@@ -55,8 +55,17 @@ on:
           - None
           
       SUSFS_META:
+        type: choice
+        description: "Enable or Disable SUSFS?"
+        required: false
+        default: ""
+        options:
+          - On
+          - Off
+
+      SUSFS_HASH:
         type: string
-        description: "Rollback SUSFS (Enter Hash or Number or -1 to Turn Off)"
+        description: "Optional: Enter a Specific Hash to Rollback SUSFS"
         required: false
         default: ""
         
@@ -544,6 +553,7 @@ jobs:
               echo "KPM               : ${{ github.event.inputs.KPM }}"
               echo "MANAGER_SOURCE    : ${{ github.event.inputs.MANAGER_SOURCE }}"
               echo "SUSFS_META        : ${{ github.event.inputs.SUSFS_META }}"
+              echo "SUSFS_HASH        : ${{ github.event.inputs.SUSFS_HASH }}"
               echo "KSU_META          : ${{ github.event.inputs.KSU_META }}"
               echo "ZRAM              : ${{ github.event.inputs.ZRAM }}"
               echo "BUILD_TIME        : ${{ github.event.inputs.BUILD_TIME }}"
@@ -1194,7 +1204,7 @@ jobs:
           fi
 
       - name: Apply SUSFS Patches (Auto Official / Fallback) & Other Patches
-        if: ${{ github.event.inputs.SUSFS_META != '-1' }}
+        if: ${{ github.event.inputs.SUSFS_META == 'On' || github.event.inputs.SUSFS_HASH != '' }}
         run: |
           set -e
 
@@ -1281,16 +1291,24 @@ jobs:
           # ==============================
           # Optional SUSFS Meta Checkout
           # ==============================
-          cd susfs4ksu
+          cd susfs4ksu || exit 1
 
-          if [ -n "${{ github.event.inputs.SUSFS_META }}" ]; then
-            if [[ "${{ github.event.inputs.SUSFS_META }}" =~ ^[0-9]+$ ]]; then
-              git checkout HEAD~${{ github.event.inputs.SUSFS_META }}
+          # ==============================
+          # Only Act if SUSFS Rollback is Enabled or Hash is Provided
+          # ==============================
+          if [[ "$SUSFS_META" == "On" || -n "$SUSFS_HASH" ]]; then
+            TARGET="${SUSFS_HASH:-$SUSFS_META}"  # Use Hash if Provided, Else SUSFS Meta
+
+            # ==============================
+            # If Target is a Number, do HEAD~N Checkout
+            # ==============================
+            if [[ "$TARGET" =~ ^[0-9]+$ ]]; then
+              git checkout HEAD~"$TARGET"
             else
-              git checkout "${{ github.event.inputs.SUSFS_META }}"
+              git checkout "$TARGET"
             fi
           fi
-
+          
           cd ..
 
           # ==============================
@@ -1482,8 +1500,20 @@ jobs:
           # ==============================
           # 6.6.0–6.6.30 TrustyOS Missing Fix
           # ==============================
-          if [[ "${{ env.KV2 }}" == "66" && "${{ env.KV3 }}" -le 6630 && "${{ github.event.inputs.SUSFS_META }}" != "-1" ]]; then
-            TRUSTY_EXISTS="false"
+          KV2="${{ env.KV2 }}"
+          KV3="${{ env.KV3 }}"
+          SUSFS_META="${{ github.event.inputs.SUSFS_META }}"
+          SUSFS_HASH="${{ github.event.inputs.SUSFS_HASH }}"
+          
+          if [[ "$KV2" == "66" && "$KV3" -le 6630 ]] && ([[ "$SUSFS_META" == "On" ]] || [[ -n "$SUSFS_HASH" ]]); then
+              echo "SUSFS rollback enabled"
+              if [[ -n "$SUSFS_HASH" ]]; then
+                  echo "Using Custom Hash: $SUSFS_HASH"
+              fi
+          else
+              echo "SUSFS Rollback Disabled"
+              TRUSTY_EXISTS="false"
+          fi
 
             # ==============================
             # Check if TrustyOS Exist in the Manifest
@@ -1508,7 +1538,11 @@ jobs:
             fi
           fi
 
-          if [ "${{ github.event.inputs.SUSFS_META }}" != "-1" ]; then
+          if [[ "${{ github.event.inputs.SUSFS_META }}" == "On" || -n "${{ github.event.inputs.SUSFS_HASH }}" ]]; then
+            echo "SUSFS Rollback Enabled"
+          else
+            echo "SUSFS Rollback Disabled"
+          fi
 
             # ==============================
             # Fake Patch Workaround to Prevent Patch Failures
@@ -1607,8 +1641,12 @@ jobs:
             # ==============================
             # Optional XUS fix
             # ==============================
-            if [ "${{ github.event.inputs.SUSFS_META }}" != "-1" ] && \
-               [ "${{ github.event.inputs.XUS_FIX }}" = "true" ]; then
+            if [[ ( "${{ github.event.inputs.SUSFS_META }}" == "On" || -n "${{ github.event.inputs.SUSFS_HASH }}" ) && \
+              "${{ github.event.inputs.XUS_FIX }}" == "true" ]]; then
+              echo "SUSFS Rollback + XUS Fix Enabled"
+            else
+              echo "SUSFS Rollback + XUS Fix Disabled"
+            fi
 
               cp ../../AndreiMikh-Kernel-Lab/patches/XUS-Fix.patch ./
               patch -p1 < XUS-Fix.patch || true
@@ -1768,6 +1806,7 @@ jobs:
           MANAGER_BRANCH="${{ steps.manager.outputs.MANAGER_BRANCH }}"
           KSU_META="${{ github.event.inputs.KSU_META }}"
           SUSFS_META="${{ github.event.inputs.SUSFS_META }}"
+          SUSFS_HASH="${{ github.event.inputs.SUSFS_HASH }}"
           ADIOS="${{ github.event.inputs.ADIOS }}" 
           FILE="${{ github.event.inputs.FILE }}" 
           RE_KERNEL="${{ github.event.inputs.RE_KERNEL }}" 
@@ -1870,7 +1909,11 @@ jobs:
           # ==============================
           # Apply SUSFS Configuration
           # ==============================
-          if [[ "$SUSFS_META" != "-1" ]]; then
+          if [[ "$SUSFS_META" == "On" || -n "$SUSFS_HASH" ]]; then
+            echo "Applying SUSFS Configuration..."
+          else
+            echo "SUSFS Configuration Skipped"
+          fi
 
             # ==============================
             # Full vs Minimal SUSFS
