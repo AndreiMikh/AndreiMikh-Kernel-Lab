@@ -2504,53 +2504,69 @@ jobs:
         id: zram_find
         run: |
           set -e
+
           ZRAM_ZIP="${GITHUB_WORKSPACE}/kernel_workspace/AndreiMikh-Kernel-Lab/ZRAM.zip"
+          MODULE_DIR="ZRAM-Module"
+          TARGET_MODULE="${MODULE_DIR}/zram/zram.ko"
+
+          echo "Checking for ZRAM Package..."
 
           if [ ! -f "$ZRAM_ZIP" ]; then
-            echo "Not Found, ZRAM.zip: $ZRAM_ZIP"
+            echo "ZRAM.zip Not Found at: $ZRAM_ZIP"
             echo "upload=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
 
-          unzip "$ZRAM_ZIP" -d ZRAM-Module
+          echo "Extracting ZRAM Module..."
+          unzip -q "$ZRAM_ZIP" -d "$MODULE_DIR"
 
-          CONFIG_PROP="ZRAM-Module/config.prop"
-          if [ -f "$CONFIG_PROP" ]; then
-            echo "Revise config.prop"
-            sed -i "s/^ZRAM_ALGO=.*/ZRAM_ALGO=${ZRAM_ALGO}/" "$CONFIG_PROP"
-            sed -i "s/^ZRAM_SIZE=.*/ZRAM_SIZE=${ZRAM_SIZE}/" "$CONFIG_PROP"
-            echo "ZRAM_ALGO=${ZRAM_ALGO}"
-            echo "ZRAM_SIZE=${ZRAM_SIZE}"
-          else
-            echo "Not Found Config Prop"
+          CONFIG_PROP="${MODULE_DIR}/config.prop"
+
+          if [ ! -f "$CONFIG_PROP" ]; then
+            echo "Config.prop Not Found Inside ZRAM Package"
             echo "upload=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
 
-          target="./ZRAM-Module/zram/zram.ko"
-          echo "Find ZRAM.ko Module File..."
+          echo "Updating ZRAM Configuration..."
+          sed -i "s/^ZRAM_ALGO=.*/ZRAM_ALGO=${ZRAM_ALGO}/" "$CONFIG_PROP"
+          sed -i "s/^ZRAM_SIZE=.*/ZRAM_SIZE=${ZRAM_SIZE}/" "$CONFIG_PROP"
+
+          echo "ZRAM_ALGO=${ZRAM_ALGO}"
+          echo "ZRAM_SIZE=${ZRAM_SIZE}"
+
+          echo "Searching for Compiled ZRAM.ko Module..."
+
           search_paths=(
             "./kernel_workspace/kernel_platform/out"
             "./kernel_workspace/device/qcom"
+            "./kernel_workspace"
           )
+
           zram_path=""
+
           for path in "${search_paths[@]}"; do
             if [ -d "$path" ]; then
-              zram_path=$(find "$path" -type f -name "zram.ko" | head -n 1)
-              [ -n "$zram_path" ] && break
+              zram_path=$(find "$path" -type f -name "zram.ko" | head -n 1 || true)
+              if [ -n "$zram_path" ]; then
+                break
+              fi
             fi
           done
-          if [ -z "$zram_path" ]; then
-            zram_path=$(find "./kernel_workspace" -type f -name "zram.ko" | head -n 1)
-          fi
-          if [ -n "$zram_path" ] && [ -f "$zram_path" ]; then
-            echo "ZRAM.ko File Finally Located at: $zram_path"
-            install -D "$zram_path" "$target"
-          else
-            echo "ZRAM.ko File was Not Found, Possibly Due to an Unsupported Kernel Version or Build Failure"
+
+          if [ -z "$zram_path" ] || [ ! -f "$zram_path" ]; then
+            echo "❌ ZRAM.ko Not Found, Possible Reasons:"
+            echo "❌ Kernel Version does Not Support Modular ZRAM"
+            echo "❌ Build failed"
+            echo "❌ Module Built-in Instead of External"
             echo "upload=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
+
+          echo "ZRAM.ko Located at: $zram_path"
+          install -D "$zram_path" "$TARGET_MODULE"
+
+          echo "✅ ZRAM Module Processed Successfully"
 
       - name: Upload ZRAM Module
         if: startsWith(github.event.inputs.ZRAM, '1/') && steps.zram_find.outputs.upload != 'false'
