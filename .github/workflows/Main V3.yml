@@ -1568,71 +1568,82 @@ jobs:
                 fi
               fi
               # ==============================
-              # KernelSU / SukiSU-Ultra Ultra-Safe Cred Fix
+              # Self-Healing KernelSU Cred Fix (Conditional)
               # ==============================
+              
               if [[ "${{ github.event.inputs.SUSFS_META }}" != "-1" && \
                     "${{ github.event.inputs.KSU_META }}" == "SukiSU-Ultra" && \
                     "${{ github.event.inputs.SUSFS_VERSION }}" == "GKI" ]]; then
               
+                  echo "Conditions Met → Enabling Self-Healing KernelSU Cred Fix"
+              
+                  build_kernel() {
+                      make -j$(nproc) 2>&1 | tee build.log
+                      return ${PIPESTATUS[0]}
+                  }
+              
+                  echo "====== Initial Build ======"
+                  if build_kernel; then
+                      echo "✅ Build Succeeded - No Fix Needed"
+                      exit 0
+                  fi
+              
+                  echo "❌ Build Failed - Analyzing Errors..."
+              
                   KSU_DIR=$(find . -type d -iname "kernelsu" | head -n1)
                   FILE=$(find "$KSU_DIR" -type f -iname "app_profile.c" | head -n1)
               
-                  if [ -n "$FILE" ]; then
-                      echo "Applying Ultra-Safe SukiSU Cred Fix on $FILE"
-                      cp "$FILE" "${FILE}.bak"
-              
-                      echo "---- Declaration Scan ----"
-                      grep -n "struct root_profile" "$FILE"
-                      grep -n "struct cred" "$FILE"
-                      echo "--------------------------"
-              
-                      # Detect Profile Pointer More Reliably
-                      if grep -Eq "struct[[:space:]]+root_profile[[:space:]]*\*[[:space:]]*profile" "$FILE"; then
-                          PROFILE_IS_PTR=1
-                          echo "Detected: Profile is POINTER"
-                      else
-                          PROFILE_IS_PTR=0
-                          echo "Detected: Profile is STRUCT"
-                      fi
-              
-                      # Detect Newcreds Pointer Reliably
-                      if grep -Eq "struct[[:space:]]+cred[[:space:]]*\*[[:space:]]*newcreds" "$FILE"; then
-                          NEWCREDS_IS_PTR=1
-                          echo "Detected: Newcreds is POINTER"
-                      else
-                          NEWCREDS_IS_PTR=0
-                      fi
-              
-                      # ------------------------------
-                      # Fix Newcreds Field Access
-                      # ------------------------------
-                      if [ "$NEWCREDS_IS_PTR" = "1" ]; then
-                          sed -i \
-                            -e 's/newcreds\.cap_/newcreds->cap_/g' \
-                            "$FILE"
-                      fi
-              
-                      # ------------------------------
-                      # Fix SELinux Domain Only if Struct
-                      # ------------------------------
-                      if [ "$PROFILE_IS_PTR" = "0" ]; then
-                          sed -i 's/profile->selinux_domain/profile.selinux_domain/g' "$FILE"
-                      fi
-              
-                      # ------------------------------
-                      # Fix Wrong Cred Parameter Only if Literal "Cred" Exists
-                      # ------------------------------
-                      if grep -q "setup_groups(.*cred)" "$FILE"; then
-                          sed -i 's/\bcred\b/newcreds/g' "$FILE"
-                      fi
-              
-                      echo "✅ Ultra-Safe Cred Fix Applied"
-              
-                  else
-                      echo "❌ KernelSU App Profile C Not Found"
+                  if [ -z "$FILE" ]; then
+                      echo "❌ KernelSU app_profile.c Not Found, Cannot Apply Fix"
+                      exit 1
                   fi
+              
+                  cp "$FILE" "${FILE}.bak"
+                  APPLIED_FIX=0
+              
+                  # ==============================
+                  # Detect Wrong Struct/Pointer Operator
+                  # ==============================
+                  if grep -q "did you mean to use '.'" build.log; then
+                      echo "Fixing: '->' Used but Struct Required"
+                      sed -i 's/profile->selinux_domain/profile.selinux_domain/g' "$FILE"
+                      APPLIED_FIX=1
+                  fi
+              
+                  if grep -q "did you mean to use '->'" build.log; then
+                      echo "Fixing: '.' Used but Pointer Required"
+                      sed -i 's/newcreds\.cap_/newcreds->cap_/g' "$FILE"
+                      APPLIED_FIX=1
+                  fi
+              
+                  # ==============================
+                  # Detect Undeclared Cred Variable
+                  # ==============================
+                  if grep -q "use of undeclared identifier 'cred'" build.log; then
+                      echo "Fixing: Replacing undeclared 'cred' with 'newcreds'"
+                      sed -i 's/\bcred\b/newcreds/g' "$FILE"
+                      APPLIED_FIX=1
+                  fi
+              
+                  # ==============================
+                  # Rebuild if Fix Applied
+                  # ==============================
+                  if [ "$APPLIED_FIX" = "1" ]; then
+                      echo "===== Rebuilding After Fix ====="
+                      if build_kernel; then
+                          echo "🎉 Auto-Fix Successful!"
+                          exit 0
+                      else
+                          echo "❌ Fix Attempt Failed"
+                          exit 1
+                      fi
+                  else
+                      echo "No Known Auto-Fixable Errors Detected"
+                      exit 1
+                  fi
+              
               else
-                  echo "Skipping Cred Fix (Conditions Not Met)"
+                  echo "Skipping Self-Healing KernelSU Cred Fix (Conditions Not Met)"
               fi
             fi
 
