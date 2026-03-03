@@ -114,10 +114,34 @@ on:
           - GKI
       
       ZRAM:
-        type: string
-        description: "ZRAM (0 for Off, 1 for On)/Algorithm Name/Size"
+        type: choice
+        description: "Enable or Disable ZRAM"
         required: true
-        default: "0/lz4kd/8589934592"
+        default: "Off"
+        options:
+          - Off
+          - On
+
+      ZRAM_ALGO:
+        type: choice
+        description: "ZRAM Compression Algorithm"
+        required: true
+        default: "LZ4KD"
+        options:
+          - LZ4KD
+          - LZ4
+          - ZSTD
+
+      ZRAM_SIZE:
+        type: choice
+        description: "ZRAM Size"
+        required: true
+        default: "8589934592"
+        options:
+          - 4294967296     #  4GB
+          - 8589934592     #  8GB
+          - 12884901888    # 12GB
+          - 17179869184    # 16GB
 
       ZRAM-LZ4:
         type: boolean
@@ -546,6 +570,8 @@ jobs:
               echo "SUSFS_META        : ${{ github.event.inputs.SUSFS_META }}"
               echo "KSU_META          : ${{ github.event.inputs.KSU_META }}"
               echo "ZRAM              : ${{ github.event.inputs.ZRAM }}"
+              echo "ZRAM_ALGO         : ${{ github.event.inputs.ZRAM_ALGO }}"
+              echo "ZRAM_SIZE         : ${{ github.event.inputs.ZRAM_SIZE }}"      
               echo "BUILD_TIME        : ${{ github.event.inputs.BUILD_TIME }}"
               echo "SUFFIX            : ${{ github.event.inputs.SUFFIX }}"
               echo "LSM               : ${{ github.event.inputs.LSM }}"
@@ -1386,8 +1412,8 @@ jobs:
             git clone --depth=1 "$REPO_URL"
           fi
 
-          if [[ "${{ github.event.inputs.ZRAM }}" == 1* ]]; then
-            echo "Pull ZRAM Patch..."
+          if [[ "${{ github.event.inputs.ZRAM }}" == "On" ]]; then
+            echo "Pull SukiSU ZRAM Patches..."
 
             cp -r ../SukiSU_patch/other/zram/lz4k/include/linux/* ./common/include/linux/
             cp -r ../SukiSU_patch/other/zram/lz4k/lib/*           ./common/lib/
@@ -1398,7 +1424,7 @@ jobs:
           # ==============================
           # Custom LZ4 / ZSTD Patches
           # ==============================          
-          if [[ "${{ github.event.inputs.ZRAM }}" == 0* && \
+          if [[ "${{ github.event.inputs.ZRAM }}" == "Off" && \
                 "${{ github.event.inputs.ZRAM-LZ4 }}" == "true" && \
                 "${{ github.event.inputs.FILE }}" == "oneplus_13_custom" ]]; then
           
@@ -1632,27 +1658,12 @@ jobs:
           fi
 
       - name: ZRAM
-        if: startsWith(github.event.inputs.ZRAM, '1/')
+        if: github.event.inputs.ZRAM == 'On'
         run: |
           set -euo pipefail
 
-          ZRAM="${{ github.event.inputs.ZRAM }}"
-
-          # ==============================
-          # Count "/" safely
-          # ==============================
-          SLASH_COUNT=$(echo "$ZRAM" | tr -cd '/' | wc -c)
-
-          if [ "$SLASH_COUNT" -lt 2 ]; then
-            echo "Error: ZRAM Parameter Format Must be:"
-            echo "Switch(0/1)/Algorithm/Size"
-            exit 10
-          fi
-
-          # ==============================
-          # Parse Fields
-          # ==============================
-          IFS='/' read -r ZRAM_SWSTA ZRAM_ALGO ZRAM_SIZE <<< "$ZRAM"
+          ZRAM_ALGO="${{ github.event.inputs.ZRAM_ALGO }}"
+          ZRAM_SIZE="${{ github.event.inputs.ZRAM_SIZE }}"
 
           echo "ZRAM_ALGO=$ZRAM_ALGO" >> "$GITHUB_ENV"
           echo "ZRAM_ALGO_U=$(echo "$ZRAM_ALGO" | tr '[:lower:]' '[:upper:]')" >> "$GITHUB_ENV"
@@ -1660,16 +1671,16 @@ jobs:
 
           PATCH_DIR="${GITHUB_WORKSPACE}/kernel_workspace/SukiSU_patch/other/zram/zram_patch/${KERNEL_VERSION}"
 
-          cd kernel_workspace/kernel_platform/common || exit 1
+          cd kernel_workspace/kernel_platform/common
 
           echo "Applying LZ4KD Patches..."
           patch -p1 -F 3 < "${PATCH_DIR}/lz4kd.patch" || true
-          echo "LZ4KD Patches Complete"
+          echo "✅ LZ4KD Patches Complete"
 
           echo "Applying LZ4K Patches..."
           patch -p1 -F 3 < "${PATCH_DIR}/lz4k_oplus.patch" || true
-          echo "LZ4K Patches Complete"
-
+          echo "✅ LZ4K Patches Complete"
+          
       - name: Fengchi Scheduler
         if: ${{ github.event.inputs.SCHED == 'true' }}
         env:
@@ -1984,7 +1995,7 @@ jobs:
           # ==============================
           # ZRAM Configuration
           # ==============================
-          if [[ "${{ github.event.inputs.ZRAM }}" == 1* ]]; then
+          if [[ "${{ github.event.inputs.ZRAM }}" == "On" ]]; then
             echo "Enabling ZRAM-Related Kernel Options..."
 
             cat >> "$CONFIG_FILE" << EOF
@@ -2438,11 +2449,6 @@ jobs:
         id: suffix
         run: |
           SUFFIX=""
-
-          # ZRAM Algorithm Suffix
-          if [ -n "${{ env.ZRAM_ALGO_U }}" ]; then
-            SUFFIX="${SUFFIX}-${{ env.ZRAM_ALGO_U }}"
-          fi
 
           # KPM / KPN Selection
           if [ "${{ github.event.inputs.KPM }}" = "KPM" ]; then
