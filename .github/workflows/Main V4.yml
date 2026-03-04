@@ -2548,67 +2548,117 @@ jobs:
 
           echo "value=${SUFFIX}" >> $GITHUB_OUTPUT
 
-      - name: Apply ZRAM Kernel Patches
+      - name: ZRAM Setup & Module Processing
         if: github.event.inputs.ZRAM == 'On'
         id: zram_find
         run: |
-          set -euo pipefail
-
-          ZRAM_ZIP="${GITHUB_WORKSPACE}/kernel_workspace/AndreiMikh-Kernel-Lab/ZRAM.zip"
+          set -eo pipefail
+      
+          echo "==== ZRAM Setup Starting ===="
+      
+          # ==============================
+          # Read Inputs Directly
+          # ==============================
+          ZRAM_ALGO="${{ github.event.inputs.ZRAM_ALGO }}"
+          ZRAM_SIZE="8589934592"
+      
+          echo "Selected Algorithm: $ZRAM_ALGO"
+          echo "ZRAM Size: $ZRAM_SIZE"
+      
+          # ==============================
+          # Move to Kernel Common Directory
+          # ==============================
+          cd kernel_workspace/kernel_platform/common
+      
+          KERNEL_VERSION=$(make kernelversion | cut -d. -f1,2)
+          echo "Detected Kernel Version: $KERNEL_VERSION"
+      
+          PATCH_DIR="${GITHUB_WORKSPACE}/SukiSU_patch/other/zram/zram_patch/${KERNEL_VERSION}"
+          echo "Using PATCH_DIR: $PATCH_DIR"
+      
+          if [[ ! -d "$PATCH_DIR" ]]; then
+            echo "❌ Patch Directory Not Found!"
+            exit 1
+          fi
+      
+          # ==============================
+          # Apply Algorithm-Specific Patch
+          # ==============================
+          case "$ZRAM_ALGO" in
+            LZ4KD)
+              patch -p1 -F 3 < "${PATCH_DIR}/lz4kd.patch"
+              ;;
+            LZ4)
+              patch -p1 -F 3 < "${PATCH_DIR}/lz4k_oplus.patch"
+              ;;
+            ZSTD)
+              patch -p1 -F 3 < "${PATCH_DIR}/zstd.patch"
+              ;;
+            *)
+              echo "❌ Unknown ZRAM Algorithm"
+              exit 1
+              ;;
+          esac
+      
+          echo "✅ ZRAM Patch Applied"
+      
+          cd "$GITHUB_WORKSPACE"
+      
+          # ==============================
+          # Process ZRAM.zip (If Exists)
+          # ==============================
+          ZRAM_ZIP="kernel_workspace/AndreiMikh-Kernel-Lab/ZRAM.zip"
           MODULE_DIR="ZRAM-Module"
           TARGET_MODULE="${MODULE_DIR}/zram/zram.ko"
-
-          echo "Checking for ZRAM Package..."
-
-          if [ ! -f "$ZRAM_ZIP" ]; then
-            echo "ZRAM.zip Not Found at: $ZRAM_ZIP"
+      
+          if [[ ! -f "$ZRAM_ZIP" ]]; then
+            echo "ZRAM.zip Not Found → Skipping Module Packaging"
             echo "upload=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
-
-          echo "Extracting ZRAM Module..."
+      
           unzip -q "$ZRAM_ZIP" -d "$MODULE_DIR"
-
+      
           CONFIG_PROP="${MODULE_DIR}/config.prop"
-
-          if [ ! -f "$CONFIG_PROP" ]; then
-            echo "Config.prop Not Found Inside ZRAM Package"
-            echo "upload=false" >> "$GITHUB_OUTPUT"
-            exit 0
+      
+          if [[ -f "$CONFIG_PROP" ]]; then
+            sed -i "s/^ZRAM_ALGO=.*/ZRAM_ALGO=${ZRAM_ALGO}/" "$CONFIG_PROP"
+            sed -i "s/^ZRAM_SIZE=.*/ZRAM_SIZE=${ZRAM_SIZE}/" "$CONFIG_PROP"
+          else
+            echo "⚠ config.prop Not Found"
           fi
-
-          echo "Updating ZRAM Configuration..."
-          sed -i "s/^ZRAM_ALGO=.*/ZRAM_ALGO=${ZRAM_ALGO}/" "$CONFIG_PROP"
-          sed -i "s/^ZRAM_SIZE=.*/ZRAM_SIZE=${ZRAM_SIZE}/" "$CONFIG_PROP"
-
-          echo "ZRAM_ALGO=${ZRAM_ALGO}"
-          echo "ZRAM_SIZE=${ZRAM_SIZE}"
-
-          echo "Searching for Compiled ZRAM.ko Module..."
-
+      
+          # ==============================
+          # Find Compiled ZRAM.ko
+          # ==============================
           zram_path=$(find kernel_workspace -type f -name "zram.ko" | head -n 1 || true)
-
-          if [ -z "$zram_path" ] || [ ! -f "$zram_path" ]; then
+      
+          if [[ -z "$zram_path" ]]; then
             echo "❌ ZRAM.ko Not Found"
             echo "upload=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
-
-          echo "ZRAM.ko Located at: $zram_path"
+      
+          echo "zram.ko Found at: $zram_path"
+      
           install -D "$zram_path" "$TARGET_MODULE"
-
+      
           echo "upload=true" >> "$GITHUB_OUTPUT"
-
-          echo "✅ ZRAM Module Processed Successfully"
+      
+          echo "==== ZRAM Setup Complete ===="
     
-      - name: Upload AnyKernel3
+      - name: Upload AnyKernel3 Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: "${{ github.event.inputs.FILE }}(${{ env.TKERNEL_VERSION }})-${{ github.event.inputs.MANAGER_SOURCE }}(${{ env.KSUVER }})${{ steps.suffix.outputs.value }}"
+          name: >
+            ${{ github.event.inputs.FILE }} |
+            Kernel-${{ env.TKERNEL_VERSION }} |
+            Manager-${{ github.event.inputs.MANAGER_SOURCE }}-${{ env.KSUVER }} |
+            ${{ steps.suffix.outputs.value }}
           path: ./AnyKernel3/*
           
 
-      - name: Build & Package ZRAM Module
+      - name: Build & Package ZRAM Module Artifact
         if: github.event.inputs.ZRAM == 'On' && steps.zram_find.outputs.upload == 'true'
         uses: actions/upload-artifact@v4
         with:
