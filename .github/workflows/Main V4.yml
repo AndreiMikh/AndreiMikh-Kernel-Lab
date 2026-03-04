@@ -2816,7 +2816,7 @@ jobs:
           path: ./AnyKernel3/*   
 
       # ==============================
-      # Extract & Prepare ZRAM Module with Auto-Download
+      # Extract, Prepare & Upload ZRAM Module
       # ==============================
       - name: Extract & Prepare ZRAM Module
         id: extract_and_prepare_zram_module
@@ -2824,22 +2824,30 @@ jobs:
         run: |
           set -euo pipefail
       
-          echo "==== Extracting ZRAM Module ===="
+          echo "==== ZRAM Module Setup Starting ===="
       
           # ==============================
-          # Search for ZRAM.zip in Kernel Workspace
+          # Define Workspace & Paths
           # ==============================
-          ZRAM_ZIP=$(find "$GITHUB_WORKSPACE/kernel_workspace" -type f -name "ZRAM.zip" | head -n 1)
+          WORKSPACE="$GITHUB_WORKSPACE/kernel_workspace"
+          ZRAM_DIR="$GITHUB_WORKSPACE/ZRAM-Module"
+          TARGET="$ZRAM_DIR/zram/zram.ko"
+          CONFIG_PROP="$ZRAM_DIR/config.prop"
+      
+          # ==============================
+          # Find ZRAM.zip Locally
+          # ==============================
+          ZRAM_ZIP=$(find "$WORKSPACE" -type f -name "ZRAM.zip" | head -n 1)
       
           # ==============================
           # Auto-Download if Missing
           # ==============================
           if [ -z "$ZRAM_ZIP" ]; then
-            echo "❌ ZRAM.zip Not Found Locally. Downloading Prebuilt ZRAM.zip..."
-            ZRAM_URL="https://example.com/prebuilt/ZRAM.zip"  # <-- replace with real URL
-            mkdir -p "$GITHUB_WORKSPACE/kernel_workspace"
-            curl -L -o "$GITHUB_WORKSPACE/kernel_workspace/ZRAM.zip" "$ZRAM_URL"
-            ZRAM_ZIP="$GITHUB_WORKSPACE/kernel_workspace/ZRAM.zip"
+            echo "❌ ZRAM.zip not found locally. Downloading prebuilt..."
+            ZRAM_URL="https://github.com/FurLC/ZRAM-Module/releases/download/v1.3.0/ZRAM-Module-v1.3.0.zip"
+            mkdir -p "$WORKSPACE"
+            curl -L -o "$WORKSPACE/ZRAM.zip" "$ZRAM_URL"
+            ZRAM_ZIP="$WORKSPACE/ZRAM.zip"
             echo "✅ Downloaded ZRAM.zip to $ZRAM_ZIP"
           else
             echo "✅ Found ZRAM.zip at: $ZRAM_ZIP"
@@ -2848,26 +2856,24 @@ jobs:
           # ==============================
           # Clean Old Extraction & Unzip
           # ==============================
-          rm -rf ./ZRAM-Module
-          mkdir -p ./ZRAM-Module/zram
-          unzip "$ZRAM_ZIP" -d ./ZRAM-Module
+          rm -rf "$ZRAM_DIR"
+          mkdir -p "$ZRAM_DIR/zram"
+          unzip -o "$ZRAM_ZIP" -d "$ZRAM_DIR"
       
           # ==============================
           # Update Config.prop with Fixed 8GB
           # ==============================
-          CONFIG_PROP="./ZRAM-Module/config.prop"
           ZRAM_SIZE=$((8*1024*1024*1024))  # 8GB in bytes
-          echo -e "ZRAM_ALGO=${{ github.event.inputs.ZRAM_ALGO }}\nZRAM_SIZE=$ZRAM_SIZE" > "$CONFIG_PROP"
-          echo "✅ Config.prop Updated with ZRAM Algorithm & Size"
+          echo -e "ZRAM_ALGO=\"${{ github.event.inputs.ZRAM_ALGO }}\"\nZRAM_SIZE=$ZRAM_SIZE" > "$CONFIG_PROP"
+          echo "✅ config.prop updated: ALGO=${{ github.event.inputs.ZRAM_ALGO }}, SIZE=$ZRAM_SIZE bytes"
       
           # ==============================
           # Locate ZRAM.ko Module
           # ==============================
-          TARGET="./ZRAM-Module/zram/zram.ko"
           SEARCH_PATHS=(
-            "./kernel_workspace/kernel_platform/out"
-            "./kernel_workspace/device/qcom"
-            "./kernel_workspace"
+            "$WORKSPACE/kernel_platform/out"
+            "$WORKSPACE/device/qcom"
+            "$WORKSPACE"
           )
           ZRAM_KO=""
           for path in "${SEARCH_PATHS[@]}"; do
@@ -2877,16 +2883,20 @@ jobs:
             fi
           done
       
-          if [ -n "$ZRAM_KO" ] && [ -f "$ZRAM_KO" ]; then
-            echo "✅ ZRAM.ko Found at: $ZRAM_KO"
-            install -D "$ZRAM_KO" "$TARGET"
+          # ==============================
+          # Install ZRAM.ko if Found
+          # ==============================
+          if [ -f "$ZRAM_KO" ]; then
+            echo "✅ ZRAM.ko found at: $ZRAM_KO"
+            mkdir -p "$(dirname "$TARGET")"
+            install -m 644 "$ZRAM_KO" "$TARGET"
             echo "upload=true" >> "$GITHUB_OUTPUT"
           else
             echo "❌ ZRAM.ko Not Found; Build may have Failed or Kernel Unsupported"
             echo "upload=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
-    
+
       # ==============================
       # Upload ZRAM Module Artifact
       # ==============================
@@ -2896,8 +2906,9 @@ jobs:
         with:
           name: "ZRAM-Module_${{ env.KERNEL_VERSION }}"
           path: |
-            ./ZRAM-Module/config.prop
-            ./ZRAM-Module/zram/**
+            ${{ github.workspace }}/ZRAM-Module/config.prop
+            ${{ github.workspace }}/ZRAM-Module/zram/**
+            ${{ github.workspace }}/kernel_workspace/ZRAM.zip
     
       - name: Post-build Disk Check
         run: df -h
