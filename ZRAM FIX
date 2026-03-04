@@ -1,0 +1,99 @@
+- name: ZRAM Setup & Module Processing
+  if: github.event.inputs.ZRAM == 'On'
+  id: zram_find
+  run: |
+    set -eo pipefail
+
+    echo "upload=false" >> "$GITHUB_OUTPUT"   # 🔴 Default state
+
+    echo "==== ZRAM Setup Starting ===="
+
+    REPO_URL="https://github.com/ShirkNeko/SukiSU_patch.git"
+    REPO_DIR="SukiSU_patch"
+    SUKI_PATH="$GITHUB_WORKSPACE/$REPO_DIR"
+    COMMON_PATH="$GITHUB_WORKSPACE/kernel_workspace/kernel_platform/common"
+
+    if [[ ! -d "$SUKI_PATH" ]]; then
+      echo "Cloning SukiSU Patch Repository..."
+      git clone --depth=1 "$REPO_URL" "$SUKI_PATH"
+    fi
+
+    ZRAM_SRC="$SUKI_PATH/other/zram/lz4k"
+    if [[ ! -d "$ZRAM_SRC" ]]; then
+      echo "❌ ZRAM source directory not found!"
+      exit 1
+    fi
+
+    cp -r "$ZRAM_SRC/include/linux/"* "$COMMON_PATH/include/linux/"
+    cp -r "$ZRAM_SRC/lib/"*           "$COMMON_PATH/lib/"
+    cp -r "$ZRAM_SRC/crypto/"*        "$COMMON_PATH/crypto/"
+
+    echo "✅ ZRAM Files Copied"
+
+    ZRAM_ALGO="${{ github.event.inputs.ZRAM_ALGO }}"
+    ZRAM_SIZE="8589934592"
+
+    echo "ZRAM_ALGO=$ZRAM_ALGO" >> "$GITHUB_ENV"
+    echo "ZRAM_SIZE=$ZRAM_SIZE" >> "$GITHUB_ENV"
+
+    cd "$COMMON_PATH"
+
+    KERNEL_VERSION=$(make kernelversion | cut -d. -f1,2)
+    PATCH_DIR="$SUKI_PATH/other/zram/zram_patch/$KERNEL_VERSION"
+
+    if [[ ! -d "$PATCH_DIR" ]]; then
+      echo "❌ Patch Directory Not Found!"
+      exit 1
+    fi
+
+    case "$ZRAM_ALGO" in
+      LZ4KD) patch -p1 -F 3 -N < "${PATCH_DIR}/lz4kd.patch" ;;
+      LZ4)   patch -p1 -F 3 -N < "${PATCH_DIR}/lz4k_oplus.patch" ;;
+      ZSTD)  patch -p1 -F 3 -N < "${PATCH_DIR}/zstd.patch" ;;
+      *)     echo "❌ Unknown ZRAM Algorithm"; exit 1 ;;
+    esac
+
+    echo "✅ ZRAM Patch Applied"
+
+    cd "$GITHUB_WORKSPACE"
+
+    ZRAM_ZIP="$GITHUB_WORKSPACE/kernel_workspace/AndreiMikh-Kernel-Lab/ZRAM.zip"
+    MODULE_DIR="ZRAM-Module"
+    TARGET_MODULE="${MODULE_DIR}/zram/zram.ko"
+
+    if [[ ! -f "$ZRAM_ZIP" ]]; then
+      echo "ZRAM.zip Not Found → Skipping Packaging"
+      exit 0
+    fi
+
+    unzip -q "$ZRAM_ZIP" -d "$MODULE_DIR"
+
+    CONFIG_PROP="${MODULE_DIR}/config.prop"
+    if [[ -f "$CONFIG_PROP" ]]; then
+      sed -i "s/^ZRAM_ALGO=.*/ZRAM_ALGO=${ZRAM_ALGO}/" "$CONFIG_PROP"
+      sed -i "s/^ZRAM_SIZE=.*/ZRAM_SIZE=${ZRAM_SIZE}/" "$CONFIG_PROP"
+    fi
+
+    zram_path=$(find kernel_workspace -type f -name "zram.ko" | head -n 1 || true)
+
+    if [[ -z "$zram_path" ]]; then
+      echo "❌ zram.ko Not Found"
+      exit 0
+    fi
+
+    install -D "$zram_path" "$TARGET_MODULE"
+
+    echo "upload=true" >> "$GITHUB_OUTPUT"   # 🟢 Only set on success
+
+    ARTIFACT_NAME="ZRAM-${ZRAM_ALGO}-${ZRAM_SIZE}B"
+    echo "ZRAM_ARTIFACT=$ARTIFACT_NAME" >> "$GITHUB_ENV"
+
+    echo "===== ZRAM Setup Done ====="
+
+
+- name: Build & Package ZRAM Module Artifact
+  if: github.event.inputs.ZRAM == 'On' && steps.zram_find.outputs.upload == 'true'
+  uses: actions/upload-artifact@v4
+  with:
+    name: "${{ env.ZRAM_ARTIFACT }}"
+    path: ZRAM-Module/*
