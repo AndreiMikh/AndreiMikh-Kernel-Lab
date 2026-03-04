@@ -2702,39 +2702,64 @@ jobs:
           echo "==== ZRAM Setup Starting ===="
       
           # ==============================
-          # Read Inputs Directly
+          # Clone SukiSU Repository if Missing
+          # ==============================
+          REPO_URL="https://github.com/ShirkNeko/SukiSU_patch.git"
+          REPO_DIR="SukiSU_patch"
+          SUKI_PATH="$GITHUB_WORKSPACE/$REPO_DIR"
+          COMMON_PATH="$GITHUB_WORKSPACE/kernel_workspace/kernel_platform/common"
+      
+          if [[ ! -d "$SUKI_PATH" ]]; then
+            echo "Cloning SukiSU Patch Repository..."
+            git clone --depth=1 "$REPO_URL" "$SUKI_PATH"
+          fi
+      
+          # Copy core ZRAM files
+          ZRAM_SRC="$SUKI_PATH/other/zram/lz4k"
+          if [[ ! -d "$ZRAM_SRC" ]]; then
+            echo "❌ ZRAM source directory not found!"
+            exit 1
+          fi
+      
+          cp -r "$ZRAM_SRC/include/linux/"* "$COMMON_PATH/include/linux/"
+          cp -r "$ZRAM_SRC/lib/"*           "$COMMON_PATH/lib/"
+          cp -r "$ZRAM_SRC/crypto/"*        "$COMMON_PATH/crypto/"
+      
+          echo "✅ ZRAM files copied from SukiSU repository"
+      
+          # ==============================
+          # Set Environment Variables
           # ==============================
           ZRAM_ALGO="${{ github.event.inputs.ZRAM_ALGO }}"
           ZRAM_SIZE="8589934592"  # 8GB fixed
       
-          echo "Selected Algorithm: $ZRAM_ALGO"
-          echo "ZRAM Size: $ZRAM_SIZE"
+          echo "ZRAM_ALGO=$ZRAM_ALGO" >> "$GITHUB_ENV"
+          echo "ZRAM_SIZE=$ZRAM_SIZE" >> "$GITHUB_ENV"
       
           # ==============================
           # Move to Kernel Common Directory
           # ==============================
-          cd kernel_workspace/kernel_platform/common
+          cd "$COMMON_PATH"
       
           KERNEL_VERSION=$(make kernelversion | cut -d. -f1,2)
           echo "Detected Kernel Version: $KERNEL_VERSION"
       
-          PATCH_DIR="${GITHUB_WORKSPACE}/SukiSU_patch/other/zram/zram_patch/${KERNEL_VERSION}"
-          echo "Using PATCH_DIR: $PATCH_DIR"
-      
+          PATCH_DIR="$SUKI_PATH/other/zram/zram_patch/$KERNEL_VERSION"
           if [[ ! -d "$PATCH_DIR" ]]; then
             echo "❌ Patch Directory Not Found!"
             exit 1
           fi
+          echo "Using PATCH_DIR: $PATCH_DIR"
       
           # ==============================
           # Reset Target Files to Avoid Patch Conflicts
           # ==============================
           git checkout -- lib/Makefile lib/Kconfig crypto/Makefile crypto/Kconfig \
-                       drivers/block/zram/Kconfig drivers/block/zram/zcomp.c \
-                       kernel/module/main.c || true
+                        drivers/block/zram/Kconfig drivers/block/zram/zcomp.c \
+                        kernel/module/main.c || echo "⚠ Warning: git checkout failed"
       
           # ==============================
-          # Apply Algorithm-Specific Patch (skip if already applied)
+          # Apply Algorithm-Specific Patch
           # ==============================
           case "$ZRAM_ALGO" in
             LZ4KD)
@@ -2759,7 +2784,7 @@ jobs:
           # ==============================
           # Process ZRAM.zip (If Exists)
           # ==============================
-          ZRAM_ZIP="kernel_workspace/AndreiMikh-Kernel-Lab/ZRAM.zip"
+          ZRAM_ZIP="$GITHUB_WORKSPACE/kernel_workspace/AndreiMikh-Kernel-Lab/ZRAM.zip"
           MODULE_DIR="ZRAM-Module"
           TARGET_MODULE="${MODULE_DIR}/zram/zram.ko"
       
@@ -2772,7 +2797,6 @@ jobs:
           unzip -q "$ZRAM_ZIP" -d "$MODULE_DIR"
       
           CONFIG_PROP="${MODULE_DIR}/config.prop"
-      
           if [[ -f "$CONFIG_PROP" ]]; then
             sed -i "s/^ZRAM_ALGO=.*/ZRAM_ALGO=${ZRAM_ALGO}/" "$CONFIG_PROP"
             sed -i "s/^ZRAM_SIZE=.*/ZRAM_SIZE=${ZRAM_SIZE}/" "$CONFIG_PROP"
@@ -2782,10 +2806,9 @@ jobs:
           fi
       
           # ==============================
-          # Find Compiled ZRAM.ko
+          # Find & Install Compiled ZRAM.ko
           # ==============================
           zram_path=$(find kernel_workspace -type f -name "zram.ko" | head -n 1 || true)
-      
           if [[ -z "$zram_path" ]]; then
             echo "❌ ZRAM.ko Not Found"
             echo "upload=false" >> "$GITHUB_OUTPUT"
@@ -2793,9 +2816,7 @@ jobs:
           fi
       
           echo "ZRAM.ko Found at: $zram_path"
-      
           install -D "$zram_path" "$TARGET_MODULE"
-      
           echo "upload=true" >> "$GITHUB_OUTPUT"
       
           echo "==== ZRAM Setup Complete ===="
@@ -2808,8 +2829,7 @@ jobs:
             Kernel-${{ env.TKERNEL_VERSION }} |
             Manager-${{ github.event.inputs.MANAGER_SOURCE }}-${{ env.KSUVER }} |
             ${{ steps.suffix.outputs.value }}
-          path: ./AnyKernel3/*
-          
+          path: ./AnyKernel3/*          
 
       - name: Build & Package ZRAM Module Artifact
         if: github.event.inputs.ZRAM == 'On' && steps.zram_find.outputs.upload == 'true'
