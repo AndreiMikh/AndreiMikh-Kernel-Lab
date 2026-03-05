@@ -2740,95 +2740,86 @@ jobs:
         run: |
           set -euo pipefail
 
-          MODULE_DIR=ZRAM-Module
-          mkdir -p $MODULE_DIR/zram
+          WORKDIR="${GITHUB_WORKSPACE}"
+          MODULE_DIR="${WORKDIR}/ZRAM-Module"
+          TEMPLATE_ZIP="${WORKDIR}/kernel_workspace/AndreiMikh-Kernel-Lab/ZRAM.zip"
 
-          echo "🔎 Searching for zram.ko..."
-          ZRAM_PATH=$(find kernel_workspace -name "zram.ko" | head -n 1)
+          echo "📦 Preparing ZRAM Module Template"
 
-          if [ -z "$ZRAM_PATH" ]; then
-            echo "❌ zram.ko not found"
+          # =========================
+          # Check Template
+          # =========================
+          if [ ! -f "$TEMPLATE_ZIP" ]; then
+            echo "❌ ZRAM.zip template not found"
             exit 1
           fi
 
-          cp "$ZRAM_PATH" $MODULE_DIR/zram/zram.ko
+          # Extract Module Template
+          unzip -q "$TEMPLATE_ZIP" -d "$MODULE_DIR"
 
-          echo "✅ zram.ko copied"
-
-          # =========================
-          # Module Prop
-          # =========================
-          cat <<EOF > $MODULE_DIR/module.prop
-          id=ZRAM-Module
-          name=ZRAM ${ZRAM_ALGO_U} Module
-          version=v1.0
-          versionCode=1
-          author=AndreiMikh
-          description=Dynamic ZRAM Module
-          EOF
+          echo "✅ Template Extracted"
 
           # =========================
-          # Config Prop
+          # Find Compiled ZRAM.ko
           # =========================
-          cat <<EOF > $MODULE_DIR/config.prop
+          echo "🔎 Searching for Compiled ZRAM.ko..."
+
+          ZRAM_PATH=$(find kernel_workspace -type f -name "zram.ko" | head -n 1)
+
+          if [ -z "$ZRAM_PATH" ]; then
+            echo "❌ ZRAM.ko Not Found in Build Output"
+            exit 1
+          fi
+
+          echo "✅ Found ZRAM.ko at: $ZRAM_PATH"
+
+          # =========================
+          # Inject Kernel Module
+          # =========================
+          TARGET_KO="$MODULE_DIR/zram/zram.ko"
+
+          mkdir -p "$(dirname "$TARGET_KO")"
+          install -D "$ZRAM_PATH" "$TARGET_KO"
+
+          echo "✅ Injected Compiled ZRAM.ko"
+
+          # =========================
+          # Update Runtime Configuration
+          # =========================
+          CONFIG_FILE="$MODULE_DIR/config.prop"
+
+          if [ -f "$CONFIG_FILE" ]; then
+
+            echo "⚙ Updating Runtime Configuration"
+ 
+            sed -i "s/^ZRAM_ALGO=.*/ZRAM_ALGO=${ZRAM_ALGO}/" "$CONFIG_FILE"
+            sed -i "s/^ZRAM_SIZE=.*/ZRAM_SIZE=${ZRAM_SIZE}/" "$CONFIG_FILE"
+
+          else
+
+            echo "⚠ Config.prop Missing — Creating New One"
+
+            cat <<EOF > "$CONFIG_FILE"
           ZRAM_ALGO=${ZRAM_ALGO}
           ZRAM_SIZE=${ZRAM_SIZE}
           EOF
 
-          # =========================
-          # Customize Sh
-          # =========================
-          cat <<'EOF' > $MODULE_DIR/customize.sh
-          #!/system/bin/sh
-          ui_print "Installing ZRAM Module..."
-          ui_print "Done"
-          EOF
-
-          chmod +x $MODULE_DIR/customize.sh
-
-          # =========================
-          # Post FS Data Sh
-          # =========================
-          cat <<'EOF' > $MODULE_DIR/post-fs-data.sh
-          #!/system/bin/sh
-
-          MODDIR=${0%/*}
-
-          insmod $MODDIR/zram/zram.ko
-          EOF
-
-          chmod +x $MODULE_DIR/post-fs-data.sh
-
-          # =========================
-          # service.sh
-          # =========================
-          cat <<'EOF' > $MODULE_DIR/service.sh
-          #!/system/bin/sh
-
-          MODDIR=${0%/*}
-
-          if [ -f "$MODDIR/config.prop" ]; then
-            . "$MODDIR/config.prop"
           fi
 
-          sleep 5
-
-          echo $ZRAM_ALGO > /sys/block/zram0/comp_algorithm
-          echo $ZRAM_SIZE > /sys/block/zram0/disksize
-
-          mkswap /dev/block/zram0
-          swapon /dev/block/zram0
-          EOF
-
-          chmod +x $MODULE_DIR/service.sh
+          echo "Algorithm: ${ZRAM_ALGO}"
+          echo "Size: ${ZRAM_SIZE}MB"
 
           # =========================
-          # Pack Module Zip
+          # Build Flashable ZRAM Module
           # =========================
-          zip -r ZRAM-Module.zip $MODULE_DIR
+          cd "$MODULE_DIR"
 
-          echo "🎉 ZRAM Module Built"
+          zip -r9 "${WORKDIR}/ZRAM-Module.zip" .
 
+          cd "$WORKDIR"
+
+          echo "🎉 Flashable ZRAM Module Built Successfully"
+          
       - name: Upload ZRAM Module
         if: ${{ startsWith(github.event.inputs.ZRAM, '1/') }}
         uses: actions/upload-artifact@v4
