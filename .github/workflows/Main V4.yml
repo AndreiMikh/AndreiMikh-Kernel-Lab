@@ -127,14 +127,7 @@ on:
         default: "LZ4KD"
         options:
           - LZ4KD
-          - ZSTD
           - LZ4
-
-      ZRAM-LZ4:
-        type: boolean
-        description: "Enable LZ4 1.10.0 if ZRAM LZ4KD is Off (Applicable for Custom Manifest)"
-        required: false
-        default: false
         
       SUFFIX:
         type: string
@@ -1450,15 +1443,18 @@ jobs:
           echo "SUSFS Applied Successfully"        
           
           # ==============================
-          # Pull SukiSU ZRAM Patches
-          # ==============================
-          if [[ "${{ github.event.inputs.ZRAM }}" == "On" && \
-                "${{ github.event.inputs.ZRAM_ALGO }}" == "LZ4KD" ]]; then
-            echo "ZRAM is On and algorithm is LZ4KD"
-            
+          # Pull SukiSU ZRAM Patches + Apply LZ4KD Kernel Patches
+          # ==============================          
+          ZRAM="${{ github.event.inputs.ZRAM }}"
+          ALGO="${{ github.event.inputs.ZRAM_ALGO }}"
+          KVER="${{ env.KERNEL_VERSION }}"
+          
+          if [[ "$ZRAM" == "On" && "$ALGO" == "LZ4KD" ]]; then
+            echo "🔧 ZRAM is On & Algorithm is LZ4KD"
+          
             SRC_BASE="../SukiSU_patch/other/zram"
             DEST_BASE="./common"
-            
+          
             # ==============================
             # Copy Headers
             # ==============================
@@ -1466,7 +1462,7 @@ jobs:
               cp -r "$SRC_BASE/lz4k/include/linux/" "$DEST_BASE/include/linux/"
               echo "✅ Copied Linux Headers"
             fi
-
+          
             # ==============================
             # Copy Library Files
             # ==============================
@@ -1474,7 +1470,7 @@ jobs:
               cp -r "$SRC_BASE/lz4k/lib/" "$DEST_BASE/lib/"
               echo "✅ Copied Library Files"
             fi
-
+          
             # ==============================
             # Copy Crypto Files
             # ==============================
@@ -1482,7 +1478,7 @@ jobs:
               cp -r "$SRC_BASE/lz4k/crypto/" "$DEST_BASE/crypto/"
               echo "✅ Copied Crypto Files"
             fi
-
+          
             # ==============================
             # Copy OnePlus-Specific Lib
             # ==============================
@@ -1490,8 +1486,30 @@ jobs:
               cp -r "$SRC_BASE/lz4k_oplus/" "$DEST_BASE/lib/"
               echo "✅ Copied LZ4K OPlus Files"
             fi
-
-            echo "✅ All ZRAM Patches Applied"
+          
+            # ==============================
+            # Apply Kernel Patches (if enabled)
+            # ==============================
+            if [[ "$ALGO" == "LZ4KD" ]]; then
+              echo "📦 Applying LZ4KD Kernel Patches for $KVER..."
+          
+              PATCH_DIR="../../SukiSU_patch/other/zram/zram_patch/$KVER"
+          
+              if [[ -d "$PATCH_DIR" ]]; then
+                cp "$PATCH_DIR/lz4kd.patch" ./
+                patch -p1 -F 3 < lz4kd.patch || true
+          
+                cp "$PATCH_DIR/lz4k_oplus.patch" ./
+                patch -p1 -F 3 < lz4k_oplus.patch || true
+          
+                echo "✅ Kernel LZ4KD Patches Applied"
+              else
+                echo "❌ Patch Directory for Kernel $KVER Not Found!"
+                exit 1
+              fi
+            fi
+          
+            echo "✅ All ZRAM + LZ4KD Operations Completed"
           fi
 
           # ==============================
@@ -1500,7 +1518,7 @@ jobs:
           if [[ "${{ github.event.inputs.ZRAM }}" == "On" && \
                 "${{ github.event.inputs.ZRAM_ALGO }}" == "LZ4" ]]; then
                 
-            echo "📦 Device OnePlus 13 + ZRAM Off + LZ4 1.10.0 Enabled"
+            echo "📦 Device OnePlus 13 + ZRAM On + LZ4"
           
             PATCH_BASE="./AndreiMikh-Kernel-Lab/patches"
             KCOMMON="./kernel_platform/common"
@@ -1732,43 +1750,6 @@ jobs:
           else
             patch -p1 --forward < "${PATCH_DIR}/Unicode-Bypass-Fix-6.1+.patch" || true
           fi
-
-      # ==============================
-      # Apply ZRAM SukiSU Patches
-      # ==============================
-      - name: SukiSU ZRAM Patch
-        if: github.event.inputs.ZRAM == 'On'
-        run: |
-          set -euo pipefail
-
-          # Fixed configuration
-          ZRAM_ALGO="${{ github.event.inputs.ZRAM_ALGO }}"
-          ZRAM_SIZE="8589934592"   # Fixed Value Equivalent to 8Gi
-
-          echo "ZRAM_ALGO=$ZRAM_ALGO" >> "$GITHUB_ENV"
-          echo "ZRAM_ALGO_U=$(echo "$ZRAM_ALGO" | tr '[:lower:]' '[:upper:]')" >> "$GITHUB_ENV"
-          echo "ZRAM_SIZE=$ZRAM_SIZE" >> "$GITHUB_ENV"
-
-          PATCH_DIR="${GITHUB_WORKSPACE}/kernel_workspace/SukiSU_patch/other/zram/zram_patch/${KERNEL_VERSION}"
-
-          cd kernel_workspace/kernel_platform/common || exit 1
- 
-          case "$ZRAM_ALGO" in
-            LZ4KD)
-              echo "Applying LZ4KD Patches..."
-              patch -p1 -F 3 < "${PATCH_DIR}/lz4kd.patch" || true
-              echo "✅ LZ4KD Patches Complete"
-              ;;
-            ZSTD)
-              echo "ZSTD Selected — No Extra Patch Required"
-              ;;
-            *)
-              echo "❌ Invalid ZRAM Algorithm Selected"
-              exit 1
-              ;;
-          esac
-
-          echo "✅ ZRAM Setup Complete"
     
       # ==============================
       # Fengchi Scheduler
@@ -2104,10 +2085,7 @@ jobs:
             echo "Enabling ZRAM-Related Kernel Options..."
 
             cat >> "$CONFIG_FILE" << EOF
-          CONFIG_CRYPTO_LZ4HC=y
-          CONFIG_CRYPTO_LZ4K=y
           CONFIG_CRYPTO_LZ4KD=y
-          CONFIG_CRYPTO_842=y
           CONFIG_CRYPTO_LZ4K_OPLUS=y
           CONFIG_ZRAM_WRITEBACK=y
           EOF
