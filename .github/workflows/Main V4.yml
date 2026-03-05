@@ -1598,7 +1598,7 @@ jobs:
       # ==============================
       # ZRAM Patch + LZ4 / LZ4KD Handling
       # ==============================
-      - name: Apply ZRAM Patches Safely
+      - name: Apply ZRAM Patches & Build Module
         shell: bash
         run: |
           set -euo pipefail
@@ -1608,114 +1608,83 @@ jobs:
           KVER="${{ env.KERNEL_VERSION }}"
       
           if [[ "$ZRAM" != "On" ]]; then
-            echo "ℹ️ ZRAM is Off; Skipping patch section"
+            echo "ℹ️ ZRAM is Off; Skipping Patch & Build"
             exit 0
           fi
       
           echo "📦 ZRAM is On; Algorithm: $ALGO"
       
-          # Detect Kernel Common Directory
+          # ==============================
+          # Kernel Common Directory
+          # ==============================
           KCOMMON="./kernel_platform/common"
           if [[ ! -d "$KCOMMON" ]]; then
             KCOMMON="./common"
           fi
           echo "Using Kernel Directory: $KCOMMON"
       
-          # Ensure LZ4 source folder exists
+          # ==============================
+          # Ensure LZ4 directories
+          # ==============================
           mkdir -p "$KCOMMON/fs/f2fs/lz4armv8"
+          mkdir -p "$KCOMMON/include/linux"
+          mkdir -p "$KCOMMON/lib"
+          mkdir -p "$KCOMMON/crypto"
       
           # ==============================
-          # Clone Patches Repository
+          # Copy local SukiSU_patch ZRAM sources
           # ==============================
-          PATCH_REPO="https://github.com/AndreiMikh/AndreiMikh-Kernel-Lab.git"
-          PATCH_BRANCH="LiquidAndrei"
-          PATCH_TMP="./patches_tmp"
-      
-          rm -rf "$PATCH_TMP"
-          git clone --depth=1 -b "$PATCH_BRANCH" "$PATCH_REPO" "$PATCH_TMP"
+          echo "🔧 Copying ZRAM Source Files..."
+          cp -r ../SukiSU_patch/other/zram/lz4k/include/linux/* "$KCOMMON/include/linux/" || true
+          cp -r ../SukiSU_patch/other/zram/lz4k/lib/* "$KCOMMON/lib/" || true
+          cp -r ../SukiSU_patch/other/zram/lz4k/crypto/* "$KCOMMON/crypto/" || true
+          cp -r ../SukiSU_patch/other/zram/lz4k_oplus/* "$KCOMMON/lib/" || true
+          echo "✅ ZRAM Source Files Copied"
       
           # ==============================
-          # LZ4KD Patches
+          # Apply Patches
           # ==============================
-          if [[ "$ALGO" == "LZ4KD" ]]; then
-            PATCH_DIR="$PATCH_TMP/other/zram/zram_patch/$KVER"
-            LZ4KD_DIR="$PATCH_TMP/other/zram/lz4k_oplus"
+          PATCH_DIR="../SukiSU_patch/other/zram/zram_patch/$KVER"
+          cd "$KCOMMON"
       
-            if [[ -d "$PATCH_DIR" ]]; then
-              echo "🔧 Applying LZ4KD Patches..."
-              for FILE in lz4kd.patch lz4k_oplus.patch; do
-                if [[ -f "$PATCH_DIR/$FILE" ]]; then
-                  cp "$PATCH_DIR/$FILE" ./ || true
-                  patch -p1 -F 3 < "$FILE" || true
-                  echo "✅ Applied $FILE"
-                else
-                  echo "⚠️ $FILE not found, skipping..."
-                fi
-              done
+          for FILE in lz4kd.patch lz4k_oplus.patch 001-lz4.patch 002-zstd.patch; do
+            if [[ -f "$PATCH_DIR/$FILE" ]]; then
+              echo "📦 Applying patch $FILE"
+              patch -p1 -F 3 < "$PATCH_DIR/$FILE" || true
             else
-              echo "⚠️ Patch Directory $PATCH_DIR not found, skipping LZ4KD patches"
+              echo "⚠️ Patch $FILE Not Found, Skipping"
             fi
-      
-            # Copy LZ4KD Implementation Files
-            if [[ -d "$LZ4KD_DIR" ]]; then
-              echo "🔧 Copying LZ4KD Implementation Files..."
-              FILES=(Kconfig Makefile lz4k.c lz4k.h lz4k_compress.c lz4k_decompress.c)
-              for FILE in "${FILES[@]}"; do
-                if [[ -f "$LZ4KD_DIR/$FILE" ]]; then
-                  cp "$LZ4KD_DIR/$FILE" "$KCOMMON/fs/f2fs/lz4armv8/"
-                  echo "✅ Copied $FILE"
-                else
-                  echo "⚠️ $FILE Not Found in LZ4KD Source, Skipping"
-                fi
-              done
-            else
-              echo "⚠️ LZ4KD Source Directory $LZ4KD_DIR Not Found"
-            fi
-          fi
+          done
+          cd - >/dev/null
+          echo "✅ All ZRAM Patches Applied"
       
           # ==============================
-          # LZ4 Patches
+          # Build ZRAM.ko
           # ==============================
-          if [[ "$ALGO" == "LZ4" ]]; then
-            PATCH_BASE="$PATCH_TMP/patches"
-            if [[ -d "$PATCH_BASE" ]]; then
-              echo "🔧 Applying LZ4 Patches..."
-              FILES=(001-lz4.patch 002-zstd.patch lz4armv8.S lz4accel.c lz4accel.h)
-              for FILE in "${FILES[@]}"; do
-                if [[ -f "$PATCH_BASE/$FILE" ]]; then
-                  cp "$PATCH_BASE/$FILE" "$KCOMMON/fs/f2fs/lz4armv8/" || true
-                  echo "✅ Copied $FILE"
-                else
-                  echo "⚠️ $FILE Not Found, Skipping"
-                fi
-              done
+          echo "🔨 Building zram.ko"
+          make -C kernel_platform/common M=drivers/zram modules || { echo "❌ Build Failed"; exit 1; }
+          echo "✅ zram.ko built"
       
-              cd "$KCOMMON"
-              if [[ "$KVER" == "6.1" && -f "fs/f2fs/lz4armv8/001-lz4.patch" ]]; then
-                echo "📦 Applying LZ4 + ZSTD Patch (6.1)"
-                git apply -p1 fs/f2fs/lz4armv8/001-lz4.patch || true
-                if [[ -f "fs/f2fs/lz4armv8/002-zstd.patch" ]]; then
-                  patch -p1 < fs/f2fs/lz4armv8/002-zstd.patch || true
-                fi
-              fi
-      
-              if [[ "$KVER" == "6.6" && -f "fs/f2fs/lz4armv8/001-lz4.patch" ]]; then
-                echo "📦 Applying LZ4 Patch (6.6)"
-                git apply -p1 fs/f2fs/lz4armv8/001-lz4.patch || true
-              fi
-              cd - >/dev/null
-              echo "✅ LZ4 Patch Section Completed"
-            else
-              echo "⚠️ LZ4 Patch Directory $PATCH_BASE Not Found, Skipping LZ4 Patches"
-            fi
-          fi
-
           # ==============================
-          # Clean Temporary Clone
+          # Package as Magisk module
           # ==============================
-          rm -rf "$PATCH_TMP"
+          MODULE_DIR="ZRAM-Module"
+          mkdir -p "$MODULE_DIR"
+          cp kernel_platform/common/drivers/zram/zram.ko "$MODULE_DIR/" || { echo "❌ ZRAM.ko Missing"; exit 1; }
+          cp post-fs-data.sh "$MODULE_DIR/"
+          cp config.prop "$MODULE_DIR/"
+          cp module.prop "$MODULE_DIR/"
       
-          echo "✅ All ZRAM Patch Operations Completed (Safe Mode)"
+          ZIP_NAME="ZRAM-Module-${{ github.run_number }}.zip"
+          cd "$MODULE_DIR"
+          zip -r "../$ZIP_NAME" * >/dev/null
+          cd ..
+          echo "✅ Magisk ZRAM Module created: $ZIP_NAME"
+      
+          # ==============================
+          # Upload artifact
+          # ==============================
+          echo "ZRAM_ZIP=$ZIP_NAME" >> $GITHUB_ENV
           
       # ==============================
       # Apply Conversion
@@ -2818,55 +2787,12 @@ jobs:
       # ==============================
       # Locate & Upload ZRAM / LZ4KD Modules
       # ==============================
-      - name: Locate & Upload ZRAM Modules
-        shell: bash
-        run: |
-          set -euo pipefail
-      
-          BUILD_DIR="out"
-          ZRAM_PATH=""
-          LZ4KD_PATH=""
-      
-          echo "🔎 Searching for ZRAM.ko & LZ4KD Modules..."
-      
-          if [[ -d "$BUILD_DIR" ]]; then
-            ZRAM_PATH=$(find "$BUILD_DIR" -type f -name "zram.ko" | head -n1 || true)
-            LZ4KD_PATH=$(find "$BUILD_DIR" -type f -name "lz4kd.ko" | head -n1 || true)
-          else
-            echo "⚠️ Build output directory '$BUILD_DIR' not found"
-          fi
-      
-          # Export Paths for Later Steps
-          echo "ZRAM_PATH=$ZRAM_PATH" >> "$GITHUB_ENV"
-          echo "LZ4KD_PATH=$LZ4KD_PATH" >> "$GITHUB_ENV"
-      
-          # Upload ZRAM.ko if Exists
-          if [[ -n "$ZRAM_PATH" ]]; then
-            echo "✅ Found ZRAM.ko: $ZRAM_PATH"
-          else
-            echo "ℹ️ ZRAM.ko not found; skipping upload"
-          fi
-      
-          # Upload LZ4KD.ko if exists
-          if [[ -n "$LZ4KD_PATH" ]]; then
-            echo "✅ Found LZ4KD.ko: $LZ4KD_PATH"
-          else
-            echo "ℹ️ LZ4KD.ko not found; skipping upload"
-          fi
-      
-      - name: Upload ZRAM Module
-        if: env.ZRAM_PATH != ''
+      - name: Upload ZRAM Magisk Module
+        if: env.ZRAM_ZIP != ''
         uses: actions/upload-artifact@v4
         with:
-          name: "${{ github.event.inputs.FILE }}-ZRAM"
-          path: ${{ env.ZRAM_PATH }}
-      
-      - name: Upload LZ4KD Module
-        if: env.LZ4KD_PATH != ''
-        uses: actions/upload-artifact@v4
-        with:
-          name: "${{ github.event.inputs.FILE }}-LZ4KD"
-          path: ${{ env.LZ4KD_PATH }}
+          name: "${{ env.ZRAM_ZIP }}"
+          path: ${{ env.ZRAM_ZIP }}
       
       - name: Post-build Disk Check
         run: df -h
