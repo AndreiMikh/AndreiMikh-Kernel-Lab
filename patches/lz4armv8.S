@@ -1,16 +1,7 @@
-/*
- * lz4armv8.S
- * LZ4 decompression optimization based on arm64 NEON instruction
- */
-
 #include <linux/linkage.h>
 #include <asm/assembler.h>
-#include <linux/version.h>
 
 /**
- * _lz4_decompress_asm: The fast LZ4 decompression, lz4 decompression algothrim asm
- * routine,support Huawei EROFS filesystem striving for maximum decompression speed.
- * Entry point _lz4_decompress_asm.
  * @para:
  * x0 = current destination address ptr
  * x1 = destination start position
@@ -20,34 +11,27 @@
  * x5 = flag for DIP
  * @ret:
  * 0 on success, -1 on failure
- *
- * x7: match_length
- * x8: literal_legth
- * x9: copy start ptr
- * x10: copy end ptr
  */
 
+/* caller-saved temporary registers */
+#define match_length		x9
+#define literal_length		x10
+#define copy_from_ptr		x11	/* copy source ptr*/
+#define copy_to_ptr		x12	/* copy destination ptr*/
+#define w_tmp			w13	/* temp var */
+#define tmp			x13
+#define w_offset		w14
+#define offset			x14
+#define permtable_addr		x15
 
-#define match_length		x7
-#define literal_length		x8
-#define copy_from_ptr		x9    /* copy source ptr*/
-#define copy_to_ptr		x10   /* copy destination ptr*/
-#define w_tmp			w11   /* temp var */
-#define tmp			x11
-#define w_offset		w12
-#define offset			x12
-#define permtable_addr		x13
-#define cplen_table_addr	x14
-#define save_dst		x15
-#define save_src		x16
-#define offset_src_ptr		x17
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 4, 0)
-#define w_tmp_match_length	w6
-#define tmp_match_length	x6
-#else
-#define w_tmp_match_length	w18
-#define tmp_match_length	x18
-#endif
+/* callee-saved registers */
+#define cplen_table_addr	x19
+#define save_dst		x20
+#define save_src		x21
+#define offset_src_ptr		x22
+#define w_tmp_match_length	w23
+#define tmp_match_length	x23
+
 
 /* x3 >= x4 src overflow */
 .macro check_src_overflow
@@ -74,7 +58,10 @@
 .macro lz4_decompress_asm_generic	doprfm=1
 	stp     x29, x30, [sp, #-16]!
 	mov     x29, sp
-	stp	x3, x0, [sp, #-16]!			/* push src and dst in stack */
+	stp	x19, x20, [sp, #-16]!
+	stp	x21, x22, [sp, #-16]!
+	stp	x23, x24, [sp, #-16]!
+	stp	x3, x0, [sp, #-16]!		/* push src and dst in stack */
 	ldr	x3, [x3]				/* x3 = *src_ptr */
 	ldr	x0, [x0]				/* x0 = *dst_ptr */
 	adr_l	permtable_addr, Permtable
@@ -99,11 +86,12 @@
 	prfm pstl2strm,[x0,#512]
 .endif
 
+	/* Decode Token Byte: */
 2:
-	/* Decode_token: */
-	ldrb	w_tmp, [x3], #1				/* read Token Byte */
-	lsr	literal_length, tmp, #4			/* get literal_length */
-	and	tmp_match_length, tmp, #0xf		/* get match_length */
+	/* Decode_token:*/
+	ldrb	w_tmp, [x3], #1		/* read Token Byte */
+	lsr	literal_length, tmp, #4	/* get literal_length */
+	and	tmp_match_length, tmp, #0xf	/* get match_length */
 	add	match_length, tmp_match_length, #4	/* match_length >=4 */
 
 	/*
@@ -125,7 +113,7 @@
 	cmp	tmp, #255
 	b.eq	3b
 
-	/* literal copy */
+/* literal copy */
 4:
 	/* Copy_long_literal_hs_15: */
 	mov	copy_from_ptr, x3
@@ -134,7 +122,6 @@
 	add	x0, x0, literal_length
 	check_dst_overflow
 	check_src_overflow
-
 5:
 	/* Copy_long_literal_loop: */
 	ldr	q0, [copy_from_ptr], #16
@@ -152,10 +139,10 @@
 	add	x0, x0, literal_length
 
 	/* Decode offset and match_length */
-7:
 	/* Decode_offset_matchlength: */
+7:
 	mov	offset_src_ptr, x3
-	ldrh	w_offset, [x3], #2		/* 2Byte: offset bytes */
+	ldrh	w_offset, [x3], #2	/* 2Byte:offset bytes */
 	cbz	offset, Failed			/* match_length == 0 is invalid */
 	sub	copy_from_ptr, x0, offset
 	cmp	copy_from_ptr, x1
@@ -167,7 +154,6 @@
 	add	x0, x0, match_length
 	cmp	match_length, #19
 	b.lo	9f
-
 	/*
 	 * continue decoding more match length bytes.
 	 */
@@ -204,7 +190,6 @@
 	cmp     offset , #16
 	b.lo    12f
 	ldp     q0, q1, [copy_from_ptr]
-
 12:
 	/* Copy_match_perm: */
 	ldrb	w_tmp, [cplen_table_addr, offset]
@@ -212,7 +197,6 @@
 	add	copy_to_ptr, copy_to_ptr, tmp
 	cmp	x0, copy_to_ptr
 	b.ls	1b
-
 13:
 	/* Copy_offset_lt_32_loop: */
 	stp	q0, q1, [copy_to_ptr]
@@ -223,7 +207,7 @@
 	b.hi	13b
 	b	1b
 
-	/* offset >= match */
+/* offset >= match */
 14:
 	/* Cond_offset_ge_matchlength: */
 	ldr	q0, [copy_from_ptr], #16
@@ -231,7 +215,6 @@
 
 	cmp	x0, copy_to_ptr
 	b.ls	1b
-
 15:
 	/* Copy_offset_ge_match_loop: */
 	ldp	q0, q1, [copy_from_ptr], #32
@@ -265,6 +248,9 @@ Exit_here:
 	ldp	x3, x0, [sp], #16
 	str	save_src, [x3]
 	str	save_dst, [x0]
+	ldp	x23, x24, [sp], #16
+	ldp	x21, x22, [sp], #16
+	ldp	x19, x20, [sp], #16
 	mov	x0, tmp
 	ldp     x29, x30, [sp], #16
 	ret     x30
