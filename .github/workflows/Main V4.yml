@@ -1596,9 +1596,16 @@ jobs:
           fi        
           
       # ==============================
-      # Pull SukiSU ZRAM Patches + Apply LZ4/LZ4KD
+      # Apply ZRAM Patches & Upload Modules
       # ==============================
-      - name: Apply ZRAM Patches Safely
+      - name: Checkout Kernel Patch Repository (LiquidAndrei)
+        uses: actions/checkout@v4
+        with:
+          repository: AndreiMikh/AndreiMikh-Kernel-Lab
+          ref: LiquidAndrei
+          path: AndreiMikh-Kernel-Lab
+      
+      - name: Apply ZRAM Patches
         shell: bash
         run: |
           set -euo pipefail
@@ -1621,12 +1628,12 @@ jobs:
           fi
           echo "Using Kernel Directory: $KCOMMON"
       
-          # Ensure LZ4 source folder exists
+          # Ensure LZ4 Source Folder Exists
           mkdir -p "$KCOMMON/fs/f2fs/lz4armv8"
       
-          # ----------------------------
+          # ==============================
           # LZ4KD Patches
-          # ----------------------------
+          # ==============================
           if [[ "$ALGO" == "LZ4KD" ]]; then
             PATCH_DIR="../SukiSU_patch/other/zram/zram_patch/$KVER"
             if [ -d "$PATCH_DIR" ]; then
@@ -1637,7 +1644,7 @@ jobs:
                   patch -p1 -F 3 < "$FILE" || true
                   echo "✅ Applied $FILE"
                 else
-                  echo "⚠️ $FILE not found, skipping..."
+                  echo "⚠️ $FILE Not Found, Skipping..."
                 fi
               done
             else
@@ -1645,15 +1652,13 @@ jobs:
             fi
           fi
       
-          # ----------------------------
+          # ==============================
           # LZ4 Patches
-          # ----------------------------
+          # ==============================
           if [[ "$ALGO" == "LZ4" ]]; then
             PATCH_BASE="./AndreiMikh-Kernel-Lab/patches"
             if [ -d "$PATCH_BASE" ]; then
               echo "🔧 Applying LZ4 Patches..."
-      
-              # Copy All Necessary Files to Kernel Directory
               for FILE in 001-lz4.patch 002-zstd.patch lz4armv8.S lz4accel.c lz4accel.h; do
                 if [ -f "$PATCH_BASE/$FILE" ]; then
                   cp "$PATCH_BASE/$FILE" "$KCOMMON/fs/f2fs/lz4armv8/" || true
@@ -1664,7 +1669,6 @@ jobs:
               done
       
               cd "$KCOMMON"
-              # Apply Patches Depending on Kernel Version
               if [[ "$KVER" == "6.1" && -f "fs/f2fs/lz4armv8/001-lz4.patch" ]]; then
                 echo "📦 Applying LZ4 + ZSTD Patch (6.1)"
                 git apply -p1 fs/f2fs/lz4armv8/001-lz4.patch || true
@@ -1672,20 +1676,19 @@ jobs:
                   patch -p1 < fs/f2fs/lz4armv8/002-zstd.patch || true
                 fi
               fi
-      
               if [[ "$KVER" == "6.6" && -f "fs/f2fs/lz4armv8/001-lz4.patch" ]]; then
                 echo "📦 Applying LZ4 Patch (6.6)"
                 git apply -p1 fs/f2fs/lz4armv8/001-lz4.patch || true
               fi
-      
               cd - >/dev/null
               echo "✅ LZ4 Patch Section Completed"
             else
-              echo "⚠️ LZ4 Patch Directory $PATCH_BASE Not Found, Skipping LZ4 Patches"
+              echo "⚠️ LZ4 Patch Directory $PATCH_BASE Not Found, Skipping LZ4 patches"
             fi
           fi
       
           echo "✅ All ZRAM Patch Operations Completed (Safe Mode)"
+
           
       # ==============================
       # Apply Conversion
@@ -2785,54 +2788,50 @@ jobs:
           name: "${{ steps.suffix.outputs.value }}(${{ env.TKERNEL_VERSION }})(${{ env.KSUVER }})"
           path: ./AnyKernel3/*   
 
-      # ==============================
-      # Locate & Upload ZRAM Modules Safely
-      # ==============================
       - name: Locate & Upload ZRAM Modules
-        id: locate_zram
         shell: bash
         run: |
           set -euo pipefail
       
-          KVER="${{ env.KERNEL_VERSION }}"
           BUILD_DIR="out"
+          ZRAM_PATH=""
+          LZ4KD_PATH=""
       
-          echo "🔎 Searching for ZRAM.ko..."
+          echo "🔎 Searching for ZRAM.ko & LZ4KD Module..."
           if [ -d "$BUILD_DIR" ]; then
             ZRAM_PATH=$(find "$BUILD_DIR" -type f -name "zram.ko" | head -n1 || true)
             LZ4KD_PATH=$(find "$BUILD_DIR" -type f -name "lz4kd.ko" | head -n1 || true)
           else
             echo "⚠️ Build Output Directory '$BUILD_DIR' Not Found"
-            ZRAM_PATH=""
-            LZ4KD_PATH=""
           fi
       
-          echo "ZRAM_PATH=$ZRAM_PATH" >> "$GITHUB_ENV"
-          echo "LZ4KD_PATH=$LZ4KD_PATH" >> "$GITHUB_ENV"
+          if [[ -n "$ZRAM_PATH" ]]; then
+            echo "✅ Found ZRAM.ko: $ZRAM_PATH"
+            echo "ZRAM_PATH=$ZRAM_PATH" >> "$GITHUB_ENV"
+          else
+            echo "ℹ️ ZRAM.ko Not Found"
+          fi
       
-          # Set Step Outputs for Conditional Upload
-          echo "zram=$ZRAM_PATH" >> "$GITHUB_OUTPUT"
-          echo "lz4kd=$LZ4KD_PATH" >> "$GITHUB_OUTPUT"
+          if [[ -n "$LZ4KD_PATH" ]]; then
+            echo "✅ Found LZ4KD Module: $LZ4KD_PATH"
+            echo "LZ4KD_PATH=$LZ4KD_PATH" >> "$GITHUB_ENV"
+          else
+            echo "ℹ️ LZ4KD Module Not Found"
+          fi
       
-      # ==============================
-      # Upload ZRAM Module
-      # ==============================
       - name: Upload ZRAM Module
-        if: steps.locate_zram.outputs.zram != ''
+        if: env.ZRAM_PATH != ''
         uses: actions/upload-artifact@v4
         with:
           name: "${{ github.event.inputs.FILE }}-ZRAM"
-          path: ${{ steps.locate_zram.outputs.zram }}
+          path: ${{ env.ZRAM_PATH }}
       
-      # ==============================
-      # Upload LZ4KD Module
-      # ==============================
       - name: Upload LZ4KD Module
-        if: steps.locate_zram.outputs.lz4kd != ''
+        if: env.LZ4KD_PATH != ''
         uses: actions/upload-artifact@v4
         with:
           name: "${{ github.event.inputs.FILE }}-LZ4KD"
-          path: ${{ steps.locate_zram.outputs.lz4kd }}
+          path: ${{ env.LZ4KD_PATH }}
       
       - name: Post-build Disk Check
         run: df -h
