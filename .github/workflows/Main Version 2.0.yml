@@ -2470,18 +2470,36 @@ jobs:
           ccache -s
 
       # ==============================
-      # Fallback to Build Kernel
+      # Fallback Kernel Build
       # ==============================
-      - name: Fallback to Build Kernel
+      - name: Fallback to Kernel Build
         if: ${{ github.event.inputs.FAST_BUILD == 'false' || steps.fast_build.outputs.fallback == 'true' }}
         run: |
+          echo "Starting Fallback Kernel Build..."
           cd kernel_workspace
-          if [ -f ./kernel_platform/build_with_bazel.py ]; then
-            ./kernel_platform/oplus/bazel/oplus_modules_variant.sh ${{ env.CPUD }} ${{ env.BUILD_METHOD }}
-            ./kernel_platform/build_with_bazel.py -t ${{ env.CPUD }} ${{ env.BUILD_METHOD }}
+      
+          # Check if Bazel Build System Exists
+          if [ -f "./kernel_platform/build_with_bazel.py" ]; then
+            echo "Using Bazel build system"
+      
+            ./kernel_platform/oplus/bazel/oplus_modules_variant.sh \
+              ${{ env.CPUD }} \
+              ${{ env.BUILD_METHOD }}
+      
+            ./kernel_platform/build_with_bazel.py \
+              -t ${{ env.CPUD }} \
+              ${{ env.BUILD_METHOD }}
+      
           else
-            LTO=thin SYSTEM_DLKM_RE_SIGN=0 BUILD_SYSTEM_DLKM=0 KMI_SYMBOL_LIST_STRICT_MODE=0 \
-            ./kernel_platform/oplus/build/oplus_build_kernel.sh ${{ env.CPUD }} ${{ env.BUILD_METHOD }}
+            echo "Using Legacy OPlus Build Script"
+      
+            LTO=thin \
+            SYSTEM_DLKM_RE_SIGN=0 \
+            BUILD_SYSTEM_DLKM=0 \
+            KMI_SYMBOL_LIST_STRICT_MODE=0 \
+            ./kernel_platform/oplus/build/oplus_build_kernel.sh \
+              ${{ env.CPUD }} \
+              ${{ env.BUILD_METHOD }}
           fi
 
       # ==============================
@@ -2489,31 +2507,50 @@ jobs:
       # ==============================
       - name: Make AnyKernel3
         run: |
+          echo "Cloning AnyKernel3..."
           git clone https://github.com/AndreiMikh/AnyKernel3 --depth=1
           rm -rf ./AnyKernel3/.git
-          mkdir -p kernel_workspace/kernel_platform/out/Final-Image-Find/
+      
+          echo "Preparing Output Directories..."
+          mkdir -p kernel_workspace/kernel_platform/out/Final-Image-Find
+      
           image_path=""
+      
+          echo "Searching for Compiled Kernel Image..."
+      
+          # Check Unified Make Output
           if [ -d "./kernel_workspace/kernel_platform/common/out/" ]; then
-            image_path=$(find "./kernel_workspace/kernel_platform/common/out/" -name "Image" | head -n 1)
+            image_path=$(find ./kernel_workspace/kernel_platform/common/out/ -name "Image" | head -n 1)
+      
             if [ -n "$image_path" ]; then
-              echo "Unified Path Used by Make for Compilation Successfully Located the Image File"
+              echo "Image Found in Unified Build Output"
             fi
           fi
+      
+          # Check Official OPlus Script Output
           if [ -z "$image_path" ] && [ -d "./kernel_workspace/kernel_platform/out/" ]; then
-            image_path=$(find "./kernel_workspace/kernel_platform/out/" -name "Image" | head -n 1)
+            image_path=$(find ./kernel_workspace/kernel_platform/out/ -name "Image" | head -n 1)
+      
             if [ -n "$image_path" ]; then
-              echo "Image File Successfully Found After Compiling Using Official Script"
+              echo "Image Found in Official Build Output"
             fi
           fi
+      
+          # Fail if No Image was Found
           if [ -z "$image_path" ]; then
-            echo "Image File Not Found, Build Failed" >&2
+            echo "ERROR: Kernel Image Not Found. Build Likely Failed" >&2
             exit 1
           fi
-          if [ -f "$image_path" ]; then
-            echo "Image File Finally Located at: $image_path"
-            cp "$image_path" ./AnyKernel3/Image
-            cp "$image_path" kernel_workspace/kernel_platform/out/Final-Image-Find/Image
-          fi
+      
+          echo "Kernel Image Located at: $image_path"
+      
+          # Copy Image to AnyKernel3
+          cp "$image_path" ./AnyKernel3/Image
+      
+          # Save Backup Copy
+          cp "$image_path" kernel_workspace/kernel_platform/out/Final-Image-Find/Image
+      
+          echo "Image Copied Successfully to AnyKernel3"
 
       # ==============================
       # Patch Linux & Replace Image
@@ -2521,15 +2558,29 @@ jobs:
       - name: Patch Linux & Replace Image
         if: ${{ github.event.inputs.KPM == 'KPM' }}
         run: |
+          echo "Starting KPM Patch Process..."
+      
           PATCH_DIR="${GITHUB_WORKSPACE}/kernel_workspace/SukiSU_patch/kpm"
           OUT_DIR="${GITHUB_WORKSPACE}/kernel_workspace/kernel_platform/out/Final-Image-Find"
-          cd "${OUT_DIR}"
-          cp "${PATCH_DIR}/patch_linux" .
+      
+          cd "$OUT_DIR"
+      
+          echo "Copying Patch Linux Tool..."
+          cp "$PATCH_DIR/patch_linux" .
+      
           chmod +x patch_linux
+      
+          echo "Applying Linux Patch..."
           ./patch_linux
+      
+          echo "Replacing Original Image with Patched Version..."
           rm -f Image
           mv oImage Image
+      
+          echo "Updating AnyKernel3 Image..."
           cp Image "${GITHUB_WORKSPACE}/AnyKernel3/Image"
+      
+          echo "KPM Patch Applied Successfully"
 
       # ==============================
       # Download Selected KSU Manager APK
