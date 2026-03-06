@@ -1,0 +1,101 @@
+if [[ "${{ github.event.inputs.ZRAM }}" == 1* ]]; then
+  echo "Pulling ZRAM patch"
+
+  cp -r ../SukiSU_patch/other/zram/lz4k/include/linux/* ./common/include/linux/
+  cp -r ../SukiSU_patch/other/zram/lz4k/lib/* ./common/lib/
+  cp -r ../SukiSU_patch/other/zram/lz4k/crypto/* ./common/crypto/
+  cp -r ../SukiSU_patch/other/zram/lz4k_oplus ./common/lib/
+fi
+
+- name: Apply ZRAM
+  if: startsWith(github.event.inputs.ZRAM, '1/')
+  run: |
+    ZRAM="${{ github.event.inputs.ZRAM }}"
+    if [[ "$(grep -o '/' <<< "$ZRAM" | wc -l)" -lt 2 ]]; then
+      echo "Error: ZRAM parameter is missing required '/' separators. Format should be: master_switch(0=off,1=on)/algorithm_name(ignored if 0)/size(ignored if 0)"
+      exit 10
+    fi
+    # Parse fields: switch status / algorithm name / size
+    IFS='/' read -r ZRAM_SWSTA ZRAM_ALGO ZRAM_SIZE <<< "$ZRAM"
+    echo "ZRAM_ALGO=$ZRAM_ALGO" >> $GITHUB_ENV
+    echo "ZRAM_ALGO_U=${ZRAM_ALGO^^}" >> $GITHUB_ENV
+    echo "ZRAM_SIZE=$ZRAM_SIZE" >> $GITHUB_ENV
+
+    PATCH_DIR="${GITHUB_WORKSPACE}/kernel_workspace/SukiSU_patch/other/zram/zram_patch/${{ env.KERNEL_VERSION }}"
+    cd kernel_workspace/kernel_platform/common
+    echo "Applying lz4kd patch"
+    patch -p1 -F 3 < "${PATCH_DIR}/lz4kd.patch" || true
+    echo 'lz4kd_patch completed'
+    echo "Applying lz4k_oplus patch"
+    patch -p1 -F 3 < "${PATCH_DIR}/lz4k_oplus.patch" || true
+    echo 'lz4k_oplus_patch completed'
+
+# ZRAM configuration*
+if [[ "${{ github.event.inputs.ZRAM }}" == 1* ]]; then
+  echo "CONFIG_CRYPTO_LZ4HC=y" >> "$CONFIG_FILE"
+  echo "CONFIG_CRYPTO_LZ4K=y" >> "$CONFIG_FILE"
+  echo "CONFIG_CRYPTO_LZ4KD=y" >> "$CONFIG_FILE"
+  echo "CONFIG_CRYPTO_842=y" >> "$CONFIG_FILE"
+  echo "CONFIG_CRYPTO_LZ4K_OPLUS=y" >> "$CONFIG_FILE"
+  echo "CONFIG_ZRAM_WRITEBACK=y" >> "$CONFIG_FILE"
+fi
+
+- name: Extract and Process ZRAM Module
+  if: startsWith(github.event.inputs.ZRAM, '1/')
+  id: zram_find
+  run: |
+    set -e
+    ZRAM_ZIP="${GITHUB_WORKSPACE}/kernel_workspace/Action-Build/ZRAM.zip"
+
+    if [ ! -f "$ZRAM_ZIP" ]; then
+      echo "❌ ZRAM.zip not found: $ZRAM_ZIP"
+      echo "upload=false" >> "$GITHUB_OUTPUT"
+      exit 0
+    fi
+
+    unzip "$ZRAM_ZIP" -d ZRAM-Module
+
+    CONFIG_PROP="ZRAM-Module/config.prop"
+    if [ -f "$CONFIG_PROP" ]; then
+      echo "Modifying config.prop"
+      sed -i "s/^ZRAM_ALGO=.*/ZRAM_ALGO=${ZRAM_ALGO}/" "$CONFIG_PROP"
+      sed -i "s/^ZRAM_SIZE=.*/ZRAM_SIZE=${ZRAM_SIZE}/" "$CONFIG_PROP"
+      echo "ZRAM_ALGO=${ZRAM_ALGO}"
+      echo "ZRAM_SIZE=${ZRAM_SIZE}"
+    else
+      echo "❌ config.prop not found"
+      echo "upload=false" >> "$GITHUB_OUTPUT"
+      exit 0
+    fi
+
+    target="./ZRAM-Module/zram/zram.ko"
+    echo "Searching for zram.ko module file..."
+    search_paths=(
+      "./kernel_workspace/kernel_platform/out"
+      "./kernel_workspace/device/qcom"
+    )
+    zram_path=""
+    for path in "${search_paths[@]}"; do
+      if [ -d "$path" ]; then
+        zram_path=$(find "$path" -type f -name "zram.ko" | head -n 1)
+        [ -n "$zram_path" ] && break
+      fi
+    done
+    if [ -z "$zram_path" ]; then
+      zram_path=$(find "./kernel_workspace" -type f -name "zram.ko" | head -n 1)
+    fi
+    if [ -n "$zram_path" ] && [ -f "$zram_path" ]; then
+      echo "✅ zram.ko file finally located at: $zram_path"
+      install -D "$zram_path" "$target"
+    else
+      echo "❌ zram.ko file not found, it may be an unsupported kernel version or the build failed"
+      echo "upload=false" >> "$GITHUB_OUTPUT"
+      exit 0
+    fi
+
+- name: Upload ZRAM Module
+  if: startsWith(github.event.inputs.ZRAM, '1/') && steps.zram_find.outputs.upload != 'false'
+  uses: actions/upload-artifact@v4
+  with:
+    name: ZRAM-Module_${{ env.KERNEL_VERSION }}_${{ steps.extract_info.outputs.value }}
+    path: ZRAM-Module/*
