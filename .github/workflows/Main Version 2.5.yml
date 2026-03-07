@@ -1970,26 +1970,58 @@ jobs:
           echo "========== Fengchi Setup Complete =========="
     
       # ==============================
-      # LSM Baseband Guard
+      # LSM Baseband Guard (Full Safety)
       # ==============================
-      - name: LSM Baseband Guard
+      - name: Enable LSM Baseband Guard
         if: ${{ github.event.inputs.LSM == 'true' }}
         run: |
           set -euo pipefail
 
-          cd kernel_workspace/kernel_platform/common || exit 1
+          # Navigate to Kernel Common Directory
+          cd kernel_workspace/kernel_platform/common || { echo "Directory not found"; exit 1; }
 
           echo "Enabling Kernel-Level Baseband Protection..."
 
-          curl -LSs \
-            https://raw.githubusercontent.com/vc-teahouse/Baseband-guard/main/setup.sh \
-            | bash -s fix_blkdev_rename
+          # Define Cache Path for Setup Script
+          SCRIPT_CACHE="./baseband_guard_setup.sh"
+          SCRIPT_URL="https://raw.githubusercontent.com/vc-teahouse/Baseband-guard/main/setup.sh"
 
-          sed -i '/^config LSM$/,/^help$/{
-            /^[[:space:]]*default/{
-              /baseband_guard/! s/selinux/selinux,baseband_guard/
-            }
-          }' ./security/Kconfig
+          # Download or Update the Setup Script if Remote is Newer
+          if [ ! -f "$SCRIPT_CACHE" ]; then
+            echo "Downloading Baseband Guard Setup Script..."
+            curl -LSs "$SCRIPT_URL" -o "$SCRIPT_CACHE"
+            chmod +x "$SCRIPT_CACHE"
+          else
+            echo "Checking for Updates to Baseband Guard Setup Script..."
+            # -z Checks Timestamp; Downloads only if Remote is Newer
+            curl -LSsz "$SCRIPT_CACHE" "$SCRIPT_URL" -o "$SCRIPT_CACHE" && chmod +x "$SCRIPT_CACHE"
+          fi
+
+          # Run the Setup Script with the Required Parameter
+          bash "$SCRIPT_CACHE" fix_blkdev_rename
+
+          KCONFIG_FILE="./security/Kconfig"
+          BACKUP_FILE="${KCONFIG_FILE}.bak"
+ 
+          # Backup KConfig Before Modification
+          if [ ! -f "$BACKUP_FILE" ]; then
+            cp "$KCONFIG_FILE" "$BACKUP_FILE"
+            echo "Backup Created: $BACKUP_FILE"
+          fi
+
+          # Only Add Baseband Guard if it's Not Already Present in the LSM Defaults
+          if ! grep -q "selinux,baseband_guard" "$KCONFIG_FILE"; then
+            sed -i '/^config LSM$/,/^help$/{
+              /^[[:space:]]*default/{
+                /baseband_guard/! s/selinux/selinux,baseband_guard/
+              }
+            }' "$KCONFIG_FILE"
+            echo "Baseband Guard Added to LSM Defaults"
+          else
+            echo "Baseband Guard is Already Enabled in LSM Defaults"
+          fi
+
+          echo "✅ LSM Baseband Guard Setup Completed"
 
       # ==============================
       # Kernel Configuration Settings
