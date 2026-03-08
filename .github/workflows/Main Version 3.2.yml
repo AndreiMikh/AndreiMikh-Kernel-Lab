@@ -574,6 +574,7 @@ jobs:
           sudo sysctl vm.swappiness=80
           sudo sysctl vm.vfs_cache_pressure=50
 
+          echo "Swap Enabled:"
           free -h
 
       # ==============================
@@ -585,7 +586,61 @@ jobs:
           CCACHE_PATH="$HOME/.ccache_${{ github.event.inputs.FILE }}_${{ env.CLANG_VERSION }}"
           echo "CCACHE_DIR=$CCACHE_PATH" >> $GITHUB_ENV
           mkdir -p "$CCACHE_PATH"
+
+          echo "CCACHE_MAXSIZE=6G" >> $GITHUB_ENV
           echo "✅ Compiler Cache Directory Set to: $CCACHE_PATH"
+
+      # ==============================
+      # Load Compiler Cache (Optimized)
+      # ==============================
+      - name: Load Compiler Cache (Optimized)
+        if: ${{ github.event.inputs.BUILD_NOCCACHE != 'true' }}
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.CCACHE_DIR }}
+          key: >
+            ccache-${{ runner.os }}-${{ env.CLANG_VERSION }}-${{ env.KERNEL_VERSION }}-${{ github.event.inputs.FILE || 'default' }}
+          restore-keys: |
+            ccache-${{ runner.os }}-${{ env.CLANG_VERSION }}-
+            ccache-${{ runner.os }}-
+
+      # ==============================
+      # Setup Compiler Cache (Optimized)
+      # ==============================
+      - name: Setup Compiler Cache
+        if: ${{ github.event.inputs.BUILD_NOCCACHE != 'true' }}
+        run: |
+          # Use Local Variable to Simplify Paths
+          CCACHE_PATH="${{ env.CCACHE_DIR }}"
+          INIT_FLAG="$CCACHE_PATH/.ccache_initialized"
+
+          # Use Bash default if CCACHE_MAXSIZE is not set
+          MAXSIZE="${CCACHE_MAXSIZE:-6G}"  # Default to 6G if Not Set
+
+          # Check if Compiler Cache is Installed
+          if ! command -v ccache >/dev/null 2>&1; then
+            echo "❌ Compiler Cache Not Found, Skipping Compiler Cache Setup"
+            exit 0
+          fi
+
+          # Initialize Compiler Cache only Once
+          if [ ! -f "$INIT_FLAG" ]; then
+            echo "Initializing Compiler Cache at $CCACHE_PATH..."
+            mkdir -p "$CCACHE_PATH"
+            ccache -M "$MAXSIZE"
+            ccache --set-config=compression=true
+            ccache --set-config=compiler_check=content
+            touch "$INIT_FLAG"
+            echo "✅ Compiler Cache Initialization Complete"
+          else
+            echo "✅ Compiler Cache Already Initialized, Skipping"
+          fi
+
+          # Reset Stats for this Build (Optional)
+          ccache -z
+
+          # Display Current Compiler Cache Stats for CI Visibility
+          ccache -s
 
       # ==============================
       # Set GIT User
@@ -625,58 +680,6 @@ jobs:
           execute_install_scripts: true
 
       # ==============================
-      # Load Compiler Cache (Optimized)
-      # ==============================
-      - name: Load Compiler Cache (Optimized)
-        if: ${{ github.event.inputs.BUILD_NOCCACHE != 'true' }}
-        uses: actions/cache@v4
-        with:
-          path: ${{ env.CCACHE_DIR }}
-          key: >
-            ccache-${{ runner.os }}-${{ env.CLANG_VERSION }}-${{ env.KERNEL_VERSION }}-${{ github.event.inputs.FILE || 'default' }}
-          restore-keys: |
-            ccache-${{ runner.os }}-${{ env.CLANG_VERSION }}-
-            ccache-${{ runner.os }}-
-
-      # ==============================
-      # Setup Compiler Cache (Fixed)
-      # ==============================
-      - name: Setup Compiler Cache
-        if: ${{ github.event.inputs.BUILD_NOCCACHE != 'true' }}
-        run: |
-          # Use Local Variable to Simplify Paths
-          CCACHE_PATH="${{ env.CCACHE_DIR }}"
-          INIT_FLAG="$CCACHE_PATH/.ccache_initialized"
-
-          # Use Bash default if CCACHE_MAXSIZE is not set
-          MAXSIZE="${CCACHE_MAXSIZE:-6G}"  # Default to 6G if Not Set
-
-          # Check if Compiler Cache is Installed
-          if ! command -v ccache >/dev/null 2>&1; then
-            echo "Compiler Cache Not Found, Skipping Compiler Cache Setup"
-            exit 0
-          fi
-
-          # Initialize Compiler Cache only Once
-          if [ ! -f "$INIT_FLAG" ]; then
-            echo "Initializing Compiler Cache at $CCACHE_PATH..."
-            mkdir -p "$CCACHE_PATH"
-            ccache -M "$MAXSIZE"
-            ccache --set-config=compression=true
-            ccache --set-config=compiler_check=content
-            touch "$INIT_FLAG"
-            echo "✅ Compiler Cache Initialization Complete"
-          else
-            echo "✅ Compiler Cache Already Initialized, Skipping"
-          fi
-
-          # Reset Stats for this Build (Optional)
-          ccache -z
-
-          # Display Current Stats for CI Visibility
-          ccache -s
-
-      # ==============================
       # Setup Google Repository Tool
       # ==============================
       - name: Setup Google Repository Tool
@@ -685,7 +688,7 @@ jobs:
           curl -sSL https://storage.googleapis.com/git-repo-downloads/repo -o ~/repo
           chmod +x ~/repo
           sudo mv ~/repo /usr/local/bin/repo
-          echo "Google Repository Tool Installed Successfully"
+          echo "✅ Google Repository Tool Installed Successfully"
 
       # ==============================
       # Initialize & Sync Repository
@@ -694,52 +697,60 @@ jobs:
         env:
           FILE: ${{ github.event.inputs.FILE }}
         run: |
-          echo "Creating Kernel Workspace..."
-          mkdir -p kernel_workspace && cd kernel_workspace
+          set -eux
 
-          echo "Setting up Manifest Directory..."
+          mkdir -p kernel_workspace
+          cd kernel_workspace
+
           mkdir -p .repo/manifests
           cp "$GITHUB_WORKSPACE/.repo/manifests_fallback/${FILE}.xml" ".repo/manifests/${FILE}.xml"
 
           BASE_URL="https://github.com/${MANIFEST_REPO}/${MANIFEST_REPO_NAME}.git"
-          echo "Initializing repository using $MANIFEST_REPO/$MANIFEST_REPO_NAME ($MANIFEST_BRANCH)..."
-          repo init -u "$BASE_URL" -b "$MANIFEST_BRANCH" -m "${FILE}.xml" --depth=1 --no-clone-bundle --no-tags
 
-          echo "Syncing Repository..."
-          repo sync -c -j$(nproc) --no-clone-bundle --no-tags --force-sync
+          echo "Initializing Repository"
+          repo init -u "$BASE_URL" -b "$MANIFEST_BRANCH" -m "${FILE}.xml" \
+            --depth=1 \
+            --no-clone-bundle \
+            --no-tags
 
-          echo "Auto Detecting Kernel Repository..."
+          echo "Syncing Repository"
 
-          KERNEL_REPOS=""
+          repo sync \
+            -c \
+            --force-sync \
+            --no-clone-bundle \
+            --no-tags \
+            -j$(nproc --all)
 
-          KERNEL_REPOS_PATH=$(find . -type f -name "build.config*" | grep -v "abi" | head -n 1)
+          echo "Detecting Kernel Repository"
 
-          if [[ -n "$KERNEL_REPOS_PATH" ]]; then
-            echo "Found build config at: $KERNEL_REPOS_PATH"
+          KERNEL_REPOS_PATH=$(find . -type f -name "build.config*" ! -path "*abi*" -print -quit)
 
-            # ==============================
-            # Extract Top-Level Kernel Folder
-            # ==============================
-            KERNEL_REPOS=$(echo "${KERNEL_REPOS_PATH#./}" | cut -d/ -f1)
-
-            echo "Detected Kernel Repository: $KERNEL_REPOS"
-            echo "KERNEL_REPOS=$KERNEL_REPOS" >> "$GITHUB_ENV"
-          else
-            echo "ERROR: No build.config file found after repo sync!"
-            find . -name "build.config*" || true
+          if [[ -z "$KERNEL_REPOS_PATH" ]]; then
+            echo "ERROR: ❌ No Build Configuration Found"
             exit 1
-          fi          
+          fi
 
-          echo "Cleaning up Build Bazel Files & Protected Exports..."
+          echo "Build Configuration Found: $KERNEL_REPOS_PATH"
+  
+          KERNEL_REPOS=$(echo "${KERNEL_REPOS_PATH#./}" | cut -d/ -f1)
+
+          echo "Detected Kernel Repository: $KERNEL_REPOS"
+
+          echo "KERNEL_REPOS=$KERNEL_REPOS" >> $GITHUB_ENV
+
+          echo "Cleaning ABI Protected Exports"
+
           for dir in kernel_platform/common kernel_platform/msm-kernel; do
-            if [ -e "$dir/BUILD.bazel" ]; then
-              sed -i '/^[[:space:]]*"protected_exports_list"[[:space:]]*:[[:space:]]*"android\/abi_gki_protected_exports_aarch64",$/d' "$dir/BUILD.bazel"
+            if [[ -f "$dir/BUILD.bazel" ]]; then
+              sed -i '/protected_exports_list/d' "$dir/BUILD.bazel"
             fi
-            rm -f "$dir/android/abi_gki_protected_exports_"* 2>/dev/null || echo "No protected exports in $dir"
+
+            rm -f "$dir/android/abi_gki_protected_exports_"* || true
           done
 
-          echo "Repository Initialization & Sync Complete"
-
+          echo "✅ Repository Sync Complete"
+          
       # ==============================
       # Kernel Version Setup (Optimized)
       # ==============================
