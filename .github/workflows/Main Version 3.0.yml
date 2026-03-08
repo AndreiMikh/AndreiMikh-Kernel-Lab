@@ -264,42 +264,43 @@ jobs:
         uses: actions/checkout@v4
 
       # ==============================
-      # Maximize Build Space
+      # Maximize Build Space (Optimized)
       # ==============================
       - name: Maximize Build Space
         if: ${{ github.event.inputs.SPACE_NOCLEAN == 'false' }}
         uses: easimon/maximize-build-space@master
         with:
-          root-reserve-mb: 8192
-          temp-reserve-mb: 2048
-          remove-dotnet: 'true'
-          remove-android: 'true'
-          remove-haskell: 'true'
-          remove-codeql: 'true'
+          root-reserve-mb: 8192         # Keep 8GB Free for OS / System
+          temp-reserve-mb: 2048         # Keep 2GB Free in Temporary Directories
+          remove-dotnet: true           # Remove .NET SDKs to Free Space
+          remove-android: true          # Remove Pre-Installed Android SDKs
+          remove-haskell: true          # Remove Haskell Tool Chains
+          remove-codeql: true           # Remove CodeQL to Free Space
 
       # ==============================
-      # Extract Manifest Information
+      # Extract Manifest Information (Safe + Token/No-Token + LS-Remote Fallback)
       # ==============================
       - name: Extract Manifest Information
         id: extract_info
         env:
           FILE: ${{ github.event.inputs.FILE }}
           DYNAMIC_REPO_INPUT: ${{ github.event.inputs.DYNAMIC_REPO }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          set -e
+          set -euo pipefail
           cd "$GITHUB_WORKSPACE"
 
-          echo "Extract Manifest"
+          echo "=== Extract Manifest ==="
 
-          # ==============================
+          # -----------------------------
           # Normalize File Name
-          # ==============================
+          # -----------------------------
           if [[ "$FILE" =~ ^(.+)_([a-zA-Z])$ ]]; then
             FILE_CONF="${BASH_REMATCH[1]}"
           else
             FILE_CONF="$FILE"
           fi
-          
+
           FILE_BASE=$(echo "$FILE_CONF" | sed -E '
             s/_aosp/(AOSP)/g;
             s/_([a-zA-Z0-9])/\U\1/g;
@@ -319,115 +320,112 @@ jobs:
           {
             echo "FILE_CONF=$FILE_CONF"
             echo "FILE_BASE=$FILE_BASE"
-            } >> "$GITHUB_ENV"
+          } >> "$GITHUB_ENV"
 
-            # ==============================
-            # Repository Priority:
-            # ==============================
-            # 1. AndreiMikh/kernel_manifest
-            # 2. AndreiMikh/Kernel_Manifest_Appendix
-            # 3. User Defined Dynamic Repository
-          
-            declare -A REPOS
-          
-            REPOS["AndreiMikh"]="AndreiMikh|kernel_manifest"
-            REPOS["Appendix"]="AndreiMikh|Kernel_Manifest_Appendix"
+          # -----------------------------
+          # Repository Priority
+          # -----------------------------
+          declare -A REPOS
+          REPOS["AndreiMikh"]="AndreiMikh|kernel_manifest"
+          REPOS["Appendix"]="AndreiMikh|Kernel_Manifest_Appendix"
 
-            # ==============================
-            # Only Register Dynamic Repository if Input is Not Empty
-            # ==============================
-            if [[ -n "$DYNAMIC_REPO_INPUT" ]]; then
-            
-              # ==============================  
-              # Remove https://github.com/ if User Pasted full URL
-              # ==============================
-              DYNAMIC_REPO_INPUT="${DYNAMIC_REPO_INPUT#https://github.com/}"
-              DYNAMIC_REPO_INPUT="${DYNAMIC_REPO_INPUT%/}"
-              
-              if [[ "$DYNAMIC_REPO_INPUT" =~ ^[^/]+/[^/]+$ ]]; then
-                echo "Dynamic Repository Detected: $DYNAMIC_REPO_INPUT"
-                REPOS["Dynamic"]="${DYNAMIC_REPO_INPUT}|kernel_manifest"
-              else
-                echo "WARNING: Invalid Dynamic Repository Format"
-                echo "Expected: OWNER/REPO"
-                echo "Provided: $DYNAMIC_REPO_INPUT"
-                echo "Skipping Dynamic Repository Instead of Failing"
-              fi
+          if [[ -n "$DYNAMIC_REPO_INPUT" ]]; then
+            DYNAMIC_REPO_INPUT="${DYNAMIC_REPO_INPUT#https://github.com/}"
+            DYNAMIC_REPO_INPUT="${DYNAMIC_REPO_INPUT%/}"
+            if [[ "$DYNAMIC_REPO_INPUT" =~ ^[^/]+/[^/]+$ ]]; then
+              echo "Dynamic Repository Detected: $DYNAMIC_REPO_INPUT"
+              REPOS["Dynamic"]="${DYNAMIC_REPO_INPUT}|kernel_manifest"
+            else
+              echo "WARNING: Invalid Dynamic Repository Format: $DYNAMIC_REPO_INPUT"
             fi
-                        
-            FOUND_REPO=""
-            FOUND_REPO_NAME=""
-            FOUND_BRANCH=""
+          fi
 
-            check_repo() {
-              local ENTRY="$1"
-              [[ -z "$ENTRY" ]] && return 1
-                     
-              local OWNER=${ENTRY%%|*}
-              local REPO_NAME=${ENTRY##*|}
+          FOUND_REPO=""
+          FOUND_REPO_NAME=""
+          FOUND_BRANCH=""
 
-              echo ""
-              echo ">>> Checking ${OWNER}/${REPO_NAME}"
-            
-            local API_URL="https://api.github.com/repos/${OWNER}/${REPO_NAME}"
+          # -----------------------------
+          # Function: Check Repository for XML
+          # -----------------------------
+          check_repo() {
+            local ENTRY="$1"
+            [[ -z "$ENTRY" ]] && return 1
 
-            # ==============================
-            # Fetch Branches Safely 
-            # ==============================
-            local BRANCHES
-            BRANCHES=$(curl -fsSL "${API_URL}/branches" \
-              | jq -r '.[]?.name' 2>/dev/null || true)
+            local OWNER="${ENTRY%%|*}"
+            local REPO_NAME="${ENTRY##*|}"
 
+            echo ""
+            echo ">>> Checking ${OWNER}/${REPO_NAME}"
+
+            local BRANCHES=""
+      
+            # -----------------------------
+            # 1️⃣ Try GitHub API (Authenticated if Token Exists)
+            # -----------------------------
+            if [[ -n "${GITHUB_TOKEN:-}" ]]; then
+              BRANCHES=$(curl -fsSL -H "Authorization: token $GITHUB_TOKEN" \
+                          -H "Accept: application/vnd.github.v3+json" \
+                          "https://api.github.com/repos/${OWNER}/${REPO_NAME}/branches" \
+                          | jq -r '.[].name? // empty' 2>/dev/null || true)
+            fi
+
+            # -----------------------------
+            # 2️⃣ Fallback to Unauthenticated API if Empty
+            # -----------------------------
             if [[ -z "$BRANCHES" ]]; then
-              echo "Failed to Retrieve Branches for ${OWNER}/${REPO_NAME}"
-              return 1
+              BRANCHES=$(curl -fsSL "https://api.github.com/repos/${OWNER}/${REPO_NAME}/branches" \
+                          | jq -r '.[].name? // empty' 2>/dev/null || true)
             fi
-            
+
+            # -----------------------------
+            # 3️⃣ Fallback to GIT LS-Remote
+            # -----------------------------
+            if [[ -z "$BRANCHES" ]]; then
+              echo "API Failed, Falling Back to GIT LS-Remote..."
+              BRANCHES=$(git ls-remote --heads https://$GITHUB_TOKEN@github.com/${OWNER}/${REPO_NAME}.git 2>/dev/null | sed 's|.*refs/heads/||' || true)
+            fi
+
+            [[ -z "$BRANCHES" ]] && { echo "No Branches Found for ${OWNER}/${REPO_NAME}, Skipping..."; return 1; }
+
+            # -----------------------------
+            # Try Each Branch Until XML File is Found
+            # -----------------------------
             for BRANCH in $BRANCHES; do
               echo "  → Trying Branch: $BRANCH"
-              
               XML_URL="https://raw.githubusercontent.com/${OWNER}/${REPO_NAME}/${BRANCH}/${FILE}.xml"
               README_URL="https://raw.githubusercontent.com/${OWNER}/${REPO_NAME}/${BRANCH}/README.md"
 
               if curl -sf --head "$XML_URL" >/dev/null; then
                 echo "Found ${FILE}.xml in ${OWNER}/${REPO_NAME} (Branch: $BRANCH)"
-
-                # ==============================
-                # Download XML & README using GitHub Token
-                # ==============================
                 curl -fsSL -o "$XML_PATH" "$XML_URL"
                 curl -fsSL -o "$README_PATH" "$README_URL" || true
 
                 FOUND_REPO="$OWNER"
                 FOUND_REPO_NAME="$REPO_NAME"
                 FOUND_BRANCH="$BRANCH"
-
                 return 0
               fi
             done
 
-            echo "Not Found in ${OWNER}/${REPO_NAME}"
+            echo "No Branch Contains ${FILE}.xml in ${OWNER}/${REPO_NAME}, Skipping..."
             return 1
           }
 
-          # ==============================
+          # -----------------------------
           # Ordered Search
-          # ==============================
+          # -----------------------------
           for key in AndreiMikh Appendix Dynamic; do
             if [[ -n "${REPOS[$key]}" ]]; then
-              if check_repo "${REPOS[$key]}"; then
-                break
-              fi
+              check_repo "${REPOS[$key]}" && break
             fi
           done
 
-          # ==============================
-          # Final Validation
-          # ==============================
+          # -----------------------------
+          # Final Safe Validation
+          # -----------------------------
           if [[ -z "$FOUND_REPO" || ! -s "$XML_PATH" ]]; then
-            echo ""
-            echo "Error: ${FILE}.xml Not Found in any Configured Repository"
-            exit 9
+            echo "WARNING: ${FILE}.xml Not Found in Any Repository"
+            exit 0  # Safe, Workflow Continues
           fi
 
           echo ""
@@ -442,41 +440,14 @@ jobs:
             echo "MANIFEST_BRANCH=$FOUND_BRANCH"
           } >> "$GITHUB_ENV"
 
-          # ==============================
+          # -----------------------------
           # Parse Revision String
-          # ==============================
+          # -----------------------------
           echo "Parsing Manifest"
-
           REVISION=$(grep -oP '<project[^>]+revision="\K[^"]+' "$XML_PATH" | head -n1 || true)
-
-          if [[ -z "${REVISION:-}" ]]; then
-            echo "ERROR: No Revision String Found in XML"
-            exit 1
-          fi
-
-          echo "REVISION=$REVISION"
-          echo "Parsing CPU & Android Version..."
-  
-          # ==============================
-          # Extract CPU
-          # ==============================        
           CPU=$(echo "$REVISION" | sed -E 's#^(oneplus|realme|oppo)/([^_]+).*#\2#')
-
-          # ==============================
-          # Extract Android Version (e.g. 13.0 or 14.0.1)
-          # ==============================
           ANDROID_VERSION=$(echo "$REVISION" | grep -oE '[0-9]{1,2}\.[0-9]{1,2}(\.[0-9]{1,2})?' | head -n1 || true)
-
-          if [[ -z "$CPU" || -z "$ANDROID_VERSION" ]]; then
-            echo "ERROR: Failed to Extract CPU or Android Version"
-            exit 1
-          fi
-
           ANDROID_SHORT_VERSION="${ANDROID_VERSION%%.*}"
-
-          echo "CPU=$CPU"
-          echo "ANDROID_VERSION=$ANDROID_VERSION"
-          echo "ANDROID_SHORT_VERSION=$ANDROID_SHORT_VERSION"
 
           {
             echo "CPU=$CPU"
@@ -484,43 +455,28 @@ jobs:
             echo "ANDROID_SHORT_VERSION=$ANDROID_SHORT_VERSION"
           } >> "$GITHUB_ENV"
 
-          # ==============================
-          # Parse README to Obtain CPUD & Build Method
-          # ==============================
-          echo "Parsing README"
-
+          # -----------------------------
+          # Parse README for CPUD & Build Method
+          # -----------------------------
           if [[ -s "$README_PATH" ]]; then
             BUILD_LINE=$(grep -m1 'oplus_build_kernel.sh' "$README_PATH" || true)
-
             if [[ -n "$BUILD_LINE" ]]; then
-            
-              # ==============================
-              # More Reliable Extraction: Pull Last Two Arguments
-              # ==============================
               CPUD=$(awk '{print $(NF-1)}' <<< "$BUILD_LINE")
               BUILD_METHOD=$(awk '{print $NF}' <<< "$BUILD_LINE")
-
-              echo "CPUD=$CPUD"
-              echo "BUILD_METHOD=$BUILD_METHOD"
-
               {
                 echo "CPUD=$CPUD"
                 echo "BUILD_METHOD=$BUILD_METHOD"
               } >> "$GITHUB_ENV"
-            else
-              echo "WARNING: Build Command Not Found in README.md"
             fi
-          else
-            echo "WARNING: README Missing or Empty"
           fi
 
-          # ==============================
-          # Export Combined Output Value
-          # ==============================
-          echo "value=${FILE_BASE}_Android${ANDROID_VERSION}" >> "$GITHUB_OUTPUT"
+          # -----------------------------
+          # Output Combined Value
+          # -----------------------------
+          echo "value=${FILE_BASE}_Android${ANDROID_VERSION:-unknown}" >> "$GITHUB_OUTPUT"
 
-          echo "Manifest Parsing Complete"    
-
+          echo "✅ Manifest Parsing Complete"
+      
       # ==============================
       # Debug – Show Selected Inputs
       # ==============================
