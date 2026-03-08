@@ -2962,95 +2962,107 @@ jobs:
         with:
           name: "${{ steps.suffix.outputs.value }}(${{ env.TKERNEL_VERSION }})(${{ env.KSUVER }})"
           path: ./AnyKernel3/*   
-
+          
       # =================================
-      # Extract & Process ZRAM Module
+      # Build ZRAM Flashable Module
       # =================================
-      - name: Extract and Process ZRAM Module
+      - name: Prepare ZRAM Module
         if: startsWith(github.event.inputs.ZRAM, '1/')
-        id: zram_find
+        id: zram_module
         run: |
           set -e
-      
-          echo "Starting ZRAM Addon Module Processing..."
-      
-          ZRAM_ZIP="${GITHUB_WORKSPACE}/kernel_workspace/AndreiMikh-Kernel-Lab/patches/ZRAM.zip"
-          ZRAM_DIR="ZRAM-Module"
-          TARGET_MODULE="${ZRAM_DIR}/zram/zram.ko"
-      
-          # Check if ZRAM.zip Exists
-          if [ ! -f "$ZRAM_ZIP" ]; then
-            echo "❌ ZRAM.zip Not Found: $ZRAM_ZIP"
-            echo "upload=false" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-      
-          echo "Extracting ZRAM Addon Module Package..."
-          unzip "$ZRAM_ZIP" -d "$ZRAM_DIR"
-      
+
+          echo "================================="
+          echo "Starting ZRAM Module Preparation"
+          echo "================================="
+
+          ZRAM_DIR="${GITHUB_WORKSPACE}/ZRAM-Module"
+          TARGET_DIR="${ZRAM_DIR}/zram"
+
+          echo "Cloning ZRAM Module Template..."
+          git clone --depth=1 https://github.com/AndreiMikh/ZRAM-Module.git "$ZRAM_DIR"
+
           CONFIG_PROP="${ZRAM_DIR}/config.prop"
-      
-          if [ -f "$CONFIG_PROP" ]; then
-            echo "Updating Config Prop"
-      
-            sed -i "s/^ZRAM_ALGO=.*/ZRAM_ALGO=${ZRAM_ALGO}/" "$CONFIG_PROP"
-            sed -i "s/^ZRAM_SIZE=.*/ZRAM_SIZE=${ZRAM_SIZE}/" "$CONFIG_PROP"
-      
-            echo "Configured Values:"
-            echo "ZRAM_ALGO=${ZRAM_ALGO}"
-            echo "ZRAM_SIZE=${ZRAM_SIZE}"
-          else
-            echo "Config Prop Not Found"
+
+          if [ ! -f "$CONFIG_PROP" ]; then
+            echo "❌ Config.prop Not Found"
             echo "upload=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
-      
-          echo "Searching for Compiled ZRAM.ko..."
-      
-          search_paths=(
-            "./kernel_workspace/kernel_platform/out"
-            "./kernel_workspace/device/qcom"
+
+          echo "Updating Config.prop..."
+
+          sed -i "s/^ZRAM_ALGO=.*/ZRAM_ALGO=${ZRAM_ALGO}/" "$CONFIG_PROP"
+          sed -i "s/^ZRAM_SIZE=.*/ZRAM_SIZE=${ZRAM_SIZE}/" "$CONFIG_PROP"
+
+          echo "Configured Values:"
+          echo "ZRAM_ALGO=${ZRAM_ALGO}"
+          echo "ZRAM_SIZE=${ZRAM_SIZE}"
+
+          echo "---------------------------------"
+          echo "Searching for Compiled ZRAM Module"
+          echo "---------------------------------"
+
+          SEARCH_ROOT="./kernel_workspace"
+
+          ZRAM_KO=$(find "$SEARCH_ROOT" -type f -name "zram*.ko" | head -n 1 || true)
+
+          if [ -z "$ZRAM_KO" ]; then
+            echo "❌ ZRAM.ko Not Found"
+            echo "upload=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          echo "Found ZRAM Module:"
+          echo "$ZRAM_KO"
+
+          install -Dm644 "$ZRAM_KO" "$TARGET_DIR/zram.ko"
+
+          echo "---------------------------------"
+          echo "Checking Optional Compression Modules"
+          echo "---------------------------------"
+
+          modules=(
+            "lz4.ko"
+            "lz4hc.ko"
+            "lz4kd.ko"
+            "zstd.ko"
+            "lzo.ko"
           )
-      
-          zram_path=""
-      
-          for path in "${search_paths[@]}"; do
-            if [ -d "$path" ]; then
-              zram_path=$(find "$path" -type f -name "zram.ko" | head -n 1)
-              if [ -n "$zram_path" ]; then
-                break
-              fi
+
+          for mod in "${modules[@]}"; do
+            found=$(find "$SEARCH_ROOT" -type f -name "$mod" | head -n 1 || true)
+
+            if [ -n "$found" ]; then
+              echo "Including $mod"
+              install -Dm644 "$found" "$TARGET_DIR/$mod"
             fi
           done
-      
-          # Final Fallback Search
-          if [ -z "$zram_path" ]; then
-            zram_path=$(find "./kernel_workspace" -type f -name "zram.ko" | head -n 1)
-          fi
-      
-          if [ -n "$zram_path" ] && [ -f "$zram_path" ]; then
-            echo "✅ ZRAM.ko Located at: $zram_path"
-            install -D "$zram_path" "$TARGET_MODULE"
-          else
-            echo "❌ ZRAM.ko Not Found, Possible Reasons:"
-            echo "🚩 Unsupported Kernel Version"
-            echo "🚩 Kernel Module Build Failed"
-            echo "🚩 Module Compiled with Different Name"
-            echo "upload=false" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-      
-          echo "ZRAM Addon Module Prepared Successfully"
-       
+
+          echo "Setting Module Permissions..."
+          chmod -R 755 "$ZRAM_DIR"
+
+          echo "---------------------------------"
+          echo "Creating Flashable Zip"
+          echo "---------------------------------"
+
+          cd "$ZRAM_DIR"
+          zip -r ../ZRAM-Module.zip .
+          cd ..
+
+          echo "Module Packaged Successfully"
+
+          echo "upload=true" >> "$GITHUB_OUTPUT"
+          
       # =================================
-      # Upload ZRAM Module
+      # Upload ZRAM Flashable Module
       # =================================
       - name: Upload ZRAM Module
-        if: startsWith(github.event.inputs.ZRAM, '1/') && steps.zram_find.outputs.upload != 'false'
+        if: startsWith(github.event.inputs.ZRAM, '1/') && steps.zram_module.outputs.upload == 'true'
         uses: actions/upload-artifact@v4
         with:
-          name: ZRAM-Addon-Module-${{ env.KERNEL_VERSION }}-${{ env.ZRAM_ALGO }}-${{ env.ZRAM_SIZE }}
-          path: ZRAM-Module/*
+          name: ZRAM-Module-${{ env.KERNEL_VERSION }}-${{ env.ZRAM_ALGO }}-${{ env.ZRAM_SIZE }}
+          path: ZRAM-Module.zip
 
       # ==============================
       # Post-build Disk Check
