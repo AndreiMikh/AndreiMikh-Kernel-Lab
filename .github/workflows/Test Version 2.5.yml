@@ -2973,42 +2973,51 @@ jobs:
           set -e
 
           echo "================================="
-          echo "Starting ZRAM Module Preparation"
+          echo "Starting ZRAM Module Builder"
           echo "================================="
 
+          SEARCH_ROOT="./kernel_workspace"
           ZRAM_DIR="${GITHUB_WORKSPACE}/ZRAM-Module"
           TARGET_DIR="${ZRAM_DIR}/zram"
 
-          echo "Cloning ZRAM Module Template..."
+          echo "Cloning Module Template..."
           git clone --depth=1 https://github.com/AndreiMikh/ZRAM-Module.git "$ZRAM_DIR"
 
-          CONFIG_PROP="${ZRAM_DIR}/config.prop"
+          echo "Cleaning Git Metadata..."
+          rm -rf "$ZRAM_DIR/.git"
+          rm -rf "$ZRAM_DIR/.github"
 
-          if [ ! -f "$CONFIG_PROP" ]; then
-            echo "❌ Config.prop Not Found"
-            echo "upload=false" >> "$GITHUB_OUTPUT"
-            exit 0
+          echo "---------------------------------"
+          echo "Detecting Compression Algorithms"
+          echo "---------------------------------"
+
+          HAS_LZ4KD=$(find "$SEARCH_ROOT" -type f -name "lz4kd*.ko" | head -n 1 || true)
+          HAS_LZ4=$(find "$SEARCH_ROOT" -type f -name "lz4*.ko" | head -n 1 || true)
+          HAS_ZSTD=$(find "$SEARCH_ROOT" -type f -name "zstd*.ko" | head -n 1 || true)
+          HAS_LZO=$(find "$SEARCH_ROOT" -type f -name "lzo*.ko" | head -n 1 || true)
+
+          if [ -n "$HAS_LZ4KD" ]; then
+            DETECTED_ALGO="lz4kd"
+          elif [ -n "$HAS_LZ4" ]; then
+            DETECTED_ALGO="lz4"
+          elif [ -n "$HAS_ZSTD" ]; then
+            DETECTED_ALGO="zstd"
+          elif [ -n "$HAS_LZO" ]; then
+            DETECTED_ALGO="lzo"
+          else
+            DETECTED_ALGO="lz4"
           fi
 
-          echo "Updating Config.prop..."
-
-          sed -i "s/^ZRAM_ALGO=.*/ZRAM_ALGO=${ZRAM_ALGO}/" "$CONFIG_PROP"
-          sed -i "s/^ZRAM_SIZE=.*/ZRAM_SIZE=${ZRAM_SIZE}/" "$CONFIG_PROP"
-
-          echo "Configured Values:"
-          echo "ZRAM_ALGO=${ZRAM_ALGO}"
-          echo "ZRAM_SIZE=${ZRAM_SIZE}"
+          echo "✅ Selected Compression: $DETECTED_ALGO"
 
           echo "---------------------------------"
-          echo "Searching for Compiled ZRAM Module"
+          echo "Locating ZRAM Kernel Module"
           echo "---------------------------------"
-
-          SEARCH_ROOT="./kernel_workspace"
 
           ZRAM_KO=$(find "$SEARCH_ROOT" -type f -name "zram*.ko" | head -n 1 || true)
 
           if [ -z "$ZRAM_KO" ]; then
-            echo "❌ ZRAM.ko Not Found"
+            echo "❌ zram.ko not found"
             echo "upload=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
@@ -3019,16 +3028,10 @@ jobs:
           install -Dm644 "$ZRAM_KO" "$TARGET_DIR/zram.ko"
 
           echo "---------------------------------"
-          echo "Checking Optional Compression Modules"
+          echo "Copying Compression Modules"
           echo "---------------------------------"
 
-          modules=(
-            "lz4.ko"
-            "lz4hc.ko"
-            "lz4kd.ko"
-            "zstd.ko"
-            "lzo.ko"
-          )
+          modules=("lz4.ko" "lz4hc.ko" "lz4kd.ko" "zstd.ko" "lzo.ko")
 
           for mod in "${modules[@]}"; do
             found=$(find "$SEARCH_ROOT" -type f -name "$mod" | head -n 1 || true)
@@ -3039,18 +3042,40 @@ jobs:
             fi
           done
 
-          echo "Setting Module Permissions..."
+          echo "---------------------------------"
+          echo "Updating Config.prop"
+          echo "---------------------------------"
+
+          CONFIG_PROP="${ZRAM_DIR}/config.prop"
+
+          if [ ! -f "$CONFIG_PROP" ]; then
+            echo "❌ Config.prop Missing"
+            echo "upload=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          sed -i "s/^ZRAM_ALGO=.*/ZRAM_ALGO=${DETECTED_ALGO}/" "$CONFIG_PROP"
+          sed -i "s/^ZRAM_SIZE=.*/ZRAM_SIZE=${ZRAM_SIZE}/" "$CONFIG_PROP"
+
+          echo "Configured:"
+          echo "ZRAM_ALGO=$DETECTED_ALGO"
+          echo "ZRAM_SIZE=$ZRAM_SIZE"
+
+          echo "---------------------------------"
+          echo "Setting Permissions"
+          echo "---------------------------------"
+
           chmod -R 755 "$ZRAM_DIR"
 
           echo "---------------------------------"
-          echo "Creating Flashable Zip"
+          echo "Creating Flashable Module Zip"
           echo "---------------------------------"
 
           cd "$ZRAM_DIR"
           zip -r ../ZRAM-Module.zip .
           cd ..
 
-          echo "Module Packaged Successfully"
+          echo "✅ Module Packaged Successfully"
 
           echo "upload=true" >> "$GITHUB_OUTPUT"
           
