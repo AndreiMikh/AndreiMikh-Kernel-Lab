@@ -1,0 +1,99 @@
+      # ==============================
+      # Fast Kernel Build
+      # ==============================
+      - name: Fast Kernel Build
+        if: ${{ github.event.inputs.FAST_BUILD == 'true' }}
+        id: fast_build
+        run: |
+          cd kernel_workspace/kernel_platform
+
+          # ------------------------------
+          # Map Kernel Version to Clang Version
+          # ------------------------------
+          case "$KERNEL_VERSION" in
+            5.10) CLANG_VERSION=16 ;;
+            5.15|6.1) CLANG_VERSION=17 ;;
+            6.6|6.12) CLANG_VERSION=18 ;;
+            *) echo "⚠️ Unknown kernel version $KERNEL_VERSION, defaulting to Clang 16"
+               CLANG_VERSION=16 ;;
+          esac
+          echo "Using Clang version: $CLANG_VERSION"
+
+          # ------------------------------
+          # Detect LLVM IAS
+          # ------------------------------
+          USE_LLVM_IAS=false
+          [[ -f ./common/build.config.arm ]] && grep -q '^LLVM_IAS=1' ./common/build.config.arm && USE_LLVM_IAS=true
+
+          # ------------------------------
+          # Setup Prebuilt Clang Path
+          # ------------------------------
+          CLANG_PREBUILT_BIN="prebuilts/clang/${CLANG_VERSION}/bin"
+          if [[ ! -d "$CLANG_PREBUILT_BIN" ]]; then
+            echo "⚠️ Prebuilt Clang not found at $CLANG_PREBUILT_BIN, fallback to official build script"
+            echo "fallback=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          export PATH="$GITHUB_WORKSPACE/kernel_workspace/kernel_platform/$CLANG_PREBUILT_BIN:$PATH"
+          export PATH="/usr/lib/ccache:$PATH"
+
+         # Optional Rust
+          if [[ "$ENABLE_RUST" == "true" ]]; then
+            export BINDGEN="bindgen"
+            export LIBCLANG_PATH="$GITHUB_WORKSPACE/kernel_workspace/kernel_platform/prebuilts/clang/${CLANG_VERSION}/lib"
+          fi
+
+          cd ./common
+
+          # ------------------------------
+          # Remap Paths
+          # ------------------------------
+          MAP="-fdebug-prefix-map=${GITHUB_WORKSPACE}=."
+          MPMAP="-fmacro-prefix-map=${GITHUB_WORKSPACE}=."
+          FPMAP="-ffile-prefix-map=${GITHUB_WORKSPACE}=."
+
+          MAKE_ARGS=(
+            LLVM=1
+            ARCH=arm64
+            CROSS_COMPILE=aarch64-linux-gnu-
+            CC="ccache clang"
+            HOSTCC="ccache clang"
+            LD=ld.lld
+            HOSTLD=ld.lld
+            PAHOLE=../../prebuilts/kernel-build-tools/linux-x86/bin/pahole
+            KCFLAGS+="$MAP $MPMAP $FPMAP"
+            KCFLAGS+=-Wno-error
+            KCFLAGS+=-D__ANDROID_COMMON_KERNEL__
+          )
+
+          [[ "$USE_LLVM_IAS" == "true" ]] && MAKE_ARGS=(LLVM_IAS=1 "${MAKE_ARGS[@]}")
+          [[ "$ENABLE_RUST" == "true" ]] && MAKE_ARGS=(RUSTC=../../prebuilts/rust/linux-x86/$RUSTC_VERSION/bin/rustc "${MAKE_ARGS[@]}")
+
+          # ------------------------------
+          # Configure Kernel
+          # ------------------------------
+          make O=out "${MAKE_ARGS[@]}" gki_defconfig
+
+          # LTO Setup Based on Kernel Version
+          if [[ "$KERNEL_VERSION" == "5.10" || "$KERNEL_VERSION" == "5.15" ]]; then
+            scripts/config --file out/.config -e LTO_CLANG -e LTO_CLANG_THIN -d LTO_CLANG_NONE -d LTO_CLANG_FULL
+          elif [[ "$KERNEL_VERSION" == "6.12" ]]; then
+            scripts/config --file out/.config -e LTO_CLANG -e LTO_CLANG_NONE -d LTO_CLANG_THIN -d LTO_CLANG_FULL
+          fi
+
+          make O=out "${MAKE_ARGS[@]}" olddefconfig
+          make -j"$(nproc --all)" O=out "${MAKE_ARGS[@]}"
+
+          # Show Compiler Cache Stats
+          ccache -s
+
+      # ==============================
+      # Save Compiler Cache (Optional)
+      # ==============================
+      - name: Save Compiler Cache
+        if: ${{ github.event.inputs.BUILD_NOCCACHE != 'true' }}
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.CCACHE_DIR }}
+          key: >
+            ccache-${{ runner.os }}-${{ env.CLANG_VERSION }}-${{ github.ref_name }}-${{ github.event.inputs.FILE }}-${{ env.BUILD_METHOD }}
