@@ -2437,26 +2437,27 @@ jobs:
           fi
 
       # ==============================
-      # Build Kernel (Fast)
+      # Fast Kernel Build
       # ==============================
       - name: Fast Kernel Build
         if: ${{ github.event.inputs.FAST_BUILD == 'true' }}
         id: fast_build
         run: |
+          set -euo pipefail
+
           KERNEL_VERSION="${{ env.KERNEL_VERSION }}"
           cd kernel_workspace/kernel_platform
 
           # ==============================
-          # Automatic Detection of LLVM IAS
-          # ==============================                   
+          # Detect LLVM IAS
+          # ==============================
+          USE_LLVM_IAS=false
           if [[ -f ./common/build.config.arm ]] && grep -q '^LLVM_IAS=1' ./common/build.config.arm; then
             USE_LLVM_IAS=true
-          else
-            USE_LLVM_IAS=false
           fi
 
           # ==============================
-          # Read Clang Prebuilt Bin from Build Config Common
+          # Locate Clang Prebuilt Binary
           # ==============================
           CLANG_PREBUILT_BIN=""
           for f in ./common/build.config.common ./"$KERNEL_REPOS"/build.config.common; do
@@ -2464,46 +2465,33 @@ jobs:
             CLANG_PREBUILT_BIN=$(grep '^CLANG_PREBUILT_BIN=' "$f" | cut -d'=' -f2)
             [[ -n "$CLANG_PREBUILT_BIN" ]] && break
           done
+
           if [[ -z "$CLANG_PREBUILT_BIN" ]]; then
-            echo "Clang Prebuilt Bin was Not Found in build.config.common, Revert to Official Build Script"
+            echo "⚠ Clang Prebuilt Bin Not Found. Falling Back to Official Build Script"
             echo "fallback=true" >> "$GITHUB_OUTPUT"
-            echo "Consider Disabling Fast Kernel Build & Submit an Issue"
             exit 0
           fi
 
           # ==============================
-          # Try Extract Clang Version from Clang Prebuilt Bin
+          # Determine Clang Version
           # ==============================
           if [[ "$CLANG_PREBUILT_BIN" =~ (clang-r[0-9a-z]+) ]]; then
             CLANG_VERSION="${BASH_REMATCH[1]}"
-          else
-          
-            # If No Match Found, Try Extract from Build Configuration Constants
-            if [[ -f ./common/build.config.constants ]]; then
-              CLANG_VERSION=$(grep '^CLANG_VERSION=' ./common/build.config.constants | cut -d'=' -f2 || true)
-            fi
+          elif [[ -f ./common/build.config.constants ]]; then
+            CLANG_VERSION=$(grep '^CLANG_VERSION=' ./common/build.config.constants | cut -d'=' -f2 || true)
           fi
 
           if [[ -z "$CLANG_VERSION" ]]; then
-            echo "Unable to Obtain Clang Version from Clang Prebuilt Bin or Build Config Constants; Reverting to Official Build Script"
+            echo "⚠ Unable to Determine Clang Version. Falling Back to Official Build Script"
             echo "fallback=true" >> "$GITHUB_OUTPUT"
-            echo "Consider Disabling Fast Kernel Build & Submit an Issue"
             exit 0
           fi
 
-          # ==============================
-          # Replace with New Clang Version Value
-          # ==============================
+          # Replace Placeholder with Actual Clang Version
           CLANG_PREBUILT_BIN=${CLANG_PREBUILT_BIN/\$\{CLANG_VERSION\}/$CLANG_VERSION}
-         
-          # ==============================
-          # Get First Directory Name of Clang Prebuilt Bin & Assign it to Clang Dir
-          # ==============================
+
+          # Extract Directory Information
           CLANG_DIR=$(echo "$CLANG_PREBUILT_BIN" | cut -d'/' -f1)
-        
-          # ==============================
-          # Get Parent Directory Name of Clang Prebuilt Bin & Assign it to Clang Path
-          # ==============================
           CLANG_PATH=$(basename "$(dirname "$CLANG_PREBUILT_BIN")")
 
           echo "=========================="
@@ -2513,10 +2501,16 @@ jobs:
           echo "USE_LLVM_IAS=$USE_LLVM_IAS"
           echo "=========================="
 
+          # ==============================
+          # Load Environment Script
+          # ==============================
           set +u
           source "$GITHUB_WORKSPACE/kernel_workspace/kernel_platform/build/kernel/_setup_env.sh" 2>/dev/null || true
           set -u
 
+          # ==============================
+          # Set Environment Variables
+          # ==============================
           export PATH="$GITHUB_WORKSPACE/kernel_workspace/kernel_platform/$CLANG_PREBUILT_BIN:$PATH"
           export PATH="/usr/lib/ccache:$PATH"
 
@@ -2528,12 +2522,15 @@ jobs:
           cd ./common
 
           # ==============================
-          # Remapping Physical Paths
+          # Prefix Mapping for Reproducibility
           # ==============================
           MAP="-fdebug-prefix-map=${GITHUB_WORKSPACE}=."
           MPMAP="-fmacro-prefix-map=${GITHUB_WORKSPACE}=."
           FPMAP="-ffile-prefix-map=${GITHUB_WORKSPACE}=."
 
+          # ==============================
+          # Prepare Make Arguments
+          # ==============================
           MAKE_ARGS=(
             LLVM=1
             ARCH=arm64
@@ -2548,65 +2545,34 @@ jobs:
             KCFLAGS+=-D__ANDROID_COMMON_KERNEL__
           )
 
-          if [[ "$USE_LLVM_IAS" == "true" ]]; then
-            MAKE_ARGS=(LLVM_IAS=1 "${MAKE_ARGS[@]}")
-          fi
-          if [[ "$ENABLE_RUST" == "true" ]]; then
-            MAKE_ARGS=(RUSTC=../../prebuilts/rust/linux-x86/$RUSTC_VERSION/bin/rustc "${MAKE_ARGS[@]}")
-          fi
+          [[ "$USE_LLVM_IAS" == "true" ]] && MAKE_ARGS=(LLVM_IAS=1 "${MAKE_ARGS[@]}")
+          [[ "$ENABLE_RUST" == "true" ]] && MAKE_ARGS=(RUSTC=../../prebuilts/rust/linux-x86/$RUSTC_VERSION/bin/rustc "${MAKE_ARGS[@]}")
+
+          # ==============================
+          # Kernel Configuration
+          # ==============================
           make O=out "${MAKE_ARGS[@]}" gki_defconfig
+
           if [[ "$KERNEL_VERSION" == "5.10" || "$KERNEL_VERSION" == "5.15" ]]; then
-            echo ">> Setup LTO = thin"
+            echo ">> Setting LTO = Thin"
             scripts/config --file out/.config -e LTO_CLANG
             scripts/config --file out/.config -e LTO_CLANG_THIN
             scripts/config --file out/.config -d LTO_CLANG_NONE
             scripts/config --file out/.config -d LTO_CLANG_FULL
-          fi
-
-          if [[ "$KERNEL_VERSION" == "6.12" ]]; then
-            echo ">> Setup LTO = none"
+          elif [[ "$KERNEL_VERSION" == "6.12" ]]; then
+            echo ">> Setting LTO = None"
             scripts/config --file out/.config -e LTO_CLANG
             scripts/config --file out/.config -e LTO_CLANG_NONE
             scripts/config --file out/.config -d LTO_CLANG_THIN
             scripts/config --file out/.config -d LTO_CLANG_FULL
           fi
+
           make O=out "${MAKE_ARGS[@]}" olddefconfig
           make -j"$(nproc --all)" O=out "${MAKE_ARGS[@]}"
+
+          # Display Compiler Cache Stats
           ccache -s
-
-      # ==============================
-      # Fallback Kernel Build
-      # ==============================
-      - name: Fallback to Kernel Build
-        if: ${{ github.event.inputs.FAST_BUILD == 'false' || steps.fast_build.outputs.fallback == 'true' }}
-        run: |
-          echo "Starting Fallback Kernel Build..."
-          cd kernel_workspace
-      
-          # Check if Bazel Build System Exists
-          if [ -f "./kernel_platform/build_with_bazel.py" ]; then
-            echo "Using Bazel Build System"
-      
-            ./kernel_platform/oplus/bazel/oplus_modules_variant.sh \
-              ${{ env.CPUD }} \
-              ${{ env.BUILD_METHOD }}
-      
-            ./kernel_platform/build_with_bazel.py \
-              -t ${{ env.CPUD }} \
-              ${{ env.BUILD_METHOD }}
-      
-          else
-            echo "Using Legacy OPlus Build Script"
-      
-            LTO=thin \
-            SYSTEM_DLKM_RE_SIGN=0 \
-            BUILD_SYSTEM_DLKM=0 \
-            KMI_SYMBOL_LIST_STRICT_MODE=0 \
-            ./kernel_platform/oplus/build/oplus_build_kernel.sh \
-              ${{ env.CPUD }} \
-              ${{ env.BUILD_METHOD }}
-          fi
-
+          
       # ==============================
       # Save Compiler Cache (Optimized)
       # ==============================
