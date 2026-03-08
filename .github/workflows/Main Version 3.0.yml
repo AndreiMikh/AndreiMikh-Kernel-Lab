@@ -722,44 +722,68 @@ jobs:
           echo "Repository Initialization & Sync Complete"
 
       # ==============================
-      # Kernel Version Setup
+      # Kernel Version Setup (Optimized)
       # ==============================
       - name: Kernel Version Setup
         run: |
           cd kernel_workspace/kernel_platform
 
-          echo "Determining Android and Kernel Branch Versions..."
+          echo "=== Determining Android and Kernel Branch Versions ==="
+
           BRANCH=""
-          for f in ./common/build.config.constants ./common/build.config.common; do
-            [ -f "$f" ] && BRANCH=$(grep -m1 '^BRANCH=' "$f" | cut -d= -f2) && [ -n "$BRANCH" ] && break
+          
+          # Try to Read Branch from Build Configuration Files
+          for cfg in ./common/build.config.constants ./common/build.config.common; do
+            if [[ -f "$cfg" ]]; then
+              BRANCH=$(grep -m1 '^BRANCH=' "$cfg" | cut -d= -f2)
+              [[ -n "$BRANCH" ]] && break
+            fi
           done
 
-          if [[ -z "$BRANCH" && -n "$KERNEL_REPOS" ]]; then
+          # Fallback: Use ACK SHA from Kernel Repositories if Kernel Repositories Defined
+          if [[ -z "$BRANCH" && -n "${KERNEL_REPOS:-}" && -f "./$KERNEL_REPOS/android/ACK_SHA" ]]; then
             BRANCH=$(sed -n '2p' "./$KERNEL_REPOS/android/ACK_SHA" | awk -F'-' '{print $1"-"$2}')
           fi
 
-          if [ -n "$BRANCH" ]; then
-            echo "KANDROID_VERSION=${BRANCH%-*}" >> $GITHUB_ENV
-            echo "KERNEL_VERSION=${BRANCH#*-}" >> $GITHUB_ENV
-            echo "Branch found: $BRANCH"
+          if [[ -n "$BRANCH" ]]; then
+            KANDROID_VERSION="${BRANCH%-*}"
+            KERNEL_VERSION="${BRANCH#*-}"
+            echo "KANDROID_VERSION=$KANDROID_VERSION" >> $GITHUB_ENV
+            echo "KERNEL_VERSION=$KERNEL_VERSION" >> $GITHUB_ENV
+            echo "Branch Found: $BRANCH"
           else
-            echo "No Branch Found in Build Config or ACK_SHA."
+            echo "No Branch Found in Build Configuration or Ack Sha"
+            KANDROID_VERSION="unknown"
+            KERNEL_VERSION="unknown"
+            echo "KANDROID_VERSION=$KANDROID_VERSION" >> $GITHUB_ENV
+            echo "KERNEL_VERSION=$KERNEL_VERSION" >> $GITHUB_ENV
           fi
 
+          # -----------------------------
+          # Read Original Kernel Version from Makefile
+          # -----------------------------
           echo "Reading Original Kernel Version..."
           ORIG_VERSION=$(awk '/^VERSION =/ {v=$3} /^PATCHLEVEL =/ {p=$3} /^SUBLEVEL =/ {s=$3} END {print v"."p"."s}' ./common/Makefile)
+          echo "Original Kernel Version: $ORIG_VERSION"
 
+          # -----------------------------
+          # Update SubLevel if Input Provided
+          # -----------------------------
           SUBLEVEL_INPUT="${{ github.event.inputs.SUBLEVEL }}"
-          if [ -n "$SUBLEVEL_INPUT" ]; then
-            echo "Updating Sublevel to: $SUBLEVEL_INPUT"
+          if [[ -n "$SUBLEVEL_INPUT" ]]; then
+            echo "Updating SUBLEVEL to: $SUBLEVEL_INPUT"
             sed -i "s/^\(SUBLEVEL[[:space:]]*=[[:space:]]*\).*/\1$SUBLEVEL_INPUT/" ./common/Makefile
           else
-            echo "No Sublevel Input Provided; Keeping Default"
+            echo "No SubLevel Input Provided; Keeping Default"
           fi
 
+          # -----------------------------
+          # Determine New Kernel Version
+          # -----------------------------
           NEW_VERSION=$(awk '/^VERSION =/ {v=$3} /^PATCHLEVEL =/ {p=$3} /^SUBLEVEL =/ {s=$3} END {print v"."p"."s}' ./common/Makefile)
+          echo "New Kernel Version: $NEW_VERSION"
 
-          if [ "$ORIG_VERSION" != "$NEW_VERSION" ]; then
+          if [[ "$ORIG_VERSION" != "$NEW_VERSION" ]]; then
             echo "Kernel Version Changed: $ORIG_VERSION -> $NEW_VERSION"
             echo "TKERNEL_VERSION=$NEW_VERSION" >> $GITHUB_ENV
           else
@@ -767,10 +791,15 @@ jobs:
             echo "TKERNEL_VERSION=$ORIG_VERSION" >> $GITHUB_ENV
           fi
 
-          KV_TMP="${BRANCH#*-}"
+          # -----------------------------
+          # Export KV1, KV2, KV3 for Further Use
+          # -----------------------------
+          KV_TMP="${KERNEL_VERSION}"
           echo "KV1=$(echo "$KV_TMP" | cut -d. -f1)" >> $GITHUB_ENV
           echo "KV2=$(echo "$KV_TMP" | tr -d '.')" >> $GITHUB_ENV
           echo "KV3=$(echo "$NEW_VERSION" | tr -d '.')" >> $GITHUB_ENV
+
+          echo "✅ Kernel Version Setup Complete"
 
       # ==============================
       # Rust Compiler Setup
