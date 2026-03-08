@@ -2437,99 +2437,63 @@ jobs:
           fi
 
       # ==============================
-      # Build Kernel (Fast)
+      # Fast Kernel Build
       # ==============================
       - name: Fast Kernel Build
         if: ${{ github.event.inputs.FAST_BUILD == 'true' }}
         id: fast_build
         run: |
-          KERNEL_VERSION="${{ env.KERNEL_VERSION }}"
+          set -e
           cd kernel_workspace/kernel_platform
 
-          # ==============================
-          # Automatic Detection of LLVM IAS
-          # ==============================                   
-          if [[ -f ./common/build.config.arm ]] && grep -q '^LLVM_IAS=1' ./common/build.config.arm; then
-            USE_LLVM_IAS=true
-          else
-            USE_LLVM_IAS=false
-          fi
+          # ------------------------------
+          # Detect LLVM IAS
+          # ------------------------------
+          USE_LLVM_IAS=false
+          [[ -f ./common/build.config.arm ]] && grep -q '^LLVM_IAS=1' ./common/build.config.arm && USE_LLVM_IAS=true
 
-          # ==============================
-          # Read Clang Prebuilt Bin from Build Config Common
-          # ==============================
+          # ------------------------------
+          # Detect Clang Prebuilt Bin
+          # ------------------------------
           CLANG_PREBUILT_BIN=""
           for f in ./common/build.config.common ./"$KERNEL_REPOS"/build.config.common; do
             [[ -f "$f" ]] || continue
             CLANG_PREBUILT_BIN=$(grep '^CLANG_PREBUILT_BIN=' "$f" | cut -d'=' -f2)
             [[ -n "$CLANG_PREBUILT_BIN" ]] && break
           done
+
           if [[ -z "$CLANG_PREBUILT_BIN" ]]; then
-            echo "Clang Prebuilt Bin was Not Found in build.config.common, Revert to Official Build Script"
-            echo "fallback=true" >> "$GITHUB_OUTPUT"
-            echo "Consider Disabling Fast Kernel Build & Submit an Issue"
-            exit 0
-          fi
-
-          # ==============================
-          # Try Extract Clang Version from Clang Prebuilt Bin
-          # ==============================
-          if [[ "$CLANG_PREBUILT_BIN" =~ (clang-r[0-9a-z]+) ]]; then
-            CLANG_VERSION="${BASH_REMATCH[1]}"
+            echo "⚠️ Clang Prebuilt Bin Not Defined. Using System Clang or Fallback"
+            CLANG_VERSION="system"
           else
-          
-            # If No Match Found, Try Extract from Build Configuration Constants
-            if [[ -f ./common/build.config.constants ]]; then
-              CLANG_VERSION=$(grep '^CLANG_VERSION=' ./common/build.config.constants | cut -d'=' -f2 || true)
+            # Extract Clang Version
+            if [[ "$CLANG_PREBUILT_BIN" =~ (clang-r[0-9a-z]+) ]]; then
+              CLANG_VERSION="${BASH_REMATCH[1]}"
+            else
+              [[ -f ./common/build.config.constants ]] && \
+                CLANG_VERSION=$(grep '^CLANG_VERSION=' ./common/build.config.constants | cut -d'=' -f2 || true)
             fi
+            [[ -z "$CLANG_VERSION" ]] && CLANG_VERSION="unknown"
           fi
 
-          if [[ -z "$CLANG_VERSION" ]]; then
-            echo "Unable to Obtain Clang Version from Clang Prebuilt Bin or Build Config Constants; Reverting to Official Build Script"
-            echo "fallback=true" >> "$GITHUB_OUTPUT"
-            echo "Consider Disabling Fast Kernel Build & Submit an Issue"
-            exit 0
-          fi
-
-          # ==============================
-          # Replace with New Clang Version Value
-          # ==============================
-          CLANG_PREBUILT_BIN=${CLANG_PREBUILT_BIN/\$\{CLANG_VERSION\}/$CLANG_VERSION}
-         
-          # ==============================
-          # Get First Directory Name of Clang Prebuilt Bin & Assign it to Clang Dir
-          # ==============================
-          CLANG_DIR=$(echo "$CLANG_PREBUILT_BIN" | cut -d'/' -f1)
-        
-          # ==============================
-          # Get Parent Directory Name of Clang Prebuilt Bin & Assign it to Clang Path
-          # ==============================
-          CLANG_PATH=$(basename "$(dirname "$CLANG_PREBUILT_BIN")")
-
-          echo "=========================="
           echo "CLANG_VERSION=$CLANG_VERSION"
-          echo "CLANG_DIR=$CLANG_DIR"
-          echo "CLANG_PATH=$CLANG_PATH"
           echo "USE_LLVM_IAS=$USE_LLVM_IAS"
-          echo "=========================="
 
-          set +u
-          source "$GITHUB_WORKSPACE/kernel_workspace/kernel_platform/build/kernel/_setup_env.sh" 2>/dev/null || true
-          set -u
-
-          export PATH="$GITHUB_WORKSPACE/kernel_workspace/kernel_platform/$CLANG_PREBUILT_BIN:$PATH"
+          # Set PATH if prebuilt bin exists
+          [[ -n "$CLANG_PREBUILT_BIN" ]] && export PATH="$GITHUB_WORKSPACE/kernel_workspace/kernel_platform/$CLANG_PREBUILT_BIN:$PATH"
           export PATH="/usr/lib/ccache:$PATH"
 
-          if [[ "$ENABLE_RUST" == "true" ]]; then
+          # Optional Rust
+          if [[ "$ENABLE_RUST" == "true" ]] && [[ -n "$CLANG_PREBUILT_BIN" ]]; then
             export BINDGEN="bindgen"
             export LIBCLANG_PATH="$GITHUB_WORKSPACE/kernel_workspace/kernel_platform/$(dirname "$CLANG_PREBUILT_BIN")/lib"
           fi
 
           cd ./common
 
-          # ==============================
-          # Remapping Physical Paths
-          # ==============================
+          # ------------------------------
+          # Remap Paths
+          # ------------------------------
           MAP="-fdebug-prefix-map=${GITHUB_WORKSPACE}=."
           MPMAP="-fmacro-prefix-map=${GITHUB_WORKSPACE}=."
           FPMAP="-ffile-prefix-map=${GITHUB_WORKSPACE}=."
@@ -2548,31 +2512,40 @@ jobs:
             KCFLAGS+=-D__ANDROID_COMMON_KERNEL__
           )
 
-          if [[ "$USE_LLVM_IAS" == "true" ]]; then
-            MAKE_ARGS=(LLVM_IAS=1 "${MAKE_ARGS[@]}")
-          fi
-          if [[ "$ENABLE_RUST" == "true" ]]; then
-            MAKE_ARGS=(RUSTC=../../prebuilts/rust/linux-x86/$RUSTC_VERSION/bin/rustc "${MAKE_ARGS[@]}")
-          fi
-          make O=out "${MAKE_ARGS[@]}" gki_defconfig
-          if [[ "$KERNEL_VERSION" == "5.10" || "$KERNEL_VERSION" == "5.15" ]]; then
-            echo ">> Setup LTO = thin"
-            scripts/config --file out/.config -e LTO_CLANG
-            scripts/config --file out/.config -e LTO_CLANG_THIN
-            scripts/config --file out/.config -d LTO_CLANG_NONE
-            scripts/config --file out/.config -d LTO_CLANG_FULL
-          fi
+          [[ "$USE_LLVM_IAS" == "true" ]] && MAKE_ARGS=(LLVM_IAS=1 "${MAKE_ARGS[@]}")
+          [[ "$ENABLE_RUST" == "true" ]] && MAKE_ARGS=(RUSTC=../../prebuilts/rust/linux-x86/$RUSTC_VERSION/bin/rustc "${MAKE_ARGS[@]}")
 
-          if [[ "$KERNEL_VERSION" == "6.12" ]]; then
-            echo ">> Setup LTO = none"
-            scripts/config --file out/.config -e LTO_CLANG
-            scripts/config --file out/.config -e LTO_CLANG_NONE
-            scripts/config --file out/.config -d LTO_CLANG_THIN
-            scripts/config --file out/.config -d LTO_CLANG_FULL
-          fi
+          # ------------------------------
+          # Configure and Build Kernel
+          # ------------------------------
+          make O=out "${MAKE_ARGS[@]}" gki_defconfig
+
+          case "$KERNEL_VERSION" in
+            5.10|5.15) scripts/config --file out/.config -e LTO_CLANG -e LTO_CLANG_THIN -d LTO_CLANG_NONE -d LTO_CLANG_FULL ;;
+            6.1|6.6|6.12) scripts/config --file out/.config -e LTO_CLANG -e LTO_CLANG_NONE -d LTO_CLANG_THIN -d LTO_CLANG_FULL ;;
+          esac
+
           make O=out "${MAKE_ARGS[@]}" olddefconfig
           make -j"$(nproc --all)" O=out "${MAKE_ARGS[@]}"
+
+          # ------------------------------
+          # Show Compiler Cache Stats
+          # ------------------------------
           ccache -s
+
+      # ==============================
+      # Save Compiler Cache
+      # ==============================
+      - name: Save Compiler Cache
+        if: ${{ github.event.inputs.BUILD_NOCCACHE != 'true' }}
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.CCACHE_DIR }}
+          key: >
+            ccache-${{ runner.os }}-${{ env.CLANG_VERSION }}-${{ github.ref_name }}-${{ github.event.inputs.FILE }}-${{ env.BUILD_METHOD }}
+          restore-keys: |
+            ccache-${{ runner.os }}-${{ env.CLANG_VERSION }}-
+            ccache-${{ runner.os }}-
 
       # ==============================
       # Fallback Kernel Build
