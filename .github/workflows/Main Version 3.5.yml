@@ -2797,82 +2797,75 @@ jobs:
       # ==============================
       # Download Selected KSU Meta Root Engine Manager APK (Fixed)
       # ==============================
-      - name: Download Selected KSU Meta Root Engine Manager APK
+      - name: Download Selected KSU Manager APK
         continue-on-error: true
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
       
-          # ------------------------------
-          # Environment Variables
-          # ------------------------------
           REPO="${{ steps.manager.outputs.KSU_REPO }}"
           BRANCH="${{ steps.manager.outputs.MANAGER_BRANCH }}"
           ARTIFACT="${{ steps.manager.outputs.MANAGER_ARTIFACT }}"
-          OUTPUT_DIR="./AnyKernel3"
-          mkdir -p "$OUTPUT_DIR"
       
-          echo "====== KSU Manager Downloader ======"
-          echo "Repository : $REPO"
-          echo "Branch     : $BRANCH"
-          echo "Artifact   : $ARTIFACT"
-          echo "===================================="
+          echo "==== KSU Manager Downloader ===="
+          echo "Repository: $REPO"
+          echo "Branch:     $BRANCH"
+          echo "Artifact:   $ARTIFACT"
+          echo "================================="
+
+          # ------------------------------
+          # Creating Target Directory for AnyKernel3
+          # ------------------------------
+          echo "ℹ️  Creating AnyKernel3 Directory..."
+          mkdir -p ./AnyKernel3
+
+          # ------------------------------
+          # Fetching Latest Successful Workflow Run
+          # ------------------------------
+          echo "ℹ️  Fetching Latest Successful Workflow Run for Branch '$BRANCH'..."
+          run_id=$(gh api \
+            "repos/$REPO/actions/runs?branch=$BRANCH&status=success&per_page=1" \
+            --jq '.workflow_runs[0].id' 2>/dev/null || echo "")
       
-          # ------------------------------
-          # Validate Repository and Branch
-          # ------------------------------
-          if [[ -z "$REPO" || -z "$BRANCH" ]]; then
-              echo "❌ ERROR: Missing Repository or Branch!"
-              exit 1
+          if [[ -z "$run_id" ]]; then
+            echo "⚠️  No Successful Workflow Run Found for Nranch '$BRANCH'."
+            exit 0
           fi
+          echo "ℹ️  Found Successful Run ID: $run_id"
+
+          # ------------------------------
+          # Fetching Artifact Download URL
+          # ------------------------------
+          echo "ℹ️  Looking for Artifact '$ARTIFACT' in Run $run_id..."
+          artifact_url=$(gh api \
+            "repos/$REPO/actions/runs/$run_id/artifacts" \
+            --jq ".artifacts[] | select(.name==\"$ARTIFACT\") | .archive_download_url" \
+            | head -n1 || echo "")
       
-          # ------------------------------
-          # Authenticate GitHub CLI if Needed
-          # ------------------------------
-          if ! gh auth status >/dev/null 2>&1; then
-              echo "⚠️ GitHub CLI Not Authenticated. Using Token..."
-              echo "$GH_TOKEN" | gh auth login --with-token || true
+          if [[ -z "$artifact_url" ]]; then
+            echo "⚠️  Artifact '$ARTIFACT' Not Found in Run $run_id"
+            exit 0
           fi
-      
+          echo "ℹ️  Artifact URL Found: $artifact_url"
+
           # ------------------------------
-          # Get Latest Successful Workflow Run
+          # Downloading Artifact
           # ------------------------------
-          echo "🔎 Searching for Latest Successful Workflow Run..."
-          RUN_ID=$(gh api "repos/$REPO/actions/runs?branch=$BRANCH&status=success&per_page=5" \
-              --jq '.workflow_runs[0].id' 2>/dev/null || echo "")
-      
-          if [[ -n "$RUN_ID" ]]; then
-              echo "📌 Latest Run ID: $RUN_ID"
-              echo "🔎 Listing Artifacts:"
-              gh api "repos/$REPO/actions/runs/$RUN_ID/artifacts" --jq '.artifacts[].name' || true
-      
-              # Try exact artifact match first
-              ARTIFACT_URL=$(gh api "repos/$REPO/actions/runs/$RUN_ID/artifacts" \
-                  --jq ".artifacts[] | select(.name == \"$ARTIFACT\") | .archive_download_url" 2>/dev/null || echo "")
-      
-              # Auto-detect if exact match fails
-              if [[ -z "$ARTIFACT_URL" ]]; then
-                  echo "⚠️ Exact Artifact Not Found, Trying Auto Detection..."
-                  ARTIFACT_URL=$(gh api "repos/$REPO/actions/runs/$RUN_ID/artifacts" \
-                      --jq '.artifacts[] | select(.name | test("manager|Manager|apk")) | .archive_download_url' 2>/dev/null || echo "")
-              fi
-      
-              # ------------------------------
-              # Download Artifact if URL Exists
-              # ------------------------------
-              if [[ -n "$ARTIFACT_URL" ]]; then
-                  echo "📦 Downloading Artifact from $ARTIFACT_URL..."
-                  curl -L -H "Authorization: Bearer $GH_TOKEN" -o manager.zip "$ARTIFACT_URL" || true
-                  echo "📂 Extracting APK..."
-                  unzip -o -j manager.zip "*.apk" -d "$OUTPUT_DIR" || true
-                  rm -f manager.zip
-                  echo "🎉 Manager APK Extracted Successfully"
-                  exit 0
-              fi
-          else
-              echo "⚠️ No Successful Workflow Runs Found"
-          fi
+          echo "ℹ️  Downloading Artifact..."
+          curl -fL -H "Authorization: token $GITHUB_TOKEN" -o manager.zip "$artifact_url"
+
+          # ------------------------------
+          # Extracting APK
+          # ------------------------------
+          echo "ℹ️  Extracting APK to ./AnyKernel3/..."
+          unzip -o -j manager.zip "*.apk" -d ./AnyKernel3/
+          rm -f manager.zip
+
+          # ------------------------------
+          # Completion
+          # ------------------------------
+          echo "✅ KSU Manager APK Download and Extraction Complete"
       
           # ------------------------------
           # Fallback: Latest Release APK (Safe)
