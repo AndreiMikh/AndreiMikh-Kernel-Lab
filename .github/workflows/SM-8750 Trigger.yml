@@ -302,76 +302,65 @@ jobs:
 
 
 # =========================
-# Wait-and-Package Job (Per-Device Loop)
+# Wait-and-Package Job
 # =========================
   wait-and-package:
     needs: build
     runs-on: ubuntu-latest
-  
+
     steps:
       - uses: actions/checkout@v4
-  
+
       - name: Setup Tools
         run: |
           sudo apt update
-          sudo apt install -y gh curl jq unzip
+          sudo apt install -y gh jq curl unzip
           echo "${{ secrets.GITHUB_TOKEN }}" | gh auth login --with-token
-  
-      - name: Create Final ZIPs Folder
+
+      - name: Create Output Folder
         run: mkdir -p final_zips
-  
-      - name: Process All Devices
+
+      - name: Fetch Artifacts
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          DEVICES=("oneplus_13_b" "oneplus_13s_b" "oneplus_13t_b" "oneplus_ace5_pro_b" "oneplus_ace6_b" "oneplus_pad_2_pro_b" "oneplus_pad_3_b")
-  
-          for DEVICE in "${DEVICES[@]}"; do
-            echo "Processing Device: $DEVICE"
-            RUN_ID="${{ github.run_id }}"
-  
-            # AnyKernel3
-            AK3_ART=$(gh api \
-              repos/${{ github.repository }}/actions/runs/$RUN_ID/artifacts \
-              --jq '.artifacts[] | .name' | grep "$DEVICE" | grep -i 'AnyKernel3' | head -n1)
-  
-            if [[ -n "$AK3_ART" ]]; then
-              ART_ID=$(gh api \
-                repos/${{ github.repository }}/actions/runs/$RUN_ID/artifacts \
-                --jq ".artifacts[] | select(.name==\"$AK3_ART\") | .id")
-              SAFE_NAME=$(echo "$AK3_ART" | tr ' ' '_' | tr -cd '[:alnum:]_-')
-              curl -L -H "Authorization: token $GH_TOKEN" \
+          set -e
+
+          RUN_ID="${{ github.run_id }}"
+
+          echo "Fetching artifacts from run: $RUN_ID"
+
+          gh api repos/${{ github.repository }}/actions/runs/$RUN_ID/artifacts > artifacts.json
+
+          echo "Available Artifacts:"
+          jq -r '.artifacts[].name' artifacts.json
+
+          echo ""
+          echo "Downloading AnyKernel3 + ZRAM artifacts..."
+          echo ""
+
+          jq -c '.artifacts[]' artifacts.json | while read ART; do
+            NAME=$(echo "$ART" | jq -r '.name')
+            ID=$(echo "$ART" | jq -r '.id')
+
+            if [[ "$NAME" =~ AnyKernel3|ZRAM ]]; then
+
+              SAFE_NAME=$(echo "$NAME" | tr ' ' '_' | tr -cd '[:alnum:]_-')
+
+              echo "Downloading: $NAME"
+
+              curl -L \
+                -H "Authorization: token $GH_TOKEN" \
                 -o "final_zips/${SAFE_NAME}.zip" \
-                "https://api.github.com/repos/${{ github.repository }}/actions/artifacts/${ART_ID}/zip"
-              echo "Downloaded AnyKernel3 Artifact for $DEVICE"
-            else
-              echo "No AnyKernel3 Artifact Found for $DEVICE"
+                "https://api.github.com/repos/${{ github.repository }}/actions/artifacts/${ID}/zip"
+
             fi
-  
-            # ZRAM
-            ZRAM_ART=$(gh api \
-              repos/${{ github.repository }}/actions/runs/$RUN_ID/artifacts \
-              --jq '.artifacts[] | .name' | grep "$DEVICE" | grep -i 'ZRAM' | head -n1)
-  
-            if [[ -n "$ZRAM_ART" ]]; then
-              ART_ID=$(gh api \
-                repos/${{ github.repository }}/actions/runs/$RUN_ID/artifacts \
-                --jq ".artifacts[] | select(.name==\"$ZRAM_ART\") | .id")
-              SAFE_NAME=$(echo "$ZRAM_ART" | tr ' ' '_' | tr -cd '[:alnum:]_-')
-              curl -L -H "Authorization: token $GH_TOKEN" \
-                -o "final_zips/${SAFE_NAME}.zip" \
-                "https://api.github.com/repos/${{ github.repository }}/actions/artifacts/${ART_ID}/zip"
-              echo "Downloaded ZRAM Artifact for $DEVICE"
-            else
-              echo "No ZRAM Artifact Found for $DEVICE"
-            fi
-  
           done
-  
-      - name: Debug - List All Downloaded Files
+
+      - name: Debug Files
         run: ls -al final_zips/
-  
-      - name: Upload All Collected Artifacts
+
+      - name: Upload Final Package
         uses: actions/upload-artifact@v4
         with:
           name: All-AnyKernel3-ZRAM-${{ github.event.inputs.KSU_META }}
