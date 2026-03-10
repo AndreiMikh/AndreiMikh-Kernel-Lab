@@ -2795,106 +2795,98 @@ jobs:
           echo "🎉 KPM Patch Applied Successfully"
 
       # ==============================
-      # Download Selected KSU Meta Root Engine Manager APK
+      # Download Selected KSU Meta Root Engine Manager APK (Fixed)
       # ==============================
       - name: Download Selected KSU Meta Root Engine Manager APK
         continue-on-error: true
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          set -e
+          set -uo pipefail
       
           REPO="${{ steps.manager.outputs.KSU_REPO }}"
           BRANCH="${{ steps.manager.outputs.MANAGER_BRANCH }}"
           ARTIFACT="${{ steps.manager.outputs.MANAGER_ARTIFACT }}"
-      
-          echo "====== KSU Manager Downloader ======"
-          echo "Repository : $REPO"
-          echo "Branch     : $BRANCH"
-          echo "Artifact   : $ARTIFACT"
-          echo "===================================="
-      
           OUTPUT_DIR="./AnyKernel3"
           mkdir -p "$OUTPUT_DIR"
       
-          # --------------------------------
-          # Get Latest Successful Workflow Run
-          # --------------------------------
-          echo "🔎 Searching for Latest Successful Workflow Run..."
+          # ------------------------------
+          # Validate Variables
+          # ------------------------------
+          if [[ -z "$REPO" || -z "$BRANCH" ]]; then
+              echo "❌ ERROR: Missing REPO or BRANCH!"
+              echo "REPO=$REPO"
+              echo "BRANCH=$BRANCH"
+              exit 1
+          fi
       
+          echo "----- KSU Meta Download -----"
+          echo "Repository : $REPO"
+          echo "Branch     : $BRANCH"
+          echo "Artifact   : $ARTIFACT"
+          echo "-----------------------------"
+      
+          # ------------------------------
+          # Check Authentication
+          # ------------------------------
+          if ! gh auth status >/dev/null 2>&1; then
+              echo "❌ GitHub CLI Not Authenticated. Using Token..."
+              gh auth login --with-token <<< "$GH_TOKEN" || true
+          fi
+      
+          # ------------------------------
+          # Get Latest Successful Workflow Run
+          # ------------------------------
+          echo "🔎 Searching for Latest Successful Workflow Run..."
           RUN_ID=$(gh api \
-            "repos/$REPO/actions/runs?branch=$BRANCH&status=success&per_page=5" \
-            --jq '.workflow_runs[0].id')
+              "repos/$REPO/actions/runs?branch=$BRANCH&status=success&per_page=5" \
+              --jq '.workflow_runs[0].id' 2>/dev/null || echo "")
       
           if [[ -z "$RUN_ID" ]]; then
-            echo "⚠️ No successful workflow run found"
+              echo "⚠️ No Successful Workflow Run Found"
           else
-            echo "📌 Latest Run ID: $RUN_ID"
+              echo "📌 Latest Run ID: $RUN_ID"
+              echo "🔎 Listing Artifacts:"
+              gh api "repos/$REPO/actions/runs/$RUN_ID/artifacts" --jq '.artifacts[].name' || true
       
-            echo "🔎 Available Artifacts:"
-            gh api "repos/$REPO/actions/runs/$RUN_ID/artifacts" \
-              --jq '.artifacts[].name' || true
+              # Try Exact Artifact Match
+              ARTIFACT_URL=$(gh api "repos/$REPO/actions/runs/$RUN_ID/artifacts" \
+                  --jq ".artifacts[] | select(.name == \"$ARTIFACT\") | .archive_download_url" 2>/dev/null || echo "")
       
-            # --------------------------------
-            # Try Exact Artifact Match
-            # --------------------------------
-            ARTIFACT_URL=$(gh api \
-              "repos/$REPO/actions/runs/$RUN_ID/artifacts" \
-              --jq ".artifacts[] | select(.name == \"$ARTIFACT\") | .archive_download_url" \
-              | head -n1)
+              # Auto-Detect if Exact Match Fails
+              if [[ -z "$ARTIFACT_URL" ]]; then
+                  echo "⚠️ Exact Artifact Not Found, Trying Auto Detection..."
+                  ARTIFACT_URL=$(gh api "repos/$REPO/actions/runs/$RUN_ID/artifacts" \
+                      --jq '.artifacts[] | select(.name | test("manager|Manager|apk")) | .archive_download_url' 2>/dev/null || echo "")
+              fi
       
-            # --------------------------------
-            # Auto Detect Manager Artifact
-            # --------------------------------
-            if [[ -z "$ARTIFACT_URL" ]]; then
-              echo "⚠️ Exact Artifact Not Found, Attempting Auto Detection..."
-      
-              ARTIFACT_URL=$(gh api \
-                "repos/$REPO/actions/runs/$RUN_ID/artifacts" \
-                --jq '.artifacts[] | select(.name | test("manager|Manager|apk")) | .archive_download_url' \
-                | head -n1)
-            fi
-      
-            # --------------------------------
-            # Download Artifact if Found
-            # --------------------------------
-            if [[ -n "$ARTIFACT_URL" ]]; then
-              echo "📦 Downloading Artifact..."
-      
-              curl -L \
-                -H "Authorization: Bearer $GH_TOKEN" \
-                -o manager.zip \
-                "$ARTIFACT_URL"
-      
-              echo "📂 Extracting APK..."
-              unzip -o -j manager.zip "*.apk" -d "$OUTPUT_DIR"
-      
-              rm -f manager.zip
-      
-              echo "🎉 Manager APK Extracted from Artifact"
-              exit 0
-            fi
+              # Download Artifact if URL Exists
+              if [[ -n "$ARTIFACT_URL" ]]; then
+                  echo "📦 Downloading Artifact from $ARTIFACT_URL..."
+                  curl -L -H "Authorization: Bearer $GH_TOKEN" -o manager.zip "$ARTIFACT_URL" || true
+                  echo "📂 Extracting APK..."
+                  unzip -o -j manager.zip "*.apk" -d "$OUTPUT_DIR" || true
+                  rm -f manager.zip
+                  echo "🎉 Manager APK Extracted from artifact"
+                  exit 0
+              fi
           fi
       
-          # --------------------------------
-          # Final Fallback: Download Latest Release APK
-          # --------------------------------
-          echo "⚠️ Artifact Not Available, Trying Release Fallback..."
-      
-          APK_URL=$(gh api \
-            "repos/$REPO/releases/latest" \
-            --jq '.assets[] | select(.name | test("apk")) | .browser_download_url' \
-            | head -n1)
+          # ------------------------------
+          # Fallback: Download Latest Release APK
+          # ------------------------------
+          echo "⚠️ Artifact Not Found, Attempting Release Fallback..."
+          APK_URL=$(gh api "repos/$REPO/releases/latest" \
+              --jq '.assets[] | select(.name | test("apk")) | .browser_download_url' 2>/dev/null || echo "")
       
           if [[ -z "$APK_URL" ]]; then
-            echo "❌ No APK found in releases"
-            exit 0
+              echo "❌ No APK Found in Releases for $REPO"
+              exit 0
           fi
       
-          echo "📦 Downloading Release APK..."
-          curl -L "$APK_URL" -o "$OUTPUT_DIR/ksu-manager.apk"
-      
-          echo "🎉 KSU Manager APK downloaded from release"
+          echo "📦 Downloading Release APK from $APK_URL..."
+          curl -L -o "$OUTPUT_DIR/ksu-manager.apk" "$APK_URL" || true
+          echo "🎉 KSU Manager APK Downloaded Successfully"
           
       # ==============================
       # Generate Zip Suffix
