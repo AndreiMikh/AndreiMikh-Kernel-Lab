@@ -2802,35 +2802,36 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          set -uo pipefail
+          set -euo pipefail
       
+          # ------------------------------
+          # Environment Variables
+          # ------------------------------
           REPO="${{ steps.manager.outputs.KSU_REPO }}"
           BRANCH="${{ steps.manager.outputs.MANAGER_BRANCH }}"
           ARTIFACT="${{ steps.manager.outputs.MANAGER_ARTIFACT }}"
           OUTPUT_DIR="./AnyKernel3"
           mkdir -p "$OUTPUT_DIR"
       
+          echo "====== KSU Manager Downloader ======"
+          echo "Repository : $REPO"
+          echo "Branch     : $BRANCH"
+          echo "Artifact   : $ARTIFACT"
+          echo "===================================="
+      
           # ------------------------------
           # Validate Variables
           # ------------------------------
           if [[ -z "$REPO" || -z "$BRANCH" ]]; then
-              echo "❌ ERROR: Missing REPO or BRANCH!"
-              echo "REPO=$REPO"
-              echo "BRANCH=$BRANCH"
+              echo "❌ ERROR: Missing Repository or Branch!"
               exit 1
           fi
       
-          echo "----- KSU Meta Download -----"
-          echo "Repository : $REPO"
-          echo "Branch     : $BRANCH"
-          echo "Artifact   : $ARTIFACT"
-          echo "-----------------------------"
-      
           # ------------------------------
-          # Check Authentication
+          # Authenticate GitHub CLI
           # ------------------------------
           if ! gh auth status >/dev/null 2>&1; then
-              echo "❌ GitHub CLI Not Authenticated. Using Token..."
+              echo "⚠️ GitHub CLI Not Authenticated. Using Token..."
               gh auth login --with-token <<< "$GH_TOKEN" || true
           fi
       
@@ -2838,55 +2839,64 @@ jobs:
           # Get Latest Successful Workflow Run
           # ------------------------------
           echo "🔎 Searching for Latest Successful Workflow Run..."
-          RUN_ID=$(gh api \
-              "repos/$REPO/actions/runs?branch=$BRANCH&status=success&per_page=5" \
+          RUN_ID=$(gh api "repos/$REPO/actions/runs?branch=$BRANCH&status=success&per_page=5" \
               --jq '.workflow_runs[0].id' 2>/dev/null || echo "")
       
-          if [[ -z "$RUN_ID" ]]; then
-              echo "⚠️ No Successful Workflow Run Found"
-          else
+          if [[ -n "$RUN_ID" ]]; then
               echo "📌 Latest Run ID: $RUN_ID"
-              echo "🔎 Listing Artifacts:"
+              echo "🔎 Listing Artifacts..."
               gh api "repos/$REPO/actions/runs/$RUN_ID/artifacts" --jq '.artifacts[].name' || true
-      
+
+              # ------------------------------
               # Try Exact Artifact Match
+              # ------------------------------
               ARTIFACT_URL=$(gh api "repos/$REPO/actions/runs/$RUN_ID/artifacts" \
                   --jq ".artifacts[] | select(.name == \"$ARTIFACT\") | .archive_download_url" 2>/dev/null || echo "")
-      
+
+              # ------------------------------
               # Auto-Detect if Exact Match Fails
+              # ------------------------------
               if [[ -z "$ARTIFACT_URL" ]]; then
                   echo "⚠️ Exact Artifact Not Found, Trying Auto Detection..."
                   ARTIFACT_URL=$(gh api "repos/$REPO/actions/runs/$RUN_ID/artifacts" \
                       --jq '.artifacts[] | select(.name | test("manager|Manager|apk")) | .archive_download_url' 2>/dev/null || echo "")
               fi
-      
+
+              # ------------------------------
               # Download Artifact if URL Exists
+              # ------------------------------
               if [[ -n "$ARTIFACT_URL" ]]; then
                   echo "📦 Downloading Artifact from $ARTIFACT_URL..."
                   curl -L -H "Authorization: Bearer $GH_TOKEN" -o manager.zip "$ARTIFACT_URL" || true
                   echo "📂 Extracting APK..."
                   unzip -o -j manager.zip "*.apk" -d "$OUTPUT_DIR" || true
                   rm -f manager.zip
-                  echo "🎉 Manager APK Extracted from artifact"
+                  echo "🎉 Manager APK Extracted Successfully"
                   exit 0
               fi
+          else
+              echo "⚠️ No Successful Workflow Runs Found"
           fi
       
           # ------------------------------
-          # Fallback: Download Latest Release APK
+          # Fallback: Latest Release APK (Safe)
           # ------------------------------
           echo "⚠️ Artifact Not Found, Attempting Release Fallback..."
           APK_URL=$(gh api "repos/$REPO/releases/latest" \
               --jq '.assets[] | select(.name | test("apk")) | .browser_download_url' 2>/dev/null || echo "")
-      
-          if [[ -z "$APK_URL" ]]; then
-              echo "❌ No APK Found in Releases for $REPO"
+
+          # ------------------------------
+          # Validate URL (Skip if JSON Error Returned)
+          # ------------------------------
+          if [[ -z "$APK_URL" ]] || [[ "$APK_URL" == \{* ]]; then
+              echo "❌ No Valid APK Found in Releases for $REPO"
               exit 0
           fi
       
           echo "📦 Downloading Release APK from $APK_URL..."
           curl -L -o "$OUTPUT_DIR/ksu-manager.apk" "$APK_URL" || true
-          echo "🎉 KSU Manager APK Downloaded Successfully"
+          
+          echo "🎉 KSU Meta Manager APK downloaded successfully"
           
       # ==============================
       # Generate Zip Suffix
