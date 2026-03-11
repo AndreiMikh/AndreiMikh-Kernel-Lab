@@ -1666,191 +1666,254 @@ jobs:
               echo "⚠️ Skipping Custom ZRAM LZ4 Patch Section"
           fi
           
-          cd ./kernel_platform/common
-
+          # ------------------------------
+          # Kernel Compatibility Fixes for SUSFS Integration 
+          # Detect Kernel Common Directory
+          # ------------------------------
+          if [ -d "kernel_platform/common" ]; then
+              KCOMMON="kernel_platform/common"
+          else
+              KCOMMON="common"
+          fi
+          
+          cd "$KCOMMON"
+          
           GKI_V="${{ env.KANDROID_VERSION }}-${{ env.KERNEL_VERSION }}"
-          SUBLEVEL=$(grep '^SUBLEVEL *=' Makefile | head -n1 | cut -d= -f2 | tr -d ' ')
-
+          SUBLEVEL=$(awk -F= '/^SUBLEVEL/{gsub(/ /,"",$2);print $2}' Makefile)
+          
+          echo "------------------------------"
+          echo "Kernel Target : $GKI_V"
+          echo "Kernel Patch  : $SUBLEVEL"
+          echo "------------------------------"
+          
           # ------------------------------
-          # 5.15 Legacy C Library Compatibility Fix
+          # 5.15 Legacy LibC Compatibility Fix
           # ------------------------------
-          if [ "$GKI_V" == "android13-5.15" ] && [ "$SUBLEVEL" -lt 123 ]; then
-            echo "🚀 Apply Legacy Fix for Kernel 5.15.0–5.15.123 (Old Libc Compatibility Issue)"
-
-            cp ../../AndreiMikh-Kernel-Lab/patches/Legacy-5.15-Fix ./Legacy-5.15-Fix.patch
-            patch -p1 < Legacy-5.15-Fix.patch
-
-            echo "✅ 5.15 Legacy Fix Applied Successfully"
+          if [[ "$GKI_V" == "android13-5.15" && "$SUBLEVEL" -lt 123 ]]; then
+          
+              echo "🚀 Applying Legacy Fix (5.15.0–5.15.123)"
+          
+              cp ../../AndreiMikh-Kernel-Lab/patches/Legacy-5.15-Fix \
+                 Legacy-5.15-Fix.patch
+          
+              patch -p1 --forward < Legacy-5.15-Fix.patch || true
+          
+              echo "✅ Legacy Fix Applied"
+          
           fi
-
+                
           # ------------------------------
-          # 6.6.0–6.6.30 TrustyOS Missing Fix
+          # TrustyOS Missing Fix (Kernel 6.6.0–6.6.30)
           # ------------------------------
-          if [[ "${{ env.KV2 }}" == "66" && "${{ env.KV3 }}" -le 6630 && "${{ github.event.inputs.SUSFS_META }}" != "-1" ]]; then
-            TRUSTY_EXISTS="false"
-
-            # ------------------------------
-            # Check if TrustyOS Exist in the Manifest
-            # ------------------------------
-            if grep -q 'common-modules/trusty' "$GITHUB_WORKSPACE/.repo/manifests_fallback/${FILE}.xml"; then
-              TRUSTY_EXISTS="true"
-            fi
-
-            echo "trusty_exists=$TRUSTY_EXISTS" >> $GITHUB_OUTPUT
-
-            # ------------------------------
-            # If TrustyOS is Missing, Fix the TrustyOS Issue
-            # ------------------------------
-            if [[ "$TRUSTY_EXISTS" == "false" ]]; then
-              echo "Fixing Missing TrustyOS in 6.6.0–6.6.30 Kernel Source & Manifest (SUSFS Error Fix)"
-
-              # ------------------------------
-              # Update the Patch to Fix TrustyOS Issues
-              # ------------------------------
-              PATCH_NAME=$(basename "$SUS_PATCH")
-
-              sed -i 's/-32,12 +32,38/-32,11 +32,37/g' "$PATCH_NAME"
-              sed -i '/#include <trace\/hooks\/fs.h>/d' "$PATCH_NAME"
-            fi
-          fi
-
-          if [ "${{ github.event.inputs.SUSFS_META }}" != "-1" ]; then
-
-            # ------------------------------
-            # Fake Patch Workaround to Prevent Patch Failures
-            # ------------------------------
-            fake_patched=0
-
-            # ------------------------------
-            # Apply Fake Patch for Specific Android Versions
-            # ------------------------------
-            if [ "$GKI_V" = "android15-6.6" ]; then
-
-              # ------------------------------
-              # Add Fix for Page Map
-              # ------------------------------
-              if ! grep -qxF $'\tunsigned int nr_subpages = __PAGE_SIZE / PAGE_SIZE;' ./fs/proc/task_mmu.c; then
-                echo "NR Subpages Not Found, Apply Temporary Fix"
-
-                sed -i \
-                  -e '/int ret = 0, copied = 0;/a \\tunsigned int nr_subpages \= __PAGE_SIZE \/ PAGE_SIZE;' \
-                  -e '/int ret = 0, copied = 0;/a \\tpagemap_entry_t \*res = NULL;' \
-                  ./fs/proc/task_mmu.c
-
-                fake_patched=1
+          if [[ "${{ env.KV2 }}" == "66" && \
+                "${{ env.KV3 }}" -le 6630 && \
+                "${{ github.event.inputs.SUSFS_META }}" != "-1" ]]; then
+          
+              echo "Checking TrustyOS Manifest..."
+          
+              TRUSTY_EXISTS=false
+          
+              if grep -qr "common-modules/trusty" \
+                  "$GITHUB_WORKSPACE/.repo/manifests_fallback/" 2>/dev/null; then
+                  TRUSTY_EXISTS=true
               fi
-
-              # ------------------------------
-              # Add Fix for DMA-BUF
-              # ------------------------------
-              if ! grep -qxF '#include <linux/dma-buf.h>' ./fs/proc/base.c; then
-                echo "Missing #include <linux/dma-buf.h>, Adding Header"
-
-                sed -i '/#include <linux\/cpufreq_times.h>/a #include <linux\/dma-buf.h>' ./fs/proc/base.c
-              fi
-
-              # ------------------------------
-              # Add Fix for SUSFS Meta (SUSFS-for-KSU)
-              # ------------------------------
-              if [[ "${{ github.event.inputs.SUSFS_VERSION }}" == "GKI" && \
-                    "${{ github.event.inputs.KSU_META }}" == "ReSukiSU" ]] && \
-                 ! grep -qxF '#include <linux/susfs.h>' ./fs/proc/base.c; then
-                echo "🚀 SUSFS Meta Version=GKI and KSU Meta=ReSukiSU, Missing SUSFS Meta Header, Adding Fix..."
-
-                sed -i '/#include <linux\/dma-buf.h>/a #include <linux\/susfs.h>' ./fs/proc/base.c
-              fi
-            fi
-
-            # ------------------------------
-            # Handle Other Android Versions
-            # ------------------------------
-            if [ "$GKI_V" = "android14-6.1" ]; then
-              if ! grep -qxF $'\tif (!vma_pages(vma))' ./fs/proc/task_mmu.c; then
-                echo "VMA Pages Not Found, Apply Temporary Fix"
-                fake_patched=1
-              fi
-
-              if ! grep -qxF '#include <linux/dma-buf.h>' ./fs/proc/base.c; then
-                echo "Missing #include <linux/dma-buf.h>, Adding Header"
-
-                sed -i '/#include <linux\/cpufreq_times.h>/a #include <linux\/dma-buf.h>' ./fs/proc/base.c
-              fi
-            fi
-
-            # ------------------------------
-            # Handle Android 12 / 13 Versions
-            # ------------------------------
-            if [ "$GKI_V" = "android12-5.10" ] || [ "$GKI_V" = "android13-5.15" ]; then
-              if ! grep -qxF $'\tif (!vma_pages(vma))' ./fs/proc/task_mmu.c; then
-                echo "VMA Pages Not Found, Apply Temporary Fix"
-                fake_patched=1
-              fi
-            fi
-
-            # ------------------------------
-            # Revert Temporary Fake Patch
-            # ------------------------------
-            if [ "$fake_patched" = 1 ]; then
-
-              # ------------------------------
-              # Revert Fake Patches Based on Kernel Version
-              # ------------------------------
-              if [ "$GKI_V" = "android15-6.6" ]; then
-                if grep -qxF $'\tunsigned int nr_subpages = __PAGE_SIZE / PAGE_SIZE;' ./fs/proc/task_mmu.c; then
+          
+              echo "trusty_exists=$TRUSTY_EXISTS" >> "$GITHUB_OUTPUT"
+          
+              if [[ "$TRUSTY_EXISTS" == false ]]; then
+          
+                  echo "⚠️ TrustyOS Missing — Patch Adjustment Required"
+          
+                  PATCH_NAME=$(basename "$SUS_PATCH")
+          
                   sed -i \
-                    -e '/unsigned int nr_subpages \= __PAGE_SIZE \/ PAGE_SIZE;/d' \
-                    -e '/pagemap_entry_t \*res = NULL;/d' \
-                    ./fs/proc/task_mmu.c
-                fi
+                  -e 's/-32,12 +32,38/-32,11 +32,37/' \
+                  -e '/#include <trace\/hooks\/fs.h>/d' \
+                  "$PATCH_NAME"
+          
               fi
-
-              if [ "$GKI_V" = "android12-5.10" ] || \
-                 [ "$GKI_V" = "android13-5.15" ] || \
-                 [ "$GKI_V" = "android14-6.1" ]; then
-
-                if grep -qxF $'\t\t\tgoto show_pad;' ./fs/proc/task_mmu.c; then
-                  sed -i -e 's/goto show_pad;/return 0;/' ./fs/proc/task_mmu.c
-                fi
-              fi
-            fi
-
-            # ------------------------------
-            # Optional XUS fix
-            # ------------------------------
-            if [ "${{ github.event.inputs.SUSFS_META }}" != "-1" ] && \
-               [ "${{ github.event.inputs.XUS_FIX }}" = "true" ]; then
-
-              cp ../../AndreiMikh-Kernel-Lab/patches/XUS-Fix.patch ./
-              patch -p1 < XUS-Fix.patch || true
-            fi
           fi        
-
+          
+          # ------------------------------
+          # Fake Patch Workaround (Prevent SUSFS Patch Fail)
+          # ------------------------------
+          if [[ "${{ github.event.inputs.SUSFS_META }}" != "-1" ]]; then
+          
+              echo "Checking kernel compatibility requirements..."
+          
+              fake_patch=false
+          
+              case "$GKI_V" in
+          
+                  # ------------------------------
+                  # Android 15 Kernel 6.6
+                  # ------------------------------
+                  android15-6.6)
+          
+                      if ! grep -q "nr_subpages" fs/proc/task_mmu.c; then
+                          echo "Temporary pagemap compatibility fix"
+          
+                          sed -i \
+                          -e '/int ret = 0, copied = 0;/a \	unsigned int nr_subpages = __PAGE_SIZE / PAGE_SIZE;' \
+                          -e '/int ret = 0, copied = 0;/a \	pagemap_entry_t *res = NULL;' \
+                          fs/proc/task_mmu.c
+          
+                          fake_patch=true
+                      fi
+          
+                      if ! grep -q "dma-buf.h" fs/proc/base.c; then
+                          echo "Adding missing dma-buf header"
+          
+                          sed -i '/cpufreq_times.h/a #include <linux/dma-buf.h>' \
+                          fs/proc/base.c
+                      fi
+          
+                      if [[ "${{ github.event.inputs.SUSFS_VERSION }}" == "GKI" && \
+                            "${{ github.event.inputs.KSU_META }}" == "ReSukiSU" ]]; then
+          
+                          if ! grep -q "susfs.h" fs/proc/base.c; then
+          
+                              echo "Adding missing SUSFS header"
+          
+                              sed -i '/dma-buf.h/a #include <linux/susfs.h>' \
+                              fs/proc/base.c
+                          fi
+                      fi
+                  ;;
+                    
+                  # ------------------------------
+                  # Android 14 Kernel 6.1
+                  # ------------------------------
+                  android14-6.1)
+          
+                      if ! grep -q "vma_pages" fs/proc/task_mmu.c; then
+                          fake_patch=true
+                      fi
+          
+                      if ! grep -q "dma-buf.h" fs/proc/base.c; then
+          
+                          sed -i '/cpufreq_times.h/a #include <linux/dma-buf.h>' \
+                          fs/proc/base.c
+                      fi
+                  ;;
+                 
+                  # ------------------------------
+                  # Android 12 / 13 Kernels
+                  # ------------------------------
+                  android12-5.10|android13-5.15)
+          
+                      if ! grep -q "vma_pages" fs/proc/task_mmu.c; then
+                          fake_patch=true
+                      fi
+                  ;;
+          
+              esac       
+          
+              # ------------------------------
+              # Revert Temporary Fixes
+              # ------------------------------
+              if [[ "$fake_patch" == true ]]; then
+          
+                  echo "Reverting temporary compatibility patches"
+          
+                  case "$GKI_V" in
+          
+                      android15-6.6)
+          
+                          sed -i \
+                          -e '/nr_subpages/d' \
+                          -e '/pagemap_entry_t \*res/d' \
+                          fs/proc/task_mmu.c
+                      ;;
+          
+                      android12-5.10|android13-5.15|android14-6.1)
+          
+                          sed -i 's/goto show_pad;/return 0;/' \
+                          fs/proc/task_mmu.c 2>/dev/null || true
+                      ;;
+          
+                  esac
+              fi
+                   
+              # ------------------------------
+              # Optional XUS Fix
+              # ------------------------------
+              if [[ "${{ github.event.inputs.XUS_FIX }}" == "true" ]]; then
+          
+                  echo "Applying XUS Fix"
+          
+                  cp ../../AndreiMikh-Kernel-Lab/patches/XUS-Fix.patch .
+          
+                  patch -p1 --forward < XUS-Fix.patch || true
+          
+                  echo "✅ XUS Fix Applied"
+          
+              fi          
+          fi          
+          
+          echo "------------------------------"
+          echo "Kernel Compatibility Fixes Complete"
+          echo "------------------------------"
+          
       # ==============================
-      # Apply Conversion
+      # Scheduler Conversion Patch
       # ==============================
-      - name: Conversion
+      - name: Scheduler Conversion
         if: ${{ env.KERNEL_VERSION == '6.6' && github.event.inputs.SCHED == 'false' }}
         run: |
+          set -euo pipefail
+      
           PATCH_DIR="${GITHUB_WORKSPACE}/kernel_workspace/AndreiMikh-Kernel-Lab/patches"
-
-          cd kernel_workspace/kernel_platform/common
-
+          KERNEL_DIR="${GITHUB_WORKSPACE}/kernel_workspace/kernel_platform/common"
+      
+          cd "$KERNEL_DIR"
+      
+          echo "------------------------------"
+          echo "Scheduler Conversion Check"
+          echo "Kernel Version : ${{ env.KERNEL_VERSION }}"
+           echo "------------------------------"
+      
           # ------------------------------
-          # If it Already Exists, Skip
+          # Detect Existing Hmbird / Windspeed
           # ------------------------------
-          for p in ./kernel/sched/hmbird* ./vendor/oplus/kernel/cpu/sched_ext/hmbird*; do
-            [ -d "$p" ] && {
-              echo "🔎 Hmbird / Windspeed Source Already Exists, Skipping Conversion"
+          if [[ -d "kernel/sched/hmbird" || \
+                -d "vendor/oplus/kernel/cpu/sched_ext/hmbird" ]]; then
+      
+              echo "🔎 Hmbird / Windspeed Scheduler Already Present"
+              echo "Skipping Conversion Patch"
+      
               exit 0
-            }
-          done
-
-          sed -i '1iobj-y += hmbird_patch.o' drivers/Makefile
-
-          echo "🚀 Applying Conversion Patch"
-          patch -p1 -F 3 < "${PATCH_DIR}/HMBIRD.patch" || true
-
-          echo "✅ Conversion Completed"
+          fi
+        
+          # ------------------------------
+          # Inject Build Rule
+          # ------------------------------
+          if ! grep -q "hmbird_patch.o" drivers/Makefile; then
+              echo "Adding Scheduler Object to Drivers / Makefile"
+              sed -i '1iobj-y += hmbird_patch.o' drivers/Makefile
+          fi
+          
+          # ------------------------------
+          # Apply Conversion Patch
+          # ------------------------------
+          echo "🚀 Applying HMBIRD Conversion Patch"
+      
+          if [[ -f "$PATCH_DIR/HMBIRD.patch" ]]; then
+      
+              patch -p1 -F3 --forward < "$PATCH_DIR/HMBIRD.patch" || true
+      
+              echo "✅ Scheduler Conversion Completed"
+      
+          else
+      
+              echo "⚠️ HMBIRD.patch Not Found"
+              echo "Conversion Skipped"
+      
+          fi
+      
+          echo "------------------------------"
+          echo "Conversion stage finished"
+          echo "------------------------------"
 
       # ==============================
       # Unicode Bypass
