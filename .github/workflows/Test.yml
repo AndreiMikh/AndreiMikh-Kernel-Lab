@@ -1305,7 +1305,7 @@ jobs:
           fi
           
       # ==============================
-      # Apply SUSFS + Kernel + ZRAM + LZ4/ZSTD + Temporary Fixes
+      # Apply SUSFS + Kernel + ZRAM + LZ4/ZSTD + Temporary Fixes (Fixed Paths)
       # ==============================
       - name: Apply SUSFS + Kernel + ZRAM + LZ4/ZSTD + Temporary Fixes
         if: ${{ github.event.inputs.SUSFS_META != '-1' }}
@@ -1345,9 +1345,9 @@ jobs:
           # Determine Kernel Common Directory
           # ------------------------------
           if [ -d "./kernel_platform/common" ]; then
-              KCOMMON="./kernel_platform/common"
+              KCOMMON="$PWD/kernel_platform/common"
           elif [ -d "./common" ]; then
-              KCOMMON="./common"
+              KCOMMON="$PWD/common"
           else
               warn "Cannot Find Kernel Common Directory"
               exit 1
@@ -1360,8 +1360,11 @@ jobs:
           git clone --depth=1 https://github.com/SukiSU-Ultra/SukiSU_patch.git
           git clone --depth=1 https://github.com/AndreiMikh/AndreiMikh-Kernel-Lab.git
       
+          PATCH_REPO="$PWD/AndreiMikh-Kernel-Lab"
+          SUKISU_PATCH_REPO="$PWD/SukiSU_patch"
+      
           # ------------------------------
-          # Clone SUSFS Meta Repositories
+          # Clone SUSFS Meta Repository
           # ------------------------------
           SUSFS_VERSION="${{ github.event.inputs.SUSFS_VERSION }}"
           SUSFS_DEV="${{ github.event.inputs.SUSFS_DEV }}"
@@ -1379,7 +1382,7 @@ jobs:
           [ ! -d "susfs4ksu" ] && { warn "SUSFS Meta Repository Failed to Clone"; exit 1; }
       
           # ------------------------------
-          # Optional Checkout
+          # Optional Checkout of SUSFS_META
           # ------------------------------
           cd_safe susfs4ksu
           META="${{ github.event.inputs.SUSFS_META }}"
@@ -1398,9 +1401,9 @@ jobs:
           # ------------------------------
           # Copy Patch + Source Files
           # ------------------------------
-          cp "$SUS_PATCH" "$KCOMMON/"
-          cp -r ./susfs4ksu/kernel_patches/fs/* "$KCOMMON/fs/"
-          cp -r ./susfs4ksu/kernel_patches/include/linux/* "$KCOMMON/include/linux/"
+          cp "$SUS_PATCH" "$KCOMMON/" || warn "Failed to copy SUSFS patch"
+          cp -r ./susfs4ksu/kernel_patches/fs/* "$KCOMMON/fs/" || warn "Failed to copy FS patches"
+          cp -r ./susfs4ksu/kernel_patches/include/linux/* "$KCOMMON/include/linux/" || warn "Failed to copy include/linux"
           cd_safe "$KCOMMON"
           apply_patch "$(basename "$SUS_PATCH")"
       
@@ -1437,20 +1440,21 @@ jobs:
       
           if [[ "$ZRAM_INPUT" == 1* ]]; then
               log "Applying ZRAM=1 LZ4/ZSTD patches"
-              SRC="$PWD/SukiSU_patch/other/zram"
+              SRC="$SUKISU_PATCH_REPO/other/zram"
               mkdir -p "$KCOMMON/include/linux" "$KCOMMON/lib" "$KCOMMON/crypto" "$KCOMMON/lib/lz4k_oplus"
-              cp -r "$SRC/lz4k/include/linux/"* "$KCOMMON/include/linux/"
-              cp -r "$SRC/lz4k/lib/"* "$KCOMMON/lib/"
-              cp -r "$SRC/lz4k/crypto/"* "$KCOMMON/crypto/"
-              cp -r "$SRC/lz4k_oplus/"* "$KCOMMON/lib/lz4k_oplus/"
+              cp -r "$SRC/lz4k/include/linux/"* "$KCOMMON/include/linux/" || warn "Linux headers missing"
+              cp -r "$SRC/lz4k/lib/"* "$KCOMMON/lib/" || warn "Lib files missing"
+              cp -r "$SRC/lz4k/crypto/"* "$KCOMMON/crypto/" || warn "Crypto files missing"
+              cp -r "$SRC/lz4k_oplus/"* "$KCOMMON/lib/lz4k_oplus/" || warn "LZ4K OPlus missing"
               grep -q 'lib/lz4k_oplus/Kconfig' "$KCOMMON/lib/Kconfig" || echo 'source "lib/lz4k_oplus/Kconfig"' >> "$KCOMMON/lib/Kconfig"
       
               if [[ "$ZRAM_LZ4" == "true" ]]; then
-                  PATCH_BASE="./AndreiMikh-Kernel-Lab/patches"
+                  PATCH_BASE="$PATCH_REPO/patches"
                   cp "$PATCH_BASE/001-lz4.patch" "$KCOMMON/" || warn "LZ4 Patch Missing"
                   cp "$PATCH_BASE/002-zstd.patch" "$KCOMMON/" || warn "ZSTD Patch Missing"
                   mkdir -p "$KCOMMON/fs/f2fs/lz4armv8"
                   for f in lz4accel.c lz4accel.h lz4armv8.S; do cp "$PATCH_BASE/$f" "$KCOMMON/fs/f2fs/lz4armv8/" || warn "$f Missing"; done
+      
                   cd_safe "$KCOMMON"
                   case "$KERNEL" in
                       6.1)
@@ -1465,19 +1469,15 @@ jobs:
               fi
           else
               log "Applying ZRAM=0 alternate LZ4/ZSTD patches"
-              PATCH_BASE="./AndreiMikh-Kernel-Lab/patches"
-              cp "$PATCH_BASE/001-lz4.patch" "$KCOMMON/" || true
-              cp "$PATCH_BASE/002-zstd.patch" "$KCOMMON/" || true
-              cp "$PATCH_BASE/lz4armv8.S" "$KCOMMON/lib/" || true
+              PATCH_BASE="$PATCH_REPO/patches"
+              cp "$PATCH_BASE/001-lz4.patch" "$KCOMMON/" || warn "001-lz4.patch Missing"
+              cp "$PATCH_BASE/002-zstd.patch" "$KCOMMON/" || warn "002-zstd.patch Missing"
+              cp "$PATCH_BASE/lz4armv8.S" "$KCOMMON/lib/" || warn "lz4armv8.S Missing"
               cd_safe "$KCOMMON"
               case "$KERNEL" in
-                  6.1)
-                      git apply -p1 001-lz4.patch || true
-                      patch -p1 < 002-zstd.patch || true
-                      ;;
-                  6.6)
-                      git apply -p1 001-lz4.patch || true
-                      patch -p1 < 002-zstd.patch || true
+                  6.1|6.6)
+                      git apply -p1 001-lz4.patch || warn "LZ4 Skipped"
+                      patch -p1 < 002-zstd.patch || warn "ZSTD Skipped"
                       ;;
               esac
               cd_safe -
@@ -1509,11 +1509,11 @@ jobs:
           success "Temporary Fake Patches Applied"
       
           # ------------------------------
-          # Optional XUS fix
+          # Optional XUS Fix
           # ------------------------------
           if [[ "${{ github.event.inputs.XUS_FIX }}" == "true" ]]; then
-              cp ../../AndreiMikh-Kernel-Lab/patches/XUS-Fix.patch ./
-              apply_patch XUS-Fix.patch
+              cp "$PATCH_REPO/patches/XUS-Fix.patch" ./
+              apply_patch "XUS-Fix.patch"
           fi
       
           cd_safe "$PWD"
