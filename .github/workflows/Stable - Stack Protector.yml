@@ -576,9 +576,26 @@ jobs:
       # Check Disk Space
       # ==============================
       - name: Check Disk Space
+        shell: bash
         run: |
-          echo "Disk Space Before Build"
+          echo "------------------------------"
+          echo "Disk Usage Before Kernel Build"
+          echo "------------------------------"
+          echo ""
+      
+          echo "Filesystem Disk Usage:"
           df -h
+      
+          echo ""
+          echo "Workspace Directory Size:"
+          du -sh $GITHUB_WORKSPACE 2>/dev/null || true
+      
+          echo ""
+          echo "Top 10 Largest Directories:"
+          du -h --max-depth=1 $GITHUB_WORKSPACE 2>/dev/null | sort -hr | head -n 10
+      
+          echo ""
+          echo "------------------------------"
 
       # ==============================
       # Create and Enable Swap (Optimized)
@@ -600,65 +617,108 @@ jobs:
           free -h
 
       # ==============================
-      # Compiler Cache
+      # Configure Compiler Cache
       # ==============================
-      - name: Compiler Cache
+      - name: Configure Compiler Cache
         if: ${{ github.event.inputs.BUILD_NOCCACHE != 'true' }}
+        shell: bash
         run: |
+          echo "------------------------------"
+          echo "Initializing Compiler Cache"
+          echo "------------------------------"
+      
           CCACHE_PATH="$HOME/.ccache_${{ github.event.inputs.FILE }}_${{ env.CLANG_VERSION }}"
-          echo "CCACHE_DIR=$CCACHE_PATH" >> $GITHUB_ENV
+      
+          # Export Compiler Cache Directory to Environment
+          echo "CCACHE_DIR=$CCACHE_PATH" >> "$GITHUB_ENV"
+      
+          # Create Cache Directory
           mkdir -p "$CCACHE_PATH"
-          echo "✅ Compiler Cache Directory Set to: $CCACHE_PATH"
+      
+          echo ""
+          echo "Compiler Cache Directory Configured:"
+          echo "  Path : $CCACHE_PATH"
+      
+          # Show Current Compiler Cache Settings if Available
+          if command -v ccache >/dev/null 2>&1; then
+            echo ""
+            echo "Current Compiler Cache Configuration:"
+            ccache -p || true
+          fi
+      
+          echo "------------------------------"
 
       # ==============================
-      # Restore Compiler Cache Environment
+      # Restore Compiler Cache
       # ==============================
       - name: Restore Compiler Cache
         if: ${{ github.event.inputs.BUILD_NOCCACHE != 'true' }}
         uses: actions/cache@v5
         with:
           path: ${{ env.CCACHE_DIR }}
-          key: >
-            ccache-${{ runner.os }}-${{ env.CLANG_VERSION }}-${{ github.ref_name }}-${{ github.event.inputs.FILE }}-${{ env.BUILD_METHOD }}
+      
+          # Primary Cache Key (Most Specific)
+          key: ccache-${{ runner.os }}-${{ env.CLANG_VERSION }}-${{ github.ref_name }}-${{ github.event.inputs.FILE }}-${{ env.BUILD_METHOD }}
+      
+          # Fallback Restore Keys (Less Specific)
           restore-keys: |
+            ccache-${{ runner.os }}-${{ env.CLANG_VERSION }}-${{ github.ref_name }}-
             ccache-${{ runner.os }}-${{ env.CLANG_VERSION }}-
             ccache-${{ runner.os }}-
 
       # ==============================
-      # Set GIT User
+      # Configure Git Identity
       # ==============================
-      - name: Set GIT User
+      - name: Configure Git Identity
+        shell: bash
         run: |
-          git config --global user.name "AndreiMikh"
+          echo "------------------------------"
+          echo "Configuring Git Identity"
+          echo "------------------------------"
+      
+          git config --global user.name  "AndreiMikh"
           git config --global user.email "andreimikhail0088@gmail.com"
-
+      
+          echo ""
+          echo "Git Configuration Applied:"
+          git config --global --list
+          echo "------------------------------"
+    
       # ==============================
-      # Setup Required Packages
+      # Install and Cache Build Dependencies
       # ==============================
-      - name: Setup Required Packages
+      - name: Install Build Dependencies
         uses: awalsh128/cache-apt-pkgs-action@latest
         with:
           packages: |
-            python3
+            # Core Tools
             git
             curl
-            ccache
-            libelf-dev
+            python3
+            unzip
+            rsync
+            gawk
+            dos2unix
+      
+            # Build Tools
             build-essential
             flex
             bison
+            ccache
+      
+            # Kernel Build Libraries
+            libelf-dev
             libssl-dev
             libncurses-dev
             liblz4-tool
             zlib1g-dev
             libxml2-utils
-            rsync
-            unzip
-            gawk
-            dos2unix
+      
+            # Kernel Module / Debugging Utilities
             kmod
             libdw-dev
             elfutils
+      
           execute_install_scripts: true
 
       # ==============================
@@ -700,15 +760,36 @@ jobs:
           ccache -s
 
       # ==============================
-      # Setup Google Repository Tool
+      # Install Google Repository Tool
       # ==============================
-      - name: Setup Google Repository Tool
+      - name: Install Google Repository Tool
+        shell: bash
         run: |
-          echo "Downloading Google Repository Tool..."
-          curl -sSL https://storage.googleapis.com/git-repo-downloads/repo -o ~/repo
-          chmod +x ~/repo
-          sudo mv ~/repo /usr/local/bin/repo
+          set -e
+      
+          echo "------------------------------"
+          echo "Installing Google Repository Tool"
+          echo "------------------------------"
+      
+          REPO_URL="https://storage.googleapis.com/git-repo-downloads/repo"
+          REPO_BIN="/usr/local/bin/repo"
+      
+          echo "Downloading Repository Tool..."
+          curl -fsSL "$REPO_URL" -o repo
+      
+          echo "Setting Executable Permissions..."
+          chmod +x repo
+      
+          echo "Installing to $REPO_BIN"
+          sudo mv repo "$REPO_BIN"
+      
+          echo ""
+          echo "Verifying Installation:"
+          repo --version || true
+      
+          echo ""
           echo "✅ Google Repository Tool Installed Successfully"
+          echo "------------------------------"
 
       # ==============================
       # Initialize and Sync Repository
@@ -856,26 +937,46 @@ jobs:
           echo "✅ Kernel Version Setup Complete"
 
       # ==============================
-      # Rust Compiler Setup
+      # Detect Rust Compiler Requirement
       # ==============================
-      - name: Rust Compiler Setup
+      - name: Detect Rust Compiler Requirement
+        shell: bash
         run: |
-          cd kernel_workspace/kernel_platform
-
-          echo "Checking Rust Compiler Version..."
+          set -e
+      
+          echo "------------------------------"
+          echo "Detecting Rust Compiler"
+          echo "------------------------------"
+      
+          KERNEL_DIR="kernel_workspace/kernel_platform"
+          CONFIG_FILE="$KERNEL_DIR/common/build.config.constants"
+      
+          cd "$KERNEL_DIR"
+      
           RUSTC_VERSION=""
-          if [[ -f ./common/build.config.constants ]]; then
-            RUSTC_VERSION=$(grep '^RUSTC_VERSION=' ./common/build.config.constants | cut -d'=' -f2 || true)
-          fi
-
-          if [[ -n "$RUSTC_VERSION" ]]; then
-            echo "Found Rustc Version: $RUSTC_VERSION"
-            echo "RUSTC_VERSION=$RUSTC_VERSION" >> $GITHUB_ENV
-            echo "ENABLE_RUST=true" >> $GITHUB_ENV
+      
+          if [[ -f "$CONFIG_FILE" ]]; then
+            echo "Checking Build Configuration for Rust..."
+      
+            RUSTC_VERSION=$(grep '^RUSTC_VERSION=' "$CONFIG_FILE" | cut -d'=' -f2 || true)
+      
+            if [[ -n "$RUSTC_VERSION" ]]; then
+              echo "Rust Compiler Version Detected: $RUSTC_VERSION"
+      
+              echo "RUSTC_VERSION=$RUSTC_VERSION" >> "$GITHUB_ENV"
+              echo "ENABLE_RUST=true" >> "$GITHUB_ENV"
+            else
+              echo "Rust Entry Not Found in Configuration"
+              echo "ENABLE_RUST=false" >> "$GITHUB_ENV"
+            fi
           else
-            echo "Rustc Version Not Found; Rust Compilation Disabled"
-            echo "ENABLE_RUST=false" >> $GITHUB_ENV
+            echo "Configuration File Not Found: $CONFIG_FILE"
+            echo "ENABLE_RUST=false" >> "$GITHUB_ENV"
           fi
+      
+          echo ""
+          echo "Rust Compilation Enabled: ${ENABLE_RUST:-false}"
+          echo "------------------------------"
 
       # ==============================
       # Inject Custom Kernel Version Suffix
