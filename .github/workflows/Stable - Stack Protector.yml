@@ -2717,43 +2717,74 @@ jobs:
           [[ "$ENABLE_RUST" == "true" ]] && MAKE_ARGS=(RUSTC=../../prebuilts/rust/linux-x86/$RUSTC_VERSION/bin/rustc "${MAKE_ARGS[@]}")
 
           # ------------------------------
-          # Kernel Configuration
+          # Kernel Configuration and Compilation
           # ------------------------------
+          echo ">> Running GKI DefConfig"
           make O=out "${MAKE_ARGS[@]}" gki_defconfig
-
-          # --- Stack Protector Flags ---
+          
+          # ------------------------------
+          # Stack Protector Flags (KSU Compatible)
+          # ------------------------------
           : "${KCFLAGS:=}" ; : "${KCPPFLAGS:=}"
-          if [[ "${{ github.event.inputs.KSU_META }}" =~ ^(KernelSU-Next|KernelSU|ReSukiSU)$ ]]; then
-            KCFLAGS="$KCFLAGS -fstack-protector-strong"
-            KCPPFLAGS="$KCPPFLAGS -DSTACKPROTECTOR_ENABLED"
-            echo "✅ Stack Protector Enabled for ${{ github.event.inputs.KSU_META }}"
+          
+          # Use Environment Variable Passed from GitHub Actions
+          KSU_META="${KSU_META:-${{ github.event.inputs.KSU_META }}}"
+          
+          if [[ "$KSU_META" =~ ^(KernelSU-Next|KernelSU|ReSukiSU)$ ]]; then
+              KCFLAGS="$KCFLAGS -fstack-protector-strong"
+              KCPPFLAGS="$KCPPFLAGS -DSTACKPROTECTOR_ENABLED"
+              echo "✅ Stack Protector Enabled for $KSU_META"
           else
-            echo "⚠️ Stack Protector Disabled or Patched Out for ${{ github.event.inputs.KSU_META }}"
+              echo "⚠️ Stack Protector Disabled or Patched Out for $KSU_META"
           fi
+          
+          # Export for Current and Subsequent Steps
           export KCFLAGS KCPPFLAGS
-
+          echo "KCFLAGS=$KCFLAGS" >> $GITHUB_ENV
+          echo "KCPPFLAGS=$KCPPFLAGS" >> $GITHUB_ENV
+          
+          # Ensure Kernel Configuration Allows Stack Protector
+          scripts/config --file out/.config -e CONFIG_CC_STACKPROTECTOR
+          scripts/config --file out/.config -e CONFIG_STACKPROTECTOR_STRONG
+          
           # ------------------------------
-          # Set LTO Depending on Kernel Version
+          # LTO Configuration Based on Kernel Version
           # ------------------------------
-          if [[ "$KERNEL_VERSION" == "5.10" || "$KERNEL_VERSION" == "5.15" ]]; then
-            echo ">> Setting LTO = Thin"
-            scripts/config --file out/.config -e LTO_CLANG
-            scripts/config --file out/.config -e LTO_CLANG_THIN
-            scripts/config --file out/.config -d LTO_CLANG_NONE
-            scripts/config --file out/.config -d LTO_CLANG_FULL
-          elif [[ "$KERNEL_VERSION" == "6.12" ]]; then
-            echo ">> Setting LTO = None"
-            scripts/config --file out/.config -e LTO_CLANG
-            scripts/config --file out/.config -e LTO_CLANG_NONE
-            scripts/config --file out/.config -d LTO_CLANG_THIN
-            scripts/config --file out/.config -d LTO_CLANG_FULL
-          fi
-
-          # Old DefConfig and Compile
+          echo ">> Configuring LTO for Kernel $KERNEL_VERSION"
+          
+          case "$KERNEL_VERSION" in
+              "5.10"|"5.15")
+                  echo ">> LTO: Thin"
+                  scripts/config --file out/.config -e LTO_CLANG
+                  scripts/config --file out/.config -e LTO_CLANG_THIN
+                  scripts/config --file out/.config -d LTO_CLANG_NONE
+                  scripts/config --file out/.config -d LTO_CLANG_FULL
+                  ;;
+              "6.12")
+                  echo ">> LTO: None"
+                  scripts/config --file out/.config -e LTO_CLANG
+                  scripts/config --file out/.config -e LTO_CLANG_NONE
+                  scripts/config --file out/.config -d LTO_CLANG_THIN
+                  scripts/config --file out/.config -d LTO_CLANG_FULL
+                  ;;
+              *)
+                  echo ">> LTO: Skipped for Kernel $KERNEL_VERSION"
+                  ;;
+          esac
+          
+          # ------------------------------
+          # Final DefConfig and Build
+          # ------------------------------
+          echo ">> Running Old DefConfig"
           make O=out "${MAKE_ARGS[@]}" olddefconfig
-          make -j"$(nproc --all)" O=out "${MAKE_ARGS[@]}"
-
+          
+          echo ">> Compiling Kernel with $(nproc --all) Threads"
+          make -j"$(nproc --all)" O=out "${MAKE_ARGS[@]}" KCFLAGS="$KCFLAGS" KCPPFLAGS="$KCPPFLAGS"
+          
+          # ------------------------------
           # Display Compiler Cache Statistics
+          # ------------------------------
+          echo ">> Compiler Cache Statistics"
           ccache -s
           
       # ==============================
