@@ -2828,23 +2828,31 @@ jobs:
           
           # Use Environment Variable Passed from GitHub Actions
           KSU_META="${KSU_META:-${{ github.event.inputs.KSU_META }}}"
-          
-          if [[ "$KSU_META" =~ ^(KernelSU-Next|KernelSU|ReSukiSU)$ ]]; then
+          ARCH="${ARCH:-$(uname -m)}"
+
+          # Enable Stack Protector Only for ARM64 + KSU Meta Variants
+          if [[ "$ARCH" == "aarch64" && "$KSU_META" =~ ^(KernelSU-Next|KernelSU|ReSukiSU)$ ]]; then
               KCFLAGS="$KCFLAGS -fstack-protector-strong"
               KCPPFLAGS="$KCPPFLAGS -DSTACKPROTECTOR_ENABLED"
-              echo "✅ Stack Protector Enabled for $KSU_META"
+              echo "✅ Stack Protector Enabled for $KSU_META on $ARCH"
           else
-              echo "⚠️ Stack Protector Disabled or Patched Out for $KSU_META"
+              echo "⚠️ Stack Protector Disabled or Patched Out for $KSU_META on $ARCH"
           fi
-          
+
           # Export for Current and Subsequent Steps
           export KCFLAGS KCPPFLAGS
           echo "KCFLAGS=$KCFLAGS" >> $GITHUB_ENV
           echo "KCPPFLAGS=$KCPPFLAGS" >> $GITHUB_ENV
-          
+
           # Ensure Kernel Configuration Allows Stack Protector
-          scripts/config --file out/.config -e CONFIG_CC_STACKPROTECTOR
-          scripts/config --file out/.config -e CONFIG_STACKPROTECTOR_STRONG
+          CONFIG_FILE="out/.config"
+          if [[ -f "$CONFIG_FILE" ]]; then
+              scripts/config --file "$CONFIG_FILE" -e CONFIG_CC_STACKPROTECTOR
+              scripts/config --file "$CONFIG_FILE" -e CONFIG_STACKPROTECTOR_STRONG
+
+              # Only Enable Per-Task Stack Protector if Defined for this Arch
+              scripts/config --file "$CONFIG_FILE" -d CONFIG_STACKPROTECTOR_PER_TASK || true
+          fi
           
           # ------------------------------
           # LTO Configuration Based on Kernel Version
@@ -2876,7 +2884,8 @@ jobs:
           # ------------------------------
           echo ">> Running Old DefConfig"
           make O=out "${MAKE_ARGS[@]}" olddefconfig
-          
+
+          # Build Kernel With Flags
           echo ">> Compiling Kernel with $(nproc --all) Threads"
           make -j"$(nproc --all)" O=out "${MAKE_ARGS[@]}" KCFLAGS="$KCFLAGS" KCPPFLAGS="$KCPPFLAGS"
           
