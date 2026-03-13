@@ -2601,9 +2601,9 @@ jobs:
           fi
 
       # ==============================
-      # Fast Kernel Build
+      # Ultimate Fast Kernel Build
       # ==============================
-      - name: Fast Kernel Build
+      - name: Ultimate Fast Kernel Build
         if: ${{ github.event.inputs.FAST_BUILD == 'true' }}
         id: fast_build
         run: |
@@ -2645,40 +2645,15 @@ jobs:
             CLANG_VERSION=$(grep '^CLANG_VERSION=' ./common/build.config.constants | cut -d'=' -f2 || true)
           fi
 
-          if [[ -z "$CLANG_VERSION" ]]; then
-            echo "⚠️ Unable to Determine Clang Version. Falling Back to Official Build Script"
-            echo "fallback=true" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-
-          # ------------------------------
-          # Replace Placeholder with Actual Clang Version
-          # ------------------------------
           CLANG_PREBUILT_BIN=${CLANG_PREBUILT_BIN/\$\{CLANG_VERSION\}/$CLANG_VERSION}
 
           # ------------------------------
-          # Extract Directory Information
+          # Setup Environment
           # ------------------------------
-          CLANG_DIR=$(echo "$CLANG_PREBUILT_BIN" | cut -d'/' -f1)
-          CLANG_PATH=$(basename "$(dirname "$CLANG_PREBUILT_BIN")")
-
-          echo "--------------------------"
-          echo "CLANG_VERSION=$CLANG_VERSION"
-          echo "CLANG_DIR=$CLANG_DIR"
-          echo "CLANG_PATH=$CLANG_PATH"
-          echo "USE_LLVM_IAS=$USE_LLVM_IAS"
-          echo "--------------------------"
-
-          # ==============================
-          # Load Github Environment Script
-          # ==============================
           set +u
           source "$GITHUB_WORKSPACE/kernel_workspace/kernel_platform/build/kernel/_setup_env.sh" 2>/dev/null || true
           set -u
 
-          # ------------------------------
-          # Set Github Environment Variables
-          # ------------------------------
           export PATH="$GITHUB_WORKSPACE/kernel_workspace/kernel_platform/$CLANG_PREBUILT_BIN:$PATH"
           export PATH="/usr/lib/ccache:$PATH"
 
@@ -2686,8 +2661,6 @@ jobs:
             export BINDGEN="bindgen"
             export LIBCLANG_PATH="$GITHUB_WORKSPACE/kernel_workspace/kernel_platform/$(dirname "$CLANG_PREBUILT_BIN")/lib"
           fi
-
-          cd ./common
 
           # ------------------------------
           # Prefix Mapping for Reproducibility
@@ -2711,49 +2684,69 @@ jobs:
             KCFLAGS+="$MAP $MPMAP $FPMAP"
             KCFLAGS+=-Wno-error
             KCFLAGS+=-D__ANDROID_COMMON_KERNEL__
+            KCFLAGS+=-fno-plt            # optional perf flags
+            KCFLAGS+=-fno-exceptions
           )
 
           [[ "$USE_LLVM_IAS" == "true" ]] && MAKE_ARGS=(LLVM_IAS=1 "${MAKE_ARGS[@]}")
           [[ "$ENABLE_RUST" == "true" ]] && MAKE_ARGS=(RUSTC=../../prebuilts/rust/linux-x86/$RUSTC_VERSION/bin/rustc "${MAKE_ARGS[@]}")
 
           # ------------------------------
-          # Kernel Configuration
+          # Stack Protector for KSU Meta Variants
           # ------------------------------
-          make O=out "${MAKE_ARGS[@]}" gki_defconfig
+          KSU_META="${KSU_META:-${{ github.event.inputs.KSU_META }}}"
 
-          # --- Stack Protector Flags ---
-          : "${KCFLAGS:=}" ; : "${KCPPFLAGS:=}"
-          if [[ "${{ github.event.inputs.KSU_META }}" =~ ^(KernelSU-Next|KernelSU|ReSukiSU)$ ]]; then
-            KCFLAGS="$KCFLAGS -fstack-protector-strong"
-            KCPPFLAGS="$KCPPFLAGS -DSTACKPROTECTOR_ENABLED"
-            echo "✅ Stack Protector Enabled for ${{ github.event.inputs.KSU_META }}"
-          else
-            echo "⚠️ Stack Protector Disabled or Patched Out for ${{ github.event.inputs.KSU_META }}"
+          if [[ "$ARCH" == "arm64" && "$KSU_META" =~ ^(KernelSU-Next|KernelSU|ReSukiSU)$ ]]; then
+              KCFLAGS="$KCFLAGS -fstack-protector-strong"
+              KCPPFLAGS="$KCPPFLAGS -DSTACKPROTECTOR_ENABLED"
+              echo "✅ Stack Protector Enabled for $KSU_META on $ARCH"
           fi
+
           export KCFLAGS KCPPFLAGS
+          echo "KCFLAGS=$KCFLAGS" >> $GITHUB_ENV
+          echo "KCPPFLAGS=$KCPPFLAGS" >> $GITHUB_ENV
 
           # ------------------------------
-          # Set LTO Depending on Kernel Version
+          # Ensure Kernel Configurations Allows Stack Protector
           # ------------------------------
-          if [[ "$KERNEL_VERSION" == "5.10" || "$KERNEL_VERSION" == "5.15" ]]; then
-            echo ">> Setting LTO = Thin"
-            scripts/config --file out/.config -e LTO_CLANG
-            scripts/config --file out/.config -e LTO_CLANG_THIN
-            scripts/config --file out/.config -d LTO_CLANG_NONE
-            scripts/config --file out/.config -d LTO_CLANG_FULL
-          elif [[ "$KERNEL_VERSION" == "6.12" ]]; then
-            echo ">> Setting LTO = None"
-            scripts/config --file out/.config -e LTO_CLANG
-            scripts/config --file out/.config -e LTO_CLANG_NONE
-            scripts/config --file out/.config -d LTO_CLANG_THIN
-            scripts/config --file out/.config -d LTO_CLANG_FULL
+          CONFIG_FILE="out/.config"
+          if [[ -f "$CONFIG_FILE" ]]; then
+              scripts/config --file "$CONFIG_FILE" -e CONFIG_CC_STACKPROTECTOR
+              scripts/config --file "$CONFIG_FILE" -e CONFIG_STACKPROTECTOR_STRONG
+              scripts/config --file "$CONFIG_FILE" -d CONFIG_STACKPROTECTOR_PER_TASK || true
           fi
 
-          # Old DefConfig and Compile
-          make O=out "${MAKE_ARGS[@]}" olddefconfig
-          make -j"$(nproc --all)" O=out "${MAKE_ARGS[@]}"
+          # ------------------------------
+          # AutoFDO Profile Handling
+          # ------------------------------
+          AFDO_PROFILE_PATH="$GITHUB_WORKSPACE/kernel_workspace/kernel_platform/common/afdo/kernel.afdo"
+          if [[ ! -f "$AFDO_PROFILE_PATH" ]]; then
+            echo "⚠️ AFDO Profile Not Found, Downloading Prebuilt..."
+            curl -L -o "$AFDO_PROFILE_PATH" "https://github.com/YourOrg/prebuilt-afdo/raw/main/kernel.afdo"
+          fi
 
-          # Display Compiler Cache Statistics
+          # ------------------------------
+          # Enable LTO + AutoFDO
+          # ------------------------------
+          echo ">> Configuring Thin LTO + AutoFDO"
+          scripts/config --file out/.config -e LTO_CLANG
+          scripts/config --file out/.config -e LTO_CLANG_THIN
+          scripts/config --file out/.config -d LTO_CLANG_NONE
+          scripts/config --file out/.config -d LTO_CLANG_FULL
+          scripts/config --file out/.config -e AFDO_PROFILE
+
+          # ------------------------------
+          # Final DefConfig and Build
+          # ------------------------------
+          make O=out "${MAKE_ARGS[@]}" olddefconfig
+          echo ">> Compiling Kernel with $(nproc --all) Threads"
+          make -j"$(nproc --all)" O=out "${MAKE_ARGS[@]}" KCFLAGS="$KCFLAGS" KCPPFLAGS="$KCPPFLAGS" \
+               AFDO_PROFILE="$AFDO_PROFILE_PATH"
+
+          # ------------------------------
+          # Display Compiler Cache statistics
+          # ------------------------------
+          echo ">> Compiler Cache Statistics"
           ccache -s
           
       # ==============================
