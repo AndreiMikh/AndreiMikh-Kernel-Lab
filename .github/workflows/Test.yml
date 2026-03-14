@@ -604,23 +604,60 @@ jobs:
           echo "--------------------------"
 
       # ==============================
-      # Create and Enable Swap (Optimized)
+      # Enable Swap 
       # ==============================
       - name: Enable Swap
         run: |
-          set -e
-    
-          sudo swapoff -a || true
-          sudo fallocate -l 4G /swapfile
-          sudo chmod 600 /swapfile
-          sudo mkswap /swapfile
-          sudo swapon /swapfile
-    
-          sudo sysctl vm.swappiness=80
-          sudo sysctl vm.vfs_cache_pressure=50
+          set -euo pipefail
 
-          echo "Swap Enabled:"
+          SWAPFILE="/swapfile"
+          SWAPSIZE="4G"
+
+          if ! swapon --show | grep -q "$SWAPFILE"; then
+            echo "🚀 Creating Swapfile at $SWAPFILE ($SWAPSIZE)..."
+
+            # Safe Allocation for All File Systems
+            if [[ "$(stat -f -c %T /)" == "btrfs" ]]; then
+              sudo dd if=/dev/zero of="$SWAPFILE" bs=1M count=4096 status=progress
+            else
+              sudo fallocate -l "$SWAPSIZE" "$SWAPFILE"
+            fi
+
+            sudo chmod 600 "$SWAPFILE"
+            sudo mkswap "$SWAPFILE"
+            sudo swapon "$SWAPFILE"
+          else
+            echo "✅ Swapfile Already Exists and Enabled"
+          fi
+
+          # Optimize Kernel Memory Usage
+          sudo sysctl -w vm.swappiness=80
+          sudo sysctl -w vm.vfs_cache_pressure=50
+
+          echo "📌 Swap Status:"
           free -h
+ 
+      # ==============================
+      # Configure Git Identity
+      # ==============================
+      - name: Configure Git Identity
+        shell: bash
+        run: |
+          echo "--------------------------"
+          echo "Configuring Git Identity"
+          echo "--------------------------"
+
+          if ! git config --global user.name >/dev/null; then
+            git config --global user.name "AndreiMikh"
+          fi
+          
+          if ! git config --global user.email >/dev/null; then
+            git config --global user.email "andreimikhail0088@gmail.com"
+          fi
+
+          echo "📌 Git Configuration Applied:"
+          git config --global --list
+          echo "--------------------------"
 
       # ==============================
       # Configure Compiler Cache
@@ -629,31 +666,43 @@ jobs:
         if: ${{ github.event.inputs.BUILD_NOCCACHE != 'true' }}
         shell: bash
         run: |
+          set -euo pipefail
+
           echo "--------------------------"
           echo "Initializing Compiler Cache"
           echo "--------------------------"
-      
-          CCACHE_PATH="$HOME/.ccache_${{ github.event.inputs.FILE }}_${{ env.CLANG_VERSION }}"
-      
-          # Export Compiler Cache Directory to Environment
-          echo "CCACHE_DIR=$CCACHE_PATH" >> "$GITHUB_ENV"
-      
-          # Create Cache Directory
-          mkdir -p "$CCACHE_PATH"
-      
-          echo ""
-          echo "Compiler Cache Directory Configured:"
-          echo "  Path : $CCACHE_PATH"
-      
-          # Show Current Compiler Cache Settings if Available
-          if command -v ccache >/dev/null 2>&1; then
-            echo ""
-            echo "Current Compiler Cache Configuration:"
-            ccache -p || true
-          fi
-      
-          echo "--------------------------"
 
+          # Use Environment Variable
+          CCACHE_PATH="$HOME/.ccache_${{ github.event.inputs.FILE }}_${{ env.CLANG_VERSION }}"
+          echo "CCACHE_DIR=$CCACHE_PATH" >> "$GITHUB_ENV"
+
+          mkdir -p "$CCACHE_PATH"
+
+          INIT_FLAG="$CCACHE_PATH/.ccache_initialized"
+          MAXSIZE="${CCACHE_MAXSIZE:-6G}"  # Default to 6G if not set
+
+          if ! command -v ccache >/dev/null 2>&1; then
+            echo "⚠️ Compiler Cache Not Found, Skipping Compiler Cache Setup"
+            exit 0
+          fi
+
+          if [ ! -f "$INIT_FLAG" ]; then
+            echo "🚀 Initializing Compiler Cache at $CCACHE_PATH..."
+            ccache -M "$MAXSIZE"
+            ccache --set-config=compression=true
+            ccache --set-config=compiler_check=content
+            touch "$INIT_FLAG"
+            echo "✅ Compiler Cache Initialized"
+          else
+            echo "🚀 Compiler Cache Already Initialized, Skipping"
+          fi
+
+          # Reset Statistics for Current Build
+          ccache -z
+          echo "📊 Current Compiler Cache Statistics:"
+          ccache -s
+          echo "--------------------------"
+          
       # ==============================
       # Restore Compiler Cache
       # ==============================
@@ -671,24 +720,6 @@ jobs:
             ccache-${{ runner.os }}-${{ env.CLANG_VERSION }}-${{ github.ref_name }}-
             ccache-${{ runner.os }}-${{ env.CLANG_VERSION }}-
             ccache-${{ runner.os }}-
-
-      # ==============================
-      # Configure Git Identity
-      # ==============================
-      - name: Configure Git Identity
-        shell: bash
-        run: |
-          echo "--------------------------"
-          echo "Configuring Git Identity"
-          echo "--------------------------"
-      
-          git config --global user.name  "AndreiMikh"
-          git config --global user.email "andreimikhail0088@gmail.com"
-      
-          echo ""
-          echo "Git Configuration Applied:"
-          git config --global --list
-          echo "--------------------------"
     
       # ==============================
       # Install and Cache Build Dependencies
