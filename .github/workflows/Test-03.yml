@@ -3307,9 +3307,9 @@ jobs:
         continue-on-error: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          EXPECTED_APK_HASH: ${{ secrets.KSU_APK_HASH }}  # Precomputed SHA256 hash
+          EXPECTED_APK_HASH: ${{ secrets.KSU_APK_HASH }}
         run: |
-          set -euo pipefail
+          set -Eeuo pipefail
       
           # ------------------------------
           # Configuration
@@ -3318,7 +3318,11 @@ jobs:
           BRANCH="${{ steps.manager.outputs.manager_branch }}"
           ARTIFACT="${{ steps.manager.outputs.manager_artifact }}"
           TARGET_DIR="./AnyKernel3"
-
+      
+          echo "------------------------------"
+          echo "KSU Meta Manager APK Downloader"
+          echo "------------------------------"
+      
           # ------------------------------
           # Validate Configuration
           # ------------------------------
@@ -3330,141 +3334,144 @@ jobs:
             exit 0
           fi
       
+          echo "Repository : $REPO"
+          echo "Branch     : $BRANCH"
+          echo "Artifact   : $ARTIFACT"
+          echo "Target Dir : $TARGET_DIR"
           echo "------------------------------"
-          echo "KSU Manager APK Downloader"
-          echo "------------------------------"
-          echo "Repository       : $REPO"
-          echo "Branch           : $BRANCH"
-          echo "Artifact         : $ARTIFACT"
-          echo "Target Directory : $TARGET_DIR"
-          echo "------------------------------"
+      
+          # ------------------------------
+          # Ensure Required Tools
+          # ------------------------------
+          for tool in gh curl unzip sha256sum; do
+            command -v "$tool" >/dev/null 2>&1 || {
+              echo "❌ Required Tool Missing: $tool"
+              exit 1
+            }
+          done
       
           # ------------------------------
           # Prepare Target Directory
           # ------------------------------
-          echo "🚀 Creating Target Directory..."
           mkdir -p "$TARGET_DIR"
-
+      
           # ------------------------------
           # Authenticate GitHub CLI
           # ------------------------------
           echo "📌 Authenticating GitHub CLI..."
           gh auth status >/dev/null 2>&1 || echo "$GITHUB_TOKEN" | gh auth login --with-token
-
       
           # ------------------------------
-          # Get Latest Successful Workflow Run
+          # Fetch Recent Successful Runs
           # ------------------------------
-          echo "🔎 Fetching Latest Successful Workflow Run..."
-          run_id=$(gh api --silent \
-            "repos/$REPO/actions/runs?branch=$BRANCH&status=completed&conclusion=success&per_page=1" \
-            --jq '.workflow_runs[0].id' 2>/dev/null || echo "")
+          echo "🔎 Fetching Recent Successful Runs..."
       
-          if [[ -z "$run_id" ]]; then
-            echo "⚠️ No Successful Workflow Run Found for Branch '$BRANCH'"
+          mapfile -t RUN_IDS < <(
+            gh api "repos/$REPO/actions/runs" \
+            -f branch="$BRANCH" \
+            -f status=completed \
+            -f conclusion=success \
+            -f per_page=5 \
+            --jq '.workflow_runs[].id'
+          )
+      
+          if [[ ${#RUN_IDS[@]} -eq 0 ]]; then
+            echo "⚠️ No Successful Workflow Runs Found"
             exit 0
           fi
-          echo "📌 Found Run ID: $run_id"
+      
+          artifact_url=""
       
           # ------------------------------
-          # Find Artifact URL (Robust)
+          # Search Artifact in Runs
           # ------------------------------
-          echo "🔎 Searching for Artifact '$ARTIFACT' in Run $run_id..."
-
-          # ------------------------------
-          # Fetch All Artifacts in the Run
-          # ------------------------------
-          artifact_url=$(gh api --silent \
-            "repos/$REPO/actions/runs/$run_id/artifacts" \
-            --jq ".artifacts[] | select(.name | contains(\"$ARTIFACT\")) | .archive_download_url" \
-            | head -n1 || echo "")
-
-          # ------------------------------
-          # Fallback: Try Previous Successful Runs if Not Found
-          # ------------------------------
-          if [[ -z "$artifact_url" ]]; then
-            echo "⚠️ Artifact '$ARTIFACT' Not Found in Latest Run 🔎 Searching Previous Runs..."
-            run_id=$(gh api --silent \
-              "repos/$REPO/actions/runs?branch=$BRANCH&status=completed&conclusion=success&per_page=5" \
-              --jq '.workflow_runs[].id' 2>/dev/null | grep -v "$run_id" | head -n1 || echo "")
-            
-            if [[ -n "$run_id" ]]; then
-              echo "📌 Trying Previous Run: $run_id"
-              artifact_url=$(gh api --silent \
-                "repos/$REPO/actions/runs/$run_id/artifacts" \
-                --jq ".artifacts[] | select(.name | contains(\"$ARTIFACT\")) | .archive_download_url" \
-                | head -n1 || echo "")
+          for run_id in "${RUN_IDS[@]}"; do
+            echo "🔎 Checking Run ID: $run_id"
+      
+            artifact_url=$(gh api "repos/$REPO/actions/runs/$run_id/artifacts" \
+              --jq ".artifacts[] | select(.name | contains(\"$ARTIFACT\")) | .archive_download_url" \
+              | head -n1 || true)
+      
+            if [[ -n "$artifact_url" ]]; then
+              echo "✔️ Artifact Found in Run: $run_id"
+              break
             fi
-          fi
-
-          # ------------------------------
-          # Final Check
-          # ------------------------------
+          done
+      
           if [[ -z "$artifact_url" ]]; then
-            echo "⚠️ Artifact '$ARTIFACT' Not Found in Any Recent Runs - Skipping Step"
+            echo "⚠️ Artifact '$ARTIFACT' Not Found in Recent Runs"
             exit 0
           fi
-          
-          echo "🎉 Artifact URL Found: $artifact_url"
+      
+          echo "🎉 Artifact URL Found"
       
           # ------------------------------
           # Download Artifact
           # ------------------------------
-          echo "ℹ️ Downloading Artifact..."
-          curl -fL --retry 3 --retry-delay 5 \
+          echo "⬇️ Downloading Artifact..."
+      
+          curl -fL \
+            --retry 5 \
+            --retry-delay 5 \
+            --retry-connrefused \
             -H "Authorization: token $GITHUB_TOKEN" \
-            -o manager.zip "$artifact_url"
+            -o manager.zip \
+            "$artifact_url"
       
           # ------------------------------
           # Extract APK
           # ------------------------------
-          echo "📂 Extracting APK to $TARGET_DIR..."
-          unzip -o -j manager.zip "*.apk" -d "$TARGET_DIR"
+          echo "📂 Extracting APK..."
+      
+          unzip -o -j manager.zip "*.apk" -d "$TARGET_DIR" >/dev/null
           rm -f manager.zip
       
           # ------------------------------
-          # Select Latest APK
+          # Select APK
           # ------------------------------
-          LATEST_APK=$(ls -t "$TARGET_DIR"/*.apk 2>/dev/null | head -n1 || echo "")
+          LATEST_APK=$(find "$TARGET_DIR" -type f -name "*.apk" -print -quit)
+      
           if [[ -z "$LATEST_APK" ]]; then
-            echo "⚠️ No APK Extracted!"
-            exit 1
-          fi
-          echo "📌 Latest APK Selected: $LATEST_APK"
-      
-          # ------------------------------
-          # Validate APK Existence and Size
-          # ------------------------------
-          if [[ ! -f "$LATEST_APK" || ! -s "$LATEST_APK" ]]; then
-            echo "⚠️ APK File Missing or Empty: $LATEST_APK"
+            echo "❌ No APK Extracted"
             exit 1
           fi
       
+          echo "📦 APK Found: $LATEST_APK"
+      
           # ------------------------------
-          # SHA256 Hash Verification
+          # Validate APK
           # ------------------------------
-          echo "ℹ️ Verifying APK SHA256 Hash..."
+          if [[ ! -s "$LATEST_APK" ]]; then
+            echo "❌ APK File is Empty or Missing"
+            exit 1
+          fi
+      
+          # ------------------------------
+          # SHA256 Verification
+          # ------------------------------
+          echo "🔐 Verifying SHA256..."
+      
           apk_hash=$(sha256sum "$LATEST_APK" | awk '{print $1}')
-          echo "Computed Hash: $apk_hash"
-          echo "Expected Hash: ${EXPECTED_APK_HASH:-<none>}"
-          
+      
+          echo "Computed Hash : $apk_hash"
+          echo "Expected Hash : ${EXPECTED_APK_HASH:-<none>}"
+      
           if [[ -n "${EXPECTED_APK_HASH:-}" ]]; then
             if [[ "$apk_hash" != "$EXPECTED_APK_HASH" ]]; then
-              echo "⚠️ SHA256 Mismatch! APK may be Corrupted or Tampered"
+              echo "⚠️ SHA256 Mismatch — APK may be Corrupted or Tampered"
               exit 1
             fi
-            echo "✔️ SHA256 Verified"
+            echo "✔️ SHA256 verified"
           else
             echo "⚠️ No Expected Hash Provided — Skipping Verification"
           fi
       
           # ------------------------------
-          # Export APK for Downstream Steps
+          # Export for Next Steps
           # ------------------------------
-          echo "🚀 Exporting APK Path for Downstream Steps..."
-          echo "LATEST_APK=$LATEST_APK" >> $GITHUB_ENV
+          echo "LATEST_APK=$LATEST_APK" >> "$GITHUB_ENV"
       
-          echo "🎉 KSU Manager APK Download, Extraction, and Validation Complete"
+          echo "🎉 KSU Meta Manager APK Ready"
           echo "------------------------------"
           
       # ==============================
