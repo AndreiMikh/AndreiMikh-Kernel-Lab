@@ -3014,133 +3014,182 @@ jobs:
           sed -i 's/check_defconfig//' ./build.config.gki
 
       # ==============================
-      # Fix IPv6 NAT Error
+      # Fix IPv6 NAT Fix Stage
       # ==============================
-      - name: IPv6 NAT Error
+      - name: Fix IPv6 NAT Fix Stage
         if: ${{ github.event.inputs.NETFILTER == 'true' }}
-        run: |
-          set -euxo pipefail
-
-          PATCH_DIR="${GITHUB_WORKSPACE}/kernel_workspace/AndreiMikh-Kernel-Lab/patches"
-          TARGET_DIR="${GITHUB_WORKSPACE}/kernel_workspace/kernel_platform/common"
-          PATCH_FILE="${PATCH_DIR}/IPv6.patch"
-
-          echo "NETFILTER Enabled — Checking IPv6 NAT Compatibility..."
-
-          # ------------------------------
-          # Ensure Target Directory Exists
-          # ------------------------------
-          if [[ ! -d "$TARGET_DIR" ]]; then
-            echo "⚠️ Target Directory Not Found: $TARGET_DIR"
-            exit 1
-          fi
-
-          cd "$TARGET_DIR"
-
-          # ------------------------------
-          # Only Apply on Supported CPU
-          # ------------------------------
-          if [[ "${CPU:-}" == sm* ]]; then
-            echo "🚀 Applying IPv6 NAT Compatibility Fix..."
-
-            if [[ ! -f "$PATCH_FILE" ]]; then
-              echo "⚠️ Patch File Not Found: $PATCH_FILE"
-              exit 1
-            fi
-
-            # ------------------------------
-            # Apply Patch with Fuzz Factor 3
-            # ------------------------------
-            patch -p1 -F 3 < "$PATCH_FILE"
-
-            echo "🎉 IPv6 NAT Fix Applied Successfully"
-            echo "------------------------------"
-          else
-            echo "⚠️ Device Does Not Support IPv6 NAT — Skipping..."
-            echo "------------------------------"
-          fi
-
-      # ==============================
-      # Custom Build Time
-      # ==============================
-      - name: Custom Build Time
         shell: bash
         run: |
           set -euo pipefail
+      
+          echo "------------------------------"
+          echo "IPv6 NAT Fix Stage"
+          echo "------------------------------"
+      
+          PATCH_DIR="${GITHUB_WORKSPACE}/kernel_workspace/AndreiMikh-Kernel-Lab/patches"
+          TARGET_DIR="${GITHUB_WORKSPACE}/kernel_workspace/kernel_platform/common"
+          PATCH_FILE="${PATCH_DIR}/IPv6.patch"
+      
+          echo "NETFILTER Enabled — Checking IPv6 NAT Compatibility..."
+      
+          # ------------------------------
+          # Validate Target Directory
+          # ------------------------------
+          if [[ ! -d "$TARGET_DIR" ]]; then
+              echo "⚠️ Target Directory Not Found:"
+              echo "$TARGET_DIR"
+              exit 1
+          fi
+      
+          cd "$TARGET_DIR"
+      
+          # ------------------------------
+          # Validate Patch File
+          # ------------------------------
+          if [[ ! -f "$PATCH_FILE" ]]; then
+              echo "⚠️ Patch File Not Found:"
+              echo "$PATCH_FILE"
+              exit 1
+          fi
+      
+          # ------------------------------
+          # Check CPU Support
+          # ------------------------------
+          if [[ "${CPU:-}" != sm* ]]; then
+              echo "⚠️ Device CPU Not Supported for IPv6 NAT Fix — Skipping"
+              exit 0
+          fi
+      
+          echo "📌 Device CPU Supports IPv6 NAT Fix"
+
+          # ------------------------------
+          # Check if Patch Already Applied
+          # ------------------------------
+          if patch --dry-run -p1 < "$PATCH_FILE" >/dev/null 2>&1; then
+              echo "🚀 Applying IPv6 NAT Compatibility Patch..."
+              patch -p1 -F3 < "$PATCH_FILE"
+              echo "✔️ IPv6 NAT Fix Applied Successfully"
+              echo "------------------------------"
+          else
+              echo "✔️ IPv6 NAT Patch Already Applied or Not Needed"
+              echo "------------------------------"
+          fi
+      
+          echo "IPv6 NAT Fix Stage Completed"
+          echo "------------------------------"
+
+      # ==============================
+      # Setup Custom Build Time
+      # ==============================
+      - name: Setup Custom Build Time
+        shell: bash
+        run: |
+          set -euo pipefail
+      
+          echo "------------------------------"
+          echo "Custom Build Time Setup"
+          echo "------------------------------"
       
           # ------------------------------
           # Determine Build Timestamp
           # ------------------------------
           INPUT_TIME="${{ github.event.inputs.BUILD_TIME }}"
       
-          if [[ -n "$INPUT_TIME" && "$INPUT_TIME" != "F" && "$INPUT_TIME" != "f" ]]; then
-            DATESTR="$INPUT_TIME"
-            echo "Using Input Build Time: $DATESTR"
+          if [[ -n "$INPUT_TIME" && "$INPUT_TIME" != [Ff] ]]; then
+              DATESTR="$INPUT_TIME"
+              echo "📌 Using Input Build Time: $DATESTR"
           else
-            DATESTR="$(TZ='UTC' date +'%a %b %d %T %Z %Y')"
-            echo "Using UTC Time as Fallback: $DATESTR"
+              DATESTR="$(TZ='UTC' date +'%a %b %d %T %Z %Y')"
+              echo "📌 Using UTC Time as Fallback: $DATESTR"
           fi
       
           # ------------------------------
-          # Export GitHub Environment Variables
+          # Export Environment Variables
           # ------------------------------
           echo "KBUILD_BUILD_TIMESTAMP=${DATESTR}" >> "$GITHUB_ENV"
           echo "KBUILD_BUILD_VERSION=1" >> "$GITHUB_ENV"
       
-          cd kernel_workspace/kernel_platform/
+          KERNEL_DIR="${GITHUB_WORKSPACE}/kernel_workspace/kernel_platform"
+          cd "$KERNEL_DIR" || { echo "⚠️ Kernel Directory Not Found: $KERNEL_DIR"; exit 1; }
       
           # ------------------------------
-          # Patch MKCompile Scripts with Build Timestamp
+          # Patch MKCompile Scripts
           # ------------------------------
-          for SCRIPT in common/scripts/mkcompile_h msm-kernel/scripts/mkcompile_h; do
-            if [[ -f "$SCRIPT" ]]; then
-              echo "🚀 Patching MKCompile Script: $SCRIPT with Build Time=$DATESTR"
+          SCRIPTS=(
+              "common/scripts/mkcompile_h"
+              "msm-kernel/scripts/mkcompile_h"
+          )
       
-              # ------------------------------
-              # If UTS Version Exists, Replace it
-              # ------------------------------
-              if grep -q 'UTS_VERSION=' "$SCRIPT"; then
-                perl -pi -e "s{UTS_VERSION=\"\\\$\\(.*?\\)\"}{UTS_VERSION=\"#1 SMP PREEMPT $DATESTR\"}" "$SCRIPT"
+          for SCRIPT in "${SCRIPTS[@]}"; do
+              if [[ -f "$SCRIPT" ]]; then
+                  echo "🚀 Patching MKCompile Script: $SCRIPT"
+      
+                  # ------------------------------
+                  # Replace existing UTS_VERSION
+                  # ------------------------------
+                  if grep -q '^UTS_VERSION=' "$SCRIPT"; then
+                      perl -pi -e "s{^UTS_VERSION=.*}{UTS_VERSION=\"#1 SMP PREEMPT $DATESTR\"}" "$SCRIPT"
+                      echo "✔️ Replaced Existing UTS Version"
+                  else
+                      # ------------------------------
+                      # Inject UTS_VERSION if Missing
+                      # ------------------------------
+                      # Add after first 'cat <<EOF'
+                      perl -0777 -pi -e "
+                        s{(cat <<EOF)}{\$1\n#undef UTS_VERSION\n#define UTS_VERSION \"#1 SMP PREEMPT $DATESTR\"}ms
+                      " "$SCRIPT"
+                      echo "✔️ Injected UTS Version Definition"
+                  fi
+      
               else
-              
-                # ------------------------------
-                # Otherwise, inject UTS Version Definition
-                # ------------------------------
-                perl -0777 -pi -e "s{cat <<EOF}{cat <<EOF\n#undef UTS_VERSION\n#define UTS_VERSION \"#1 SMP PREEMPT $DATESTR\"} unless /UTS_VERSION/" "$SCRIPT"
+                  echo "⚠️ Script Not Found: $SCRIPT — Skipping"
               fi
       
-            else
-              echo "⚠️ Script Not Found: $SCRIPT — Skipping"
               echo "------------------------------"
-            fi
           done
+      
+          echo "🎉 Custom Build Time Setup Completed"
+          echo "------------------------------"
           
       # ==============================
       # Disable GPU Embedded Bridge / Engine
       # ==============================
       - name: Disable GPUEB
         if: ${{ env.KERNEL_VERSION == '5.10' && startsWith(env.CPU, 'mt') }}
+        shell: bash
         run: |
           set -euo pipefail
-          echo "🚀 Checking GPU Embedded Bridge (GPUEB) Status for Mediatek Kernel 5.10..."
       
-          GPUEB_MAKEFILE="kernel_workspace/kernel-5.10/drivers/gpu/mediatek/Makefile"
+          echo "------------------------------"
+          echo "Disable GPU Embedded Bridge (GPUEB)"
+          echo "------------------------------"
+      
+          GPUEB_MAKEFILE="${GITHUB_WORKSPACE}/kernel_workspace/kernel-5.10/drivers/gpu/mediatek/Makefile"
       
           # ------------------------------
           # Verify Makefile Exists
           # ------------------------------
-          if [[ -f "$GPUEB_MAKEFILE" ]]; then
-            echo "🛠️ Disabling GPUEB in $GPUEB_MAKEFILE..."
-      
-            # Remove Any Lines Containing GPUEB from OBJ-Y
-            sed -i '/obj-y.*gpueb/d' "$GPUEB_MAKEFILE"
-      
-            echo "🎉 GPU Embedded Bridge / Engine Disabled Successfully"
-            echo "------------------------------"
-          else
-            echo "⚠️ Makefile Not Found: $GPUEB_MAKEFILE — Skipping GPUEB Disable"
-            echo "------------------------------"
+          if [[ ! -f "$GPUEB_MAKEFILE" ]]; then
+              echo "⚠️ Makefile Not Found: $GPUEB_MAKEFILE — skipping GPUEB disable"
+              exit 0
           fi
+      
+          echo "🛠️ Disabling GPUEB in $GPUEB_MAKEFILE..."
+      
+          # ------------------------------
+          # Check if GPUEB Already Disabled
+          # ------------------------------
+          if grep -q 'obj-y.*gpueb' "$GPUEB_MAKEFILE"; then
+          
+              # Remove Lines Containing GPUEB from OBJ-Y Assignments
+              sed -i '/obj-y.*gpueb/d' "$GPUEB_MAKEFILE"
+              echo "✔️ GPUEB Entries Removed Successfully"
+          else
+              echo "✔️ GPUEB Already Disabled — Nothing to Do"
+          fi
+      
+          echo "🎉 GPU Embedded Bridge / Engine Disable Stage Completed"
+          echo "------------------------------"
 
       # ==============================
       # Fast Kernel Build
@@ -3150,6 +3199,10 @@ jobs:
         id: fast_build
         run: |
           set -euo pipefail
+
+          echo "------------------------------"
+          echo "Fast Kernel Build"
+          echo "------------------------------"
 
           KERNEL_VERSION="${{ env.KERNEL_VERSION }}"
           cd kernel_workspace/kernel_platform
@@ -3204,12 +3257,12 @@ jobs:
           CLANG_DIR=$(echo "$CLANG_PREBUILT_BIN" | cut -d'/' -f1)
           CLANG_PATH=$(basename "$(dirname "$CLANG_PREBUILT_BIN")")
 
-          echo "--------------------------"
+          echo "------------------------------"
           echo "CLANG_VERSION=$CLANG_VERSION"
           echo "CLANG_DIR=$CLANG_DIR"
           echo "CLANG_PATH=$CLANG_PATH"
           echo "USE_LLVM_IAS=$USE_LLVM_IAS"
-          echo "--------------------------"
+          echo "------------------------------"
 
           # ------------------------------
           # Load Github Environment Script
@@ -3282,7 +3335,7 @@ jobs:
           if [[ "$ARCH" == "arm64" && "$KSU_META" =~ ^(KernelSU-Next|KernelSU|ReSukiSU)$ ]]; then
               KCFLAGS="$KCFLAGS -fstack-protector-strong"
               KCPPFLAGS="$KCPPFLAGS -DSTACKPROTECTOR_ENABLED"
-              echo "✅ Stack Protector Enabled for $KSU_META on $ARCH"
+              echo "✔️ Stack Protector Enabled for $KSU_META on $ARCH"
           else
               echo "⚠️ Stack Protector Disabled or Patched Out for $KSU_META on $ARCH"
           fi
@@ -3341,7 +3394,9 @@ jobs:
                   ;;
           esac
 
+          # ------------------------------
           # Only Use Auto-Feedback Directed Optimization if Profile Exists
+          # ------------------------------
           AFDO_FILE="$GITHUB_WORKSPACE/kernel_workspace/kernel_platform/afdo/kernel.afdo"
           if [[ -f "$AFDO_FILE" ]]; then
             echo ">> 📌 Using AutoFDO Profile: $AFDO_FILE"
@@ -3356,7 +3411,9 @@ jobs:
           echo ">> Running Old DefConfig"
           make O=out "${MAKE_ARGS[@]}" olddefconfig
 
+          # ------------------------------
           # Build Kernel With Flags
+          # ------------------------------
           echo ">> Compiling Kernel with $(nproc --all) Threads"
           make -j"$(nproc --all)" O=out "${MAKE_ARGS[@]}" KCFLAGS="$KCFLAGS" KCPPFLAGS="$KCPPFLAGS"
           
@@ -3379,15 +3436,17 @@ jobs:
           CPU="${{ env.CPUD }}"
           METHOD="${{ env.BUILD_METHOD }}"
 
-          echo "------ Kernel Build ------"
+          echo "-------- Kernel Build --------"
           echo "CPU      : $CPU"
           echo "Method   : $METHOD"
-          echo "--------------------------"
+          echo "------------------------------"
 
           BAZEL_SCRIPT="./kernel_platform/build_with_bazel.py"
           OPLUS_SCRIPT="./kernel_platform/oplus/build/oplus_build_kernel.sh"
 
+          # ------------------------------
           # Default Build Flags
+          # ------------------------------
           export LTO=${LTO:-thin}
           export SYSTEM_DLKM_RE_SIGN=${SYSTEM_DLKM_RE_SIGN:-0}
           export BUILD_SYSTEM_DLKM=${BUILD_SYSTEM_DLKM:-0}
@@ -3440,9 +3499,14 @@ jobs:
       # ==============================
       # Make AnyKernel3
       # ==============================
-      - name: AnyKernel3
+      - name: Make AnyKernel3
         run: |
           set -e
+
+          echo "------------------------------"
+          echo "Make AnyKernel3"
+          echo "------------------------------"
+          
           echo "🚀 Cloning AnyKernel3..."
           git clone --depth=1 https://github.com/AndreiMikh/AnyKernel3
           rm -rf ./AnyKernel3/.git
@@ -3487,6 +3551,7 @@ jobs:
           cp "$IMAGE_PATH" kernel_workspace/kernel_platform/out/Final-Image-Find/Image
 
           echo "🎉 Image Copied Successfully to AnyKernel3 and Backup"
+          echo "------------------------------"
           
       # ==============================
       # Patch Linux and Replace Image
@@ -3495,7 +3560,10 @@ jobs:
         if: ${{ github.event.inputs.KPM == 'KPM' }}
         run: |
           set -e
+
+          echo "------------------------------"
           echo "🚀 Starting KPM Patch Process..."
+          echo "------------------------------"
 
           PATCH_DIR="${GITHUB_WORKSPACE}/kernel_workspace/SukiSU_patch/kpm"
           OUT_DIR="${GITHUB_WORKSPACE}/kernel_workspace/kernel_platform/out/Final-Image-Find"
@@ -3557,6 +3625,7 @@ jobs:
           fi
 
           echo "🎉 KPM Patch Applied Successfully"
+          echo "------------------------------"
 
       # ==============================
       # Download and Validate KSU Meta Manager APK
@@ -3987,7 +4056,9 @@ jobs:
           fi
 
           echo "value=${SUFFIX}" >> $GITHUB_OUTPUT
+          
           echo "🎉 Suffix Value Set!"
+          echo "------------------------------"
   
       # ==============================
       # Upload Flashable Kernel Artifact
@@ -4086,7 +4157,8 @@ jobs:
             exit 0
           fi
       
-          echo "ZRAM Addon Module Prepared Successfully"
+          echo "🎉 ZRAM Addon Module Prepared Successfully"
+          echo "------------------------------"
        
       # ==============================
       # Upload ZRAM Addon Module
