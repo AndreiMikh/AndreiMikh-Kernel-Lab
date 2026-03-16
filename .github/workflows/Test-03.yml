@@ -3668,44 +3668,69 @@ jobs:
           mkdir -p "$TARGET_DIR"
       
           # ------------------------------
-          # Fetch Recent Successful Workflow Runs
+          # Fetch Recent Successful Workflow Runs (filtered)
           # ------------------------------
           echo "🔎 Fetching Recent Successful Workflow Runs..."
+
           mapfile -t RUN_IDS < <(
             gh api "repos/$REPO/actions/runs" \
               -f branch="$BRANCH" \
               -f status=completed \
               -f conclusion=success \
-              -f per_page=5 \
+              -f per_page=10 \
               --jq '.workflow_runs[].id' 2>/dev/null || true
           )
-      
+
           if [[ ${#RUN_IDS[@]} -eq 0 ]]; then
             echo "⚠️ No Successful Workflow Runs Found for Branch '$BRANCH'"
             exit 1
           fi
-      
+
           # ------------------------------
-          # Find Artifact URL
+          # Find Artifact URL safely
           # ------------------------------
           artifact_url=""
+
           for run_id in "${RUN_IDS[@]}"; do
-            echo "🔎 Checking run ID: $run_id"
-            url=$(gh api "repos/$REPO/actions/runs/$run_id/artifacts" \
-              --jq ".artifacts[] | select(.name==\"$ARTIFACT\") | .archive_download_url" 2>/dev/null || true)
-      
-            if [[ -n "$url" ]]; then
+            echo "🔎 Checking Run ID: $run_id"
+
+            response=$(gh api \
+              "repos/$REPO/actions/runs/$run_id/artifacts" \
+              2>/dev/null || true)
+
+            # Ensure JSON Valid
+            if ! echo "$response" | jq . >/dev/null 2>&1; then
+              echo "⚠️ Invalid API Response"
+              continue
+            fi
+
+            # Check Artifact Count
+            count=$(echo "$response" | jq '.artifacts | length')
+
+            if [[ "$count" -eq 0 ]]; then
+              echo "... ⚠️ No Artifacts"
+              continue
+            fi
+
+            # Find Matching Artifact Name
+            url=$(echo "$response" | jq -r \
+              ".artifacts[] | select(.name==\"$ARTIFACT\") | .archive_download_url")
+
+            if [[ "$url" == https://api.github.com/* ]]; then
               artifact_url="$url"
               echo "✔️ Artifact Found in Run: $run_id"
               break
+            else
+              echo "... ⚠️ Artifact Not in this Run"
             fi
+
           done
-      
+
           if [[ -z "$artifact_url" ]]; then
             echo "⚠️ Artifact '$ARTIFACT' Not Found in Recent Runs"
             exit 1
           fi
-      
+
           echo "🎉 Artifact URL Found: $artifact_url"
       
           # ------------------------------
