@@ -3071,69 +3071,63 @@ jobs:
       
           KERNEL_VERSION="${{ env.KERNEL_VERSION }}"
           KERNEL_ROOT="$GITHUB_WORKSPACE/kernel_workspace/kernel_platform"
+          COMMON_DIR="$KERNEL_ROOT/common"
       
           cd "$KERNEL_ROOT"
       
           # ------------------------------
-          # Detect LLVM IAS
+          # Locate Clang Toolchain
           # ------------------------------
-          USE_LLVM_IAS=false
-          if [[ -f ./common/build.config.arm ]] && grep -q '^LLVM_IAS=1' ./common/build.config.arm; then
-            USE_LLVM_IAS=true
-          fi
+          echo ">> Detecting Clang Toolchain"
       
-          # ------------------------------
-          # Locate Clang Prebuilt Binary
-          # ------------------------------
           CLANG_PREBUILT_BIN=""
-      
-          for f in ./common/build.config.common ./"$KERNEL_REPOS"/build.config.common; do
-            [[ -f "$f" ]] || continue
-            CLANG_PREBUILT_BIN=$(grep '^CLANG_PREBUILT_BIN=' "$f" | cut -d'=' -f2 || true)
+          for cfg in \
+            "$COMMON_DIR/build.config.common" \
+            "$KERNEL_ROOT/$KERNEL_REPOS/build.config.common"
+          do
+            [[ -f "$cfg" ]] || continue
+            CLANG_PREBUILT_BIN=$(grep -m1 '^CLANG_PREBUILT_BIN=' "$cfg" | cut -d= -f2 || true)
             [[ -n "$CLANG_PREBUILT_BIN" ]] && break
           done
       
           if [[ -z "$CLANG_PREBUILT_BIN" ]]; then
-            echo "⚠️ Clang Prebuilt Bin Not Found"
+            echo "⚠️ Clang Path Not Found — Using Fallback Build"
             echo "fallback=true" >> "$GITHUB_OUTPUT"
             exit 0
           fi
       
           # ------------------------------
-          # Detect Clang Version
+          # Resolve Clang Version
           # ------------------------------
           CLANG_VERSION=""
       
           if [[ "$CLANG_PREBUILT_BIN" =~ (clang-r[0-9a-z]+) ]]; then
             CLANG_VERSION="${BASH_REMATCH[1]}"
-          elif [[ -f ./common/build.config.constants ]]; then
-            CLANG_VERSION=$(grep '^CLANG_VERSION=' ./common/build.config.constants | cut -d'=' -f2 || true)
+          elif [[ -f "$COMMON_DIR/build.config.constants" ]]; then
+            CLANG_VERSION=$(grep -m1 '^CLANG_VERSION=' "$COMMON_DIR/build.config.constants" | cut -d= -f2 || true)
           fi
       
-          if [[ -z "$CLANG_VERSION" ]]; then
-            echo "⚠️ Unable to Detect Clang Version"
+          [[ -n "$CLANG_VERSION" ]] || {
+            echo "⚠️ Unable to Determine Clang Version"
             echo "fallback=true" >> "$GITHUB_OUTPUT"
             exit 0
-          fi
+          }
       
           echo "CLANG_VERSION=$CLANG_VERSION" >> "$GITHUB_ENV"
       
-          # Replace placeholder
-          CLANG_PREBUILT_BIN=${CLANG_PREBUILT_BIN/\$\{CLANG_VERSION\}/$CLANG_VERSION}
-      
+          CLANG_PREBUILT_BIN="${CLANG_PREBUILT_BIN/\$\{CLANG_VERSION\}/$CLANG_VERSION}"
           CLANG_PATH="$KERNEL_ROOT/$CLANG_PREBUILT_BIN"
       
-          if [[ ! -d "$CLANG_PATH" ]]; then
-            echo "⚠️ Clang Directory Not Found: $CLANG_PATH"
+          [[ -d "$CLANG_PATH" ]] || {
+            echo "⚠️ Missing Clang Directory: $CLANG_PATH"
             echo "fallback=true" >> "$GITHUB_OUTPUT"
             exit 0
-          fi
-      
+          }
+
           echo "------------------------------"
           echo "Kernel Version : $KERNEL_VERSION"
           echo "Clang Version  : $CLANG_VERSION"
-          echo "LLVM IAS       : $USE_LLVM_IAS"
-          echo "Clang Path     : $CLANG_PATH"
+          echo "Toolchain Path : $CLANG_PATH"
           echo "------------------------------"
       
           # ------------------------------
@@ -3144,22 +3138,40 @@ jobs:
           set -u
       
           # ------------------------------
-          # Setup Toolchain
+          # Setup Toolchain Environment
           # ------------------------------
-          export PATH="/usr/lib/ccache:$PATH"
-          export PATH="$CLANG_PATH:$PATH"
+          export PATH="/usr/lib/ccache:$CLANG_PATH:$PATH"
       
-          echo "Using Clang:"
+          echo ">> Compiler Information"
           clang --version || true
       
-          # Rust Support
+          # ------------------------------
+          # Configure Compiler Cache
+          # ------------------------------
+          if command -v ccache >/dev/null; then
+            echo ">> Initializing ccache"
+      
+            export CCACHE_DIR="${CCACHE_DIR:-$HOME/.ccache}"
+            export CCACHE_MAXSIZE=10G
+            export CCACHE_COMPRESS=true
+            export CCACHE_BASEDIR="$GITHUB_WORKSPACE"
+            export CCACHE_SLOPPINESS=time_macros
+      
+            ccache --set-config=max_size=10G
+            ccache --set-config=compression=true
+      
+            ccache -z || true
+          fi
+      
+          # ------------------------------
+          # Optional Rust Support
+          # ------------------------------
           if [[ "${ENABLE_RUST:-false}" == "true" ]]; then
             export BINDGEN="bindgen"
             export LIBCLANG_PATH="$(dirname "$CLANG_PATH")/lib"
           fi
       
-          cd ./common
-      
+          cd "$COMMON_DIR"
           mkdir -p out
       
           # ------------------------------
@@ -3170,10 +3182,11 @@ jobs:
           FPMAP="-ffile-prefix-map=${GITHUB_WORKSPACE}=."
       
           # ------------------------------
-          # Prepare Make Arguments
+          # Prepare Build Arguments
           # ------------------------------
           MAKE_ARGS=(
             LLVM=1
+            LLVM_IAS=1
             ARCH=arm64
             CROSS_COMPILE=aarch64-linux-gnu-
             CC="ccache clang"
@@ -3182,71 +3195,77 @@ jobs:
             HOSTLD=ld.lld
             PAHOLE=../../prebuilts/kernel-build-tools/linux-x86/bin/pahole
             KCFLAGS+="$MAP $MPMAP $FPMAP"
+            KCFLAGS+=-pipe
+            KCFLAGS+=-O2
             KCFLAGS+=-Wno-error
             KCFLAGS+=-D__ANDROID_COMMON_KERNEL__
-            KCFLAGS+=-pipe
           )
-      
-          [[ "$USE_LLVM_IAS" == "true" ]] && MAKE_ARGS=(LLVM_IAS=1 "${MAKE_ARGS[@]}")
       
           if [[ "${ENABLE_RUST:-false}" == "true" ]]; then
             MAKE_ARGS=(RUSTC=../../prebuilts/rust/linux-x86/$RUSTC_VERSION/bin/rustc "${MAKE_ARGS[@]}")
           fi
       
           # ------------------------------
-          # Generate Initial Configurations
+          # Generate Kernel Config
           # ------------------------------
-          echo ">> Generating Kernel Config"
+          echo ">> Generating Kernel Configuration"
           make O=out "${MAKE_ARGS[@]}" olddefconfig
       
           # ------------------------------
           # Configure LTO
           # ------------------------------
-          if [[ -f scripts/config ]]; then
+          if [[ -x scripts/config ]]; then
       
             echo ">> Configuring LTO"
       
             case "$KERNEL_VERSION" in
-              "5.10"|"5.15")
-                echo "LTO Mode: Thin"
-                scripts/config --file out/.config -e LTO_CLANG
-                scripts/config --file out/.config -e LTO_CLANG_THIN
-                scripts/config --file out/.config -d LTO_CLANG_NONE
-                scripts/config --file out/.config -d LTO_CLANG_FULL
+              5.10|5.15)
+                scripts/config --file out/.config \
+                  -e LTO_CLANG \
+                  -e LTO_CLANG_THIN \
+                  -d LTO_CLANG_NONE \
+                  -d LTO_CLANG_FULL
                 ;;
-              "6.12")
-                echo "LTO Mode: None"
-                scripts/config --file out/.config -e LTO_CLANG
-                scripts/config --file out/.config -e LTO_CLANG_NONE
-                scripts/config --file out/.config -d LTO_CLANG_THIN
-                scripts/config --file out/.config -d LTO_CLANG_FULL
+              6.12)
+                scripts/config --file out/.config \
+                  -e LTO_CLANG \
+                  -e LTO_CLANG_NONE \
+                  -d LTO_CLANG_THIN \
+                  -d LTO_CLANG_FULL
                 ;;
               *)
-                echo "LTO Skipped"
+                echo "LTO Configuration Skipped"
                 ;;
             esac
       
             make O=out "${MAKE_ARGS[@]}" olddefconfig
           else
-            echo "Scripts / Configurations Not Found, Skipping LTO Configuration"
+            echo "Scripts / Configurations Not Found — Skipping LTO Setup"
           fi
       
           # ------------------------------
           # Compile Kernel
           # ------------------------------
-          THREADS=$(nproc --ignore=1)
+          THREADS=$(nproc --ignore=1 2>/dev/null || echo 4)
       
           echo ">> Building Kernel Using $THREADS Threads"
       
-          make -j"$THREADS" O=out "${MAKE_ARGS[@]}"
+          make -j"$THREADS" O=out "${MAKE_ARGS[@]}" \
+            Image.gz \
+            modules \
+            dtbs
       
           # ------------------------------
-          # Compiler Cache Statistics
+          # Cache Statistics
           # ------------------------------
           if command -v ccache >/dev/null; then
-            echo "📊 Compiler Cache Statistics"
+            echo "📊 Final Compiler Cache Statistics"
             ccache -s
           fi
+      
+          echo ------------------------------
+          echo "Build Complete"
+          echo ------------------------------
 
       # ==============================
       # Fallback to Build Kernel
