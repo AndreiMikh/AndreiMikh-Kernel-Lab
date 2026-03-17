@@ -2389,50 +2389,43 @@ jobs:
           echo "------------------------------"
     
       # ==============================
-      # Enable LSM Baseband Guard
+      # LSM Baseband Guard Setup
       # ==============================
-      - name: LSM Baseband Guard
+      - name: Setup LSM Baseband Guard
         if: ${{ github.event.inputs.LSM == 'true' }}
         shell: bash
         run: |
-          set -euo pipefail
+          set -Eeuo pipefail
       
           echo "------------------------------"
-          echo "LSM Baseband Guard Setup"
+          echo "🚀 LSM Baseband Guard Setup"
           echo "------------------------------"
       
-          KERNEL_DIR="${GITHUB_WORKSPACE}/kernel_workspace/kernel_platform/common"
-          SCRIPT_CACHE="${KERNEL_DIR}/baseband_guard_setup.sh"
+          KERNEL_ROOT="${GITHUB_WORKSPACE}/kernel_workspace/kernel_platform"
+          COMMON_DIR="$KERNEL_ROOT/common"
           SCRIPT_URL="https://raw.githubusercontent.com/vc-teahouse/Baseband-guard/main/setup.sh"
-          KCONFIG_FILE="${KERNEL_DIR}/security/Kconfig"
-          BACKUP_FILE="${KCONFIG_FILE}.bak"
+          SCRIPT_CACHE="$COMMON_DIR/baseband_guard_setup.sh"
+          KCONFIG_FILE="$COMMON_DIR/security/Kconfig"
+          BACKUP_KCONFIG="$KCONFIG_FILE.bak"
+          OUT_CONFIG="$COMMON_DIR/out/.config"
       
           # ------------------------------
-          # Validate Kernel Directory
+          # Validate directories
           # ------------------------------
-          if [[ ! -d "$KERNEL_DIR" ]]; then
-              echo "❌ Kernel Directory Not Found:"
-              echo "$KERNEL_DIR"
-              exit 1
-          fi
+          [[ -d "$COMMON_DIR" ]] || { echo "❌ Common directory not found: $COMMON_DIR"; exit 1; }
       
-          cd "$KERNEL_DIR"
-      
-          echo "📌 Enabling Kernel-Level Baseband Protection..."
+          cd "$COMMON_DIR"
       
           # ------------------------------
-          # Download / Update Setup Script
+          # Download or update BBG setup script
           # ------------------------------
           if [[ ! -f "$SCRIPT_CACHE" ]]; then
               echo "📥 Downloading Baseband Guard Setup Script..."
-              curl -fL "$SCRIPT_URL" -o "$SCRIPT_CACHE"
+              curl -fsSL "$SCRIPT_URL" -o "$SCRIPT_CACHE"
               chmod +x "$SCRIPT_CACHE"
           else
-              echo "🔎 Checking for Setup Script Updates..."
-      
               TMP_SCRIPT="${SCRIPT_CACHE}.tmp"
-      
-              if curl -fLs "$SCRIPT_URL" -o "$TMP_SCRIPT"; then
+              if curl -fsSL "$SCRIPT_URL" -o "$TMP_SCRIPT"; then
                   if ! cmp -s "$TMP_SCRIPT" "$SCRIPT_CACHE"; then
                       echo "⬆️ Updating Setup Script"
                       mv "$TMP_SCRIPT" "$SCRIPT_CACHE"
@@ -2442,51 +2435,49 @@ jobs:
                       echo "✔️ Setup Script Already Up to Date"
                   fi
               else
-                  echo "⚠️ Failed to Check Script Updates (Continuing with Cached Version)"
+                  echo "⚠️ Failed to check script updates, using cached version"
               fi
           fi
       
           # ------------------------------
-          # Run Setup Script
+          # Run BBG script
           # ------------------------------
-          echo "🚀 Running Baseband Guard Setup Script..."
-      
-          if bash "$SCRIPT_CACHE" fix_blkdev_rename; then
-              echo "✔️ Baseband Guard Kernel Patch Stage Completed"
-          else
-              echo "⚠️ Baseband Guard Setup Script Failed"
-              exit 2
-          fi
+          echo "📌 Applying Baseband Guard kernel patches..."
+          bash "$SCRIPT_CACHE" fix_blkdev_rename || { echo "❌ BBG setup script failed"; exit 2; }
+          echo "✔️ BBG patch stage completed"
       
           # ------------------------------
-          # Validate Kernel Configuration File
+          # Backup Kconfig if needed
           # ------------------------------
-          if [[ ! -f "$KCONFIG_FILE" ]]; then
-              echo "⚠️ Security / Kernel Configuration Not Found"
-              exit 3
-          fi
+          [[ -f "$KCONFIG_FILE" ]] && [[ ! -f "$BACKUP_KCONFIG" ]] && {
+              cp "$KCONFIG_FILE" "$BACKUP_KCONFIG"
+              echo "✔️ Kconfig backup created: $BACKUP_KCONFIG"
+          }
       
           # ------------------------------
-          # Backup Kernel Configuration (Once)
+          # Add BBG to LSM defaults in Kconfig
           # ------------------------------
-          if [[ ! -f "$BACKUP_FILE" ]]; then
-              cp "$KCONFIG_FILE" "$BACKUP_FILE"
-              echo "✔️ Backup Created: $BACKUP_FILE"
-          fi
-      
-          # ------------------------------
-          # Add Baseband Guard to LSM Defaults
-          # ------------------------------
-          echo "🔧 Updating LSM Defaults..."
-      
           if grep -q "baseband_guard" "$KCONFIG_FILE"; then
-              echo "✔️ Baseband Guard Already Present in LSM Defaults"
+              echo "✔️ Baseband Guard already present in Kconfig"
           else
               sed -i '/^config LSM$/,/^help$/{
                 /^[[:space:]]*default/ s/selinux/selinux,baseband_guard/
               }' "$KCONFIG_FILE"
+              echo "✔️ Baseband Guard added to LSM defaults"
+          fi
       
-              echo "✔️ Baseband Guard Added to LSM Defaults"
+          # ------------------------------
+          # Patch .config used for build
+          # ------------------------------
+          if [[ -f "$OUT_CONFIG" ]]; then
+              echo "📌 Ensuring CONFIG_BBG and CONFIG_LSM include baseband_guard in .config"
+              # Enable BBG
+              scripts/config --file "$OUT_CONFIG" -e BBG || true
+              # Ensure LSM includes bbg
+              sed -i 's/^CONFIG_LSM="\([^"]*\)"/CONFIG_LSM="\1,bbg"/' "$OUT_CONFIG"
+              echo "✔️ .config patched for BBG"
+          else
+              echo "⚠️ Build .config not found, BBG will be enabled at next olddefconfig"
           fi
       
           echo "🎉 LSM Baseband Guard Setup Completed"
