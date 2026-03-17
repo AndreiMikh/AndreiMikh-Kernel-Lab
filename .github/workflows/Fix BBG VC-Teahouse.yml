@@ -1,7 +1,7 @@
 # ===========================
 # OnePlus Kernel Action Build
 # ===========================
-name: Fix BBG VC-Teahouse
+name: Main-03
 on:
   workflow_dispatch:
     inputs:
@@ -196,6 +196,12 @@ on:
       RE_KERNEL:
         type: boolean
         description: "Apply REKERNEL? (Applicable for Custom Manifest)"
+        required: true
+        default: false
+
+      DOCKER_LXC:
+        type: boolean
+        description: "Enable Docker / LXC Container Support?"
         required: true
         default: false
         
@@ -621,6 +627,7 @@ jobs:
               echo "UNICODE_BYPASS    : ${{ github.event.inputs.UNICODE_BYPASS }}"
               echo "RE_KERNEL         : ${{ github.event.inputs.RE_KERNEL }}"
               echo "XUS_FIX           : ${{ github.event.inputs.XUS_FIX }}"
+              echo "DOCKER_LXC        : ${{ github.event.inputs.DOCKER_LXC }}"
               
               # ------------------------------
               # Unicode Inspection (Whitespace / Hidden Character Detection)
@@ -2389,34 +2396,105 @@ jobs:
           echo "------------------------------"
     
       # ==============================
-      # Linux Security Module (LSM) Baseband Guard Setup
+      # Enable LSM Baseband Guard
       # ==============================
       - name: LSM Baseband Guard
         if: ${{ github.event.inputs.LSM == 'true' }}
         shell: bash
         run: |
-          set -euo pipefail  # Exit on Error, Unset Variables, and Pipe Failures
-      
-          # Navigate to the Kernel Common Directory
-          cd kernel_workspace/kernel_platform/common || exit 1
+          set -euo pipefail
       
           echo "------------------------------"
-          echo "Enabling Kernel-Level Baseband Protection..."
+          echo "LSM Baseband Guard Setup"
           echo "------------------------------"
       
-          # Download and Execute the Baseband Guard Setup Script
-          # 'FIX BLKDEV RENAME' Argument Applies a Known Baseband Guard Fix
-          curl -LSs \
-            https://raw.githubusercontent.com/vc-teahouse/Baseband-guard/main/setup.sh \
-            | bash -s fix_blkdev_rename
+          KERNEL_DIR="${GITHUB_WORKSPACE}/kernel_workspace/kernel_platform/common"
+          SCRIPT_CACHE="${KERNEL_DIR}/baseband_guard_setup.sh"
+          SCRIPT_URL="https://raw.githubusercontent.com/vc-teahouse/Baseband-guard/main/setup.sh"
+          KCONFIG_FILE="${KERNEL_DIR}/security/Kconfig"
+          BACKUP_FILE="${KCONFIG_FILE}.bak"
       
-          # Update the Security / Kernel Configuration to include Baseband Guard in Configuration Linux Security Module
-          # This Ensures BBG is Properly Integrated into the Kernel Linux Security Module List
-          sed -i '/^config LSM$/,/^help$/{
-            /^[[:space:]]*default/{
-              /baseband_guard/! s/selinux/selinux,baseband_guard/
-            }
-          }' ./security/Kconfig
+          # ------------------------------
+          # Validate Kernel Directory
+          # ------------------------------
+          if [[ ! -d "$KERNEL_DIR" ]]; then
+              echo "❌ Kernel Directory Not Found:"
+              echo "$KERNEL_DIR"
+              exit 1
+          fi
+      
+          cd "$KERNEL_DIR"
+      
+          echo "📌 Enabling Kernel-Level Baseband Protection..."
+      
+          # ------------------------------
+          # Download / Update Setup Script
+          # ------------------------------
+          if [[ ! -f "$SCRIPT_CACHE" ]]; then
+              echo "📥 Downloading Baseband Guard Setup Script..."
+              curl -fL "$SCRIPT_URL" -o "$SCRIPT_CACHE"
+              chmod +x "$SCRIPT_CACHE"
+          else
+              echo "🔎 Checking for Setup Script Updates..."
+      
+              TMP_SCRIPT="${SCRIPT_CACHE}.tmp"
+      
+              if curl -fLs "$SCRIPT_URL" -o "$TMP_SCRIPT"; then
+                  if ! cmp -s "$TMP_SCRIPT" "$SCRIPT_CACHE"; then
+                      echo "⬆️ Updating Setup Script"
+                      mv "$TMP_SCRIPT" "$SCRIPT_CACHE"
+                      chmod +x "$SCRIPT_CACHE"
+                  else
+                      rm -f "$TMP_SCRIPT"
+                      echo "✔️ Setup Script Already Up to Date"
+                  fi
+              else
+                  echo "⚠️ Failed to Check Script Updates (Continuing with Cached Version)"
+              fi
+          fi
+      
+          # ------------------------------
+          # Run Setup Script
+          # ------------------------------
+          echo "🚀 Running Baseband Guard Setup Script..."
+      
+          if bash "$SCRIPT_CACHE" fix_blkdev_rename; then
+              echo "✔️ Baseband Guard Kernel Patch Stage Completed"
+          else
+              echo "⚠️ Baseband Guard Setup Script Failed"
+              exit 2
+          fi
+      
+          # ------------------------------
+          # Validate Kernel Configuration File
+          # ------------------------------
+          if [[ ! -f "$KCONFIG_FILE" ]]; then
+              echo "⚠️ Security / Kernel Configuration Not Found"
+              exit 3
+          fi
+      
+          # ------------------------------
+          # Backup Kernel Configuration (Once)
+          # ------------------------------
+          if [[ ! -f "$BACKUP_FILE" ]]; then
+              cp "$KCONFIG_FILE" "$BACKUP_FILE"
+              echo "✔️ Backup Created: $BACKUP_FILE"
+          fi
+      
+          # ------------------------------
+          # Add Baseband Guard to LSM Defaults
+          # ------------------------------
+          echo "🔧 Updating LSM Defaults..."
+      
+          if grep -q "baseband_guard" "$KCONFIG_FILE"; then
+              echo "✔️ Baseband Guard Already Present in LSM Defaults"
+          else
+              sed -i '/^config LSM$/,/^help$/{
+                /^[[:space:]]*default/ s/selinux/selinux,baseband_guard/
+              }' "$KCONFIG_FILE"
+      
+              echo "✔️ Baseband Guard Added to LSM Defaults"
+          fi
       
           echo "🎉 LSM Baseband Guard Setup Completed"
           echo "------------------------------"
@@ -2448,6 +2526,7 @@ jobs:
           RE_KERNEL="${{ github.event.inputs.RE_KERNEL }}" 
           GKI_V="${{ env.KANDROID_VERSION }}-${{ env.KERNEL_VERSION }}"
           KPM_INPUT="${{ github.event.inputs.KPM }}"
+          DOCKER_LXC="${{ github.event.inputs.DOCKER_LXC }}"
           BBR_ECN="${{ github.event.inputs.BBR_ECN }}"
           ZRAM_LZ4="${{ github.event.inputs.ZRAM-LZ4 }}"
           ZRAM="${{ github.event.inputs.ZRAM }}"
@@ -2608,6 +2687,144 @@ jobs:
 
           echo "🎉 TMPFS Configuration Applied"
           echo "------------------------------"
+
+          # ------------------------------
+          # Docker / LXC Container Support (Android GKI Only, SELinux Strict Safe)
+          # ------------------------------
+          if [[ "$DOCKER_LXC" == "true" ]]; then
+            if [[ "$GKI_V" == "android14-6.1" || \
+                  "$GKI_V" == "android15-6.6" || \
+                  "$GKI_V" == "android16-6.12" ]]; then
+
+              echo "🐳 Enabling Docker / LXC Kernel Support for $GKI_V..."
+
+              cat >> "$CONFIG_FILE" << EOF
+
+          # ------------------------------
+          # Namespaces (Excluding 'USER NS' for SELinux Strict Safety)
+          # ------------------------------
+          CONFIG_NAMESPACES=y
+          CONFIG_UTS_NS=y
+          CONFIG_IPC_NS=y
+          CONFIG_PID_NS=y
+          CONFIG_NET_NS=y
+          CONFIG_MNT_NS=y
+          CONFIG_TIME_NS=y
+
+          # ------------------------------
+          # Control Groups (CGROUPS Version 2 Ready)
+          # ------------------------------
+          CONFIG_CGROUPS=y
+          CONFIG_CGROUP_FREEZER=y
+          CONFIG_CGROUP_PIDS=y
+          CONFIG_CGROUP_DEVICE=y
+          CONFIG_CGROUP_CPUACCT=y
+          CONFIG_CGROUP_SCHED=y
+          CONFIG_CPUSETS=y
+          CONFIG_MEMCG=y
+          CONFIG_BLK_CGROUP=y
+          CONFIG_CGROUP_BPF=y
+          CONFIG_CGROUP_MISC=y
+          CONFIG_CGROUP_HUGETLB=y
+          CONFIG_CGROUP_PERF=y
+          CONFIG_SOCK_CGROUP_DATA=y
+          CONFIG_CFS_BANDWIDTH=y
+
+          # ------------------------------
+          # BPF - Packet Filter (Required for Modern Docker / LXC Container Runtime)
+          # ------------------------------
+          CONFIG_BPF=y
+          CONFIG_BPF_SYSCALL=y
+          CONFIG_BPF_JIT=y
+          CONFIG_BPF_JIT_ALWAYS_ON=y
+          CONFIG_BPF_EVENTS=y
+
+          # ------------------------------
+          # Security / Capabilities
+          # ------------------------------
+          CONFIG_KEYS=y
+          CONFIG_AUDIT=y
+          CONFIG_SECCOMP=y
+          CONFIG_SECCOMP_FILTER=y
+
+          # ------------------------------
+          # File Systems and OverlayFS
+          # ------------------------------
+          CONFIG_OVERLAY_FS=y
+          CONFIG_OVERLAY_FS_REDIRECT_DIR=y
+          CONFIG_OVERLAY_FS_INDEX=y
+          CONFIG_OVERLAY_FS_METACOPY=y
+          CONFIG_TMPFS=y
+          CONFIG_PROC_FS=y
+          CONFIG_SYSFS=y
+          CONFIG_DEVTMPFS=y
+          CONFIG_MEMFD_CREATE=y
+          CONFIG_POSIX_MQUEUE=y
+          CONFIG_CHECKPOINT_RESTORE=y
+          CONFIG_FHANDLE=y
+          CONFIG_DEVPTS_MULTIPLE_INSTANCES=y
+          CONFIG_UNIX98_PTYS=y
+          CONFIG_EVENTFD=y
+          CONFIG_EPOLL=y
+          CONFIG_SIGNALFD=y
+          CONFIG_TIMERFD=y
+
+          # ------------------------------
+          # IPC (Inter Process Communication)
+          # ------------------------------
+          CONFIG_SYSVIPC=y
+          CONFIG_SYSVIPC_SYSCTL=y
+          CONFIG_SHMEM=y
+
+          # ------------------------------
+          # Loop / SquashFS / Image Files
+          # ------------------------------
+          CONFIG_BLK_DEV_LOOP=y
+          CONFIG_SQUASHFS=y
+          CONFIG_SQUASHFS_XZ=y
+          CONFIG_SQUASHFS_LZ4=y
+          CONFIG_SQUASHFS_ZSTD=y
+
+          # ------------------------------
+          # Network for Containers: Event / FD
+          # ------------------------------
+          CONFIG_VETH=y
+          CONFIG_BRIDGE=y
+          CONFIG_BRIDGE_NETFILTER=y
+          CONFIG_TUN=y
+          CONFIG_MACVLAN=y
+          CONFIG_IPVLAN=y
+
+          # ------------------------------
+          # NetFilter for Container NAT
+          # ------------------------------
+          CONFIG_NETFILTER=y
+          CONFIG_NF_TABLES=y
+          CONFIG_NF_NAT=y
+          CONFIG_NFT_NAT=y
+          CONFIG_NFT_CHAIN_NAT=y
+          CONFIG_NFT_MASQ=y
+          CONFIG_NFT_CT=y
+          CONFIG_IP_NF_IPTABLES=y
+          CONFIG_IP_NF_FILTER=y
+          CONFIG_IP_NF_NAT=y
+          CONFIG_IP6_NF_NAT=y
+          CONFIG_NETFILTER_XT_MATCH_CONNTRACK=y
+          CONFIG_NETFILTER_XT_MATCH_ADDRTYPE=y
+          CONFIG_NETFILTER_XT_TARGET_MASQUERADE=y
+
+          EOF
+
+              echo "🎉 Docker / LXC Support Enabled for $GKI_V (SELinux Safe)"
+              echo "------------------------------"
+            else
+              echo "⚠️ Docker / LXC Support Skipped — GKI Version $GKI_V Not Supported"
+              echo "------------------------------"
+            fi
+          else
+            echo "📌 Docker / LXC Support Disabled by Input"
+            echo "------------------------------"
+          fi
 
           # ------------------------------
           # BBR + ECN Kernel Configuration with Brutal Default and Cubic Fallback
@@ -2992,130 +3209,104 @@ jobs:
         if: ${{ github.event.inputs.FAST_BUILD == 'true' }}
         id: fast_build
         run: |
-          set -Eeuo pipefail
-      
+          set -euo pipefail
+
           echo "------------------------------"
           echo "Fast Kernel Build"
           echo "------------------------------"
-      
+
           KERNEL_VERSION="${{ env.KERNEL_VERSION }}"
-          KERNEL_ROOT="$GITHUB_WORKSPACE/kernel_workspace/kernel_platform"
-          COMMON_DIR="$KERNEL_ROOT/common"
-      
-          cd "$KERNEL_ROOT"
-      
+          cd kernel_workspace/kernel_platform
+
           # ------------------------------
-          # Locate Clang Toolchain
+          # Detect LLVM IAS
           # ------------------------------
-          echo ">> Detecting Clang Toolchain"
-      
+          USE_LLVM_IAS=false
+          if [[ -f ./common/build.config.arm ]] && grep -q '^LLVM_IAS=1' ./common/build.config.arm; then
+            USE_LLVM_IAS=true
+          fi
+
+          # ------------------------------
+          # Locate Clang Prebuilt Binary
+          # ------------------------------
           CLANG_PREBUILT_BIN=""
-          for cfg in \
-            "$COMMON_DIR/build.config.common" \
-            "$KERNEL_ROOT/$KERNEL_REPOS/build.config.common"
-          do
-            [[ -f "$cfg" ]] || continue
-            CLANG_PREBUILT_BIN=$(grep -m1 '^CLANG_PREBUILT_BIN=' "$cfg" | cut -d= -f2 || true)
+          for f in ./common/build.config.common ./"$KERNEL_REPOS"/build.config.common; do
+            [[ -f "$f" ]] || continue
+            CLANG_PREBUILT_BIN=$(grep '^CLANG_PREBUILT_BIN=' "$f" | cut -d'=' -f2)
             [[ -n "$CLANG_PREBUILT_BIN" ]] && break
           done
-      
+
           if [[ -z "$CLANG_PREBUILT_BIN" ]]; then
-            echo "⚠️ Clang Path Not Found — Using Fallback Build"
+            echo "⚠️ Clang Prebuilt Bin Not Found. Falling Back to Official Build Script"
             echo "fallback=true" >> "$GITHUB_OUTPUT"
             exit 0
           fi
-      
+
           # ------------------------------
-          # Resolve Clang Version
+          # Determine Clang Version
           # ------------------------------
-          CLANG_VERSION=""
-      
           if [[ "$CLANG_PREBUILT_BIN" =~ (clang-r[0-9a-z]+) ]]; then
             CLANG_VERSION="${BASH_REMATCH[1]}"
-          elif [[ -f "$COMMON_DIR/build.config.constants" ]]; then
-            CLANG_VERSION=$(grep -m1 '^CLANG_VERSION=' "$COMMON_DIR/build.config.constants" | cut -d= -f2 || true)
+          elif [[ -f ./common/build.config.constants ]]; then
+            CLANG_VERSION=$(grep '^CLANG_VERSION=' ./common/build.config.constants | cut -d'=' -f2 || true)
           fi
-      
-          [[ -n "$CLANG_VERSION" ]] || {
-            echo "⚠️ Unable to Determine Clang Version"
+
+          if [[ -z "$CLANG_VERSION" ]]; then
+            echo "⚠️ Unable to Determine Clang Version. Falling Back to Official Build Script"
             echo "fallback=true" >> "$GITHUB_OUTPUT"
             exit 0
-          }
-      
-          echo "CLANG_VERSION=$CLANG_VERSION" >> "$GITHUB_ENV"
-      
-          CLANG_PREBUILT_BIN="${CLANG_PREBUILT_BIN/\$\{CLANG_VERSION\}/$CLANG_VERSION}"
-          CLANG_PATH="$KERNEL_ROOT/$CLANG_PREBUILT_BIN"
-      
-          [[ -d "$CLANG_PATH" ]] || {
-            echo "⚠️ Missing Clang Directory: $CLANG_PATH"
-            echo "fallback=true" >> "$GITHUB_OUTPUT"
-            exit 0
-          }
+          fi
+
+          # ------------------------------
+          # Replace Placeholder with Actual Clang Version
+          # ------------------------------
+          CLANG_PREBUILT_BIN=${CLANG_PREBUILT_BIN/\$\{CLANG_VERSION\}/$CLANG_VERSION}
+
+          # ------------------------------
+          # Extract Directory Information
+          # ------------------------------
+          CLANG_DIR=$(echo "$CLANG_PREBUILT_BIN" | cut -d'/' -f1)
+          CLANG_PATH=$(basename "$(dirname "$CLANG_PREBUILT_BIN")")
 
           echo "------------------------------"
-          echo "Kernel Version : $KERNEL_VERSION"
-          echo "Clang Version  : $CLANG_VERSION"
-          echo "Toolchain Path : $CLANG_PATH"
+          echo "CLANG_VERSION=$CLANG_VERSION"
+          echo "CLANG_DIR=$CLANG_DIR"
+          echo "CLANG_PATH=$CLANG_PATH"
+          echo "USE_LLVM_IAS=$USE_LLVM_IAS"
           echo "------------------------------"
-      
+
           # ------------------------------
-          # Load Kernel Environment
+          # Load Github Environment Script
           # ------------------------------
           set +u
-          source "$KERNEL_ROOT/build/kernel/_setup_env.sh" 2>/dev/null || true
+          source "$GITHUB_WORKSPACE/kernel_workspace/kernel_platform/build/kernel/_setup_env.sh" 2>/dev/null || true
           set -u
-      
+
           # ------------------------------
-          # Setup Toolchain Environment
+          # Set Github Environment Variables
           # ------------------------------
-          export PATH="/usr/lib/ccache:$CLANG_PATH:$PATH"
-      
-          echo ">> Compiler Information"
-          clang --version || true
-      
-          # ------------------------------
-          # Configure Compiler Cache
-          # ------------------------------
-          if command -v ccache >/dev/null; then
-            echo ">> Initializing ccache"
-      
-            export CCACHE_DIR="${CCACHE_DIR:-$HOME/.ccache}"
-            export CCACHE_MAXSIZE=10G
-            export CCACHE_COMPRESS=true
-            export CCACHE_BASEDIR="$GITHUB_WORKSPACE"
-            export CCACHE_SLOPPINESS=time_macros
-      
-            ccache --set-config=max_size=10G
-            ccache --set-config=compression=true
-      
-            ccache -z || true
-          fi
-      
-          # ------------------------------
-          # Optional Rust Support
-          # ------------------------------
-          if [[ "${ENABLE_RUST:-false}" == "true" ]]; then
+          export PATH="$GITHUB_WORKSPACE/kernel_workspace/kernel_platform/$CLANG_PREBUILT_BIN:$PATH"
+          export PATH="/usr/lib/ccache:$PATH"
+
+          if [[ "$ENABLE_RUST" == "true" ]]; then
             export BINDGEN="bindgen"
-            export LIBCLANG_PATH="$(dirname "$CLANG_PATH")/lib"
+            export LIBCLANG_PATH="$GITHUB_WORKSPACE/kernel_workspace/kernel_platform/$(dirname "$CLANG_PREBUILT_BIN")/lib"
           fi
-      
-          cd "$COMMON_DIR"
-          mkdir -p out
-      
+
+          cd ./common
+
           # ------------------------------
-          # Reproducible Build Flags
+          # Prefix Mapping for Reproducibility
           # ------------------------------
           MAP="-fdebug-prefix-map=${GITHUB_WORKSPACE}=."
           MPMAP="-fmacro-prefix-map=${GITHUB_WORKSPACE}=."
           FPMAP="-ffile-prefix-map=${GITHUB_WORKSPACE}=."
-      
+
           # ------------------------------
-          # Prepare Build Arguments
+          # Prepare Make Arguments
           # ------------------------------
           MAKE_ARGS=(
             LLVM=1
-            LLVM_IAS=1
             ARCH=arm64
             CROSS_COMPILE=aarch64-linux-gnu-
             CC="ccache clang"
@@ -3124,77 +3315,124 @@ jobs:
             HOSTLD=ld.lld
             PAHOLE=../../prebuilts/kernel-build-tools/linux-x86/bin/pahole
             KCFLAGS+="$MAP $MPMAP $FPMAP"
-            KCFLAGS+=-pipe
-            KCFLAGS+=-O2
             KCFLAGS+=-Wno-error
             KCFLAGS+=-D__ANDROID_COMMON_KERNEL__
           )
-      
-          if [[ "${ENABLE_RUST:-false}" == "true" ]]; then
-            MAKE_ARGS=(RUSTC=../../prebuilts/rust/linux-x86/$RUSTC_VERSION/bin/rustc "${MAKE_ARGS[@]}")
-          fi
-      
+
+          [[ "$USE_LLVM_IAS" == "true" ]] && MAKE_ARGS=(LLVM_IAS=1 "${MAKE_ARGS[@]}")
+          [[ "$ENABLE_RUST" == "true" ]] && MAKE_ARGS=(RUSTC=../../prebuilts/rust/linux-x86/$RUSTC_VERSION/bin/rustc "${MAKE_ARGS[@]}")
+
           # ------------------------------
-          # Generate Kernel Config
+          # Kernel Configuration and Compilation
           # ------------------------------
-          echo ">> Generating Kernel Configuration"
-          make O=out "${MAKE_ARGS[@]}" olddefconfig
-      
+          echo ">> Running GKI DefConfig"
+          ARCH="arm64"  # Force Target Architecture
+          make O=out ARCH=$ARCH "${MAKE_ARGS[@]}" gki_defconfig
+
           # ------------------------------
-          # Configure LTO
+          # Stack Protector Flags (KSU Compatible)
           # ------------------------------
-          if [[ -x scripts/config ]]; then
-      
-            echo ">> Configuring LTO"
-      
-            case "$KERNEL_VERSION" in
-              5.10|5.15)
-                scripts/config --file out/.config \
-                  -e LTO_CLANG \
-                  -e LTO_CLANG_THIN \
-                  -d LTO_CLANG_NONE \
-                  -d LTO_CLANG_FULL
-                ;;
-              6.12)
-                scripts/config --file out/.config \
-                  -e LTO_CLANG \
-                  -e LTO_CLANG_NONE \
-                  -d LTO_CLANG_THIN \
-                  -d LTO_CLANG_FULL
-                ;;
-              *)
-                echo "LTO Configuration Skipped"
-                ;;
-            esac
-      
-            make O=out "${MAKE_ARGS[@]}" olddefconfig
+          : "${KCFLAGS:=}"
+          : "${KCPPFLAGS:=}"
+
+          # ------------------------------
+          # Use Environment Variable Passed from GitHub Actions
+          # ------------------------------
+          KSU_META="${KSU_META:-${{ github.event.inputs.KSU_META }}}"
+
+          # ------------------------------
+          # Enable Stack Protector Only for ARM64 + KSU Meta Variants
+          # ------------------------------
+          if [[ "$ARCH" == "arm64" && "$KSU_META" =~ ^(KernelSU-Next|KernelSU|ReSukiSU)$ ]]; then
+              KCFLAGS="$KCFLAGS -fstack-protector-strong"
+              KCPPFLAGS="$KCPPFLAGS -DSTACKPROTECTOR_ENABLED"
+              echo "✔️ Stack Protector Enabled for $KSU_META on $ARCH"
           else
-            echo "Scripts / Configurations Not Found — Skipping LTO Setup"
+              echo "⚠️ Stack Protector Disabled or Patched Out for $KSU_META on $ARCH"
           fi
-      
+
           # ------------------------------
-          # Compile Kernel
+          # Export for Current and Subsequent Steps
           # ------------------------------
-          THREADS=$(nproc --ignore=1 2>/dev/null || echo 4)
-      
-          echo ">> Building Kernel Using $THREADS Threads"
-      
-          make -j"$THREADS" O=out "${MAKE_ARGS[@]}" \
-            Image.gz \
-            modules \
-            dtbs
-      
+          export KCFLAGS KCPPFLAGS
+          echo "KCFLAGS=$KCFLAGS" >> $GITHUB_ENV
+          echo "KCPPFLAGS=$KCPPFLAGS" >> $GITHUB_ENV
+
           # ------------------------------
-          # Cache Statistics
+          # Ensure Kernel Configuration Allows Stack Protector
           # ------------------------------
-          if command -v ccache >/dev/null; then
-            echo "📊 Final Compiler Cache Statistics"
-            ccache -s
+          CONFIG_FILE="out/.config"
+          if [[ -f "$CONFIG_FILE" ]]; then
+          
+              # ------------------------------
+              # Enable Compiler Stack Protector Support
+              # ------------------------------
+              scripts/config --file "$CONFIG_FILE" -e CONFIG_CC_STACKPROTECTOR
+
+              # ------------------------------
+              # Enable Strong Stack Protector
+              # ------------------------------
+              scripts/config --file "$CONFIG_FILE" -e CONFIG_STACKPROTECTOR_STRONG
+
+              # ------------------------------
+              # Disable Per-Task Stack Protector if Undefined for this Arch
+              # ------------------------------
+              scripts/config --file "$CONFIG_FILE" -d CONFIG_STACKPROTECTOR_PER_TASK || true
           fi
-      
-          echo ------------------------------
-          echo "Build Complete"
-          echo ------------------------------
+          
+          # ------------------------------
+          # Link Time Optimization (LTO) Configuration Based on Kernel Version
+          # ------------------------------
+          echo ">> Configuring Link Time Optimization for Kernel $KERNEL_VERSION"
+          
+          case "$KERNEL_VERSION" in
+              "5.10"|"5.15")
+                  echo ">> 🚀 Link Time Optimization: Thin"
+                  scripts/config --file out/.config -e LTO_CLANG
+                  scripts/config --file out/.config -e LTO_CLANG_THIN
+                  scripts/config --file out/.config -d LTO_CLANG_NONE
+                  scripts/config --file out/.config -d LTO_CLANG_FULL
+                  ;;
+              "6.12")
+                  echo ">> 🚀 Link Time Optimization: None"
+                  scripts/config --file out/.config -e LTO_CLANG
+                  scripts/config --file out/.config -e LTO_CLANG_NONE
+                  scripts/config --file out/.config -d LTO_CLANG_THIN
+                  scripts/config --file out/.config -d LTO_CLANG_FULL
+                  ;;
+              *)
+                  echo ">> ⚠️ Link Time Optimization: Skipped for Kernel $KERNEL_VERSION"
+                  ;;
+          esac
+
+          # ------------------------------
+          # Only Use Auto-Feedback Directed Optimization if Profile Exists
+          # ------------------------------
+          AFDO_FILE="$GITHUB_WORKSPACE/kernel_workspace/kernel_platform/afdo/kernel.afdo"
+          if [[ -f "$AFDO_FILE" ]]; then
+            echo ">> 📌 Using AutoFDO Profile: $AFDO_FILE"
+            MAKE_ARGS+=(AFDO_PROFILE="$AFDO_FILE")
+          else
+            echo "⚠️ No AFDO Profile Found; Skipping AFDO Optimization"
+          fi
+          
+          # ------------------------------
+          # Final DefConfig and Build
+          # ------------------------------
+          echo ">> Running Old DefConfig"
+          make O=out "${MAKE_ARGS[@]}" olddefconfig
+
+          # ------------------------------
+          # Build Kernel With Flags
+          # ------------------------------
+          echo ">> Compiling Kernel with $(nproc --all) Threads"
+          make -j"$(nproc --all)" O=out "${MAKE_ARGS[@]}" KCFLAGS="$KCFLAGS" KCPPFLAGS="$KCPPFLAGS"
+          
+          # ------------------------------
+          # Display Compiler Cache Statistics
+          # ------------------------------
+          echo "📊 Compiler Cache Statistics"
+          ccache -s
 
       # ==============================
       # Fallback to Build Kernel
@@ -3808,6 +4046,13 @@ jobs:
           # ------------------------------
           if [ "${{ github.event.inputs.SCHED }}" = "true" ]; then
             SUFFIX="${SUFFIX}-Fengchi"
+          fi
+
+          # ------------------------------
+          # Docker / LXC Container Flag
+          # ------------------------------
+          if [ "${{ github.event.inputs.DOCKER_LXC }}" = "true" ]; then
+            SUFFIX="${SUFFIX}-DockerLXC"
           fi
 
           echo "value=${SUFFIX}" >> $GITHUB_OUTPUT
