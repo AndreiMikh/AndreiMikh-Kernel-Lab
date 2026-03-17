@@ -2427,9 +2427,9 @@ jobs:
           echo "------------------------------"
     
       # ==============================
-      # Enable LSM Baseband Guard
+      # Enable Linux Security Baseband Guard
       # ==============================
-      - name: LSM Baseband Guard
+      - name: Linux Security Baseband Guard
         if: ${{ github.event.inputs.LSM == 'true' }}
         shell: bash
         run: |
@@ -2444,64 +2444,53 @@ jobs:
           # ------------------------------
           KERNEL_DIR="${GITHUB_WORKSPACE}/kernel_workspace/kernel_platform/common"
           CONFIG_FILE="${KERNEL_DIR}/arch/arm64/configs/gki_defconfig"
-      
-          if [[ ! -d "$KERNEL_DIR" ]]; then
-            echo "❌ Kernel Directory Not Found: $KERNEL_DIR"
-            exit 1
-          fi
-      
-          if [[ ! -f "$CONFIG_FILE" ]]; then
-            echo "❌ GKI Default Configuration Not Found: $CONFIG_FILE"
-            exit 1
-          fi
-      
-          echo "✔️ Using KERNEL_DIR=$KERNEL_DIR"
-          echo "✔️ Using CONFIG_FILE=$CONFIG_FILE"
-      
-          # ------------------------------
-          # Paths
-          # ------------------------------
-          SCRIPT_CACHE="${KERNEL_DIR}/baseband_guard_setup.sh"
-          SCRIPT_URL="https://raw.githubusercontent.com/cctv18/Baseband-guard/master/setup.sh"
           KCONFIG_FILE="${KERNEL_DIR}/security/Kconfig"
           BACKUP_FILE="${KCONFIG_FILE}.bak"
+          SCRIPT_CACHE="${KERNEL_DIR}/baseband_guard_setup.sh"
+          SCRIPT_URL="https://raw.githubusercontent.com/cctv18/Baseband-guard/master/setup.sh"
+      
+          # ------------------------------
+          # Validate Paths
+          # ------------------------------
+          [[ -d "$KERNEL_DIR" ]] || { echo "⚠️ Kernel Directory Not Found: $KERNEL_DIR"; exit 1; }
+          [[ -f "$CONFIG_FILE" ]] || { echo "⚠️ GKI Default Configuration Not Found: $CONFIG_FILE"; exit 1; }
+      
+          echo "✔️ Using Kernel Directory=$KERNEL_DIR"
+          echo "✔️ Using Configuration File=$CONFIG_FILE"
       
           cd "$KERNEL_DIR"
       
-          echo "📌 Enabling Kernel-Level Baseband Protection..."
-      
           # ------------------------------
-          # Download Script
+          # Download / Cache Setup Script
           # ------------------------------
           if [[ ! -f "$SCRIPT_CACHE" ]]; then
             echo "📥 Downloading Baseband Guard Setup Script..."
             curl -fsSL "$SCRIPT_URL" -o "$SCRIPT_CACHE"
             chmod +x "$SCRIPT_CACHE"
           else
-            echo "✅ Using Cached Script"
+            echo "📌 Using Cached Script"
           fi
       
           # ------------------------------
-          # Run Script
+          # Run Setup Script
           # ------------------------------
           echo "🚀 Running Setup Script..."
           if ! bash "$SCRIPT_CACHE" master; then
-            echo "⚠️ Script Failed, Continuing..."
+            echo "⚠️ Setup Script Failed, Continuing..."
           fi
       
           echo "✔️ Patch Stage Done"
       
           # ------------------------------
-          # Patch KConfig
+          # Patch Kernel Configuration
           # ------------------------------
           if [[ -f "$KCONFIG_FILE" ]]; then
             echo "📌 Patching Kernel Configuration..."
-      
             [[ -f "$BACKUP_FILE" ]] || cp "$KCONFIG_FILE" "$BACKUP_FILE"
       
             if ! grep -q "baseband_guard" "$KCONFIG_FILE"; then
               sed -i '/^config LSM$/,/^help$/{
-                /^[[:space:]]*default/ s/"\([^"]*\)"/"\1,baseband_guard"/
+                /^[[:space:]]*default/ s/\bselinux\b/&\,baseband_guard/
               }' "$KCONFIG_FILE"
             fi
       
@@ -2511,11 +2500,25 @@ jobs:
           fi
       
           # ------------------------------
-          # Patch GKI Default Configuration
+          # Patch GKI Default Configuration Dynamically
           # ------------------------------
           echo "📌 Patching GKI Default Configuration..."
       
-          LSM_STRING="landlock,lockdown,yama,loadpin,safesetid,selinux,smack,tomoyo,apparmor,bpf,baseband_guard"
+          LSM_BASE="landlock,lockdown,yama,loadpin,safesetid"
+      
+          if grep -q "CONFIG_DEFAULT_SECURITY_APPARMOR=y" "$CONFIG_FILE"; then
+            LSM_STRING="$LSM_BASE,apparmor,selinux,smack,tomoyo,bpf,baseband_guard"
+          elif grep -q "CONFIG_DEFAULT_SECURITY_SMACK=y" "$CONFIG_FILE"; then
+            LSM_STRING="$LSM_BASE,smack,selinux,tomoyo,apparmor,bpf,baseband_guard"
+          elif grep -q "CONFIG_DEFAULT_SECURITY_TOMOYO=y" "$CONFIG_FILE"; then
+            LSM_STRING="$LSM_BASE,tomoyo,bpf,baseband_guard"
+          elif grep -q "CONFIG_DEFAULT_SECURITY_DAC=y" "$CONFIG_FILE"; then
+            LSM_STRING="$LSM_BASE,bpf,baseband_guard"
+          else
+            LSM_STRING="$LSM_BASE,selinux,smack,tomoyo,apparmor,bpf,baseband_guard"
+          fi
+      
+          echo "➡️ Applying LSM String: $LSM_STRING"
       
           if grep -q "^CONFIG_LSM=" "$CONFIG_FILE"; then
             sed -i "s|^CONFIG_LSM=.*|CONFIG_LSM=\"$LSM_STRING\"|" "$CONFIG_FILE"
@@ -2523,17 +2526,14 @@ jobs:
             echo "CONFIG_LSM=\"$LSM_STRING\"" >> "$CONFIG_FILE"
           fi
       
-          if ! grep -q "^CONFIG_BBG=y" "$CONFIG_FILE"; then
-            echo "CONFIG_BBG=y" >> "$CONFIG_FILE"
-          fi
+          grep -q "^CONFIG_BBG=y" "$CONFIG_FILE" || echo "CONFIG_BBG=y" >> "$CONFIG_FILE"
       
           echo "✔️ GKI Default Configuration Patched"
       
           # ------------------------------
-          # Verify 
+          # Verify
           # ------------------------------
           echo "📌 Verifying..."
-      
           grep CONFIG_LSM "$CONFIG_FILE"
           grep CONFIG_BBG "$CONFIG_FILE"
       
