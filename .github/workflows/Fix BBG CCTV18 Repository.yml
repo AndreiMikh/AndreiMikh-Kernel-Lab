@@ -2427,93 +2427,107 @@ jobs:
           echo "------------------------------"
     
       # ==============================
-      # Setup Linux Security Baseband Guard
+      # Enable LSM Baseband Guard
       # ==============================
-      - name: Linux Security Baseband Guard
+      - name: LSM Baseband Guard
         if: ${{ github.event.inputs.LSM == 'true' }}
         shell: bash
         run: |
           set -euo pipefail
       
           echo "------------------------------"
-          echo "📌 Running Linux Security Baseband Guard Setup..."
+          echo "Linux Security Baseband Guard Setup"
           echo "------------------------------"
       
-          # ------------------------------
-          # Define Kernel Root and Common Directory
-          # ------------------------------
-          KERNEL_ROOT="kernel_workspace/kernel_platform"
-          COMMON_DIR="$KERNEL_ROOT/common"
+          KERNEL_DIR="${GITHUB_WORKSPACE}/kernel_workspace/kernel_platform/common"
+          SCRIPT_CACHE="${KERNEL_DIR}/baseband_guard_setup.sh"
+          SCRIPT_URL="https://raw.githubusercontent.com/cctv18/Baseband-guard/master/setup.sh"
+          KCONFIG_FILE="${KERNEL_DIR}/security/Kconfig"
+          BACKUP_FILE="${KCONFIG_FILE}.bak"
       
-          # Validate Common Directory
-          if [[ ! -d "$COMMON_DIR" ]]; then
-              echo "⚠️ Kernel Common Directory Not Found: $COMMON_DIR"
+          # ------------------------------
+          # Validate Kernel Directory
+          # ------------------------------
+          if [[ ! -d "$KERNEL_DIR" ]]; then
+              echo "⚠️ Kernel Directory Not Found:"
+              echo "$KERNEL_DIR"
               exit 1
           fi
-          echo "📌 Kernel Common Directory Verified: $COMMON_DIR"
       
-          # ------------------------------
-          # Enter Kernel Common Directory
-          # ------------------------------
-          cd "$COMMON_DIR"
+          cd "$KERNEL_DIR"
       
           echo "📌 Enabling Kernel-Level Baseband Protection..."
       
           # ------------------------------
-          # Download and Run Baseband Guard Setup
+          # Download / Update Setup Script
           # ------------------------------
-          echo "📥 Downloading and Running Baseband Guard..."
-          curl -sSL https://github.com/cctv18/Baseband-guard/raw/master/setup.sh | bash
-          echo "✔️ Baseband Guard Setup Completed"
-      
-          # ------------------------------
-          # Auto-Detect KConfig File
-          # ------------------------------
-          KCONFIG_FILE=$(find "$COMMON_DIR" -type f -name "Kconfig" | grep -i security | head -n1)
-      
-          if [[ ! -f "$KCONFIG_FILE" ]]; then
-              echo "⚠️ KConfig File Not Found after BBG setup"
-              exit 1
-          fi
-          echo "📌 Using KConfig File: $KCONFIG_FILE"
-      
-          # ------------------------------
-          # Patch KConfig to Include 'Baseband Guard'
-          # ------------------------------
-          echo "🔧 Patching KConfig to Include 'BASEBAND GUARD'..."
-          sed -i '/^config LSM$/,/^help$/{ /^[[:space:]]*default/ { /baseband_guard/! s/selinux/selinux,baseband_guard/ } }' "$KCONFIG_FILE"
-      
-          # Explicitly Enable 'Baseband Guard' in KConfig
-          if ! grep -q "^CONFIG_BBG=" "$KCONFIG_FILE"; then
-              echo "CONFIG_BBG=y" >> "$KCONFIG_FILE"
-          fi
-          echo "✔️ Baseband Guard Applied to KConfig"
-      
-          # ------------------------------
-          # Auto-detect DefConfig File
-          # ------------------------------
-          DEFCONFIG_PATH=$(find "$KERNEL_ROOT/arch/arm64/configs" -type f -name "*defconfig" | head -n1)
-      
-          if [[ ! -f "$DEFCONFIG_PATH" ]]; then
-              echo "⚠️ DefConfig Not Found in $KERNEL_ROOT/arch/arm64/configs"
-              exit 1
-          fi
-          echo "📌 Using DefConfig File: $DEFCONFIG_PATH"
-      
-          # ------------------------------
-          # Update DefConfig 'CONFIG LSM'
-          # ------------------------------
-          echo "🔧 Updating DefConfig 'CONFIG LSM'..."
-          if grep -q "^CONFIG_LSM=" "$DEFCONFIG_PATH"; then
-              if ! grep -q "baseband_guard" "$DEFCONFIG_PATH"; then
-                  sed -i 's|\(CONFIG_LSM=.*\)|\1,baseband_guard|' "$DEFCONFIG_PATH"
-              fi
+          if [[ ! -f "$SCRIPT_CACHE" ]]; then
+              echo "📥 Downloading Baseband Guard Setup Script..."
+              curl -fL "$SCRIPT_URL" -o "$SCRIPT_CACHE"
+              chmod +x "$SCRIPT_CACHE"
           else
-              echo "CONFIG_LSM=landlock,lockdown,yama,loadpin,safesetid,selinux,smack,tomoyo,apparmor,bpf,baseband_guard" >> "$DEFCONFIG_PATH"
-          fi
-          echo "✔️ DefConfig Updated with Baseband Guard"
+              echo "🔎 Checking for Setup Script Updates..."
       
-          echo "🎉 Linux Security Baseband Guard Setup Complete"
+              TMP_SCRIPT="${SCRIPT_CACHE}.tmp"
+      
+              if curl -fLs "$SCRIPT_URL" -o "$TMP_SCRIPT"; then
+                  if ! cmp -s "$TMP_SCRIPT" "$SCRIPT_CACHE"; then
+                      echo "⬆️ Updating Setup Script..."
+                      mv "$TMP_SCRIPT" "$SCRIPT_CACHE"
+                      chmod +x "$SCRIPT_CACHE"
+                  else
+                      rm -f "$TMP_SCRIPT"
+                      echo "✔️ Setup Script Already Up to Date"
+                  fi
+              else
+                  echo "⚠️ Failed to Check Script Updates (Continuing with Cached Version)"
+              fi
+          fi
+      
+          # ------------------------------
+          # Run Setup Script
+          # ------------------------------
+          echo "🚀 Running Baseband Guard Setup Script..."
+      
+          if bash "$SCRIPT_CACHE" master; then
+              echo "✔️ Baseband Guard Kernel Patch Stage Completed"
+          else
+              echo "⚠️ Baseband Guard Setup Script Failed"
+              exit 2
+          fi
+      
+          # ------------------------------
+          # Validate Kernel Configuration File
+          # ------------------------------
+          if [[ ! -f "$KCONFIG_FILE" ]]; then
+              echo "⚠️ Security / Kernel Configuration Not Found"
+              exit 3
+          fi
+      
+          # ------------------------------
+          # Backup Kernel Configuration (Once)
+          # ------------------------------
+          if [[ ! -f "$BACKUP_FILE" ]]; then
+              cp "$KCONFIG_FILE" "$BACKUP_FILE"
+              echo "✔️ Backup Created: $BACKUP_FILE"
+          fi
+      
+          # ------------------------------
+          # Add Baseband Guard to Linux Security Defaults
+          # ------------------------------
+          echo "🔧 Updating Linux Security Defaults..."
+      
+          if grep -q "baseband_guard" "$KCONFIG_FILE"; then
+              echo "✔️ Baseband Guard Already Present in LSM Defaults"
+          else
+              sed -i '/^config LSM$/,/^help$/{
+                /^[[:space:]]*default/ s/selinux/selinux,baseband_guard/
+              }' "$KCONFIG_FILE"
+      
+              echo "✔️ Baseband Guard Added to LSM Defaults"
+          fi
+      
+          echo "🎉 LSM Baseband Guard Setup Completed"
           echo "------------------------------"
     
       # ==============================
