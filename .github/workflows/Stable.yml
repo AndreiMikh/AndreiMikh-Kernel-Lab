@@ -1,7 +1,7 @@
 # ===========================
 # OnePlus Kernel Action Build
 # ===========================
-name: Main-03
+name: Stable
 on:
   workflow_dispatch:
     inputs:
@@ -158,10 +158,14 @@ on:
         default: true
         
       BBR_ECN:
-        type: boolean
-        description: "Enable Network Optimization Algorithm (BBR + ECN)?"
+        type: choice
+        description: "Network Optimization Algorithm (BBR + ECN)"
         required: true
-        default: true
+        default: "True"
+        options:
+          - "True"     # Base BBR + ECN Settings, Safe Default
+          - "False"    # Skip BBR + ECN Configuration
+          - "Brutal"   # Apply Brutal as Default + Cubic Fallback
         
       UNICODE_BYPASS:
         type: boolean
@@ -198,12 +202,6 @@ on:
         description: "Apply REKERNEL? (Applicable for Custom Manifest)"
         required: true
         default: false
-
-      DOCKER_LXC:
-        type: boolean
-        description: "Enable Docker / LXC Container Support?"
-        required: true
-        default: false
         
       SPACE_NOCLEAN:
         type: boolean
@@ -226,7 +224,7 @@ jobs:
 
           (github.event.inputs.FAST_BUILD == 'true' && 'Fast ' || ''),
           (github.event.inputs.ZRAM == '1/LZ4KD/8589934592' && 'LZ4KD ' || ''),
-          (github.event.inputs['ZRAM-LZ4'] == 'true' && 'LZ4+ZSTD ' || ''),
+          (github.event.inputs['ZRAM-LZ4'] == 'true' && 'LZ4 ' || ''),
           (contains(github.event.inputs.FILE, '_aosp') && 'AOSP ' || ''),
 
           (
@@ -627,7 +625,6 @@ jobs:
               echo "UNICODE_BYPASS    : ${{ github.event.inputs.UNICODE_BYPASS }}"
               echo "RE_KERNEL         : ${{ github.event.inputs.RE_KERNEL }}"
               echo "XUS_FIX           : ${{ github.event.inputs.XUS_FIX }}"
-              echo "DOCKER_LXC        : ${{ github.event.inputs.DOCKER_LXC }}"
               
               # ------------------------------
               # Unicode Inspection (Whitespace / Hidden Character Detection)
@@ -2184,28 +2181,26 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-      
+
           ZRAM="${{ github.event.inputs.ZRAM }}"
           KERNEL_VERSION="${{ env.KERNEL_VERSION }}"
       
           echo "------------------------------"
-          echo "ZRAM Setup Stage"
+          echo "📌 ZRAM Setup Stage"
           echo "Input Parameter : $ZRAM"
           echo "Kernel Version  : $KERNEL_VERSION"
           echo "------------------------------"
-      
+
           # ------------------------------
           # Validate Format
           # ------------------------------
           if [[ "$ZRAM" != */*/* ]]; then
-              echo "❌ Invalid ZRAM parameter format"
-              echo "Expected format:"
-              echo "Switch(0/1)/Algorithm/Size"
-              echo "Example:"
-              echo "1/lz4k/4096"
+              echo "⚠️ Invalid ZRAM Parameter Format"
+              echo "Expected Format: Switch(0/1)/Algorithm/Size"
+              echo "Example: 1/lz4kd/4096"
               exit 10
           fi
-      
+
           # ------------------------------
           # Parse Fields
           # ------------------------------
@@ -2214,35 +2209,39 @@ jobs:
           echo "ZRAM_ALGO=$ZRAM_ALGO" >> "$GITHUB_ENV"
           echo "ZRAM_ALGO_U=$(echo "$ZRAM_ALGO" | tr '[:lower:]' '[:upper:]')" >> "$GITHUB_ENV"
           echo "ZRAM_SIZE=$ZRAM_SIZE" >> "$GITHUB_ENV"
-
+      
           echo "------------------------------"
           echo "ZRAM Switch    : $ZRAM_SWSTA"
           echo "ZRAM Algorithm : $ZRAM_ALGO"
           echo "ZRAM Size      : $ZRAM_SIZE"
           echo "------------------------------"
-      
-          PATCH_DIR="${GITHUB_WORKSPACE}/kernel_workspace/SukiSU_patch/other/zram/zram_patch/${KERNEL_VERSION}"
+
+          # ------------------------------
+          # Kernel and Patch Directories
+          # ------------------------------
           KERNEL_DIR="${GITHUB_WORKSPACE}/kernel_workspace/kernel_platform/common"
+          CONFIG_FILE="${KERNEL_DIR}/arch/arm64/configs/gki_defconfig"
       
-          # ------------------------------
-          # Validate Directories
-          # ------------------------------
-          if [[ ! -d "$PATCH_DIR" ]]; then
-              echo "❌ ZRAM Patch Directory Not Found:"
-              echo "$PATCH_DIR"
+          BASE_PATCH_DIR="${GITHUB_WORKSPACE}/kernel_workspace/SukiSU_patch/other/zram/zram_patch"
+          PATCH_DIR=$(find "$BASE_PATCH_DIR" -maxdepth 1 -type d -name "${KERNEL_VERSION}*" | sort -V | tail -n 1 || true)
+      
+          if [[ -z "$PATCH_DIR" || ! -d "$PATCH_DIR" ]]; then
+              echo "⚠️ ZRAM Patch Directory Not Found for Kernel Version $KERNEL_VERSION"
+              echo "Searched Under: $BASE_PATCH_DIR"
               exit 1
           fi
       
+          echo "✅ Using ZRAM Patch Directory: $PATCH_DIR"
+
           if [[ ! -d "$KERNEL_DIR" ]]; then
-              echo "❌ Kernel Directory Not Found:"
-              echo "$KERNEL_DIR"
+              echo "⚠️ Kernel Directory Not Found: $KERNEL_DIR"
               exit 1
           fi
       
           cd "$KERNEL_DIR"
-      
+
           # ------------------------------
-          # Function: Patch Apply
+          # Function: Apply Patch
           # ------------------------------
           apply_patch() {
               local PATCH_FILE="$1"
@@ -2255,7 +2254,7 @@ jobs:
               fi
       
               echo "🚀 Applying $PATCH_NAME"
-      
+
               if patch -p1 --dry-run < "$PATCH_FILE" >/dev/null 2>&1; then
                   patch -p1 -F3 --forward < "$PATCH_FILE"
                   echo "✔️ $PATCH_NAME Applied"
@@ -2263,12 +2262,44 @@ jobs:
                   echo "✔️ $PATCH_NAME Already Applied or Not Needed"
               fi
           }
-      
+
           # ------------------------------
-          # Apply Patches
+          # Apply ZRAM Patches
           # ------------------------------
           apply_patch "${PATCH_DIR}/lz4kd.patch"
           apply_patch "${PATCH_DIR}/lz4k_oplus.patch"
+      
+          # ------------------------------
+          # Kernel Config: ZRAM Options
+          # ------------------------------
+          if [[ "$ZRAM_SWSTA" == "1" ]]; then
+              echo "🚀 Enabling ZRAM-Related Kernel Options..."
+      
+              if [[ "$ZRAM_ALGO" != "lz4" ]]; then
+                  # Non-LZ4 Base ZRAM Options
+                  cat >> "$CONFIG_FILE" << EOF
+          CONFIG_CRYPTO_LZ4HC=y
+          CONFIG_CRYPTO_LZ4K=y
+          CONFIG_CRYPTO_LZ4KD=y
+          CONFIG_CRYPTO_842=y
+          CONFIG_CRYPTO_LZ4K_OPLUS=y
+          CONFIG_ZRAM_WRITEBACK=y
+          EOF
+              else
+                  # LZ4 ZRAM Options
+                  cat >> "$CONFIG_FILE" << EOF
+          CONFIG_ZSMALLOC=y
+          CONFIG_CRYPTO_LZ4HC=y
+          CONFIG_CRYPTO_LZ4K=y
+          CONFIG_CRYPTO_LZ4KD=y
+          CONFIG_CRYPTO_842=y
+          EOF
+              fi
+
+              echo "🎉 ZRAM Configuration Applied"
+          else
+              echo "📌 Skipping ZRAM Configuration"
+          fi
       
           echo "🎉 ZRAM Patch Process Completed"
           echo "------------------------------"
@@ -2396,109 +2427,46 @@ jobs:
           echo "------------------------------"
     
       # ==============================
-      # Enable LSM Baseband Guard
+      # Linux Security Baseband Guard
       # ==============================
-      - name: LSM Baseband Guard
+      - name: Linux Security Baseband Guard
         if: ${{ github.event.inputs.LSM == 'true' }}
-        shell: bash
         run: |
-          set -euo pipefail
       
           echo "------------------------------"
-          echo "LSM Baseband Guard Setup"
-          echo "------------------------------"
-      
-          KERNEL_DIR="${GITHUB_WORKSPACE}/kernel_workspace/kernel_platform/common"
-          SCRIPT_CACHE="${KERNEL_DIR}/baseband_guard_setup.sh"
-          SCRIPT_URL="https://raw.githubusercontent.com/vc-teahouse/Baseband-guard/main/setup.sh"
-          KCONFIG_FILE="${KERNEL_DIR}/security/Kconfig"
-          BACKUP_FILE="${KCONFIG_FILE}.bak"
-      
-          # ------------------------------
-          # Validate Kernel Directory
-          # ------------------------------
-          if [[ ! -d "$KERNEL_DIR" ]]; then
-              echo "❌ Kernel Directory Not Found:"
-              echo "$KERNEL_DIR"
-              exit 1
-          fi
-      
-          cd "$KERNEL_DIR"
-      
-          echo "📌 Enabling Kernel-Level Baseband Protection..."
-      
-          # ------------------------------
-          # Download / Update Setup Script
-          # ------------------------------
-          if [[ ! -f "$SCRIPT_CACHE" ]]; then
-              echo "📥 Downloading Baseband Guard Setup Script..."
-              curl -fL "$SCRIPT_URL" -o "$SCRIPT_CACHE"
-              chmod +x "$SCRIPT_CACHE"
-          else
-              echo "🔎 Checking for Setup Script Updates..."
-      
-              TMP_SCRIPT="${SCRIPT_CACHE}.tmp"
-      
-              if curl -fLs "$SCRIPT_URL" -o "$TMP_SCRIPT"; then
-                  if ! cmp -s "$TMP_SCRIPT" "$SCRIPT_CACHE"; then
-                      echo "⬆️ Updating Setup Script"
-                      mv "$TMP_SCRIPT" "$SCRIPT_CACHE"
-                      chmod +x "$SCRIPT_CACHE"
-                  else
-                      rm -f "$TMP_SCRIPT"
-                      echo "✔️ Setup Script Already Up to Date"
-                  fi
-              else
-                  echo "⚠️ Failed to Check Script Updates (Continuing with Cached Version)"
-              fi
-          fi
-      
-          # ------------------------------
-          # Run Setup Script
-          # ------------------------------
-          echo "🚀 Running Baseband Guard Setup Script..."
-      
-          if bash "$SCRIPT_CACHE" fix_blkdev_rename; then
-              echo "✔️ Baseband Guard Kernel Patch Stage Completed"
-          else
-              echo "⚠️ Baseband Guard Setup Script Failed"
-              exit 2
-          fi
-      
-          # ------------------------------
-          # Validate Kernel Configuration File
-          # ------------------------------
-          if [[ ! -f "$KCONFIG_FILE" ]]; then
-              echo "⚠️ Security / Kernel Configuration Not Found"
-              exit 3
-          fi
-      
-          # ------------------------------
-          # Backup Kernel Configuration (Once)
-          # ------------------------------
-          if [[ ! -f "$BACKUP_FILE" ]]; then
-              cp "$KCONFIG_FILE" "$BACKUP_FILE"
-              echo "✔️ Backup Created: $BACKUP_FILE"
-          fi
-      
-          # ------------------------------
-          # Add Baseband Guard to LSM Defaults
-          # ------------------------------
-          echo "🔧 Updating LSM Defaults..."
-      
-          if grep -q "baseband_guard" "$KCONFIG_FILE"; then
-              echo "✔️ Baseband Guard Already Present in LSM Defaults"
-          else
-              sed -i '/^config LSM$/,/^help$/{
-                /^[[:space:]]*default/ s/selinux/selinux,baseband_guard/
-              }' "$KCONFIG_FILE"
-      
-              echo "✔️ Baseband Guard Added to LSM Defaults"
-          fi
-      
-          echo "🎉 LSM Baseband Guard Setup Completed"
+          echo "Linux Security Baseband Guard Setup"
           echo "------------------------------"
 
+          # ------------------------------
+          # Navigate to the Common Kernel Platform Directory
+          # ------------------------------
+          cd kernel_workspace/kernel_platform/common
+      
+          echo "Enabling Kernel-Level Baseband Guard Support..."
+
+          # ------------------------------
+          # Download and Execute the Baseband Guard Setup Script Securely
+          # ------------------------------
+          curl -fsSL https://raw.githubusercontent.com/vc-teahouse/Baseband-guard/master/setup.sh | bash -s fix_blkdev_rename
+
+          # ------------------------------
+          # Ensure 'Baseband Guard' is Included in Linux Security Defaults Alongside 'SELinux'
+          # Idempotent: Won't Duplicate if Already Present
+          # ------------------------------
+          awk '
+            /^config LSM$/ { in_block=1 }
+            in_block && /^[[:space:]]*default/ {
+              if ($0 !~ /baseband_guard/) {
+                sub(/selinux/, "selinux,baseband_guard")
+              }
+            }
+            /^help$/ { in_block=0 }
+            { print }
+          ' ./security/Kconfig > ./security/Kconfig.tmp && mv ./security/Kconfig.tmp ./security/Kconfig
+      
+          echo "🎉 Done — Baseband Guard Fully Applied and Configured"
+          echo "------------------------------"
+    
       # ==============================
       # Kernel Configuration Settings
       # ==============================
@@ -2526,10 +2494,7 @@ jobs:
           RE_KERNEL="${{ github.event.inputs.RE_KERNEL }}" 
           GKI_V="${{ env.KANDROID_VERSION }}-${{ env.KERNEL_VERSION }}"
           KPM_INPUT="${{ github.event.inputs.KPM }}"
-          DOCKER_LXC="${{ github.event.inputs.DOCKER_LXC }}"
           BBR_ECN="${{ github.event.inputs.BBR_ECN }}"
-          ZRAM_LZ4="${{ github.event.inputs.ZRAM-LZ4 }}"
-          ZRAM="${{ github.event.inputs.ZRAM }}"
           LSM="${{ github.event.inputs.LSM }}"
           NETFILTER_INPUT="${{ github.event.inputs.NETFILTER }}"
 
@@ -2689,164 +2654,11 @@ jobs:
           echo "------------------------------"
 
           # ------------------------------
-          # Docker / LXC Container Support (Android GKI Only, SELinux Strict Safe)
-          # ------------------------------
-          if [[ "$DOCKER_LXC" == "true" ]]; then
-            if [[ "$GKI_V" == "android14-6.1" || \
-                  "$GKI_V" == "android15-6.6" || \
-                  "$GKI_V" == "android16-6.12" ]]; then
-
-              echo "🐳 Enabling Docker / LXC Kernel Support for $GKI_V..."
-
-              cat >> "$CONFIG_FILE" << EOF
-
-          # ------------------------------
-          # Namespaces (Excluding 'USER NS' for SELinux Strict Safety)
-          # ------------------------------
-          CONFIG_NAMESPACES=y
-          CONFIG_UTS_NS=y
-          CONFIG_IPC_NS=y
-          CONFIG_PID_NS=y
-          CONFIG_NET_NS=y
-          CONFIG_MNT_NS=y
-          CONFIG_TIME_NS=y
-
-          # ------------------------------
-          # Control Groups (CGROUPS Version 2 Ready)
-          # ------------------------------
-          CONFIG_CGROUPS=y
-          CONFIG_CGROUP_FREEZER=y
-          CONFIG_CGROUP_PIDS=y
-          CONFIG_CGROUP_DEVICE=y
-          CONFIG_CGROUP_CPUACCT=y
-          CONFIG_CGROUP_SCHED=y
-          CONFIG_CPUSETS=y
-          CONFIG_MEMCG=y
-          CONFIG_BLK_CGROUP=y
-          CONFIG_CGROUP_BPF=y
-          CONFIG_CGROUP_MISC=y
-          CONFIG_CGROUP_HUGETLB=y
-          CONFIG_CGROUP_PERF=y
-          CONFIG_SOCK_CGROUP_DATA=y
-          CONFIG_CFS_BANDWIDTH=y
-
-          # ------------------------------
-          # BPF - Packet Filter (Required for Modern Docker / LXC Container Runtime)
-          # ------------------------------
-          CONFIG_BPF=y
-          CONFIG_BPF_SYSCALL=y
-          CONFIG_BPF_JIT=y
-          CONFIG_BPF_JIT_ALWAYS_ON=y
-          CONFIG_BPF_EVENTS=y
-
-          # ------------------------------
-          # Security / Capabilities
-          # ------------------------------
-          CONFIG_KEYS=y
-          CONFIG_AUDIT=y
-          CONFIG_SECCOMP=y
-          CONFIG_SECCOMP_FILTER=y
-
-          # ------------------------------
-          # File Systems and OverlayFS
-          # ------------------------------
-          CONFIG_OVERLAY_FS=y
-          CONFIG_OVERLAY_FS_REDIRECT_DIR=y
-          CONFIG_OVERLAY_FS_INDEX=y
-          CONFIG_OVERLAY_FS_METACOPY=y
-          CONFIG_TMPFS=y
-          CONFIG_PROC_FS=y
-          CONFIG_SYSFS=y
-          CONFIG_DEVTMPFS=y
-          CONFIG_MEMFD_CREATE=y
-          CONFIG_POSIX_MQUEUE=y
-          CONFIG_CHECKPOINT_RESTORE=y
-          CONFIG_FHANDLE=y
-          CONFIG_DEVPTS_MULTIPLE_INSTANCES=y
-          CONFIG_UNIX98_PTYS=y
-          CONFIG_EVENTFD=y
-          CONFIG_EPOLL=y
-          CONFIG_SIGNALFD=y
-          CONFIG_TIMERFD=y
-
-          # ------------------------------
-          # IPC (Inter Process Communication)
-          # ------------------------------
-          CONFIG_SYSVIPC=y
-          CONFIG_SYSVIPC_SYSCTL=y
-          CONFIG_SHMEM=y
-
-          # ------------------------------
-          # Loop / SquashFS / Image Files
-          # ------------------------------
-          CONFIG_BLK_DEV_LOOP=y
-          CONFIG_SQUASHFS=y
-          CONFIG_SQUASHFS_XZ=y
-          CONFIG_SQUASHFS_LZ4=y
-          CONFIG_SQUASHFS_ZSTD=y
-
-          # ------------------------------
-          # Network for Containers: Event / FD
-          # ------------------------------
-          CONFIG_VETH=y
-          CONFIG_BRIDGE=y
-          CONFIG_BRIDGE_NETFILTER=y
-          CONFIG_TUN=y
-          CONFIG_MACVLAN=y
-          CONFIG_IPVLAN=y
-
-          # ------------------------------
-          # NetFilter for Container NAT
-          # ------------------------------
-          CONFIG_NETFILTER=y
-          CONFIG_NF_TABLES=y
-          CONFIG_NF_NAT=y
-          CONFIG_NFT_NAT=y
-          CONFIG_NFT_CHAIN_NAT=y
-          CONFIG_NFT_MASQ=y
-          CONFIG_NFT_CT=y
-          CONFIG_IP_NF_IPTABLES=y
-          CONFIG_IP_NF_FILTER=y
-          CONFIG_IP_NF_NAT=y
-          CONFIG_IP6_NF_NAT=y
-          CONFIG_NETFILTER_XT_MATCH_CONNTRACK=y
-          CONFIG_NETFILTER_XT_MATCH_ADDRTYPE=y
-          CONFIG_NETFILTER_XT_TARGET_MASQUERADE=y
-
-          EOF
-
-              echo "🎉 Docker / LXC Support Enabled for $GKI_V (SELinux Safe)"
-              echo "------------------------------"
-            else
-              echo "⚠️ Docker / LXC Support Skipped — GKI Version $GKI_V Not Supported"
-              echo "------------------------------"
-            fi
-          else
-            echo "📌 Docker / LXC Support Disabled by Input"
-            echo "------------------------------"
-          fi
-
-          # ------------------------------
           # BBR + ECN Kernel Configuration with Brutal Default and Cubic Fallback
           # ------------------------------
-          if [[ "$BBR_ECN" == "true" ]]; then
+          if [[ "$BBR_ECN" != "False" ]]; then
               echo "🚀 Applying BBR + ECN Configuration..."
-
-              # ------------------------------
-              # Note for Changing Congrstion Control (Using Terminal Emulator)              
-              # Check Current
-              # "cat /proc/sys/net/ipv4/tcp_congestion_control"
-
-              # Check Available Algorithms
-              # "cat /proc/sys/net/ipv4/tcp_available_congestion_control"
-
-              # Switch to Brutal
-              # "echo brutal > /proc/sys/net/ipv4/tcp_congestion_control"
-              
-              # Switch Back to Cubic
-              # "echo cubic > /proc/sys/net/ipv4/tcp_congestion_control"
-              # ------------------------------
-
+          
               # ------------------------------
               # Base BBR + ECN Settings (Always Applied)
               # ------------------------------
@@ -2862,11 +2674,11 @@ jobs:
           CONFIG_IPV6_ECN=y
           CONFIG_IP_NF_TARGET_ECN=y
           EOF
-
+          
               # ------------------------------
-              # Optional Additional TCP Algorithms if ZRAM-LZ4 is True
+              # Additional TCP Algorithms if Brutal is Selected
               # ------------------------------
-              if [[ "$ZRAM_LZ4" == "true" ]]; then
+              if [[ "$BBR_ECN" == "Brutal" ]]; then
                   cat >> "$CONFIG_FILE" << EOF
           CONFIG_TCP_CONG_BRUTAL=y      # Default Aggressive Algorithm
           CONFIG_TCP_CONG_CUBIC=y       # Fallback
@@ -2875,27 +2687,26 @@ jobs:
           CONFIG_TCP_CONG_WESTWOOD=y
           CONFIG_TCP_CONG_HTCP=y
           EOF
-
                   # ------------------------------
-                  # Set Brutal as the Default only if it's Compiled
+                  # Set Brutal as the Default Only if it's Compiled
                   # ------------------------------
                   echo "CONFIG_DEFAULT_TCP_CONG=brutal" >> "$CONFIG_FILE"
                   echo "------------------------------"
-                  echo "🎉 BBR + ECN + Brutal Default Enabled (Cubic Fallback Included)"
+                  echo "🎉 BBR + ECN: Brutal Default Enabled (Cubic Fallback Included)"
                   echo "------------------------------"
               else
                   # ------------------------------
-                  # ZRAM-LZ4 is false → Use Cubic as Safe Default
+                  # Not Brutal → Use Cubic as safe default
                   # ------------------------------
                   cat >> "$CONFIG_FILE" << EOF
           CONFIG_TCP_CONG_CUBIC=y       # Default Safe Algorithm
           EOF
                   echo "CONFIG_DEFAULT_TCP_CONG=cubic" >> "$CONFIG_FILE"
                   echo "------------------------------"
-                  echo "🎉 ZRAM-LZ4 is False; Brutal Not Compiled, Using Cubic as Default"
+                  echo "🎉 BBR + ECN: Using Cubic as Default (Brutal Not Selected)"
                   echo "------------------------------"
               fi
-
+          
           else
               echo "------------------------------"
               echo "⚠️ Skipping BBR + ECN Configuration"
@@ -2903,46 +2714,6 @@ jobs:
               echo "------------------------------"
           fi
 
-          # ------------------------------
-          # ZRAM Configuration
-          # ------------------------------
-          if [[ "$ZRAM" == 1/* ]]; then
-              echo "🚀 Enabling ZRAM-Related Kernel Options..."
-
-              # ------------------------------
-              # Base ZRAM Options Applied only if ZRAM-LZ4 is Not Enabled
-              # ------------------------------
-              if [[ "$ZRAM_LZ4" != "true" ]]; then
-                  cat >> "$CONFIG_FILE" << EOF
-          CONFIG_CRYPTO_LZ4HC=y
-          CONFIG_CRYPTO_LZ4K=y
-          CONFIG_CRYPTO_LZ4KD=y
-          CONFIG_CRYPTO_842=y
-          CONFIG_CRYPTO_LZ4K_OPLUS=y
-          CONFIG_ZRAM_WRITEBACK=y
-          EOF
-              else
-
-                  # ------------------------------
-                  # If ZRAM-LZ4 is Enabled, only Apply these Options
-                  # ------------------------------
-                  cat >> "$CONFIG_FILE" << EOF
-          CONFIG_ZSMALLOC=y
-          CONFIG_CRYPTO_LZ4HC=y
-          CONFIG_CRYPTO_LZ4K=y
-          CONFIG_CRYPTO_LZ4KD=y
-          CONFIG_CRYPTO_842=y
-          EOF
-              fi
-
-              echo "------------------------------"
-              echo "🎉 ZRAM Configuration Applied"
-              echo "------------------------------"
-          else
-              echo "📌 Skipping ZRAM Configuration"
-              echo "------------------------------"
-          fi
-          
           # ------------------------------
           # LSM Baseband Guard Configuration
           # ------------------------------
@@ -2954,7 +2725,7 @@ jobs:
             echo "📌 LSM Baseband Guard Disabled, Skipping..."
             echo "------------------------------"
           fi
-
+          
           # ------------------------------
           # IPSet and IPv6 NAT Configuration
           # ------------------------------
@@ -3321,12 +3092,12 @@ jobs:
 
           [[ "$USE_LLVM_IAS" == "true" ]] && MAKE_ARGS=(LLVM_IAS=1 "${MAKE_ARGS[@]}")
           [[ "$ENABLE_RUST" == "true" ]] && MAKE_ARGS=(RUSTC=../../prebuilts/rust/linux-x86/$RUSTC_VERSION/bin/rustc "${MAKE_ARGS[@]}")
-
+          
           # ------------------------------
           # Kernel Configuration and Compilation
           # ------------------------------
-          echo ">> Running GKI DefConfig"
-          ARCH="arm64"  # Force Target Architecture
+          echo ">> Running GKI Default Configuration"
+          ARCH="arm64"                                              # Force Target Architecture
           make O=out ARCH=$ARCH "${MAKE_ARGS[@]}" gki_defconfig
 
           # ------------------------------
@@ -3341,7 +3112,7 @@ jobs:
           KSU_META="${KSU_META:-${{ github.event.inputs.KSU_META }}}"
 
           # ------------------------------
-          # Enable Stack Protector Only for ARM64 + KSU Meta Variants
+          # Enable Stack Protector Only for Arm64 + KSU Meta Variants
           # ------------------------------
           if [[ "$ARCH" == "arm64" && "$KSU_META" =~ ^(KernelSU-Next|KernelSU|ReSukiSU)$ ]]; then
               KCFLAGS="$KCFLAGS -fstack-protector-strong"
@@ -3417,9 +3188,9 @@ jobs:
           fi
           
           # ------------------------------
-          # Final DefConfig and Build
+          # Final Default Configuration and Build
           # ------------------------------
-          echo ">> Running Old DefConfig"
+          echo ">> Running Old Default Configuration"
           make O=out "${MAKE_ARGS[@]}" olddefconfig
 
           # ------------------------------
@@ -4046,13 +3817,6 @@ jobs:
           # ------------------------------
           if [ "${{ github.event.inputs.SCHED }}" = "true" ]; then
             SUFFIX="${SUFFIX}-Fengchi"
-          fi
-
-          # ------------------------------
-          # Docker / LXC Container Flag
-          # ------------------------------
-          if [ "${{ github.event.inputs.DOCKER_LXC }}" = "true" ]; then
-            SUFFIX="${SUFFIX}-DockerLXC"
           fi
 
           echo "value=${SUFFIX}" >> $GITHUB_OUTPUT
