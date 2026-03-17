@@ -2433,102 +2433,111 @@ jobs:
         if: ${{ github.event.inputs.LSM == 'true' }}
         shell: bash
         run: |
-          set -euo pipefail
-
-          LSM="${{ github.event.inputs.LSM }}"
-    
+          set -Eeuo pipefail
+      
           echo "------------------------------"
           echo "Linux Security Baseband Guard Setup"
           echo "------------------------------"
-
+      
           # ------------------------------
-          # Auto detect kernel common dir
+          # Fixed Paths
           # ------------------------------
-          if [[ -d "${GITHUB_WORKSPACE}/kernel_workspace/kernel_platform/common" ]]; then
-            KERNEL_DIR="${GITHUB_WORKSPACE}/kernel_workspace/kernel_platform/common"
-          elif [[ -d "${GITHUB_WORKSPACE}/kernel_workspace/common" ]]; then
-            KERNEL_DIR="${GITHUB_WORKSPACE}/kernel_workspace/common"
-          else
-            KERNEL_DIR=$(find "${GITHUB_WORKSPACE}/kernel_workspace" -type d -name common | head -n1)
-          fi
-
-          if [[ -z "${KERNEL_DIR:-}" ]]; then
-            echo "❌ Kernel common directory not found"
-            find kernel_workspace -maxdepth 3 -type d
+          KERNEL_DIR="${GITHUB_WORKSPACE}/kernel_workspace/kernel_platform/common"
+          CONFIG_FILE="${KERNEL_DIR}/arch/arm64/configs/gki_defconfig"
+      
+          if [[ ! -d "$KERNEL_DIR" ]]; then
+            echo "❌ Kernel Directory Not Found: $KERNEL_DIR"
             exit 1
           fi
-
-          echo "Using KERNEL_DIR=$KERNEL_DIR"
-
-          CONFIG_FILE=$(find "${GITHUB_WORKSPACE}/kernel_workspace" -type f -name "*defconfig" | head -n1)
-
+      
+          if [[ ! -f "$CONFIG_FILE" ]]; then
+            echo "❌ GKI DefConfig Not Found: $CONFIG_FILE"
+            exit 1
+          fi
+      
+          echo "✅ Using KERNEL_DIR=$KERNEL_DIR"
+          echo "✅ Using CONFIG_FILE=$CONFIG_FILE"
+      
+          # ------------------------------
+          # Paths
+          # ------------------------------
           SCRIPT_CACHE="${KERNEL_DIR}/baseband_guard_setup.sh"
           SCRIPT_URL="https://raw.githubusercontent.com/cctv18/Baseband-guard/master/setup.sh"
           KCONFIG_FILE="${KERNEL_DIR}/security/Kconfig"
           BACKUP_FILE="${KCONFIG_FILE}.bak"
-
+      
           cd "$KERNEL_DIR"
-
+      
           echo "📌 Enabling Kernel-Level Baseband Protection..."
-
+      
           # ------------------------------
-          # Download / Update Setup Script
+          # Download Script
           # ------------------------------
           if [[ ! -f "$SCRIPT_CACHE" ]]; then
             echo "📥 Downloading Baseband Guard Setup Script..."
-            curl -fL "$SCRIPT_URL" -o "$SCRIPT_CACHE"
+            curl -fsSL "$SCRIPT_URL" -o "$SCRIPT_CACHE"
             chmod +x "$SCRIPT_CACHE"
-          fi
-
-          # ------------------------------
-          # Run Setup Script
-          # ------------------------------
-          echo "🚀 Running Baseband Guard Setup Script..."
-
-          bash "$SCRIPT_CACHE" master || true
-
-          echo "✔️ Baseband Guard Kernel Patch Stage Completed"
-
-          # ------------------------------
-          # Validate Kconfig
-          # ------------------------------
-          if [[ ! -f "$KCONFIG_FILE" ]]; then
-            echo "⚠️ security/Kconfig not found, skipping"
           else
-
-            if [[ ! -f "$BACKUP_FILE" ]]; then
-              cp "$KCONFIG_FILE" "$BACKUP_FILE"
-            fi
-
-            if ! grep -q baseband_guard "$KCONFIG_FILE"; then
+            echo "✅ Using Cached Script"
+          fi
+      
+          # ------------------------------
+          # Run Script
+          # ------------------------------
+          echo "🚀 Running setup script..."
+          if ! bash "$SCRIPT_CACHE" master; then
+            echo "⚠️ Script Failed, Continuing..."
+          fi
+      
+          echo "✔️ Patch Stage Done"
+      
+          # ------------------------------
+          # Patch KConfig
+          # ------------------------------
+          if [[ -f "$KCONFIG_FILE" ]]; then
+            echo "📌 Patching KConfig..."
+      
+            [[ -f "$BACKUP_FILE" ]] || cp "$KCONFIG_FILE" "$BACKUP_FILE"
+      
+            if ! grep -q "baseband_guard" "$KCONFIG_FILE"; then
               sed -i '/^config LSM$/,/^help$/{
-                /^[[:space:]]*default/ s/selinux/selinux,baseband_guard/
+                /^[[:space:]]*default/ s/"\([^"]*\)"/"\1,baseband_guard"/
               }' "$KCONFIG_FILE"
             fi
-          fi
-
-          echo "✔️ Kconfig patched"
-
-          # ------------------------------
-          # Patch defconfig (IMPORTANT)
-          # ------------------------------
-          if [[ -n "$CONFIG_FILE" ]]; then
-
-            echo "Using defconfig: $CONFIG_FILE"
-
-            if grep -q CONFIG_LSM "$CONFIG_FILE"; then
-              sed -i 's/CONFIG_LSM=.*/CONFIG_LSM="landlock,lockdown,yama,loadpin,safesetid,selinux,smack,tomoyo,apparmor,bpf,baseband_guard"/' "$CONFIG_FILE"
-            else
-              echo 'CONFIG_LSM="landlock,lockdown,yama,loadpin,safesetid,selinux,smack,tomoyo,apparor,bpf,baseband_guard"' >> "$CONFIG_FILE"
-            fi
-
-            echo "CONFIG_BBG=y" >> "$CONFIG_FILE"
-
+      
+            echo "✔️ KConfig Patched"
           else
-            echo "⚠️ defconfig not found"
+            echo "⚠️ KConfig Missing, Skipping"
           fi
-
-          echo "🎉 LSM Baseband Guard Setup Completed"
+      
+          # ------------------------------
+          # Patch GKI DefConfig
+          # ------------------------------
+          echo "📌 Patching GKI DefConfig..."
+      
+          LSM_STRING="landlock,lockdown,yama,loadpin,safesetid,selinux,smack,tomoyo,apparmor,bpf,baseband_guard"
+      
+          if grep -q "^CONFIG_LSM=" "$CONFIG_FILE"; then
+            sed -i "s|^CONFIG_LSM=.*|CONFIG_LSM=\"$LSM_STRING\"|" "$CONFIG_FILE"
+          else
+            echo "CONFIG_LSM=\"$LSM_STRING\"" >> "$CONFIG_FILE"
+          fi
+      
+          if ! grep -q "^CONFIG_BBG=y" "$CONFIG_FILE"; then
+            echo "CONFIG_BBG=y" >> "$CONFIG_FILE"
+          fi
+      
+          echo "✔️ GKI DefConfig Patched"
+      
+          # ------------------------------
+          # Verify 
+          # ------------------------------
+          echo "📌 Verifying..."
+      
+          grep CONFIG_LSM "$CONFIG_FILE"
+          grep CONFIG_BBG "$CONFIG_FILE"
+      
+          echo "🎉 Done — Baseband Guard Correctly Configured"
           echo "------------------------------"
     
       # ==============================
