@@ -2458,27 +2458,34 @@ jobs:
       - name: Linux Security Baseband Guard
         if: ${{ github.event.inputs.LSM == 'true' }}
         run: |
-      
+          set -euo pipefail
+          IFS=$'\n\t'
+
           echo "------------------------------"
           echo "Linux Security Baseband Guard Setup"
           echo "------------------------------"
 
           # ------------------------------
-          # Navigate to the Common Kernel Platform Directory
+          # Define paths
           # ------------------------------
-          cd kernel_workspace/kernel_platform/common
-      
+          KERNEL_COMMON_DIR="kernel_workspace/kernel_platform/common"
+          BASEBAND_DIR="$KERNEL_COMMON_DIR/Baseband-guard"
+          PATCH_FILE="$KERNEL_COMMON_DIR/bbg_fix_get_link.patch"
+
+          cd "$KERNEL_COMMON_DIR"
+
           echo "Enabling Kernel-Level Baseband Guard Support..."
 
           # ------------------------------
-          # Download and Execute the Baseband Guard Setup Script Securely
+          # Run Baseband Guard setup
           # ------------------------------
+          echo "Running Baseband Guard setup script..."
           curl -fsSL https://raw.githubusercontent.com/vc-teahouse/Baseband-guard/master/setup.sh | bash -s fix_blkdev_rename
 
           # ------------------------------
-          # Ensure 'Baseband Guard' is Included in Linux Security Defaults Alongside 'SELinux'
-          # Idempotent: Won't Duplicate if Already Present
+          # Ensure Baseband Guard is added to LSM defaults
           # ------------------------------
+          echo "Adding baseband_guard to LSM defaults if missing..."
           awk '
             /^config LSM$/ { in_block=1 }
             in_block && /^[[:space:]]*default/ {
@@ -2489,8 +2496,24 @@ jobs:
             /^help$/ { in_block=0 }
             { print }
           ' ./security/Kconfig > ./security/Kconfig.tmp && mv ./security/Kconfig.tmp ./security/Kconfig
-      
-          echo "🎉 Done — Baseband Guard Fully Applied and Configured"
+
+          # ------------------------------
+          # Download BBG get_link patch (online)
+          # ------------------------------
+          echo "Downloading BBG get_link compatibility patch..."
+          wget -q https://raw.githubusercontent.com/WildKernels/kernel_patches/main/experimental/bbg/bbg_fix_get_link.patch -O "$PATCH_FILE"
+
+          # ------------------------------
+          # Apply patch if old get_link usage exists
+          # ------------------------------
+          if grep -qxF $'\t\tconst char* symlink_target_link = inode->i_op->get_link(dentry, inode, NULL);' "$BASEBAND_DIR/baseband_guard.c"; then
+            echo "Applying BBG get_link patch..."
+            patch -p1 --forward < "$PATCH_FILE"
+          else
+            echo "BBG get_link patch not needed; already up to date."
+          fi
+
+          echo "🎉 Done — Baseband Guard fully applied and configured"
           echo "------------------------------"
     
       # ==============================
