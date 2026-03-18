@@ -2431,41 +2431,93 @@ jobs:
       # ==============================
       - name: Linux Security Baseband Guard
         if: ${{ github.event.inputs.LSM == 'true' }}
+        shell: bash
         run: |
+          set -euo pipefail
+          
+          IFS=$'\n\t'
       
-          echo "------------------------------"
-          echo "Linux Security Baseband Guard Setup"
-          echo "------------------------------"
-
-          # ------------------------------
-          # Navigate to the Common Kernel Platform Directory
-          # ------------------------------
-          cd kernel_workspace/kernel_platform/common
+          echo "--------------------------------------------------"
+          echo "🔒 Linux Security Baseband Guard Setup Starting..."
+          echo "--------------------------------------------------"
       
-          echo "Enabling Kernel-Level Baseband Guard Support..."
-
           # ------------------------------
-          # Download and Execute the Baseband Guard Setup Script Securely
+          # Auto-Detect Kernel Common Directory
           # ------------------------------
-          curl -fsSL https://raw.githubusercontent.com/vc-teahouse/Baseband-guard/master/setup.sh | bash -s fix_blkdev_rename
-
-          # ------------------------------
-          # Ensure 'Baseband Guard' is Included in Linux Security Defaults Alongside 'SELinux'
-          # Idempotent: Won't Duplicate if Already Present
-          # ------------------------------
-          awk '
-            /^config LSM$/ { in_block=1 }
-            in_block && /^[[:space:]]*default/ {
-              if ($0 !~ /baseband_guard/) {
-                sub(/selinux/, "selinux,baseband_guard")
-              }
-            }
-            /^help$/ { in_block=0 }
-            { print }
-          ' ./security/Kconfig > ./security/Kconfig.tmp && mv ./security/Kconfig.tmp ./security/Kconfig
+          COMMON_DIR=$(find . -type d -path "*/kernel_platform/common" | head -n1)
+          if [[ -z "$COMMON_DIR" ]]; then
+              echo "⚠️ ERROR: Kernel Common Folder Not Found"
+              exit 1
+          fi
+          BASEBAND_DIR="$COMMON_DIR/Baseband-guard"
+          KCONFIG_FILE="$COMMON_DIR/security/Kconfig"
       
-          echo "🎉 Done — Baseband Guard Fully Applied and Configured"
-          echo "------------------------------"
+          echo "✔️ Detected Kernel Common Directory: $COMMON_DIR"
+          cd "$COMMON_DIR"
+      
+          # ------------------------------
+          # Run Baseband Guard Setup Script
+          # ------------------------------
+          echo "🚀 Running Baseband Guard setup script..."
+          curl -fsSL https://raw.githubusercontent.com/vc-teahouse/Baseband-guard/main/setup.sh | bash -s fix_blkdev_rename
+      
+          # ------------------------------
+          # Auto-Detect Default Configuration (Default Configuration)
+          # ------------------------------
+          DEFCONFIG_PATH=$(find ../.. -type f -name "gki_defconfig" | head -n1)
+          if [[ -z "$DEFCONFIG_PATH" ]]; then
+              DEFCONFIG_PATH=$(find ../.. -type f -name "*defconfig" | head -n1)
+          fi
+      
+          if [[ -z "$DEFCONFIG_PATH" ]]; then
+              echo "⚠️ Warning: Default Configuration Not Found — Please Set it Manually"
+          else
+              echo "✔️ Detected Default Configuration: $DEFCONFIG_PATH"
+      
+              # ------------------------------
+              # Detect Default and Set Linux Security Configuration
+              # ------------------------------
+              if grep -q "^CONFIG_DEFAULT_SECURITY_SMACK=y" "$DEFCONFIG_PATH"; then
+                  LSM_LIST="landlock,lockdown,yama,loadpin,safesetid,smack,selinux,tomoyo,apparmor,bpf,baseband_guard"
+              elif grep -q "^CONFIG_DEFAULT_SECURITY_APPARMOR=y" "$DEFCONFIG_PATH"; then
+                  LSM_LIST="landlock,lockdown,yama,loadpin,safesetid,apparmor,selinux,smack,tomoyo,bpf,baseband_guard"
+              elif grep -q "^CONFIG_DEFAULT_SECURITY_TOMOYO=y" "$DEFCONFIG_PATH"; then
+                  LSM_LIST="landlock,lockdown,yama,loadpin,safesetid,tomoyo,bpf,baseband_guard"
+              elif grep -q "^CONFIG_DEFAULT_SECURITY_DAC=y" "$DEFCONFIG_PATH"; then
+                  LSM_LIST="landlock,lockdown,yama,loadpin,safesetid,bpf,baseband_guard"
+              else
+                  LSM_LIST="landlock,lockdown,yama,loadpin,safesetid,selinux,smack,tomoyo,apparmor,bpf,baseband_guard"
+              fi
+      
+              if grep -q "^CONFIG_LSM=" "$DEFCONFIG_PATH"; then
+                  sed -i "s/^CONFIG_LSM=.*/CONFIG_LSM=$LSM_LIST/" "$DEFCONFIG_PATH"
+                  echo "✔️ Linux Security Configuration Updated in Default Configuration"
+              else
+                  echo "CONFIG_LSM=$LSM_LIST" >> "$DEFCONFIG_PATH"
+                  echo "✔️ Linux Security Configuration Added to Default Configuration"
+              fi
+          fi
+      
+          # ------------------------------
+          # Apply Legacy Get Link Patch if Needed
+          # ------------------------------
+          if [[ -f "$BASEBAND_DIR/baseband_guard.c" ]]; then
+              PATCH_FILE="$COMMON_DIR/bbg_fix_get_link.patch"
+              echo "🛠 Downloading BBG get_link compatibility patch..."
+              wget -q https://raw.githubusercontent.com/WildKernels/kernel_patches/main/experimental/bbg/bbg_fix_get_link.patch -O "$PATCH_FILE"
+      
+              if grep -qxF $'\t\tconst char* symlink_target_link = inode->i_op->get_link(dentry, inode, NULL);' "$BASEBAND_DIR/baseband_guard.c"; then
+                  echo "✔️ Applying Get Link Patch..."
+                  patch -p1 --forward < "$PATCH_FILE"
+              else
+                  echo "ℹ️ Get Link Patch Not Needed; Already Up to Date"
+              fi
+          else
+              echo "ℹ️ Modern Linux Security Detected — Skipping Legacy Get Link Patch"
+          fi
+      
+          echo "🎉 Linux Security Baseband Guard Fully Applied"
+          echo "--------------------------------------------------"
     
       # ==============================
       # Kernel Configuration Settings
