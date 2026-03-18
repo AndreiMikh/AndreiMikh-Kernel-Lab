@@ -2462,9 +2462,9 @@ jobs:
           set -euo pipefail
           IFS=$'\n\t'
       
-          echo "--------------------------------------------------"
+          echo "------------------------------"
           echo "🔒 Linux Security Baseband Guard Setup Starting"
-          echo "--------------------------------------------------"
+          echo "------------------------------"
       
           # ------------------------------
           # Resolve Working Directory
@@ -2489,6 +2489,7 @@ jobs:
               fi
           fi
       
+          CURRENT_DIR="$(realpath "$CURRENT_DIR")"
           cd "$CURRENT_DIR"
           echo "✔️ Working Directory: $(pwd)"
       
@@ -2498,12 +2499,13 @@ jobs:
           COMMON_DIR="$(find . -type d -path "*/kernel_platform/common" | head -n1 || true)"
       
           if [[ -z "${COMMON_DIR:-}" ]]; then
-              echo "⚠️ ERROR : Kernel Platform / Common Not Found"
+              echo "⚠️ ERROR: Kernel Platform / Common Not Found"
               exit 1
           fi
       
-          echo "✔️ Found Common Directory: $COMMON_DIR"
+          COMMON_DIR="$(realpath "$COMMON_DIR")"
           cd "$COMMON_DIR"
+          echo "✔️ Found Common Directory: $COMMON_DIR"
       
           BASEBAND_DIR="$COMMON_DIR/Baseband-guard"
       
@@ -2511,8 +2513,13 @@ jobs:
           # Run Baseband Guard Setup
           # ------------------------------
           echo "🚀 Running Baseband Guard Setup Script..."
-          curl -fsSL https://raw.githubusercontent.com/vc-teahouse/Baseband-guard/main/setup.sh \
-              | bash -s -- fix_blkdev_rename
+          MAX_RETRIES=3
+          for i in $(seq 1 $MAX_RETRIES); do
+              curl -fsSL https://raw.githubusercontent.com/vc-teahouse/Baseband-guard/main/setup.sh \
+                  | bash -s -- fix_blkdev_rename && break
+              echo "⚠️ Download / Setup Failed, Retry $i/$MAX_RETRIES..."
+              sleep 2
+          done
       
           echo "✔️ Baseband Guard Setup Completed"
       
@@ -2527,9 +2534,16 @@ jobs:
           fi
       
           if [[ -z "${DEFCONFIG_PATH:-}" ]]; then
-              echo "⚠️ WARNING: No Default Configuration found — Skipping Linux Security Configuration"
+              echo "⚠️ WARNING: No Default Configuration Found — Skipping Linux Security Configuration"
           else
+              DEFCONFIG_PATH="$(realpath "$DEFCONFIG_PATH")"
               echo "✔️ Using Default Configuration: $DEFCONFIG_PATH"
+
+              # ------------------------------
+              # Backup Default Configuration
+              # ------------------------------
+              cp "$DEFCONFIG_PATH" "${DEFCONFIG_PATH}.bak"
+              echo "💾 Backup created: ${DEFCONFIG_PATH}.bak"
       
               # ------------------------------
               # Detect Default Linux Security
@@ -2584,24 +2598,47 @@ jobs:
           # ------------------------------
           # Apply Legacy Get Link Patch
           # ------------------------------
-          if [[ -f "$BASEBAND_DIR/baseband_guard.c" ]]; then
-              PATCH_FILE="$COMMON_DIR/bbg_fix_get_link.patch"
+          PATCH_FILE="$COMMON_DIR/bbg_fix_get_link.patch"
+          PATCH_URL="https://raw.githubusercontent.com/WildKernels/kernel_patches/main/experimental/bbg/bbg_fix_get_link.patch"
       
-              echo "🛠 Downloading Get Link Compatibility Patch..."
-              wget -q https://raw.githubusercontent.com/WildKernels/kernel_patches/main/experimental/bbg/bbg_fix_get_link.patch -O "$PATCH_FILE"
+          echo "🔍 Checking Baseband Guard source..."
       
-              if grep -q "get_link(dentry, inode, NULL)" "$BASEBAND_DIR/baseband_guard.c"; then
-                  echo "✔️ Applying Legacy Get Link Patch..."
-                  patch -p1 --forward < "$PATCH_FILE" || echo "ℹ️ Patch Already Applied or Not Needed"
+          if [[ -d "$BASEBAND_DIR" ]]; then
+              echo "✔️ Baseband Guard Directory Found"
+      
+              if [[ -f "$BASEBAND_DIR/baseband_guard.c" ]]; then
+                  echo "✔️ Source File Detected"
+
+                  # ------------------------------
+                  # Fetch Patch with Retries
+                  # ------------------------------
+                  for i in $(seq 1 $MAX_RETRIES); do
+                      curl -fsSL "$PATCH_URL" -o "$PATCH_FILE" && break
+                      echo "⚠️ Patch Download Failed, Retry $i/$MAX_RETRIES..."
+                      sleep 2
+                  done
+      
+                  echo "🧪 Checking if Patch is Needed..."
+                  if patch -p1 --dry-run < "$PATCH_FILE" >/dev/null 2>&1; then
+                      echo "✔️ Patch is Applicable — Applying Now..."
+                      patch -p1 < "$PATCH_FILE"
+                      echo "✅ Patch Applied Successfully"
+                  else
+                      echo "ℹ️ Patch Already Applied or Not Required"
+                  fi
+      
               else
-                  echo "ℹ️ Patch Not Required (Modern Kernel)"
+                  echo "⚠️ Baseband Guard C Not Found Inside Baseband Guard"
+                  ls -la "$BASEBAND_DIR" || true
               fi
+      
           else
-              echo "ℹ️ Baseband Guard Source Not Found — Skipping Patch"
+              echo "⚠️ Baseband Guard Directory Not Found — Setup may have Failed"
+              exit 1
           fi
       
           echo "🎉 Linux Security Baseband Guard Fully Applied"
-          echo "--------------------------------------------------"
+          echo "------------------------------"
     
       # ==============================
       # Kernel Configuration Settings
