@@ -1636,90 +1636,57 @@ jobs:
           echo
       
           # ------------------------------
-          # Apply KernelSU SUSFS Meta Enable Patch + Auto Fixes
-          # ------------------------------         
-          KSU_META="KernelSU-Next"
-          SUSFS_VERSION="GKI"
+          # Apply KernelSU SUSFS Enable Patch (Optional)
+          # ------------------------------
+          KSU_META="${KSU_META:-KernelSU}"                      # Default to "KernelSU" if Not Set
+          SUSFS_VERSION="${SUSFS_VERSION:-GKI}"                 # Default to GKI if Not Set
+          SUSFS_FIX_VERSION="${SUSFS_FIX_VERSION:-v2.0.0}"      # Default Fix Version if Not Set
           
           if [[ "$KSU_META" == "KernelSU" || "$KSU_META" == "KernelSU-Next" ]]; then
-              echo "🚀 Applying KernelSU SUSFS Meta Enable Patch..."
+              echo "🚀 Applying KernelSU SUSFS Enable Patch..."
           
-              # ------------------------------
-              # Select Main Patch URL (Actions Variables)
-              # ------------------------------
-              if [[ "${{ github.event.inputs.SUSFS_VERSION }}" == "OGKI" ]]; then
-                  PATCH_URL="https://raw.githubusercontent.com/cctv18/susfs4oki/oki-${{ env.KANDROID_VERSION }}-${{ env.KERNEL_VERSION }}/kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch"
+              # Determine Main Patch URL Based on SUSFS Version
+              if [[ "$SUSFS_VERSION" == "OGKI" ]]; then
+                  PATCH_URL="https://raw.githubusercontent.com/cctv18/susfs4oki/oki-${KANDROID_VERSION}-${KERNEL_VERSION}/kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch"
               else
-                  PATCH_URL="https://gitlab.com/simonpunk/susfs4ksu/-/raw/gki-${{ env.KANDROID_VERSION }}-${{ env.KERNEL_VERSION }}/kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch"
+                  PATCH_URL="https://gitlab.com/simonpunk/susfs4ksu/-/raw/gki-${KANDROID_VERSION}-${KERNEL_VERSION}/kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch"
               fi
           
-              # ------------------------------
-              # Download Patch to Workspace
-              # ------------------------------
-              wget -q "$PATCH_URL" -O "$GITHUB_WORKSPACE/enable.patch" || true
-              if [[ ! -f "$GITHUB_WORKSPACE/enable.patch" ]]; then
-                  echo "⚠️ Main KernelSU Patch Not Found — Skipping"
-              else
-                  # ------------------------------
-                  # Detect Kernel Directory (Absolute Path)
-                  # ------------------------------
-                  if [[ -d "$GITHUB_WORKSPACE/kernel_workspace/kernel_platform/common" ]]; then
-                      KDIR="$GITHUB_WORKSPACE/kernel_workspace/kernel_platform/common"
-                  elif [[ -d "$GITHUB_WORKSPACE/kernel_workspace/common" ]]; then
-                      KDIR="$GITHUB_WORKSPACE/kernel_workspace/common"
-                  else
-                      echo "⚠️ Kernel Directory Not Found — Aborting"
-                      exit 1
-                  fi
+              # Download and Apply Main Enable Patch
+              if wget -q "$PATCH_URL" -O enable.patch; then
+                  patch -p1 --forward < enable.patch || echo "⚠️ Main Patch already applied or failed"
+                  rm -f enable.patch
+                  echo "✔️ KernelSU SUSFS Enable Patch Applied"
           
-                  cd "$KDIR" || exit 1
-                  echo "📁 Using Kernel Directory: $KDIR"
-          
-                  # ------------------------------
-                  # Apply the Patch with Auto-Detect -p
-                  # ------------------------------
-                  echo "🔧 Applying KernelSU Patch (Auto-Detect -p)..."
-                  PATCH_FILE="$GITHUB_WORKSPACE/enable.patch"
-                  APPLIED=false
-                  for P in 1 2 3 4; do
-                      if patch -p$P --forward --dry-run < "$PATCH_FILE" > /dev/null 2>&1; then
-                          echo "✔️ Patch Matches with -p$P — Applying..."
-                          patch -p$P --forward < "$PATCH_FILE" || echo "⚠️ Some Hunks Failed — Continuing..."
-                          APPLIED=true
-                          break
-                      fi
-                  done
-                  if [ "$APPLIED" = false ]; then
-                      echo "❌ Failed to Apply Patch — Please Check the Paths or Strip Level"
-                  fi
-                  rm -f "$PATCH_FILE"
-                  echo "✔️ KernelSU SUSFS Meta Patch Applied"
-          
-                  # ------------------------------
-                  # Optional: KernelSU-Next Auto-Fixes
-                  # ------------------------------
+                  # Apply Additional Fix Patches if KernelSU-Next
                   if [[ "$KSU_META" == "KernelSU-Next" ]]; then
-                      REJ_FILES=$(find . -name "*.rej")
-                      if [[ -n "$REJ_FILES" ]]; then
-                          echo "⚠️ Found Rejected Hunks — Attempting Fixes..."
-                          for rej in $REJ_FILES; do
-                              base=$(basename "$rej" .rej)
-                              FIX_URL="https://raw.githubusercontent.com/WildKernels/kernel_patches/main/next/susfs_fix_patches/v2.0.0/fix_${base}.patch"
-                              if wget -q "$FIX_URL" -O "$GITHUB_WORKSPACE/fix.patch"; then
-                                  patch -p1 --forward < "$GITHUB_WORKSPACE/fix.patch" || echo "⚠️ Failed to Apply Fix for $base"
-                                  rm -f "$GITHUB_WORKSPACE/fix.patch"
-                                  echo "✔️ Fix Applied for $base"
-                              else
-                                  echo "⚠️ No Fix Patch Available for $base"
-                              fi
-                          done
-                      else
-                          echo "✔️ No Rejected Files — No Fixes Needed"
-                      fi
+                      echo "🧩 KernelSU-Next Detected — Applying Fix Patches..."
+                      FIX_BASE_URL="https://raw.githubusercontent.com/WildKernels/kernel_patches/main/next/susfs_fix_patches/${SUSFS_FIX_VERSION}"
+          
+                      # Find Rejected Patches and Apply Corresponding Fixes
+                      find . -name "*.rej" | while read -r rej; do
+                          file=$(basename "$rej" .rej)
+                          fix_url="$FIX_BASE_URL/fix_${file}.patch"
+          
+                          echo "⚠️ Found Reject: $file"
+                          echo "➡️ Attempting Fix Patch: $fix_url"
+          
+                          if wget -q "$fix_url" -O fix.patch; then
+                              patch -p1 --forward < fix.patch || echo "⚠️ Fix Patch Failed for $file"
+                              rm -f fix.patch
+                              echo "✔️ Fix Applied for $file"
+                          else
+                              echo "⚠️ No Fix Patch Found for $file"
+                          fi
+                      done
+                  else
+                      echo "ℹ️ KernelSU Selected — Skipping Fix Patches"
                   fi
+              else
+                  echo "⚠️ Enable Patch Not Found"
               fi
           else
-              echo "⚠️ KernelSU Not Selected — Skipping SUSFS Meta Patch"
+              echo "⚠️ KernelSU Not Selected — Skipping Enable Patch"
           fi
           
           echo "🎉 KernelSU SUSFS Patch Stage Completed!"
