@@ -1636,67 +1636,120 @@ jobs:
           echo
       
           # ------------------------------
-          # Apply KernelSU SUSFS Enable Patch (Optional)
+          # KernelSU SUSFS Meta Enable Patch + Auto Fixes
           # ------------------------------
-          KSU_META="${{ github.event.inputs.KSU_META }}"
-          SUSFS_VERSION="${{ github.event.inputs.SUSFS_VERSION }}"
+          KSU_META="KernelSU-Next"
+          SUSFS_VERSION="GKI"
           
           if [[ "$KSU_META" == "KernelSU" || "$KSU_META" == "KernelSU-Next" ]]; then
           
-              echo "🚀 Applying KernelSU SUSFS Enable Patch..."
+              echo "🚀 Applying KernelSU SUSFS Meta Enable Patch..."
           
+              # ------------------------------
+              # Select Main Patch URL
+              # ------------------------------
               if [[ "$SUSFS_VERSION" == "OGKI" ]]; then
-                  PATCH_URL="https://raw.githubusercontent.com/cctv18/susfs4oki/oki-${{ env.KANDROID_VERSION }}-${{ env.KERNEL_VERSION }}/kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch"
+                  PATCH_URL="https://raw.githubusercontent.com/cctv18/susfs4oki/oki-android15-6.6/kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch"
               else
-                  PATCH_URL="https://gitlab.com/simonpunk/susfs4ksu/-/raw/gki-${{ env.KANDROID_VERSION }}-${{ env.KERNEL_VERSION }}/kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch"
+                  PATCH_URL="https://gitlab.com/simonpunk/susfs4ksu/-/raw/gki-android15-6.6/kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch"
               fi
           
-              # Download main patch
+              # ------------------------------
+              # Download Main Patch
+              # ------------------------------
               wget -q "$PATCH_URL" -O enable.patch || true
+              if [[ ! -f enable.patch ]]; then
+                  echo "⚠️ Main KernelSU Patch Not Found, Skipping"
+                  exit 0
+              fi
           
-              if [[ -f enable.patch ]]; then
-                  patch -p1 --forward < enable.patch || true
-                  rm -f enable.patch
-                  echo "✔️ KernelSU SUSFS Meta Patch Applied"
+              # ------------------------------
+              # Auto-Detect Kernel Root
+              # ------------------------------
+              PATCH_TOPDIR=$(grep -oP '(?<=diff --git a/)[^ ]+' enable.patch | head -n1 | cut -d/ -f1)
+          
+              if [[ -d "$PATCH_TOPDIR" ]]; then
+                  cd "$PATCH_TOPDIR/.." || exit 1
+                  echo "📁 Detected Kernel Root: $(pwd)"
+              elif [[ -d "./kernel" ]]; then
+                  cd ./kernel/..
+                  echo "📁 Using Fallback Kernel Root: $(pwd)"
+              else
+                  echo "⚠️ Could Not Detect Kernel Root, Exiting"
+                  exit 1
+              fi
+          
+              # ------------------------------
+              # Apply Main Patch
+              # ------------------------------
+              patch -p1 --forward < enable.patch || {
+                  echo "⚠️ KernelSU SUSFS Patch Failed — Check Paths!"
+                  exit 1
+              }
+              rm -f enable.patch
+              echo "✔️ KernelSU SUSFS Meta Patch Applied"
+          
+              # ------------------------------
+              # Only for KernelSU-Next: Auto Fix
+              # ------------------------------
+              if [[ "$KSU_META" == "KernelSU-Next" ]]; then
+          
+                  echo "🧩 KernelSU-Next Detected — Preparing Auto Fixes..."
           
                   # ------------------------------
-                  # Apply Fix Patches for KernelSU-Next
+                  # Detect SUSFS Meta Version from Patch or Fallback
                   # ------------------------------
-                  if [[ "$KSU_META" == "KernelSU-Next" ]]; then
+                  PATCH_NAME=$(basename "${SUS_PATCH:-enable.patch}")
+                  SUSFS_VER=$(echo "$PATCH_NAME" | grep -oE 'v[0-9]+\.[0-9]+\.[0-9]+')
+                  [[ -z "$SUSFS_VER" ]] && SUSFS_VER="v2.0.0"
+                  echo "📌 Using SUSFS Meta Fix Version: $SUSFS_VER"
           
-                      echo "🧩 KernelSU-Next Detected — Applying Fix Patches..."
+                  FIX_BASE_URL="https://raw.githubusercontent.com/WildKernels/kernel_patches/main/next/susfs_fix_patches/${SUSFS_VER}"
+                  echo "🌐 Fix Patch Source: $FIX_BASE_URL"
           
-                      FIX_BASE_URL="https://raw.githubusercontent.com/WildKernels/kernel_patches/main/next/susfs_fix_patches/v2.0.0"
+                  # ------------------------------
+                  # Find All Rejected Files and Missing Files Mentioned in Patch
+                  # ------------------------------
+                  REJ_FILES=$(find . -name "*.rej" -printf "%p\n")
           
-                      find . -name "*.rej" | while read -r rej; do
-                          file=$(basename "$rej" .rej)
-                          fix_url="$FIX_BASE_URL/fix_${file}.patch"
+                  MISSING_FILES=$(grep -oP '(?<=diff --git a/)[^ ]+' enable.patch | cut -d/ -f2-)
+                  for f in $MISSING_FILES; do
+                      [[ ! -f "$f" ]] && REJ_FILES+="$f"$'\n'
+                  done
           
-                          echo "⚠️ Found Reject: $file"
-                          echo "➡️ Trying Fix: $fix_url"
+                  # ------------------------------
+                  # Apply Fixes
+                  # ------------------------------
+                  if [[ -z "$REJ_FILES" ]]; then
+                      echo "✔️ No Rejected or Missing Files — No Fixes Needed"
+                  else
+                      echo "⚠️ Applying Fixes for Rejected / Missing Files..."
+                      while read -r file; do
+                          [[ -z "$file" ]] && continue
+                          base=$(basename "$file" .rej)
+                          fix_url="$FIX_BASE_URL/fix_${base}.patch"
+                          echo "➡️ Applying Fix for: $base"
           
-                          wget -q "$fix_url" -O fix.patch || true
-          
-                          if [[ -f fix.patch ]]; then
+                          if wget -q "$fix_url" -O fix.patch; then
                               patch -p1 --forward < fix.patch || true
                               rm -f fix.patch
-                              echo "✔️ Applied Fix for $file"
+                              echo "✔️ Fix Applied: $base"
                           else
-                              echo "⚠️ No Fix Patch Found for $file"
+                              echo "❌ No Fix Patch Available for: $base"
                           fi
-                      done
-          
-                  else
-                      echo "ℹ️ KernelSU Selected — Skipping Fix Patches"
+                      done <<< "$REJ_FILES"
                   fi
           
               else
-                  echo "⚠️ Enable Patch Not Found"
+                  echo "ℹ️ KernelSU Selected — Skipping KernelSU-Next Fixes"
               fi
           
           else
-              echo "⚠️ KernelSU Not Selected — Skipping Enable Patch"
+              echo "⚠️ KernelSU Not Selected — Skipping SUSFS Meta Patch"
           fi
+          
+          echo "🎉 KernelSU SUSFS Patch + Auto Fixes Completed!"
+          echo "------------------------------"
       
           echo "🎉 SUSFS Meta Installation Completed Successfully!"
           echo "------------------------------"
