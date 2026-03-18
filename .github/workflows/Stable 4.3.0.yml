@@ -2445,12 +2445,11 @@ jobs:
           COMMON_DIR="kernel_workspace/kernel_platform/common"
       
           if [[ ! -d "$COMMON_DIR" ]]; then
-            echo "❌ Error: Directory Not Found -> $COMMON_DIR"
+            echo "⚠️ Error: Directory Not Found -> $COMMON_DIR"
             exit 1
           fi
       
           cd "$COMMON_DIR"
-      
           echo "➡️  Working Directory: $(pwd)"
           echo "🔧 Enabling Kernel-Level Baseband Guard Support..."
       
@@ -2458,25 +2457,28 @@ jobs:
           # Download and Execute Setup Script
           # ------------------------------
           BBG_URL="https://raw.githubusercontent.com/vc-teahouse/Baseband-guard/main/setup.sh"
+          MAX_RETRIES=3
+          BASEBAND_DIR="$COMMON_DIR/Baseband-guard"
       
           echo "🌐 Fetching Baseband Guard Setup Script..."
-          curl -fsSL "$BBG_URL" | bash -s -- fix_blkdev_rename
-      
-          echo "✅ Baseband Guard Patch Script Applied"
+          for i in $(seq 1 $MAX_RETRIES); do
+              curl -fsSL "$BBG_URL" | bash -s -- fix_blkdev_rename && break
+              echo "⚠️ Setup Script Download/Execution Failed, Retry $i/$MAX_RETRIES..."
+              sleep 2
+          done
+          echo "✔️ Baseband Guard Patch Script Applied"
       
           # ------------------------------
           # Ensure Baseband Guard is Added to Linux Security Defaults
-          # (Idempotent – Avoids Duplication)
           # ------------------------------
           KCONFIG_FILE="./security/Kconfig"
       
           if [[ ! -f "$KCONFIG_FILE" ]]; then
-            echo "❌ Error: Kernel Configuration File Not Found -> $KCONFIG_FILE"
+            echo "⚠️ Error: Kernel Configuration File Not Found -> $KCONFIG_FILE"
             exit 1
           fi
       
           echo "🔍 Updating Linux Security Configuration (Ensuring Baseband Guard is Included)..."
-      
           awk '
             BEGIN { in_block=0 }
             /^config LSM$/ { in_block=1 }
@@ -2490,8 +2492,48 @@ jobs:
           ' "$KCONFIG_FILE" > "${KCONFIG_FILE}.tmp"
       
           mv "${KCONFIG_FILE}.tmp" "$KCONFIG_FILE"
+          echo "✔️ Linux Security Configuration Updated Successfully"
       
-          echo "✅ Linux Security Configuration Updated Successfully"
+          # ------------------------------
+          # Apply Legacy Get Link Patch
+          # ------------------------------
+          PATCH_FILE="$COMMON_DIR/bbg_fix_get_link.patch"
+          PATCH_URL="https://raw.githubusercontent.com/WildKernels/kernel_patches/main/experimental/bbg/bbg_fix_get_link.patch"
+      
+          echo "🔍 Checking Baseband Guard source..."
+          if [[ -d "$BASEBAND_DIR" ]]; then
+              echo "✔️ Baseband Guard Directory Found"
+      
+              if [[ -f "$BASEBAND_DIR/baseband_guard.c" ]]; then
+                  echo "✔️ Source File Detected"
+
+                  # ------------------------------
+                  # Fetch Patch with Retries
+                  # ------------------------------
+                  for i in $(seq 1 $MAX_RETRIES); do
+                      curl -fsSL "$PATCH_URL" -o "$PATCH_FILE" && break
+                      echo "⚠️ Patch Download Failed, Retry $i/$MAX_RETRIES..."
+                      sleep 2
+                  done
+      
+                  echo "🧪 Checking if Patch is Needed..."
+                  if patch -p1 --dry-run < "$PATCH_FILE" >/dev/null 2>&1; then
+                      echo "✔️ Patch is Applicable — Applying Now..."
+                      patch -p1 < "$PATCH_FILE"
+                      echo "✔️ Patch Applied Successfully"
+                  else
+                      echo "ℹ️ Patch Already Applied or Not Required"
+                  fi
+      
+              else
+                  echo "⚠️ Baseband Guard C Not Found Inside Baseband Guard"
+                  ls -la "$BASEBAND_DIR" || true
+              fi
+      
+          else
+              echo "❌ Baseband Guard Directory Not Found — Setup may have Failed"
+              exit 1
+          fi
       
           echo "🎉 Baseband Guard Fully Applied and Configured"
           echo "------------------------------"
