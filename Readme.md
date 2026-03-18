@@ -127,3 +127,8 @@ The Automation
 No Middle Layer
 No Pre-Built Dependency Chains
 No Non-Sense
+
+<!-- This is a visitor counter used to see how many people have visited my project homepage -->
+<div align="center">
+  <img width="0" height="0" src="https://count.getloli.com/get/@:AndreiMikh" />
+</div>
