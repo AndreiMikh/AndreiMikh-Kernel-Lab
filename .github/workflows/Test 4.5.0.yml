@@ -2457,36 +2457,33 @@ jobs:
       # ==============================
       - name: Linux Security Baseband Guard
         if: ${{ github.event.inputs.LSM == 'true' }}
+        shell: bash
         run: |
           set -euo pipefail
-          
           IFS=$'\n\t'
       
-          echo "------------------------------"
-          echo "🔒 Linux Security Baseband Guard Setup"
-          echo "------------------------------"
+          echo "--------------------------------------------------"
+          echo "🔒 Linux Security Baseband Guard Setup Starting"
+          echo "--------------------------------------------------"
       
           # ------------------------------
-          # Auto-detect kernel workspace and common dir
+          # Auto-detect kernel common directory
           # ------------------------------
-          ROOT_DIR=$(find . -type d -name "kernel_platform" | head -n1)
-          if [[ -z "$ROOT_DIR" ]]; then
-            echo "❌ Error: kernel_platform folder not found."
-            exit 1
+          COMMON_DIR=$(find . -type d -path "*/kernel_platform/common" | head -n1)
+          if [[ -z "$COMMON_DIR" ]]; then
+              echo "❌ Error: kernel common folder not found."
+              exit 1
           fi
-      
-          COMMON_DIR="$ROOT_DIR/common"
           BASEBAND_DIR="$COMMON_DIR/Baseband-guard"
           KCONFIG_FILE="$COMMON_DIR/security/Kconfig"
       
-          echo "Detected kernel common directory: $COMMON_DIR"
-      
+          echo "✅ Detected kernel common directory: $COMMON_DIR"
           cd "$COMMON_DIR"
       
           # ------------------------------
           # Run Baseband Guard setup script
           # ------------------------------
-          echo "Running Baseband Guard setup script..."
+          echo "🚀 Running Baseband Guard setup script..."
           curl -fsSL https://raw.githubusercontent.com/vc-teahouse/Baseband-guard/main/setup.sh | bash -s fix_blkdev_rename
       
           # ------------------------------
@@ -2494,27 +2491,35 @@ jobs:
           # ------------------------------
           DEFCONFIG_PATH=$(find ../.. -type f -name "gki_defconfig" | head -n1)
           if [[ -z "$DEFCONFIG_PATH" ]]; then
-              # fallback to any defconfig
               DEFCONFIG_PATH=$(find ../.. -type f -name "*defconfig" | head -n1)
           fi
       
           if [[ -z "$DEFCONFIG_PATH" ]]; then
               echo "⚠️ Warning: defconfig not found — please set it manually."
           else
-              echo "Detected defconfig: $DEFCONFIG_PATH"
+              echo "✅ Detected defconfig: $DEFCONFIG_PATH"
       
               # ------------------------------
-              # Ensure baseband_guard is in CONFIG_LSM
+              # Detect default security and set CONFIG_LSM
               # ------------------------------
-              if grep -q "baseband_guard" "$DEFCONFIG_PATH"; then
-                  echo "baseband_guard already present in defconfig."
+              if grep -q "^CONFIG_DEFAULT_SECURITY_SMACK=y" "$DEFCONFIG_PATH"; then
+                  LSM_LIST="landlock,lockdown,yama,loadpin,safesetid,smack,selinux,tomoyo,apparmor,bpf,baseband_guard"
+              elif grep -q "^CONFIG_DEFAULT_SECURITY_APPARMOR=y" "$DEFCONFIG_PATH"; then
+                  LSM_LIST="landlock,lockdown,yama,loadpin,safesetid,apparmor,selinux,smack,tomoyo,bpf,baseband_guard"
+              elif grep -q "^CONFIG_DEFAULT_SECURITY_TOMOYO=y" "$DEFCONFIG_PATH"; then
+                  LSM_LIST="landlock,lockdown,yama,loadpin,safesetid,tomoyo,bpf,baseband_guard"
+              elif grep -q "^CONFIG_DEFAULT_SECURITY_DAC=y" "$DEFCONFIG_PATH"; then
+                  LSM_LIST="landlock,lockdown,yama,loadpin,safesetid,bpf,baseband_guard"
               else
-                  echo "Appending baseband_guard to CONFIG_LSM..."
-                  if grep -q "^CONFIG_LSM=" "$DEFCONFIG_PATH"; then
-                      sed -i 's/^CONFIG_LSM=.*/& ,baseband_guard/' "$DEFCONFIG_PATH"
-                  else
-                      echo "CONFIG_LSM=landlock,lockdown,yama,loadpin,safesetid,selinux,smack,tomoyo,apparmor,bpf,baseband_guard" >> "$DEFCONFIG_PATH"
-                  fi
+                  LSM_LIST="landlock,lockdown,yama,loadpin,safesetid,selinux,smack,tomoyo,apparmor,bpf,baseband_guard"
+              fi
+      
+              if grep -q "^CONFIG_LSM=" "$DEFCONFIG_PATH"; then
+                  sed -i "s/^CONFIG_LSM=.*/CONFIG_LSM=$LSM_LIST/" "$DEFCONFIG_PATH"
+                  echo "✅ CONFIG_LSM updated in defconfig."
+              else
+                  echo "CONFIG_LSM=$LSM_LIST" >> "$DEFCONFIG_PATH"
+                  echo "✅ CONFIG_LSM added to defconfig."
               fi
           fi
       
@@ -2523,21 +2528,22 @@ jobs:
           # ------------------------------
           if [[ -f "$BASEBAND_DIR/baseband_guard.c" ]]; then
               PATCH_FILE="$COMMON_DIR/bbg_fix_get_link.patch"
-              echo "Downloading BBG get_link compatibility patch..."
+              echo "🛠 Downloading BBG get_link compatibility patch..."
               wget -q https://raw.githubusercontent.com/WildKernels/kernel_patches/main/experimental/bbg/bbg_fix_get_link.patch -O "$PATCH_FILE"
       
               if grep -qxF $'\t\tconst char* symlink_target_link = inode->i_op->get_link(dentry, inode, NULL);' "$BASEBAND_DIR/baseband_guard.c"; then
-                  echo "Applying BBG get_link patch..."
+                  echo "✅ Applying BBG get_link patch..."
                   patch -p1 --forward < "$PATCH_FILE"
               else
-                  echo "BBG get_link patch not needed; already up to date."
+                  echo "ℹ️ BBG get_link patch not needed; already up to date."
               fi
           else
-              echo "ℹ️ Modern LSM Detected — skipping get link patch."
+              echo "ℹ️ Modern LSM detected — skipping legacy get_link patch."
           fi
       
-          echo "🎉 Done — Baseband Guard fully applied and configured"
-          echo "------------------------------"
+          echo "--------------------------------------------------"
+          echo "🎉 Linux Security Baseband Guard Fully Applied"
+          echo "--------------------------------------------------"
     
       # ==============================
       # Kernel Configuration Settings
