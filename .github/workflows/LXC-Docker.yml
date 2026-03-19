@@ -2564,117 +2564,146 @@ jobs:
       # ==============================
       # LXC/Docker Auto Patch Step
       # ==============================
-      - name: 🐳 LXC / Docker Auto Patch (Dynamic)
+      - name: 🐳 LXC / Docker Auto Patch (Dynamic Fixed)
         if: ${{ github.event.inputs.LXCDOCKER == 'true' }}
         continue-on-error: true
         shell: bash
         run: |
-          set -Eeuo pipefail
-      
+          set -uo pipefail   # Unset Vars are Errors; Pipeline Fails if Any Step Fails
+                             # No -e, so Script Continues on Patch Failures
+
           echo "------------------------------"
-          echo "🐳 Starting LXC/Docker Patch Setup"
+          echo "🚀 Starting Linux Container / Docker Patch Setup"
           echo "------------------------------"
-      
-          # ------------------------------
-          # Clone Patch Repository
-          # ------------------------------
-          PATCH_REPO="https://github.com/natsumerinchan/GKI_KernelSU_SUSFS.git"
+
+          # ==============================
+          # Clone Patch Repository (Branch 'NEW')
+          # ==============================
+          PATCH_REPO="https://github.com/AndreiMikh/GKI_KernelSU_SUSFS.git"
           PATCH_DIR_LOCAL="$GITHUB_WORKSPACE/lxc_repo"
-      
-          echo "📥 Cloning Patch Repository..."
-          git clone --depth=1 "$PATCH_REPO" "$PATCH_DIR_LOCAL" || echo "⚠️ Patch Repository Already Exists, Skipping Clone"
-      
-          # ------------------------------
+
+          echo "📥 Cloning Patch Repository (Branch 'NEW')..."
+          rm -rf "$PATCH_DIR_LOCAL" || true
+          git clone --depth=1 -b new "$PATCH_REPO" "$PATCH_DIR_LOCAL" || echo "⚠️ Clone Failed, Continuing..."
+
+          # ==============================
           # Navigate to Kernel Common Directory
-          # ------------------------------
+          # ==============================
           KERNEL_COMMON_DIR="kernel_workspace/kernel_platform/common"
           if [ ! -d "$KERNEL_COMMON_DIR" ]; then
-            echo "❌ Kernel Common Directory Not Found: $KERNEL_COMMON_DIR"
-            exit 1
+            echo "⚠️ Kernel Common Directory Not Found, Skipping Patch Step"
+            exit 0
           fi
           cd "$KERNEL_COMMON_DIR"
-      
-          # ------------------------------
-          # Detect Kernel Version (Auto Fallback)
-          # ------------------------------
-          KERNEL_VERSION=$(make kernelversion 2>/dev/null || echo "${{ github.event.inputs.kernel_version }}")
+
+          # ==============================
+          # Detect Kernel Version
+          # ==============================
+          KERNEL_VERSION=$(make kernelversion 2>/dev/null || echo "6.6.0")
           echo "🧠 Using Kernel Version: $KERNEL_VERSION"
-      
+
           KERNEL_MAJOR_MINOR=$(echo "$KERNEL_VERSION" | cut -d. -f1,2)
-      
-          # ------------------------------
-          # Validate Android version
-          # ------------------------------
-          ANDROID_VER="${{ github.event.inputs.android_version }}"
+          echo "🧠 Kernel Base: $KERNEL_MAJOR_MINOR"
+
+          # ==============================
+          # Detect Android Version Safely
+          # ==============================
+          ANDROID_VER="${{ github.event.inputs.android_version:-}}"
+
+          if [ -z "$ANDROID_VER" ]; then
+            echo "⚠️ Android Version Input Empty → Using Android16"
+            ANDROID_VER="android16"
+          fi
+
           if [[ ! "$ANDROID_VER" =~ ^android[0-9]+$ ]]; then
-            echo "❌ Invalid Android Version: $ANDROID_VER"
-            exit 1
+            echo "⚠️ Invalid Android Version → Forcing Android16"
+            ANDROID_VER="android16"
           fi
+
           ANDROID_NUM="${ANDROID_VER#android}"
-      
-          # ------------------------------
-          # Determine Patch Directory
-          # ------------------------------
+          echo "📊 Android Version: $ANDROID_VER"
+
+          # Export for Downstream Steps
+          echo "ANDROID_VERSION=${ANDROID_NUM}.0.0" >> $GITHUB_ENV
+          echo "ANDROID_SHORT_VERSION=${ANDROID_NUM}" >> $GITHUB_ENV
+          echo "KANDROID_VERSION=android${ANDROID_NUM}" >> $GITHUB_ENV
+
+          # ==============================
+          # Determine Patch Directory (Smart Matching)
+          # ==============================
           PATCH_BASE="$PATCH_DIR_LOCAL/lxc_docker_patches"
-          TARGET_PATCH_DIR="$PATCH_BASE/a${ANDROID_NUM}-${KERNEL_MAJOR_MINOR}"
-      
-          if [ ! -d "$TARGET_PATCH_DIR" ]; then
-            echo "⚠️ Exact Patch Directory Not Found, Searching Fallback..."
-            TARGET_PATCH_DIR=$(find "$PATCH_BASE" -type d -name "a${ANDROID_NUM}-*" | sort -V | tail -n1 || true)
-            if [ -z "$TARGET_PATCH_DIR" ]; then
-              echo "❌ No Compatible Patch Set Found for Android $ANDROID_NUM"
-              exit 0
+
+          # Gather All Candidate Patches for this Android Version
+          CANDIDATES=$(find "$PATCH_BASE" -maxdepth 1 -type d -name "a${ANDROID_NUM}-*" | sort -V)
+
+          TARGET_PATCH_DIR=""
+
+          for dir in $CANDIDATES; do
+            PATCH_KERNEL=$(basename "$dir" | cut -d- -f2)
+            PATCH_MAJOR=$(echo "$PATCH_KERNEL" | cut -d. -f1)
+            PATCH_MINOR=$(echo "$PATCH_KERNEL" | cut -d. -f2)
+            KERN_MAJOR=$(echo "$KERNEL_MAJOR_MINOR" | cut -d. -f1)
+            KERN_MINOR=$(echo "$KERNEL_MAJOR_MINOR" | cut -d. -f2)
+
+            # Select Patch if Patch Kernel ≤ Current Kernel
+            if (( PATCH_MAJOR < KERN_MAJOR )) || { (( PATCH_MAJOR == KERN_MAJOR )) && (( PATCH_MINOR <= KERN_MINOR )); }; then
+              TARGET_PATCH_DIR="$dir"
             fi
-            echo "➡️ Using Fallback Patch Directory: $TARGET_PATCH_DIR"
+          done
+
+          # If no patch ≤ current kernel, pick the highest available as fallback
+          if [ -z "$TARGET_PATCH_DIR" ] && [ -n "$CANDIDATES" ]; then
+            TARGET_PATCH_DIR=$(echo "$CANDIDATES" | tail -n1)
           fi
-          echo "📂 Patch Directory: $TARGET_PATCH_DIR"
-      
-          # ------------------------------
+
+          if [ -z "$TARGET_PATCH_DIR" ]; then
+            echo "⚠️ No Compatible Patch Found for Android${ANDROID_NUM}-${KERNEL_MAJOR_MINOR}"
+            exit 0
+          fi
+
+          echo "📂 Using Patch Directory: $TARGET_PATCH_DIR"
+
+          # ==============================
           # Apply Patches
-          # ------------------------------
+          # ==============================
           PATCHES_APPLIED=0
           PATCHES_SKIPPED=0
           PATCHES_FAILED=0
-      
+
           for patch_file in "$TARGET_PATCH_DIR"/*.patch; do
             [ -f "$patch_file" ] || continue
+
             patch_name=$(basename "$patch_file")
-            echo "➡️ Processing Patch: $patch_name"
-      
-            # Skip Already Applied Patches
+            echo "➡️ Applying: $patch_name"
+
+            # Skip if Already Applied
             if patch -R -p1 -s -f --dry-run < "$patch_file" >/dev/null 2>&1; then
-              echo "⏭️ Already Applied, Skipping"
-              PATCHES_SKIPPED=$((PATCHES_SKIPPED + 1))
+              echo "⏭️ Already Applied → Skipping"
+              PATCHES_SKIPPED=$((PATCHES_SKIPPED+1))
               continue
             fi
-      
+
             # Apply Patch
-            if patch -p1 -F 3 --forward --reject-file=- < "$patch_file"; then
-              echo "✅ Applied Patch: $patch_name"
-              PATCHES_APPLIED=$((PATCHES_APPLIED + 1))
+            if patch -p1 -F3 --forward < "$patch_file"; then
+              echo "✔️ Applied Successfully"
+              PATCHES_APPLIED=$((PATCHES_APPLIED+1))
             else
-              echo "⚠️ Failed to Apply Patch: $patch_name"
-              PATCHES_FAILED=$((PATCHES_FAILED + 1))
+              echo "⚠️ Patch Failed"
+              PATCHES_FAILED=$((PATCHES_FAILED+1))
             fi
           done
-      
-          # ------------------------------
-          # Patch Summary
-          # ------------------------------
+
           echo "------------------------------"
-          echo "📊 Patch Summary"
+          echo "Patch Summary"
           echo "------------------------------"
-          echo "✔ Applied : $PATCHES_APPLIED"
-          echo "⏭️ Skipped : $PATCHES_SKIPPED"
-          echo "✖ Failed  : $PATCHES_FAILED"
-      
-          # ------------------------------
-          # Final log
-          # ------------------------------
+          echo "✔️ Applied : $PATCHES_APPLIED"
+          echo "⚠️ Skipped : $PATCHES_SKIPPED"
+          echo "🚩 Failed  : $PATCHES_FAILED"
+
           if [ "$PATCHES_FAILED" -gt 0 ]; then
-            echo "⚠️ Some Patches Failed — Continuing Build"
+            echo "⚠️ Some Patches Failed → Continuing build"
           else
-            echo "🚀 All Patches Applied Successfully"
+            echo "🎉 LXC / Docker Patch Done"
           fi
     
       # ==============================
@@ -3728,122 +3757,6 @@ jobs:
           echo "🎉 KernelPatch-Next Patch Completed"
           echo "------------------------------"
 
-      # ==============================
-      # Download and Validate KSU Meta Manager APK
-      # ==============================
-      - name: Download and Validate KSU Meta Manager APK
-        continue-on-error: true   # Ensures the Step Itself Won’t Fail the Workflow
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          # -------------------------------
-          # Fail-safe wrapper: Any Error here Won't Break the Workflow
-          # -------------------------------
-          (
-            set -euo pipefail
-      
-            TIMESTAMP=$(date +"%Y-%m-%d %H:%M:%S")
-            echo "------------------------------"
-            echo "[$TIMESTAMP] 🚀 Starting KSU Meta Manager Download..."
-            echo "------------------------------"
-      
-            REPO="${{ steps.manager.outputs.KSU_REPO }}"
-            BRANCH="${{ steps.manager.outputs.MANAGER_BRANCH }}"
-            ARTIFACT_PATTERN="${{ steps.manager.outputs.MANAGER_ARTIFACT }}"  # Partial match allowed
-            TARGET_DIR="./AnyKernel3"
-      
-            echo "-------------------------------"
-            echo "KSU Meta Manager Downloader"
-            echo "Repository       : $REPO"
-            echo "Branch           : $BRANCH"
-            echo "Artifact Pattern : $ARTIFACT_PATTERN"
-            echo "Target Directory : $TARGET_DIR"
-            echo "-------------------------------"
-
-            # -------------------------------
-            # Clean Target Directory
-            # -------------------------------
-            rm -rf "$TARGET_DIR"/*
-            mkdir -p "$TARGET_DIR"
-      
-            # -------------------------------
-            # Fetch Latest Successful Workflow Run
-            # -------------------------------
-            echo "🔍 Fetching Latest Successful Workflow Run..."
-            run_id=$(gh api "repos/$REPO/actions/runs?branch=$BRANCH&status=success&per_page=1" \
-              --jq '.workflow_runs[0].id' 2>/dev/null || echo "")
-      
-            if [[ -z "$run_id" ]]; then
-              echo "⚠️  No Successful Workflow Run Found, Skipping Download"
-              exit 0
-            fi
-            echo "✔️ Found Run ID: $run_id"
-      
-            # -------------------------------
-            # Get Latest Artifact Matching Pattern
-            # -------------------------------
-            echo "🔍 Searching for Artifact Matching Pattern '$ARTIFACT_PATTERN'..."
-            artifact_url=$(gh api "repos/$REPO/actions/runs/$run_id/artifacts" \
-              --jq ".artifacts[] | select(.name | test(\"$ARTIFACT_PATTERN\"; \"i\")) | {url: .archive_download_url, name: .name}" \
-              | jq -r '.[].url' | tail -n1)
-      
-            if [[ -z "$artifact_url" ]]; then
-              echo "⚠️  No Artifact Matching '$ARTIFACT_PATTERN' Found, Skipping Download"
-              exit 0
-            fi
-            echo "✔️ Artifact URL found: $artifact_url"
-      
-            # -------------------------------
-            # Download Artifact
-            # -------------------------------
-            echo "⬇️  Downloading Artifact..."
-            for i in {1..3}; do
-              if curl -fL -H "Authorization: token $GITHUB_TOKEN" -o manager.zip "$artifact_url"; then
-                echo "✔️ Download Successful"
-                break
-              else
-                echo "⚠️ Download Failed, Retrying ($i/3)..."
-                sleep 3
-              fi
-              if [[ $i -eq 3 ]]; then
-                echo "⚠️ Failed to Download Artifact After 3 Attempts, Skipping this Step"
-                exit 0                                                         
-              fi
-            done
-      
-            # -------------------------------
-            # Extract APK(s) and Select Primary
-            # -------------------------------
-            apk_files=$(unzip -Z1 manager.zip | grep '\.apk$' || true)
-      
-            if [[ -z "$apk_files" ]]; then
-              echo "⚠️ No APK Files Found in Artifact, Skipping Extraction"
-              rm -f manager.zip
-              exit 0
-            fi
-
-            # -------------------------------
-            # Select the Largest APK (Usually Release)
-            # -------------------------------
-            primary_apk=$(unzip -l manager.zip | awk '/\.apk$/ {print $4, $1}' | sort -k2 -nr | head -n1 | awk '{print $1}')
-      
-            echo "📦 Extracting APK(s) to $TARGET_DIR..."
-            for apk in $apk_files; do
-              if [[ "$apk" == "$primary_apk" ]]; then
-                echo "   - Extracting Primary APK: $apk"
-              else
-                echo "   - Extracting Additional APK: $apk"
-              fi
-              unzip -o -j manager.zip "$apk" -d "$TARGET_DIR"
-            done
-      
-            rm -f manager.zip
-            echo "✔️ KSU Meta Manager Download and Extraction Complete!"
-            echo "🎉 APK(s) Ready in $TARGET_DIR"
-            echo "------------------------------"
-      
-          ) || echo "⚠️ KSU Meta Manager Section Encountered an Issue but Workflow Continues"
-          
       # ==============================
       # Generate Zip Suffix
       # ==============================     
