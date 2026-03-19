@@ -3566,164 +3566,117 @@ jobs:
       # Download and Validate KSU Meta Manager APK
       # ==============================
       - name: Download and Validate KSU Meta Manager APK
-        continue-on-error: true
+        continue-on-error: true   # Ensures the Step Itself Won’t Fail the Workflow
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          EXPECTED_APK_HASH: ${{ secrets.KSU_APK_HASH }}
         run: |
-          set -Eeuo pipefail
+          # -------------------------------
+          # Fail-safe wrapper: Any Error here Won't Break the Workflow
+          # -------------------------------
+          (
+            set -euo pipefail
+      
+            TIMESTAMP=$(date +"%Y-%m-%d %H:%M:%S")
+            echo "------------------------------"
+            echo "[$TIMESTAMP] 🚀 Starting KSU Meta Manager Download..."
+            echo "------------------------------"
+      
+            REPO="${{ steps.manager.outputs.KSU_REPO }}"
+            BRANCH="${{ steps.manager.outputs.MANAGER_BRANCH }}"
+            ARTIFACT_PATTERN="${{ steps.manager.outputs.MANAGER_ARTIFACT }}"  # Partial match allowed
+            TARGET_DIR="./AnyKernel3"
+      
+            echo "-------------------------------"
+            echo "KSU Meta Manager Downloader"
+            echo "Repository       : $REPO"
+            echo "Branch           : $BRANCH"
+            echo "Artifact Pattern : $ARTIFACT_PATTERN"
+            echo "Target Directory : $TARGET_DIR"
+            echo "-------------------------------"
 
-          echo "------------------------------"
-          echo "🚀 KSU Meta Manager Downloader"
-          echo "------------------------------"
-
-          REPO="${{ steps.manager.outputs.KSU_REPO }}"
-          BRANCH="${{ steps.manager.outputs.MANAGER_BRANCH }}"
-          ARTIFACT="${{ steps.manager.outputs.MANAGER_ARTIFACT }}"
-          TARGET_DIR="./AnyKernel3"
-
-          echo "📂 Repository       : ${REPO:-<empty>}"
-          echo "📂 Branch           : ${BRANCH:-<empty>}"
-          echo "🧾 Artifact         : ${ARTIFACT:-<empty>}"
-          echo "🔎 Target Directory : $TARGET_DIR"
-
-          # ------------------------------
-          # Validate Inputs
-          # ------------------------------
-          if [[ -z "${REPO:-}" || -z "${BRANCH:-}" || -z "${ARTIFACT:-}" ]]; then
-            echo "⚠️ Missing Manager Outputs → Skipping"
-            exit 0
-          fi
-
-          mkdir -p "$TARGET_DIR"
-
-          # ------------------------------
-          # Fetch Successful Runs
-          # ------------------------------
-          echo "🔎 Fetching Workflow Runs..."
-
-          mapfile -t RUN_IDS < <(
-            gh api "repos/$REPO/actions/runs" \
-              -f branch="$BRANCH" \
-              -f status=completed \
-              -f conclusion=success \
-              -f per_page=10 \
-              --jq '.workflow_runs[].id' \
-              2>/dev/null || true
-          )
-
-          if [[ ${#RUN_IDS[@]} -eq 0 ]]; then
-            echo "⚠️ No Successful Runs Found"
-            exit 0
-          fi
-
-          # ------------------------------
-          # Find Artifact
-          # ------------------------------
-          artifact_url=""
-
-          for run_id in "${RUN_IDS[@]}"; do
-
-            echo "🔎 Checking Run $run_id"
-
-            response=$(gh api \
-              "repos/$REPO/actions/runs/$run_id/artifacts" \
-              2>/dev/null || true)
-
-            # Validate JSON
-            if ! echo "$response" | jq . >/dev/null 2>&1; then
-              echo "… ⚠️ Invalid API Response"
-              continue
+            # -------------------------------
+            # Clean Target Directory
+            # -------------------------------
+            rm -rf "$TARGET_DIR"/*
+            mkdir -p "$TARGET_DIR"
+      
+            # -------------------------------
+            # Fetch Latest Successful Workflow Run
+            # -------------------------------
+            echo "🔍 Fetching Latest Successful Workflow Run..."
+            run_id=$(gh api "repos/$REPO/actions/runs?branch=$BRANCH&status=success&per_page=1" \
+              --jq '.workflow_runs[0].id' 2>/dev/null || echo "")
+      
+            if [[ -z "$run_id" ]]; then
+              echo "⚠️  No Successful Workflow Run Found, Skipping Download"
+              exit 0
+            fi
+            echo "✔️ Found Run ID: $run_id"
+      
+            # -------------------------------
+            # Get Latest Artifact Matching Pattern
+            # -------------------------------
+            echo "🔍 Searching for Artifact Matching Pattern '$ARTIFACT_PATTERN'..."
+            artifact_url=$(gh api "repos/$REPO/actions/runs/$run_id/artifacts" \
+              --jq ".artifacts[] | select(.name | test(\"$ARTIFACT_PATTERN\"; \"i\")) | {url: .archive_download_url, name: .name}" \
+              | jq -r '.[].url' | tail -n1)
+      
+            if [[ -z "$artifact_url" ]]; then
+              echo "⚠️  No Artifact Matching '$ARTIFACT_PATTERN' Found, Skipping Download"
+              exit 0
+            fi
+            echo "✔️ Artifact URL found: $artifact_url"
+      
+            # -------------------------------
+            # Download Artifact
+            # -------------------------------
+            echo "⬇️  Downloading Artifact..."
+            for i in {1..3}; do
+              if curl -fL -H "Authorization: token $GITHUB_TOKEN" -o manager.zip "$artifact_url"; then
+                echo "✔️ Download Successful"
+                break
+              else
+                echo "⚠️ Download Failed, Retrying ($i/3)..."
+                sleep 3
+              fi
+              if [[ $i -eq 3 ]]; then
+                echo "⚠️ Failed to Download Artifact After 3 Attempts, Skipping this Step"
+                exit 0                                                         
+              fi
+            done
+      
+            # -------------------------------
+            # Extract APK(s) and Select Primary
+            # -------------------------------
+            apk_files=$(unzip -Z1 manager.zip | grep '\.apk$' || true)
+      
+            if [[ -z "$apk_files" ]]; then
+              echo "⚠️ No APK Files Found in Artifact, Skipping Extraction"
+              rm -f manager.zip
+              exit 0
             fi
 
-            count=$(echo "$response" | jq '.artifacts | length')
-
-            if [[ "$count" -eq 0 ]]; then
-              echo "… ⚠️ No Artifacts"
-              continue
-            fi
-
-            url=$(echo "$response" | jq -r \
-              ".artifacts[] | select(.name==\"$ARTIFACT\") | .archive_download_url")
-
-            if [[ "$url" == https://api.github.com/* ]]; then
-              artifact_url="$url"
-              echo "🔎 Found Artifact in Run $run_id"
-              break
-            else
-              echo "… ⚠️ Artifact Not in this Run"
-            fi
-
-          done
-
-          if [[ -z "$artifact_url" ]]; then
-            echo "⚠️ Artifact Not Found → Skipping"
-            exit 0
-          fi
-
-          # ------------------------------
-          # Download Artifact
-          # ------------------------------
-          echo "⬇️ Downloading Artifact..."
-
-          if ! curl -fL \
-            -H "Authorization: token $GITHUB_TOKEN" \
-            -o manager.zip \
-            "$artifact_url"
-          then
-            echo "⚠️ Download Failed"
-            exit 0
-          fi
-
-          # ------------------------------
-          # Extract APK
-          # ------------------------------
-          echo "📌 Extracting APK..."
-
-          if ! unzip -o -j manager.zip "*.apk" -d "$TARGET_DIR" >/dev/null 2>&1
-          then
-            echo "⚠️ Unzip Failed"
+            # -------------------------------
+            # Select the Largest APK (Usually Release)
+            # -------------------------------
+            primary_apk=$(unzip -l manager.zip | awk '/\.apk$/ {print $4, $1}' | sort -k2 -nr | head -n1 | awk '{print $1}')
+      
+            echo "📦 Extracting APK(s) to $TARGET_DIR..."
+            for apk in $apk_files; do
+              if [[ "$apk" == "$primary_apk" ]]; then
+                echo "   - Extracting Primary APK: $apk"
+              else
+                echo "   - Extracting Additional APK: $apk"
+              fi
+              unzip -o -j manager.zip "$apk" -d "$TARGET_DIR"
+            done
+      
             rm -f manager.zip
-            exit 0
-          fi
-
-          rm -f manager.zip
-
-          APK=$(find "$TARGET_DIR" -type f -name "*.apk" | head -n1)
-
-          if [[ -z "${APK:-}" ]]; then
-            echo "⚠️ No APK Extracted"
-            exit 0
-          fi
-
-          echo "✔️ APK: $APK"
-
-          # ------------------------------
-          # Hash check (optional)
-          # ------------------------------
-          if [[ -n "${EXPECTED_APK_HASH:-}" ]]; then
-
-            HASH=$(sha256sum "$APK" | awk '{print $1}')
-
-            echo "Hash: $HASH"
-
-            if [[ "$HASH" != "$EXPECTED_APK_HASH" ]]; then
-              echo "⚠️ SHA256 Mismatch (Ignored)"
-            else
-              echo "✔️ SHA256 Verified"
-            fi
-
-          else
-            echo "⚠️ No Expected Hash Provided"
-          fi
-
-          # ------------------------------
-          # Export
-          # ------------------------------
-          echo "LATEST_APK=$APK" >> "$GITHUB_ENV"
-          
-          echo "🎉 KSU Meta Manager APK Ready"
-          echo "------------------------------"
+            echo "✔️ KSU Meta Manager Download and Extraction Complete!"
+            echo "🎉 APK(s) Ready in $TARGET_DIR"
+            echo "------------------------------"
+      
+          ) || echo "⚠️ KSU Meta Manager Section Encountered an Issue but Workflow Continues"
           
       # ==============================
       # Generate Zip Suffix
