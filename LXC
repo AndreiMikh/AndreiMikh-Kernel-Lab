@@ -1,0 +1,148 @@
+      # ==============================
+      # LXC/Docker Auto Patch Step
+      # ==============================
+      - name: 🐳 LXC / Docker Auto Patch (Dynamic Fixed)
+        if: ${{ github.event.inputs.LXCDOCKER == 'true' }}
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+      
+          echo "------------------------------"
+          echo "🐳 Starting LXC / Docker Patch Setup"
+          echo "------------------------------"
+      
+          # ------------------------------
+          # Clone Patch Repository
+          # ------------------------------
+          PATCH_REPO="https://github.com/natsumerinchan/GKI_KernelSU_SUSFS.git"
+          PATCH_DIR_LOCAL="$GITHUB_WORKSPACE/lxc_repo"
+      
+          echo "📥 Cloning Patch Repository..."
+          rm -rf "$PATCH_DIR_LOCAL"
+          git clone --depth=1 "$PATCH_REPO" "$PATCH_DIR_LOCAL"
+      
+          # ------------------------------
+          # Navigate to Kernel Common Directory
+          # ------------------------------
+          KERNEL_COMMON_DIR="kernel_workspace/kernel_platform/common"
+      
+          if [ ! -d "$KERNEL_COMMON_DIR" ]; then
+            echo "⚠️ Kernel Common Directory Not Found"
+            exit 1
+          fi
+      
+          cd "$KERNEL_COMMON_DIR"
+      
+          # ------------------------------
+          # Detect Kernel Version
+          # ------------------------------
+          KERNEL_VERSION=$(make kernelversion 2>/dev/null || echo "6.6.0")
+          echo "🧾 Kernel Version: $KERNEL_VERSION"
+      
+          KERNEL_MAJOR_MINOR=$(echo "$KERNEL_VERSION" | cut -d. -f1,2)
+          echo "🧾 Kernel Base: $KERNEL_MAJOR_MINOR"
+      
+          # ------------------------------
+          # Detect Android Version (safe)
+          # ------------------------------      
+          ANDROID_VER="${{ github.event.inputs.android_version }}"
+      
+          if [ -z "$ANDROID_VER" ]; then
+            echo "⚠️ Android Version Input Empty, Using Android16"
+            ANDROID_VER="android16"
+          fi
+      
+          if [[ ! "$ANDROID_VER" =~ ^android[0-9]+$ ]]; then
+            echo "⚠️ Invalid Android Version → Forcing Android16"
+            ANDROID_VER="android16"
+          fi
+      
+          ANDROID_NUM="${ANDROID_VER#android}"
+      
+          echo "📊 Android: $ANDROID_VER"
+      
+          # ------------------------------
+          # Export for Other Steps
+          # ------------------------------    
+          echo "ANDROID_VERSION=${ANDROID_NUM}.0.0" >> $GITHUB_ENV
+          echo "ANDROID_SHORT_VERSION=${ANDROID_NUM}" >> $GITHUB_ENV
+          echo "KANDROID_VERSION=android${ANDROID_NUM}" >> $GITHUB_ENV
+      
+          # ------------------------------
+          # Determine Patch Directory
+          # ------------------------------
+      
+          PATCH_BASE="$PATCH_DIR_LOCAL/lxc_docker_patches"
+          TARGET_PATCH_DIR="$PATCH_BASE/a${ANDROID_NUM}-${KERNEL_MAJOR_MINOR}"
+      
+          if [ ! -d "$TARGET_PATCH_DIR" ]; then
+      
+            echo "⚠️ Exact Patch Not Found"
+            echo "Searching Fallback..."
+      
+            TARGET_PATCH_DIR=$(find "$PATCH_BASE" \
+              -type d \
+              -name "a${ANDROID_NUM}-*" \
+              | sort -V \
+              | tail -n1 || true)
+      
+          fi
+      
+          if [ -z "$TARGET_PATCH_DIR" ]; then
+            echo "⚠️ No Compatible Patch Set Found"
+            exit 0
+          fi
+      
+          echo "📂 Patch Directory: $TARGET_PATCH_DIR"
+      
+          # ------------------------------
+          # Apply Patches
+          # ------------------------------     
+          PATCHES_APPLIED=0
+          PATCHES_SKIPPED=0
+          PATCHES_FAILED=0
+      
+          for patch_file in "$TARGET_PATCH_DIR"/*.patch; do
+      
+            [ -f "$patch_file" ] || continue
+      
+            patch_name=$(basename "$patch_file")
+            echo "➡️ $patch_name"
+      
+            # Already Applied Check
+            if patch -R -p1 -s -f --dry-run < "$patch_file" >/dev/null 2>&1; then
+      
+              echo "⏭️ skip"
+              PATCHES_SKIPPED=$((PATCHES_SKIPPED+1))
+              continue
+      
+            fi
+      
+            # Apply
+            if patch -p1 -F3 --forward < "$patch_file"; then
+      
+              echo "✔️ Applied"
+              PATCHES_APPLIED=$((PATCHES_APPLIED+1))
+      
+            else
+      
+              echo "⚠️ Failed"
+              PATCHES_FAILED=$((PATCHES_FAILED+1))
+      
+            fi
+      
+          done
+      
+          echo "------------------------------"
+          echo "Patch Summary"
+          echo "------------------------------"      
+          echo "✔️ Applied : $PATCHES_APPLIED"
+          echo "⚠️ Skipped : $PATCHES_SKIPPED"
+          echo "🚩 Failed  : $PATCHES_FAILED"
+      
+          if [ "$PATCHES_FAILED" -gt 0 ]; then
+            echo "⚠️ Continue Build"
+          else
+            echo "🎉 LXC / Docker Patch Done"
+          fi
