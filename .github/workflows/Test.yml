@@ -3393,8 +3393,11 @@ jobs:
           set -u
 
           # ------------------------------
-          # Export Paths
+          # Configure Compiler Cache
           # ------------------------------
+          export CCACHE_DIR="$GITHUB_WORKSPACE/.ccache"
+          export CCACHE_MAXSIZE="10G"
+          ccache -M $CCACHE_MAXSIZE
           export PATH="$GITHUB_WORKSPACE/kernel_workspace/kernel_platform/$CLANG_PREBUILT_BIN:$PATH"
           export PATH="/usr/lib/ccache:$PATH"
 
@@ -3416,7 +3419,7 @@ jobs:
           MPMAP="-fmacro-prefix-map=$ROOT_REAL_PATH=."
           FPMAP="-ffile-prefix-map=$ROOT_REAL_PATH=."
 
-          KCFLAGS="$MAP $MPMAP $FPMAP -no-canonical-prefixes -Wno-error -D__ANDROID_COMMON_KERNEL__"
+          KCFLAGS="$MAP $MPMAP $FPMAP -no-canonical-prefixes -Wno-error -D__ANDROID_COMMON_KERNEL__ -g0"
 
           # ------------------------------
           # Prepare Make Arguments
@@ -3429,7 +3432,7 @@ jobs:
             HOSTCC="ccache clang"
             LD=ld.lld
             HOSTLD=ld.lld
-            PAHOLE=../../prebuilts/kernel-build-tools/linux-x86/bin/pahole
+            PAHOLE=:
             KCFLAGS="$KCFLAGS"
           )
 
@@ -3437,44 +3440,49 @@ jobs:
           [[ "$ENABLE_RUST" == "true" ]] && MAKE_ARGS=(RUSTC=../../prebuilts/rust/linux-x86/$RUSTC_VERSION/bin/rustc "${MAKE_ARGS[@]}")
 
           # ------------------------------
-          # Kernel Configuration and Compilation
+          # Kernel Configuration
           # ------------------------------
           echo ">> 🚀 Running GKI Default Configuration"
           make O=out ARCH=arm64 "${MAKE_ARGS[@]}" gki_defconfig
 
+          # ------------------------------  
+          # Skip Old Default Configuration if GKI Default Configuration is Sufficient
           # ------------------------------
-          # Link Time Optimization (LTO) Configuration
+          [[ -f out/.config ]] || make O=out "${MAKE_ARGS[@]}" olddefconfig
+
           # ------------------------------
-          echo ">> 🧾 Configuring Link Time Optimization for Kernel $KERNEL_VERSION"
+          # Link Time Optimization (LTO)
+          # ------------------------------
+          echo ">> 🧾 Configuring LTO for Kernel $KERNEL_VERSION"
           case "$KERNEL_VERSION" in
             "5.10"|"5.15")
-              echo ">> 🚀 Link Time Optimization: Thin"
+              echo ">> 🚀 Thin LTO"
               scripts/config --file out/.config -e LTO_CLANG
               scripts/config --file out/.config -e LTO_CLANG_THIN
               scripts/config --file out/.config -d LTO_CLANG_NONE
               scripts/config --file out/.config -d LTO_CLANG_FULL
               ;;
             "6.12")
-              echo ">> 🚀 Link Time Optimization: None"
+              echo ">> 🚀 LTO Disabled"
               scripts/config --file out/.config -e LTO_CLANG
               scripts/config --file out/.config -e LTO_CLANG_NONE
               scripts/config --file out/.config -d LTO_CLANG_THIN
               scripts/config --file out/.config -d LTO_CLANG_FULL
               ;;
             *)
-              echo ">> ⚠️ Link Time Optimization: Skipped for Kernel $KERNEL_VERSION"
+              echo ">> ⚠️ LTO Skipped for Kernel $KERNEL_VERSION"
               ;;
           esac
 
           # ------------------------------
-          # Final Default Configuration and Build
-          # ------------------------------   
-          echo ">> 🚀 Running Old Default Configuration"
-          make O=out "${MAKE_ARGS[@]}" olddefconfig
-
-          echo ">> 🧾 Compiling Kernel with $(nproc --all) Threads"
+          # Build Kernel
+          # ------------------------------
+          echo ">> 🧾 Compiling Kernel with $(nproc --all) threads"
           make -j"$(nproc --all)" O=out "${MAKE_ARGS[@]}" KCFLAGS="$KCFLAGS"
 
+          # ------------------------------
+          # Show Compiler Cache Statistics
+          # ------------------------------
           echo "📊 Compiler Cache Statistics"
           ccache -s
 
