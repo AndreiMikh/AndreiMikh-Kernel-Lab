@@ -687,29 +687,49 @@ jobs:
           echo "------------------------------"
 
       # ==============================
-      # Enable Swap 
+      # Enable Swap and Dynamic ZRAM
       # ==============================
       - name: Enable Swap
         run: |
           set -euo pipefail
 
-          # Swap and VM Tuning
+          # ------------------------------
+          # Dynamic ZRAM Size Based on RAM
+          # ------------------------------
+          RAM_KB=$(grep MemTotal /proc/meminfo | awk '{print $2}')        # in KB
+          ZRAM_SIZE_KB=$(( RAM_KB * 75 / 100 ))                           # 75% of total RAM
+          ZRAM_SIZE_MB=$(( ZRAM_SIZE_KB / 1024 ))                         # convert to MB
+          echo "🚀 Total RAM: $((RAM_KB/1024)) MB"
+          echo "💾 Setting ZRAM Size to 75% → ${ZRAM_SIZE_MB} MB"
+
+          # ------------------------------
+          # Enable ZRAM if module exists
+          # ------------------------------
+          if ! swapon --show | grep -q "/dev/zram0"; then
+            sudo modprobe zram
+            echo $((ZRAM_SIZE_MB * 1024 * 1024)) | sudo tee /sys/block/zram0/disksize
+            sudo mkswap /dev/zram0
+            sudo swapon /dev/zram0
+            echo "🎉 ZRAM Enabled"
+          else
+            echo "ℹ️ ZRAM Already Enabled"
+          fi
+
+          # ------------------------------
+          # Legacy Swapfile (Optional)
+          # ------------------------------
           SWAPFILE="/swapfile"
           SWAPSIZE="4G"
 
           if ! swapon --show | grep -q "$SWAPFILE"; then
             echo "🚀 Creating Swapfile at $SWAPFILE ($SWAPSIZE)..."
 
-            # ------------------------------
-            # Safe Allocation for All File Systems
-            # ------------------------------
             if [[ "$(stat -f -c %T /)" == "btrfs" ]]; then
               sudo dd if=/dev/zero of="$SWAPFILE" bs=1M count=4096 status=progress
             else
               sudo fallocate -l "$SWAPSIZE" "$SWAPFILE"
             fi
 
-            # Create Swap if it Doesn't Exist
             sudo chmod 600 "$SWAPFILE"
             sudo mkswap "$SWAPFILE"
             sudo swapon "$SWAPFILE"
@@ -720,29 +740,18 @@ jobs:
           # ------------------------------
           # Optimize Kernel Memory Usage and Tuning
           # ------------------------------
-          # Start Background Flushing Earlier
           sudo sysctl -w vm.dirty_background_ratio=3
-
-          # Maximum Dirty Pages Before Forcing Flush
           sudo sysctl -w vm.dirty_ratio=10
-
-          # How Aggressively Swap is Used (Higher → More Swapping)
           sudo sysctl -w vm.swappiness=80
-
-          # Cache Pressure (Lower → Keep More Inode / Page Cache in RAM)
           sudo sysctl -w vm.vfs_cache_pressure=50
+          sudo sysctl -w vm.dirty_expire_centisecs=1500
+          sudo sysctl -w vm.dirty_writeback_centisecs=500
+          sudo sysctl -w vm.dirtytime_expire_seconds=10
 
-          # Flush Behavior for Faster I/O Response
-          sudo sysctl -w vm.dirty_expire_centisecs=1500   # default 3000, flush pages older than 15s
-          sudo sysctl -w vm.dirty_writeback_centisecs=500 # default 500, background flush interval
-
-          # Optional: Increase I/O Scheduler Efficiency if Using SSDs
-          sudo sysctl -w vm.dirtytime_expire_seconds=10          
-
-          echo "📌 Swap Status:"
+          echo "📌 Swap and ZRAM Status:"
           free -h
           echo "------------------------------"
- 
+          
       # ==============================
       # Configure Git Identity
       # ==============================
