@@ -511,21 +511,40 @@ jobs:
           # -----------------------------
           # Parallel Repository Check
           # -----------------------------
-          pids=()
           TMP_FOUND="/tmp/manifest_found.lock"
+          TMP_INFO="/tmp/manifest_info.txt"
 
-          # Remove Old Marker if Exists
-          rm -f "$TMP_FOUND"
+          # Remove Old Markers
+          rm -f "$TMP_FOUND" "$TMP_INFO"
+
+          pids=()
 
           for key in $REPOS_KEYS; do
               value="${REPOS[$key]}" || true
               if [[ -n "$value" ]]; then
                   (
-                      check_repo "$value"
-                      # If FOUND_REPO is set, create lock file
-                      if [[ -n "$FOUND_REPO" ]]; then
-                          touch "$TMP_FOUND"
-                      fi
+                      OWNER="${value%%|*}"
+                      REPO_NAME="${value##*|}"
+
+                      echo "🔎 Checking $OWNER/$REPO_NAME"
+
+                      # Try Branches as Before
+                      BRANCHES=$(curl -s "https://api.github.com/repos/$OWNER/$REPO_NAME/branches?per_page=100" | jq -r '.[].name? // empty' 2>/dev/null || true)
+                      [[ -z "$BRANCHES" ]] && BRANCHES=$(git ls-remote --heads https://github.com/$OWNER/$REPO_NAME.git 2>/dev/null | sed 's|.*refs/heads/||' || true)
+
+                      for BRANCH in $BRANCHES; do
+                          XML_URL="https://raw.githubusercontent.com/$OWNER/$REPO_NAME/$BRANCH/${FILE}.xml"
+                          README_URL="https://raw.githubusercontent.com/$OWNER/$REPO_NAME/$BRANCH/README.md"
+                          if curl -sf --head "$XML_URL" >/dev/null; then
+                              curl -fsSL -o "$XML_PATH" "$XML_URL"
+                              curl -fsSL -o "$README_PATH" "$README_URL" || true
+                              
+                              # Write Success Information to a Temporary File (Parent Shell will Read this)
+                              echo "$OWNER|$REPO_NAME|$BRANCH" > "$TMP_INFO"
+                              touch "$TMP_FOUND"
+                              exit 0
+                          fi
+                      done
                   ) &
                   pids+=($!)
               fi
@@ -536,12 +555,13 @@ jobs:
               wait $pid || true
           done
 
-          # Final Check Using Lock File
-          if [[ ! -f "$TMP_FOUND" || ! -s "$XML_PATH" ]]; then
+          # Read Results from Temporary File
+          if [[ -f "$TMP_FOUND" && -s "$TMP_INFO" ]]; then
+              IFS='|' read -r FOUND_REPO FOUND_REPO_NAME FOUND_BRANCH < "$TMP_INFO"
+              echo "✔️ Manifest Successfully Found: $FOUND_REPO/$FOUND_REPO_NAME (Branch: $FOUND_BRANCH)"
+          else
               echo "⚠️ WARNING: ${FILE}.xml Not Found in Any Repository"
               exit 1
-          else
-              echo "✔️ Manifest Successfully Found: $FOUND_REPO/$FOUND_REPO_NAME (Branch: $FOUND_BRANCH)"
           fi
 
           # -----------------------------
