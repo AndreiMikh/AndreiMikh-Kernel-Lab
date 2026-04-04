@@ -2899,7 +2899,7 @@ jobs:
             echo "🎉 Linux Container / Docker Patch Done"
             echo "------------------------------"
           fi
-
+ 
       # ==============================
       # ReKernel Patch Setup
       # ==============================
@@ -2909,100 +2909,121 @@ jobs:
           set -euo pipefail
 
           echo "------------------------------"
-          echo "🚀 Starting ReKernel Patch Setup..."
+          echo "🚀 ReKernel Patch Setup..."
           echo "------------------------------"
           echo ""
+          
+          # ------------------------------
+          # Paths
+          # ------------------------------
+          WS="${GITHUB_WORKSPACE}/kernel_workspace"
+          REPO_DIR="${WS}/Re-Kernel"
+          DRIVERS_DIR="${WS}/kernel_platform/common/drivers"
+          TARGET_DIR="${DRIVERS_DIR}/rekernel"
+          KCONFIG_FILE="${DRIVERS_DIR}/Kconfig"
+          MAKEFILE="${DRIVERS_DIR}/Makefile"
 
           # ------------------------------
-          # Clone ReKernel Repository if Not Already Present
+          # Basic Sanity Checks
           # ------------------------------
-          RE_DIR="${GITHUB_WORKSPACE}/kernel_workspace/Re-Kernel"
-          if [ ! -d "$RE_DIR" ]; then
-            echo "♻️ Cloning ReKernel Repository..."
-            mkdir -p "$RE_DIR"
-            git clone https://github.com/Sakion-Team/Re-Kernel.git "$RE_DIR"
-            echo "📩 ReKernel Repository Cloned"
+          [[ -d "$DRIVERS_DIR" ]] || { echo "⚠️ Missing Drivers Directory"; exit 1; }
+          [[ -f "$KCONFIG_FILE" ]] || { echo "⚠️ Missing Kconfig"; exit 1; }
+          [[ -f "$MAKEFILE" ]] || { echo "⚠️ Missing Makefile"; exit 1; }
+
+          # ------------------------------
+          # Clone Repository (Shallow)
+          # ------------------------------
+          if [[ ! -d "$REPO_DIR/.git" ]]; then
+            echo "[INFO] Cloning ReKernel repository..."
+            git clone --depth=1 https://github.com/Sakion-Team/Re-Kernel.git "$REPO_DIR"
+            echo "📩 Repository Cloned"
           else
-            echo "⚠️ ReKernel Repository Already Exists, Skipping Clone..."
+            echo "⚠️ Repository Already Exists"
           fi
 
           # ------------------------------
           # Re-Solve Source Directory
           # ------------------------------
-          if [ -d "$RE_DIR/LKM-Source" ]; then
-            SRC_DIR="$RE_DIR/LKM-Source"
-          else
-            SRC_DIR="$RE_DIR"
-          fi
+          SRC_DIR="$REPO_DIR"
+          [[ -d "$REPO_DIR/LKM-Source" ]] && SRC_DIR="$REPO_DIR/LKM-Source"
+          echo "📂 Source: $SRC_DIR"
 
           # ------------------------------
-          # Directories
+          # Skip if Already Applied (Stronger Check)
           # ------------------------------
-          DRIVERS_DIR="${GITHUB_WORKSPACE}/kernel_workspace/kernel_platform/common/drivers"
-          RE_TARGET_DIR="${DRIVERS_DIR}/rekernel"
-
-          # ------------------------------
-          # Detect if ReKernel is Already Applied Else Skip Step
-          # ------------------------------
-          if [ -d "$RE_TARGET_DIR" ] && grep -q 'obj-$(CONFIG_REKERNEL) += rekernel' "$DRIVERS_DIR/Makefile"; then
-            echo "✔️ ReKernel Already Applied, Skipping Step..."
+          if grep -q "drivers/rekernel/Kconfig" "$KCONFIG_FILE" && \
+            grep -q "CONFIG_REKERNEL" "$MAKEFILE" && \
+            [[ -f "$TARGET_DIR/rekernel.c" ]]; then
+            echo "⚠️ ReKernel Already Applied"
             exit 0
           fi
 
           echo "⚙️ Applying ReKernel..."
 
           # ------------------------------
-          # Ensure Target Directory Exists
+          # Prepare Target Directory
           # ------------------------------
-          mkdir -p "$RE_TARGET_DIR"
+          mkdir -p "$TARGET_DIR"
 
           # ------------------------------
-          # Inject Kernel Configuration Entry if Missing
+          # Inject Kernel Configuration Entry (Idempotent)
           # ------------------------------
-          grep -q 'source "drivers/rekernel/Kconfig"' "$DRIVERS_DIR/Kconfig" || {
-            sed -i '/endmenu/i source "drivers/rekernel/Kconfig"' "$DRIVERS_DIR/Kconfig"
-            echo "💉 Injected Kernel Configuration Entry"
-          }
+          if ! grep -q 'drivers/rekernel/Kconfig' "$KCONFIG_FILE"; then
+            sed -i '/endmenu/i source "drivers/rekernel/Kconfig"' "$KCONFIG_FILE"
+            echo "✔️ Kernel Configuration Entry Added"
+          else
+            echo "⚠️ Kernel Configuration Already Present"
+          fi
 
           # ------------------------------
-          # Inject Makefile Entry if Missing
+          # Inject Makefile Entry (Idempotent)
           # ------------------------------
-          grep -q 'obj-$(CONFIG_REKERNEL) += rekernel' "$DRIVERS_DIR/Makefile" || {
-            sed -i '$a \# Re-Kernel Support\nobj-$(CONFIG_REKERNEL) += rekernel/' "$DRIVERS_DIR/Makefile"
-            echo "💉 Injected MakeFile Entry"
-          }
+          if ! grep -q "CONFIG_REKERNEL" "$MAKEFILE"; then
+            printf "\n# ReKernel Support\nobj-\$(CONFIG_REKERNEL) += rekernel/\n" >> "$MAKEFILE"
+            echo "✔️ Makefile Entry Added"
+          else
+            echo "⚠️ Makefile Already Present"
+          fi
 
           # ------------------------------
-          # Verify Required Source Files Exist
+          # Validate Required Files
           # ------------------------------
-          REQUIRED_FILES=("rekernel.c" "rekernel.h" "Makefile" "Kconfig")
-          for f in "${REQUIRED_FILES[@]}"; do
-            if [ ! -f "$SRC_DIR/$f" ]; then
-              echo "⚠️ ERROR: Required File $f Not Found in $SRC_DIR"
-              exit 1
-            fi
+          for f in rekernel.c rekernel.h Makefile Kconfig; do
+            [[ -f "$SRC_DIR/$f" ]] || { echo "[ERROR] Missing $f in $SRC_DIR"; exit 1; }
           done
+          echo "✔️ Source Files Verified"
 
           # ------------------------------
-          # Copy ReKernel Source Files (Update Only if Newer)
+          # Sync Source Files (Safe Update)
           # ------------------------------
-          cp -u "$SRC_DIR/rekernel.c" "$SRC_DIR/rekernel.h" "$SRC_DIR/Makefile" "$SRC_DIR/Kconfig" "$RE_TARGET_DIR/"
-          echo "📂 Copied Source Files"
+          cp -u "$SRC_DIR"/{rekernel.c,rekernel.h,Makefile,Kconfig} "$TARGET_DIR/"
+          echo "♻️ Files Synced"
 
           # ------------------------------
-          # Enable Kernel Patch Define
+          # Apply Kernel Define Patch
           # ------------------------------
-          sed -i "s|^\s*//\s*#define KERNEL_${KERNEL_SHORT_PATCH_VERSION}|#define KERNEL_${KERNEL_SHORT_PATCH_VERSION}|" "$RE_TARGET_DIR/rekernel.h"
-          echo "📃 Applied Kernel Patches Define in ReKernel Patch"
+          if [[ -n "${KERNEL_SHORT_PATCH_VERSION:-}" ]]; then
+            sed -i \
+              "s|^[[:space:]]*//[[:space:]]*#define KERNEL_${KERNEL_SHORT_PATCH_VERSION}|#define KERNEL_${KERNEL_SHORT_PATCH_VERSION}|" \
+              "$TARGET_DIR/rekernel.h"
+            echo "✔️ Kernel Define Enabled"
+          else
+            echo "⚠️ Kernel Short Patch Version Not Set"
+          fi
 
           echo "🎉 ReKernel Applied Successfully"
           echo "------------------------------"
-          
+
       # ==============================
       # Kernel Configuration Settings
       # ==============================
       - name: Kernel Configuration Settings
         run: |
+          echo "------------------------------"
+          echo "🚀 Kernel Configuration Settings Setup..."
+          echo "------------------------------"
+          echo ""
+          
           # ------------------------------
           # Navigate to the Correct Directory
           # ------------------------------
