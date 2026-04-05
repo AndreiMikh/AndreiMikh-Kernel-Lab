@@ -1448,38 +1448,98 @@ jobs:
 
             REPO="ShirkNeko/SukiSU-Ultra"
 
-            curl -fsSL \
-              "https://raw.githubusercontent.com/${REPO}/${MANAGER_BRANCH}/kernel/setup.sh" \
-              | bash -s builtin
+            # ------------------------------
+            # Install SukiSU-Ultra
+            # ------------------------------
+            curl -fsSL "https://raw.githubusercontent.com/${REPO}/${MANAGER_BRANCH}/kernel/setup.sh" \
+                | bash -s builtin
 
-            cd ./KernelSU || exit 1
-
-            GIT_COMMIT_HASH=$(git rev-parse --short=8 HEAD)
-            echo "🔎 Current Commit Hash: $GIT_COMMIT_HASH"
+            cd ./KernelSU || {
+                echo "⚠️ Failed to Enter Root Engine Directory"
+                exit 1
+            }
 
             # ------------------------------
-            # Get API Version (Retry 3 Times)
+            # Get Git Commit Hash
+            # ------------------------------
+            GIT_COMMIT_HASH=$(git rev-parse --short=8 HEAD)
+            echo "🔎 Commit Hash: $GIT_COMMIT_HASH"
+
+            # ------------------------------
+            # Fetch API Version (Retry Up to 3 Times)
             # ------------------------------
             for i in {1..3}; do
-              KSU_API_VERSION=$(curl -s \
-                "https://raw.githubusercontent.com/${REPO}/builtin/kernel/Makefile" \
-                | grep -m1 "KSU_VERSION_API :=" \
-                | awk -F'= ' '{print $2}' \
-                | tr -d '[:space:]')
-              [ -n "$KSU_API_VERSION" ] && break || sleep 1
+                KSU_API_VERSION=$(curl -fsSL \
+                    "https://raw.githubusercontent.com/${REPO}/builtin/kernel/Makefile" | \
+                    grep -m1 "KSU_VERSION_API :=" | \
+                    awk -F'= ' '{print $2}' | \
+                    tr -d '[:space:]')
+
+                [[ -n "$KSU_API_VERSION" ]] && break
+                sleep 1
             done
 
-            [ -z "$KSU_API_VERSION" ] && KSU_API_VERSION="3.1.7"
+            # ------------------------------
+            # Fallback if Retrieval Failed
+            # ------------------------------
+            if [[ -z "$KSU_API_VERSION" ]]; then
+                echo "⚠️ Failed to Fetch API Version, Using Fallback"
+                KSU_API_VERSION="3.1.7"
+            fi
 
             echo "KSU_API_VERSION=$KSU_API_VERSION" >> "$GITHUB_ENV"
 
             # ------------------------------
+            # Inject Version Definitions
+            # ------------------------------
+            VERSION_DEFINITIONS=$(
+                printf '%s\n' \
+                "define get_ksu_version_full" \
+                "v\$1-${GIT_COMMIT_HASH}" \
+                "endef" \
+                "" \
+                "KSU_VERSION_API := ${KSU_API_VERSION}" \
+                "KSU_VERSION_FULL := v${KSU_API_VERSION}-${GIT_COMMIT_HASH}"
+            )
+
+            # ------------------------------
+            # Remove Old Definitions
+            # ------------------------------
+            sed -i '/define get_ksu_version_full/,/endef/d' kernel/Makefile
+            sed -i '/KSU_VERSION_API :=/d' kernel/Makefile
+            sed -i '/KSU_VERSION_FULL :=/d' kernel/Makefile
+
+            # ------------------------------
+            # Insert After Github Repository Owner (Fallback: Append to End)
+            # ------------------------------
+            awk -v def="$VERSION_DEFINITIONS" '
+                /REPO_OWNER[[:space:]]*:=/ && !inserted {
+                    print
+                    print def
+                    inserted=1
+                    next
+                }
+                { print }
+                END {
+                    if (!inserted) print def
+                }
+            ' kernel/Makefile > kernel/Makefile.tmp && mv kernel/Makefile.tmp kernel/Makefile
+
+            # ------------------------------
             # Generate Commit-Based Version
             # ------------------------------
-            KSU_VERSION=$(( $(git rev-list --count main 2>/dev/null || echo 114514) + 37185 ))
+            COMMIT_COUNT=$(git rev-list --count main 2>/dev/null || echo 114514)
+            KSU_VERSION=$((COMMIT_COUNT + 37185))
+
             echo "KSUVER=$KSU_VERSION" >> "$GITHUB_ENV"
 
-            echo "📌 SukiSU-Ultra Version: v${KSU_API_VERSION}"
+            # ------------------------------
+            # Verification (Debug Only)
+            # ------------------------------
+            grep -A5 "REPO_OWNER" kernel/Makefile || true
+            grep "KSU_VERSION_FULL" kernel/Makefile || true
+
+            echo "📌 Final Version: v${KSU_API_VERSION}-${GIT_COMMIT_HASH}"
 
           elif [[ "$ROOT_ENGINE" == "ReSukiSU" ]]; then
             echo "🚀 Configuring ReSukiSU..."
