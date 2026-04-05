@@ -278,21 +278,17 @@ jobs:
         device: [oneplus_13_b, oneplus_13s_b, oneplus_13t_b, oneplus_ace5_pro_b, oneplus_ace_6, oneplus_pad_2_pro_b, oneplus_pad_3_b]
 
     steps:
-      # =========================
       - uses: actions/checkout@v5
 
-      # =========================
       - name: Setup Tools
         run: |
           sudo apt update
           sudo apt install -y gh jq curl unzip
           echo "${{ secrets.GITHUB_TOKEN }}" | gh auth login --with-token
 
-      # =========================
       - name: Prepare Device Folder
         run: mkdir -p "artifacts/${{ matrix.device }}"
 
-      # =========================
       - name: Wait and Download Artifacts
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -304,57 +300,68 @@ jobs:
           INTERVAL=15
           ELAPSED=0
 
-          echo "⚙️ Waiting for Completed Workflow Run for $DEVICE..."
+          echo "⚙️ Waiting for Completed Workflow Runs for $DEVICE..."
 
           while (( ELAPSED < MAX_WAIT )); do
+            # Get timestamp 1 hour ago
+            START_TIME=$(date -u +"%Y-%m-%dT%H:%M:%SZ" -d "1 hour ago")
 
-            # Run Detection (No Fragile Name Matching)
-            RUN_ID=$(gh api repos/${{ github.repository }}/actions/runs \
+            # Get all recent successful workflow runs
+            RUN_IDS=$(gh api repos/${{ github.repository }}/actions/runs \
               --jq ".workflow_runs
                 | map(select(
                     .event==\"workflow_dispatch\" and
                     .status==\"completed\" and
-                    .conclusion==\"success\"
+                    .conclusion==\"success\" and
+                    .created_at > \"$START_TIME\"
                 ))
                 | sort_by(.created_at)
                 | reverse
-                | .[0].id")
+                | .[].id")
 
-            if [[ -z "$RUN_ID" || "$RUN_ID" == "null" ]]; then
-              echo "⏳ No Completed Run Yet... 💤 Sleeping $INTERVAL Sec(s)..."
+            if [[ -z "$RUN_IDS" ]]; then
+              echo "⏳ No Completed Runs Yet... 💤 Sleeping $INTERVAL Sec(s)..."
               sleep $INTERVAL
               ((ELAPSED+=INTERVAL))
               continue
             fi
 
-            echo "🔎 Found Run ID = $RUN_ID"
+            FOUND=false
+            for RUN_ID in $RUN_IDS; do
+              echo "🔎 Checking Run ID = $RUN_ID"
 
-            # Fetch Artifacts
-            MATCHED_IDS=$(gh api repos/${{ github.repository }}/actions/runs/$RUN_ID/artifacts \
-              --jq ".artifacts[]
-                | select(.name | test(\"$DEVICE\"))
-                | .id")
+              # Find artifacts for this device in the run
+              MATCHED_IDS=$(gh api repos/${{ github.repository }}/actions/runs/$RUN_ID/artifacts \
+                --jq ".artifacts[]
+                  | select(.name | test(\"$DEVICE\"))
+                  | .id")
 
-            if [[ -z "$MATCHED_IDS" ]]; then
+              if [[ -n "$MATCHED_IDS" ]]; then
+                echo "🧾 Found Artifacts for $DEVICE in Run $RUN_ID → 📩 Downloading..."
+
+                for ID in $MATCHED_IDS; do
+                  NAME=$(gh api repos/${{ github.repository }}/actions/artifacts/$ID --jq '.name')
+                  SAFE_NAME=$(echo "$NAME" | tr ' ' '_' | tr -cd '[:alnum:]_-')
+ 
+                  echo "📩 Downloading $NAME → $DEVICE_FOLDER/${SAFE_NAME}.zip"
+
+                  curl -L \
+                    -H "Authorization: token $GH_TOKEN" \
+                    -o "$DEVICE_FOLDER/${SAFE_NAME}.zip" \
+                    "https://api.github.com/repos/${{ github.repository }}/actions/artifacts/${ID}/zip"
+                done
+
+                FOUND=true
+                break
+              fi
+            done
+
+            if [[ "$FOUND" != true ]]; then
               echo "⏳ Artifacts Not Ready Yet for $DEVICE... 💤 Sleeping $INTERVAL Sec(s)..."
               sleep $INTERVAL
               ((ELAPSED+=INTERVAL))
               continue
             fi
-
-            echo "🧾 Found Artifacts for $DEVICE → 📩 Downloading..."
-
-            for ID in $MATCHED_IDS; do
-              NAME=$(gh api repos/${{ github.repository }}/actions/artifacts/$ID --jq '.name')
-              SAFE_NAME=$(echo "$NAME" | tr ' ' '_' | tr -cd '[:alnum:]_-')
-
-              echo "📩 Downloading $NAME → $DEVICE_FOLDER/${SAFE_NAME}.zip"
-
-              curl -L \
-                -H "Authorization: token $GH_TOKEN" \
-                -o "$DEVICE_FOLDER/${SAFE_NAME}.zip" \
-                "https://api.github.com/repos/${{ github.repository }}/actions/artifacts/${ID}/zip"
-            done
 
             echo "🎉 Artifacts Successfully Downloaded for $DEVICE"
             break
@@ -365,7 +372,6 @@ jobs:
             exit 1
           fi
 
-      # =========================
       - name: Upload Device Artifacts
         uses: actions/upload-artifact@v7
         with:
