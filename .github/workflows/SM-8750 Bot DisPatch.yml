@@ -221,7 +221,7 @@ jobs:
           echo "matrix=$MATRIX_JSON" >> $GITHUB_OUTPUT
 
   # =========================
-  # Trigger Workflow per Device
+  # Trigger Workflow Per Device
   # =========================
   build:
     needs: generate-matrix
@@ -230,8 +230,11 @@ jobs:
       fail-fast: false
       matrix:
         include: ${{ fromJson(needs.generate-matrix.outputs.matrix) }}
+    outputs:
+      run_id_matrix: ${{ steps.capture-run-ids.outputs.run_id_matrix }}
     steps:
       - name: Trigger workflow
+        id: trigger
         uses: benc-uk/workflow-dispatch@v1
         with:
           workflow: ${{ github.event.inputs.TARGET_WORKFLOW }}
@@ -260,14 +263,18 @@ jobs:
               "RE_KERNEL": "${{ github.event.inputs.RE_KERNEL }}",
               "FAST_BUILD": "${{ github.event.inputs.FAST_BUILD }}",
               "WINDSPEED": "${{ github.event.inputs.WINDSPEED }}",
-              "ADIOS": "${{ github.event.inputs.ADIOS }}",
               "SPACE_NOCLEAN": "${{ github.event.inputs.SPACE_NOCLEAN }}",
               "BUILD_NOCCACHE": "${{ github.event.inputs.BUILD_NOCCACHE }}",
               "XUS": "${{ github.event.inputs.XUS }}"
             }
 
+      - name: Capture Run IDs
+        id: capture-run-ids
+        run: |
+          echo "run_id_matrix=$(jq -n --arg dev "${{ matrix.file }}" --arg id "${{ steps.trigger.outputs.run_id }}" '{($dev):$id}')" >> $GITHUB_OUTPUT
+
   # =========================
-  # Artifacts Fetch
+  # Fetch Artifacts Per Device Using Captured Run IDs
   # =========================
   fetch-artifacts:
     needs: build
@@ -289,83 +296,38 @@ jobs:
       - name: Prepare Device Folder
         run: mkdir -p "artifacts/${{ matrix.device }}"
 
-      - name: Wait and Download Artifacts
+      - name: Download Artifacts Using Run ID
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RUN_ID: ${{ fromJson(needs.build.outputs.run_id_matrix)[matrix.device] }}
         run: |
           DEVICE="${{ matrix.device }}"
           DEVICE_FOLDER="artifacts/$DEVICE"
 
-          MAX_WAIT=$((45*60))
-          INTERVAL=15
-          ELAPSED=0
-
-          echo "⚙️ Waiting for Completed Workflow Runs for $DEVICE..."
-
-          while (( ELAPSED < MAX_WAIT )); do
-            # Get TimeStamp 1 Hour Ago
-            START_TIME=$(date -u +"%Y-%m-%dT%H:%M:%SZ" -d "1 hour ago")
-
-            # Get All Recent Successful Workflow Runs
-            RUN_IDS=$(gh api repos/${{ github.repository }}/actions/runs \
-              --jq ".workflow_runs
-                | map(select(
-                    .event==\"workflow_dispatch\" and
-                    .status==\"completed\" and
-                    .conclusion==\"success\" and
-                    .created_at > \"$START_TIME\"
-                ))
-                | sort_by(.created_at)
-                | reverse
-                | .[].id")
-
-            if [[ -z "$RUN_IDS" ]]; then
-              echo "⏳ No Completed Runs Yet... 💤 Sleeping $INTERVAL Sec(s)..."
-              sleep $INTERVAL
-              ((ELAPSED+=INTERVAL))
-              continue
-            fi
-
-            FOUND=false
-            for RUN_ID in $RUN_IDS; do
-              echo "🔎 Checking Run ID = $RUN_ID"
-
-              # Find artifacts for this device
-              MATCHED_IDS=$(gh api repos/${{ github.repository }}/actions/runs/$RUN_ID/artifacts \
-                --jq ".artifacts[]
-                  | select(.name | test(\"$DEVICE\"))
-                  | .id")
-
-              if [[ -n "$MATCHED_IDS" ]]; then
-                echo "✔️ Found Artifacts for $DEVICE in Run $RUN_ID → 📩 Downloading..."
-                for ID in $MATCHED_IDS; do
-                  NAME=$(gh api repos/${{ github.repository }}/actions/artifacts/$ID --jq '.name')
-                  SAFE_NAME=$(echo "$NAME" | tr ' ' '_' | tr -cd '[:alnum:]_-')
-                  echo "📩 Downloading $NAME → $DEVICE_FOLDER/${SAFE_NAME}.zip"
-                  curl -L -H "Authorization: token $GH_TOKEN" \
-                    -o "$DEVICE_FOLDER/${SAFE_NAME}.zip" \
-                    "https://api.github.com/repos/${{ github.repository }}/actions/artifacts/${ID}/zip"
-                done
-                FOUND=true
-                break  # Stop Checking More Run IDs if Found
-              fi
-            done
-
-            if [[ "$FOUND" != true ]]; then
-              echo "⏳ Artifacts Not Ready Yet for $DEVICE... 💤 Sleeping $INTERVAL sec(s)"
-              sleep $INTERVAL
-              ((ELAPSED+=INTERVAL))
-              continue
-            fi
-
-            echo "🎉 Artifacts Successfully Downloaded for $DEVICE"
-            break
-          done
-
-          if (( ELAPSED >= MAX_WAIT )); then
-            echo "🚩 Timeout... Waiting for $DEVICE Artifacts"
+          if [[ -z "$RUN_ID" || "$RUN_ID" == "null" ]]; then
+            echo "🚩 No Run ID Found for $DEVICE"
             exit 1
           fi
+
+          echo "🔎 Using Run ID = $RUN_ID for $DEVICE"
+
+          MATCHED_IDS=$(gh api repos/${{ github.repository }}/actions/runs/$RUN_ID/artifacts \
+            --jq ".artifacts[] | select(.name | test(\"$DEVICE\")) | .id")
+
+          if [[ -z "$MATCHED_IDS" ]]; then
+            echo "⏳ Artifacts Not Ready for $DEVICE in Run $RUN_ID"
+            exit 1
+          fi
+
+          for ID in $MATCHED_IDS; do
+            NAME=$(gh api repos/${{ github.repository }}/actions/artifacts/$ID --jq '.name')
+            SAFE_NAME=$(echo "$NAME" | tr ' ' '_' | tr -cd '[:alnum:]_-')
+              curl -L -H "Authorization: token $GH_TOKEN" \
+              -o "$DEVICE_FOLDER/${SAFE_NAME}.zip" \
+              "https://api.github.com/repos/${{ github.repository }}/actions/artifacts/${ID}/zip"
+          done
+
+          echo "🎉 Artifacts Successfully Downloaded for $DEVICE"
 
       - name: Upload Device Artifacts
         uses: actions/upload-artifact@v7
