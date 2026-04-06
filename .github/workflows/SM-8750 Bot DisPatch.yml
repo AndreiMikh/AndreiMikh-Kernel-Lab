@@ -291,30 +291,30 @@ jobs:
       - id: merge
         run: |
           JSON="{}"
-          
+      
           for d in meta/meta-*; do
             DEV=$(cat "$d/device.txt")
             ID=$(cat "$d/run_id.txt")
-          
-            # Skip Empty Run ID (Important)
-            if [[ -z "$ID" ]]; then
-              echo "⚠️ Skipping $DEV (empty run_id)"
+      
+            # Skip Invalid IDs
+            if [[ -z "$ID" || "$ID" == "null" ]]; then
+              echo "⚠️ Skipping $DEV (Invalid Run ID)"
               continue
             fi
-          
+      
             JSON=$(echo "$JSON" | jq --arg dev "$DEV" --arg id "$ID" '. + {($dev): $id}')
           done
-          
-          # Compact JSON (Single Line = Safer)
+      
           JSON=$(echo "$JSON" | jq -c .)
-          
-          # Proper Multi-Line-Safe Output
+      
+          echo "Final Run Map: $JSON"
+      
           echo "run_ids<<EOF" >> $GITHUB_OUTPUT
           echo "$JSON" >> $GITHUB_OUTPUT
           echo "EOF" >> $GITHUB_OUTPUT
 
 # =========================
-# FETCH ARTIFACTS (SMART)
+# FETCH ARTIFACTS
 # =========================
   fetch:
     needs: merge
@@ -323,45 +323,86 @@ jobs:
       fail-fast: false
       matrix:
         device: [oneplus_13_b, oneplus_13s_b, oneplus_13t_b, oneplus_ace5_pro_b, oneplus_ace_6, oneplus_pad_2_pro_b, oneplus_pad_3_b]
-
+  
     steps:
       - uses: actions/checkout@v5
-
+  
       - name: Setup
         run: |
           sudo apt update
           sudo apt install -y gh jq curl unzip
           echo "${{ secrets.GITHUB_TOKEN }}" | gh auth login --with-token
-
+  
+      # =========================
+      # Resolve RUN_ID SAFELY
+      # =========================
       - name: Resolve Run ID
         id: resolve
         run: |
-          RUN_ID=$(echo '${{ needs.merge.outputs.run_ids }}' | jq -r '."${{ matrix.device }}"')
+          JSON='${{ needs.merge.outputs.run_ids }}'
+  
+          RUN_ID=$(echo "$JSON" | jq -r --arg dev "${{ matrix.device }}" '.[$dev] // empty')
+  
+          if [[ -z "$RUN_ID" ]]; then
+            echo "❌ No RUN_ID found for ${{ matrix.device }}"
+            exit 1
+          fi
+  
+          echo "✅ Using RUN_ID=$RUN_ID"
           echo "RUN_ID=$RUN_ID" >> $GITHUB_ENV
-
+  
+      # =========================
+      # HARD WAIT (ROBUST)
+      # =========================
       - name: Wait for Completion
         run: |
-          for i in {1..40}; do
-            STATUS=$(gh api repos/${{ github.repository }}/actions/runs/$RUN_ID --jq .status)
-            CONCLUSION=$(gh api repos/${{ github.repository }}/actions/runs/$RUN_ID --jq .conclusion)
-
-            echo "Attempt $i → $STATUS / $CONCLUSION"
-
+          echo "⏳ Waiting for Run $RUN_ID..."
+  
+          for i in {1..60}; do
+            DATA=$(gh api repos/${{ github.repository }}/actions/runs/$RUN_ID)
+  
+            STATUS=$(echo "$DATA" | jq -r .status)
+            CONCLUSION=$(echo "$DATA" | jq -r .conclusion)
+  
+            echo "Attempt $i → STATUS=$STATUS | CONCLUSION=$CONCLUSION"
+  
             if [[ "$STATUS" == "completed" ]]; then
-              break
+              if [[ "$CONCLUSION" == "success" ]]; then
+                echo "✅ Build Completed Successfully!"
+                break
+              else
+                echo "❌ Build Failed with Conclusion: $CONCLUSION"
+                exit 1
+              fi
             fi
-
+  
             sleep 20
           done
-
+  
+          # 🚨 FINAL CHECK (PREVENT EARLY FETCH)
+          FINAL_STATUS=$(gh api repos/${{ github.repository }}/actions/runs/$RUN_ID --jq .status)
+  
+          if [[ "$FINAL_STATUS" != "completed" ]]; then
+            echo "❌ Timeout: Run Did Not Finish in Time"
+            exit 1
+          fi
+  
+      # =========================
+      # DOWNLOAD ARTIFACTS
+      # =========================
       - name: Download Artifacts
         run: |
           mkdir -p artifacts/${{ matrix.device }}
-
+  
+          echo "📦 Downloading Artifacts for $RUN_ID..."
+  
           gh run download $RUN_ID \
             --dir artifacts/${{ matrix.device }} \
             --repo ${{ github.repository }}
-
+  
+      # =========================
+      # UPLOAD FINAL
+      # =========================
       - name: Upload Final Artifacts
         uses: actions/upload-artifact@v4
         with:
