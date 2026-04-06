@@ -1334,76 +1334,77 @@ jobs:
           }
 
           if [[ "$ROOT_ENGINE" == "SukiSU-Ultra" ]]; then
-            echo "🚀 Setting up SukiSU Ultra..."
+            echo "🚀 Setting up SukiSU-Ultra..."
       
             REPO="SukiSU-Ultra/SukiSU-Ultra"
       
-            # Setup with Retries for Three Times
+            # Setup
+            curl -LSs "https://raw.githubusercontent.com/${REPO}/refs/heads/${MANAGER_BRANCH}/kernel/setup.sh" \
+              | bash -s builtin || echo "⚠️ Setup Failed, Continuing..."
+      
+            cd ./KernelSU || { echo "⚠️ KernelSU / SukiSU-Ultra Directory Not Found"; exit 0; }
+      
+            # Get Git Commit Hash
+            GIT_COMMIT_HASH=$(git rev-parse --short=8 HEAD 2>/dev/null || echo "Unknown")
+            echo "Current commit hash: $GIT_COMMIT_HASH"
+      
+            # Fetch SukiSU-Ultra API Version
             for i in 1 2 3; do
-              curl -fLSs \
-                "https://raw.githubusercontent.com/${REPO}/${MANAGER_BRANCH}/kernel/setup.sh" \
-                | bash -s builtin && break
-      
-              echo "⚠️ Setup Failed ($i), Retrying..."
-              sleep 2
-      
-              [[ $i -eq 3 ]] && echo "⚠️ Failed to Setup SukiSU-Ultra" && exit 1
-            done
-      
-            cd ./KernelSU || exit 1
-      
-            # Get Commit Hash
-            USE_HASH=$(git rev-parse --short=8 HEAD)
-            echo "Using commit: $USE_HASH"
-      
-            # Get API Version
-            for i in 1 2 3; do
-              KSU_API_VERSION=$(curl -s \
-                "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/builtin/kernel/Makefile" | \
-                grep -m1 "KSU_VERSION_API :=" | \
-                awk -F'= ' '{print $2}' | \
-                tr -d '[:space:]')
+              KSU_API_VERSION=$(curl -fsSL \
+                "https://raw.githubusercontent.com/${REPO}/builtin/kernel/Makefile" 2>/dev/null | \
+                grep "KSU_VERSION_API" | head -n1 | cut -d'=' -f2 | tr -d '[:space:]')
       
               [ -n "$KSU_API_VERSION" ] && break || sleep 1
             done
       
+            # Fallback if Fetch Fails
             [[ -z "$KSU_API_VERSION" ]] && KSU_API_VERSION="3.1.7"
       
             echo "KSU_API_VERSION=$KSU_API_VERSION" >> $GITHUB_ENV
       
-            VERSION_FULL="v${KSU_API_VERSION}-${USE_HASH}@SukiSU"
+            # Version Definitions
+            VERSION_DEFINITIONS=$'define get_ksu_version_full\nv\\$1-'"$GIT_COMMIT_HASH"$'@Andrei\nendef\n\nKSU_VERSION_API := '"$KSU_API_VERSION"$'\nKSU_VERSION_FULL := v'"$KSU_API_VERSION"$'-'"$GIT_COMMIT_HASH"$'@cctv18'
       
-            # Detect Makefile
+            # Locate Kernel Makefile
             if [[ -f kernel/Makefile ]]; then
               KERNEL_MAKEFILE="kernel/Makefile"
             elif [[ -f ../common/Makefile ]]; then
               KERNEL_MAKEFILE="../common/Makefile"
+            elif [[ -f ../kernel_platform/common/Makefile ]]; then
+              KERNEL_MAKEFILE="../kernel_platform/common/Makefile"
             else
-              echo "⚠️ Kernel Makefile Not Found!"
-              exit 1
+              echo "⚠️ Kernel Makefile Not Found, Skipping Version Injection"
+              KERNEL_MAKEFILE=""
             fi
       
-            # Clean Old Entries
-            sed -i '/define get_ksu_version_full/,/endef/d' "$KERNEL_MAKEFILE"
-            sed -i '/KSU_VERSION_API :=/d' "$KERNEL_MAKEFILE"
-            sed -i '/KSU_VERSION_FULL :=/d' "$KERNEL_MAKEFILE"
+            # Patch Makefile
+            if [[ -n "$KERNEL_MAKEFILE" ]]; then
+              sed -i '/define get_ksu_version_full/,/endef/d' "$KERNEL_MAKEFILE" 2>/dev/null
+              sed -i '/KSU_VERSION_API :=/d' "$KERNEL_MAKEFILE" 2>/dev/null
+              sed -i '/KSU_VERSION_FULL :=/d' "$KERNEL_MAKEFILE" 2>/dev/null
       
-            # Inject Version
-            VERSION_BLOCK=$'define get_ksu_version_full\nv\\$1-'"$USE_HASH"$'@SukiSU\nendef\n\nKSU_VERSION_API := '"$KSU_API_VERSION"$'\nKSU_VERSION_FULL := '"$VERSION_FULL"
+              awk -v def="$VERSION_DEFINITIONS" '
+                /REPO_OWNER :=/ {print; print def; inserted=1; next}
+                {print}
+                END {if (!inserted) print def}
+              ' "$KERNEL_MAKEFILE" > "$KERNEL_MAKEFILE.tmp" 2>/dev/null
       
-            awk -v def="$VERSION_BLOCK" '
-              /REPO_OWNER :=/ {print; print def; inserted=1; next}
-              {print}
-              END {if (!inserted) print def}
-            ' "$KERNEL_MAKEFILE" > "$KERNEL_MAKEFILE.tmp" && mv "$KERNEL_MAKEFILE.tmp" "$KERNEL_MAKEFILE"
+              mv "$KERNEL_MAKEFILE.tmp" "$KERNEL_MAKEFILE" 2>/dev/null
+            fi
       
-            # Version Code
+            # Generate Version Code
             COUNT=$(git rev-list --count HEAD 2>/dev/null || echo 0)
             KSU_VERSION=$((COUNT + 37185))
       
             echo "KSUVER=$KSU_VERSION" >> $GITHUB_ENV
       
-            echo "🚀 SukiSU-Ultra ready: $VERSION_FULL"
+            # Debug Output
+            if [[ -n "$KERNEL_MAKEFILE" ]]; then
+              grep -A5 "REPO_OWNER" "$KERNEL_MAKEFILE" 2>/dev/null
+              grep "KSU_VERSION_FULL" "$KERNEL_MAKEFILE" 2>/dev/null
+            fi
+      
+            echo "🚀 SukiSU-Ultra Version: v${KSU_API_VERSION}-${GIT_COMMIT_HASH}@Andrei"
             
           elif [[ "$ROOT_ENGINE" == "ReSukiSU" ]]; then
             echo "🚀 Configuring ReSukiSU..."
