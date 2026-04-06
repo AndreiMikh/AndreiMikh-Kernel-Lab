@@ -928,39 +928,67 @@ jobs:
 
           BASE_URL="https://github.com/${MANIFEST_REPO}/${MANIFEST_REPO_NAME}.git"
 
-          echo "📩 Initializing Repository..."
+          echo "------------------------------"
+          echo "🚀 Initializing Repository..."
+          echo "------------------------------"
 
-          # Prevent Repository from Hitting Gerrit (429 Error)
-          export REPO_URL="https://storage.googleapis.com/git-repo-downloads/repo"
+          # Critical Fix
+          export REPO_DISABLE_UPDATE=1
+          git config --global http.version HTTP/1.1
 
-          # Optional: Small Retry for Stability
+          # Retry Init Safely
+          INIT_SUCCESS=false
           for i in {1..3}; do
-            repo init -u "$BASE_URL" -b "$MANIFEST_BRANCH" -m "${FILE}.xml" \
+            if repo init -u "$BASE_URL" -b "$MANIFEST_BRANCH" -m "${FILE}.xml" \
               --depth=1 \
               --no-clone-bundle \
-              --no-tags && break
+              --no-tags \
+              --no-repo-verify; then
+              INIT_SUCCESS=true
+              break
+            fi
 
             echo "🛠️ Retry Init $i..."
             sleep 15
           done
 
-          echo "♻️ Syncing Repository"
+          # Hard Fail if Init Didn't Work
+          if [ "$INIT_SUCCESS" = false ] || [ ! -d ".repo" ]; then
+            echo "⚠️ Repository Init Failed — Stopping Build"
+            exit 1
+          fi
 
-          # Reduce Parallel Jobs + Remove Aggressive Fetch
+          echo "------------------------------"
+          echo "♻️ Syncing Repository..."
+          echo "------------------------------"
+
+          # Retry Sync Safely
+          SYNC_SUCCESS=false
           for i in {1..3}; do
-            repo sync \
+            if repo sync \
               -c \
               --force-sync \
               --no-clone-bundle \
               --no-tags \
               --prune \
-              -j8 && break
+              -j8; then
+              SYNC_SUCCESS=true
+              break
+            fi
 
             echo "⚙️ Retry Sync $i..."
             sleep 20
           done
 
-          echo "🔎 Detecting Kernel Repository"
+          # Hard Fail if Sync Failed
+          if [ "$SYNC_SUCCESS" = false ]; then
+            echo "⚠️ Repository Sync Failed — Stopping Build"
+            exit 1
+          fi
+
+          echo "------------------------------"
+          echo "🔎 Detecting Kernel Repository..."
+          echo "------------------------------"
 
           KERNEL_REPOS_PATH=$(find . -type f -name "build.config*" ! -path "*abi*" -print -quit)
 
@@ -969,15 +997,17 @@ jobs:
             exit 1
           fi
 
-          echo "📂 Build Configuration Found: $KERNEL_REPOS_PATH"
+          echo "📌 Build Configuration Found: $KERNEL_REPOS_PATH"
 
           KERNEL_REPOS=$(echo "${KERNEL_REPOS_PATH#./}" | cut -d/ -f1)
 
-          echo "📌 Detected Kernel Repository: $KERNEL_REPOS"
+          echo "🔎 Detected Kernel Repository: $KERNEL_REPOS"
 
           echo "KERNEL_REPOS=$KERNEL_REPOS" >> $GITHUB_ENV
 
-          echo "🧹 Cleaning ABI Protected Exports"
+          echo "------------------------------"
+          echo "🧹 Cleaning ABI Protected Exports..."
+          echo "------------------------------"
 
           for dir in kernel_platform/common kernel_platform/msm-kernel; do
             if [[ -f "$dir/BUILD.bazel" ]]; then
