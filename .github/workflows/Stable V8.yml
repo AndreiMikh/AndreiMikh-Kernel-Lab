@@ -192,17 +192,15 @@ on:
         required: true
         default: true
 
-      ADIOS:
-        type: boolean
-        description: "Apply ADIOS I/O Scheduler (Applicable for Dynamic Owner Custom Manifest)"
+      SCHEDULERS:
+        type: choice
+        description: "Apply I/O Scheduler? (Applicable for Dynamic Owner Custom Manifest)"
         required: true
-        default: false
-
-      SSG:
-        type: boolean
-        description: "Apply SSG I/O Scheduler (Only Applicable for SM-8650 Custom Manifest)"
-        required: true
-        default: false
+        default: "None"
+        options:
+          - ADIOS
+          - SSG
+          - None
         
       XUS:
         type: boolean
@@ -239,14 +237,14 @@ jobs:
     name: >
       ${{
         format(
-          '{0}{1}{2}{3}{4}{5}{6}{7}{8}{9}{10}{11}{12}{13} {14}',
+          '{0}{1}{2}{3}{4}{5}{6}{7}{8}{9}{10}{11}{12} {13}',
 
           (github.event.inputs.FAST_BUILD == 'true' && 'Fast ' || ''),
           (github.event.inputs.BBR == 'Brutal' && 'Brutal ' ||
           github.event.inputs.BBR == 'true' && 'BBR ' || ''),
           (github.event.inputs.LXCDOCKER == 'true' && 'LXC ' || ''),
-          (github.event.inputs.ADIOS == 'true' && 'ADIOS ' || ''),
-          (github.event.inputs.SSG == 'true' && 'SSG ' || ''),
+          (github.event.inputs.SCHEDULERS == 'ADIOS' && 'ADIOS ' ||
+          github.event.inputs.SCHEDULERS == 'SSG' && 'SSG ' || ''),
           (github.event.inputs.ZRAM == '1/LZ4KD/8589934592' && 'LZ4KD ' || ''),
           (github.event.inputs['ZRAM_CUSTOM'] == 'true' && 'LZ4 ' || ''),
           (contains(github.event.inputs.FILE, '_aosp') && 'AOSP ' || ''),
@@ -671,8 +669,7 @@ jobs:
               echo "SUSFS_DEV           : ${{ github.event.inputs.SUSFS_DEV }}"
               echo "FAST_BUILD          : ${{ github.event.inputs.FAST_BUILD }}"
               echo "WINDSPEED           : ${{ github.event.inputs.WINDSPEED }}"
-              echo "ADIOS               : ${{ github.event.inputs.ADIOS }}"
-              echo "SSG                 : ${{ github.event.inputs.SSG }}"
+              echo "SCHEDULERS          : ${{ github.event.inputs.SCHEDULERS }}"
               echo "UNICODE             : ${{ github.event.inputs.UNICODE }}"
               echo "RE_KERNEL           : ${{ github.event.inputs.RE_KERNEL }}"
               echo "XUS                 : ${{ github.event.inputs.XUS }}"
@@ -2788,8 +2785,7 @@ jobs:
           MANAGER_BRANCH="${{ steps.manager.outputs.MANAGER_BRANCH }}"
           ROOT_ENGINE="${{ github.event.inputs.ROOT_ENGINE }}"
           SUSFS_REPOSITORY="${{ github.event.inputs.SUSFS_REPOSITORY }}"
-          ADIOS="${{ github.event.inputs.ADIOS }}" 
-          SSG="${{ github.event.inputs.SSG }}" 
+          SCHEDULERS="${{ github.event.inputs.SCHEDULERS }}" 
           FILE="${{ github.event.inputs.FILE }}" 
           RE_KERNEL="${{ github.event.inputs.RE_KERNEL }}" 
           GKI_V="${{ env.KANDROID_VERSION }}-${{ env.KERNEL_VERSION }}"
@@ -2806,26 +2802,32 @@ jobs:
             echo "⚠️ -O2 Optimization Not Applied for Kernel $KERNEL_VERSION"
           fi
 
-          # ADIOS I/O Scheduler Configuration for SM-8750
-          if [[ "$KERNEL_VERSION" == "6.6" && "$ADIOS" == "true" ]]; then
-            echo "CONFIG_MQ_IOSCHED_ADIOS=y" >> "$CONFIG_FILE"
-            echo "CONFIG_MQ_IOSCHED_DEFAULT_ADIOS=y" >> "$CONFIG_FILE"
-            echo "🎉 ADIOS I/O Scheduler Set!"
+          # I/O Scheduler Configuration
+          sched=$(echo "$SCHEDULERS" | tr '[:upper:]' '[:lower:]')  # Normalize Input
+          
+          # ADIOS I/O Scheduler for Kernel 6.6
+          if [[ "$KERNEL_VERSION" == "6.6" && "$sched" == "adios" ]]; then
+              echo "CONFIG_MQ_IOSCHED_ADIOS=y" >> "$CONFIG_FILE"
+              echo "CONFIG_MQ_IOSCHED_DEFAULT_ADIOS=y" >> "$CONFIG_FILE"
+              echo "🎉 ADIOS I/O Scheduler Set!"
           else
-            echo "⚠️ ADIOS I/O Scheduler Disabled or Incompatible"
-          fi 
-
-          # SSG I/O Scheduler Configuration for SM-8650
-          if [[ "$KERNEL_VERSION" == "6.1" && "$SSG" == "true" ]]; then
-            echo "CONFIG_MQ_IOSCHED_SSG=y" >> "$CONFIG_FILE"
-            echo "CONFIG_MQ_IOSCHED_SSG_CGROUP=y" >> "$CONFIG_FILE"
-            echo "🎉 SSG I/O Scheduler Set!"
+              if [[ "$KERNEL_VERSION" == "6.6" ]]; then
+                  echo "⚠️ ADIOS I/O Scheduler Disabled"
+              fi
+          fi
+          
+          # SSG I/O Scheduler for Kernel 6.1
+          if [[ "$KERNEL_VERSION" == "6.1" && "$sched" == "ssg" ]]; then
+              echo "CONFIG_MQ_IOSCHED_SSG=y" >> "$CONFIG_FILE"
+              echo "CONFIG_MQ_IOSCHED_SSG_CGROUP=y" >> "$CONFIG_FILE"
+              echo "🎉 SSG I/O Scheduler Set!"
           else
-            echo "⚠️ SSG I/O Scheduler Disabled or Incompatible"
-          fi 
-            
+              if [[ "$KERNEL_VERSION" == "6.1" ]]; then
+                  echo "⚠️ SSG I/O Scheduler Disabled"
+              fi
+          fi            
 
-          # Enable ReKernel 
+          # ReKernel Configuration
           echo "🚀 Enabling Re-Kernel Support (for Use with Freezer, NoActive, ETC., to Improve Background App Freezing)..."
           
           # Use Underscore for Variable Name
