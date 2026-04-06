@@ -1340,37 +1340,30 @@ jobs:
               | cut -d'"' -f4
           }
 
-          if [[ "$ROOT_ENGINE" == "SukiSU-Ultra" ]]; then
+          # SukiSU-Ultra Root Engine Logic
+          if [[ "$ROOT_ENGINE" == "SukiSU-Ultra"* ]]; then
             echo "🚀 Configuring SukiSU-Ultra..."
-
+      
             REPO="SukiSU-Ultra/SukiSU-Ultra"
-
-            # Parse Root Engine (Flexible)
+      
+            # Parse Branch / Manual Hash from Root Engine
             IFS='/' read -r BRANCH_NAME _ MANUAL_HASH <<< "$ROOT_ENGINE"
-
-            if [[ -z "$BRANCH_NAME" ]]; then
-              echo "⚠️ Invalid Root Engine: Missing Branch"
-              exit 10
-            fi
-
+            [[ -z "$BRANCH_NAME" ]] && { echo "⚠️ Invalid Root Engine: Missing Branch"; exit 10; }
             echo "📌 Branch: $BRANCH_NAME"
             [[ -n "$MANUAL_HASH" ]] && echo "📌 Manual Hash: $MANUAL_HASH"
-
-            # Setup SukiSU-Ultra (Retry Three Times)
+      
+            # Setup SukiSU-Ultra (Retry Up To 3 Times)
             for i in 1 2 3; do
-              curl -fLSs \
-                "https://raw.githubusercontent.com/${REPO}/${MANAGER_BRANCH}/kernel/setup.sh" \
+              curl -fLSs "https://raw.githubusercontent.com/${REPO}/${MANAGER_BRANCH}/kernel/setup.sh" \
                 | bash -s builtin && break
-
               echo "⚠️ Setup Failed ($i), Retrying..."
               sleep 2
-
               [[ $i -eq 3 ]] && echo "⚠️ Failed to Setup SukiSU-Ultra" && exit 1
             done
-
+      
             cd ./KernelSU || exit 1
-
-            # Checkout Logic
+      
+            # Git Checkout Logic
             if [[ -n "$MANUAL_HASH" ]]; then
               git fetch origin "$BRANCH_NAME" --depth=50
               git checkout "$MANUAL_HASH" || exit 1
@@ -1378,39 +1371,35 @@ jobs:
             else
               USE_HASH=$(git rev-parse --short HEAD)
             fi
-
             echo "📌 Using hash: $USE_HASH"
-
-            # ------------------------------
-            # Version Tag
-            # ------------------------------
-            KSU_VERSION_TAG=$(curl -fsSL https://api.github.com/repos/${REPO}/releases/latest \
-              | sed -n 's/.*"tag_name": *"v\?\([^"]*\)".*/\1/p')
-
-            [[ -z "$KSU_VERSION_TAG" ]] && KSU_VERSION_TAG="3.1.7"
-            echo "KSU_VERSION_TAG=$KSU_VERSION_TAG" >> $GITHUB_ENV
-
-            # Version String
-            VERSION_FULL="v${KSU_VERSION_TAG}-${USE_HASH}@${BRANCH_NAME}"
-
+      
+            # Fetch KSU API Version from Makefile
+            KSU_API_VERSION=$(curl -fsSL "https://raw.githubusercontent.com/${REPO}/builtin/kernel/Makefile" \
+              | grep -m1 "KSU_VERSION_API :=" | awk -F'= ' '{print $2}' | tr -d '[:space:]')
+            if [[ -z "$KSU_API_VERSION" || "$(printf '%s\n' "$KSU_API_VERSION" "3.1.7" | sort -V | head -n1)" != "3.1.7" ]]; then
+                KSU_API_VERSION="3.1.7"
+            fi
+            echo "KSU_API_VERSION=$KSU_API_VERSION" >> $GITHUB_ENV
+      
+            # Assemble Version Full
+            VERSION_FULL="v$KSU_API_VERSION-$USE_HASH@Andrei"
+            echo "📌 SukiSU-Ultra Version: $VERSION_FULL"
+      
             # Detect Kernel Makefile
             if [[ -f ../kernel_platform/common/Makefile ]]; then
               KERNEL_MAKEFILE="../kernel_platform/common/Makefile"
             elif [[ -f ../common/Makefile ]]; then
               KERNEL_MAKEFILE="../common/Makefile"
             else
-              echo "⚠️ Kernel Makefile Not Found!"
-              exit 1
+              echo "⚠️ Kernel Makefile Not Found!" && exit 1
             fi
-
             echo "📂 Using Makefile: $KERNEL_MAKEFILE"
-
-            # Clean Old Entries
+      
+            # Clean Old Version Entries and Inject New Ones
             sed -i '/KSU_VERSION_API :=/d' "$KERNEL_MAKEFILE"
             sed -i '/KSU_VERSION_FULL :=/d' "$KERNEL_MAKEFILE"
-
-            # Inject Version Information
-            awk -v full="$VERSION_FULL" -v api="$KSU_VERSION_TAG" '
+      
+            awk -v full="$VERSION_FULL" -v api="$KSU_API_VERSION" '
               /REPO_OWNER :=/ {
                 print
                 print "KSU_VERSION_API := " api
@@ -1419,24 +1408,16 @@ jobs:
                 next
               }
               1
-              END {
-                if (!inserted) {
-                  print "KSU_VERSION_API := " api
-                  print "KSU_VERSION_FULL := " full
-                }
-              }
+              END {if (!inserted) {print "KSU_VERSION_API := " api; print "KSU_VERSION_FULL := " full}}
             ' "$KERNEL_MAKEFILE" > "$KERNEL_MAKEFILE.tmp" && mv "$KERNEL_MAKEFILE.tmp" "$KERNEL_MAKEFILE"
-
-            # Root Engine Version (Stable Logic)
-            COUNT=$(git rev-list --count HEAD 2>/dev/null)
-            [[ -z "$COUNT" ]] && COUNT=0
-
-            KSU_VERSION=$((COUNT + 37185))
+      
+            # Compute Incremental KSU Version
+            KSU_VERSION=$(expr $(git rev-list --count "$MANAGER_BRANCH" 2>/dev/null || echo 13000) + 37185)
             echo "KSUVER=$KSU_VERSION" >> $GITHUB_ENV
-
-            echo "📌 SukiSU-Ultra Version: $VERSION_FULL"
+      
             echo "🎉 SukiSU-Ultra Ready"
-            
+
+          # ReSukiSU Root Engine Logic
           elif [[ "$ROOT_ENGINE" == "ReSukiSU" ]]; then
             echo "🚀 Configuring ReSukiSU..."
 
@@ -1468,7 +1449,8 @@ jobs:
 
             # Add Formatted Name
             printf 'CONFIG_KSU_FULL_NAME_FORMAT="%%TAG_NAME%%"\n' >> "$DEFCONFIG"
-            
+
+          # KernelSU-Next Root Engine Logic
           elif [[ "$ROOT_ENGINE" == "KernelSU-Next" ]]; then
             echo "🚀 Configuring KernelSU-Next..."
 
@@ -1518,6 +1500,7 @@ jobs:
 
             echo "🎉 All KernelSU-Next Patches Processed"
 
+          # WildKernel WildKSU Root Engine Logic
           elif [[ "$ROOT_ENGINE" == "WildKSU" ]]; then
             echo "🚀 Configuring WildKSU..."
 
