@@ -923,98 +923,123 @@ jobs:
           echo "🎉 Repository Tool Installed Successfully"
 
       # ==============================
-      # Initialize and Incremental Sync Repository
+      # Initialize and Sync Repository
       # ==============================
-      - name: Initialize and Incremental Sync Repository
-        shell: bash
+      - name: Initialize and Sync Repository
         env:
           FILE: ${{ github.event.inputs.FILE }}
         run: |
           set -euo pipefail
-      
-          echo "------------------------------"
+
           echo "📁 Preparing Workspace..."
-          echo "------------------------------"
-          WORKDIR="kernel_workspace"
-          mkdir -p "$WORKDIR"
-          cd "$WORKDIR"
-      
-          # Validate Essential Variables
-          : "${MANIFEST_REPO:?Missing MANIFEST_REPO}"
-          : "${MANIFEST_REPO_NAME:?Missing MANIFEST_REPO_NAME}"
-          : "${MANIFEST_BRANCH:?Missing MANIFEST_BRANCH}"
+          mkdir -p kernel_workspace
+          cd kernel_workspace
+
+          echo "📄 Setting Up Manifest..."
+          mkdir -p .repo/manifests
+          cp "$GITHUB_WORKSPACE/.repo/manifests_fallback/${FILE}.xml" ".repo/manifests/${FILE}.xml"
+
           BASE_URL="https://github.com/${MANIFEST_REPO}/${MANIFEST_REPO_NAME}.git"
-      
+
           echo "------------------------------"
           echo "🚀 Initializing Repository..."
           echo "------------------------------"
-          if [[ ! -d ".repo" ]]; then
-            # Use -m to specify the custom manifest file
-            repo init -u "$BASE_URL" -b "$MANIFEST_BRANCH" -m "${FILE}.xml" --depth=1 --no-tags --no-clone-bundle
-            echo "🎉 Repository Initialized with manifest ${FILE}.xml"
-          else
-            echo "🎉 Using Cached Repository"
-          fi
-      
-          # Setup Local Manifests Safely
-          LOCAL_MANIFESTS=".repo/local_manifests"
-          mkdir -p "$LOCAL_MANIFESTS"
-          cp "$GITHUB_WORKSPACE/.repo/manifests_fallback/${FILE}.xml" "$LOCAL_MANIFESTS/"
-      
-          JOBS=$(nproc 2>/dev/null || echo 4)
-          echo "------------------------------"
-          echo "⚡ Performing Incremental Kernel Sync..."
-          echo "------------------------------"
-      
-          # Incremental Kernel Sync
-          SYNC_SUCCESS=false
-          KERNEL_PROJECTS=$(repo list -p | grep '^kernel_platform/' || true)
-          if [[ -z "$KERNEL_PROJECTS" ]]; then
-            echo "⚠️ No Kernel Projects Detected, Falling Back to Full Kernel Platform Sync"
-            KERNEL_PROJECTS="kernel_platform"
-          fi
-      
-          for attempt in 1 2 3; do
-            echo "🔁 Sync Attempt $attempt..."
-            if repo sync $KERNEL_PROJECTS -c --force-sync --optimized-fetch --retry-fetches=3 --no-tags --prune -j"$JOBS"; then
-              SYNC_SUCCESS=true
-              echo "🎉 Incremental Sync Successful"
+
+          # Critical Fix
+          export REPO_DISABLE_UPDATE=1
+          git config --global http.version HTTP/1.1
+
+          # Ensure No Gerrit-Based Repository Tool is Cached
+          rm -rf .repo/repo || true
+
+          INIT_SUCCESS=false
+
+          for i in 1 2 3; do
+            echo "🔁 Initializing Attempt $i..."
+
+            if repo init \
+              -u "$BASE_URL" \
+              -b "$MANIFEST_BRANCH" \
+              -m "${FILE}.xml" \
+              --repo-url=https://github.com/GerritCodeReview/git-repo \
+              --depth=1 \
+              --no-clone-bundle \
+              --no-tags; then
+
+              INIT_SUCCESS=true
               break
             fi
-            echo "⚠️ Sync Failed, Cleaning Partial Repositories..."
-            repo forall -c 'git reset --hard || true; git clean -fd || true' || true
-            sleep 10
+
+            echo "⚠️ Initialization Failed, Retrying in 20s..."
+            sleep 20
           done
-      
-          if [[ "$SYNC_SUCCESS" != true ]]; then
-            echo "⚠️ Incremental Sync Failed, Performing Full Fallback Sync..."
-            repo sync kernel_platform -c --force-sync -j"$JOBS" || { echo "⚠️ Repository Sync Failed"; exit 1; }
+
+          if [ "$INIT_SUCCESS" = false ] || [ ! -d ".repo" ]; then
+            echo "⚠️ Repository Init Failed"
+            exit 1
           fi
-      
-          # Detect Kernel Repository Reliably
+
+          echo "------------------------------"
+          echo "♻️ Syncing Repository..."
+          echo "------------------------------"
+
+          SYNC_SUCCESS=false
+
+          for i in 1 2 3; do
+            echo "🔁 Sync Attempt $i..."
+
+            if repo sync \
+              -c \
+              --force-sync \
+              --no-clone-bundle \
+              --no-tags \
+              --prune \
+              -j$(nproc --all); then
+
+              SYNC_SUCCESS=true
+              break
+            fi
+
+            echo "⚠️ Sync Failed, Retrying in 30s..."
+            sleep 30
+          done
+
+          if [ "$SYNC_SUCCESS" = false ]; then
+            echo "⚠️ Repository Sync Failed"
+            exit 1
+          fi
+
           echo "------------------------------"
           echo "🔎 Detecting Kernel Repository..."
           echo "------------------------------"
-          KERNEL_PATH=$(find kernel_platform -type f -name "build.config*" | head -n 1)
-          if [[ -z "$KERNEL_PATH" ]]; then
-            echo "⚠️ No Kernel Build Configuration Found"
+
+          KERNEL_REPOS_PATH=$(find . -type f -name "build.config*" ! -path "*abi*" -print -quit)
+ 
+          if [[ -z "$KERNEL_REPOS_PATH" ]]; then
+            echo "⚠️ ERROR: No Build Configuration Found"
             exit 1
           fi
-          KERNEL_REPO=$(dirname "$KERNEL_PATH" | cut -d/ -f2)
-          echo "🔎 Kernel Repository Detected: $KERNEL_REPO"
-          echo "KERNEL_REPOS=$KERNEL_REPO" >> "$GITHUB_ENV"
-      
-          # Clean ABI Protected Exports
+
+          echo "📌 Build Configuration Found: $KERNEL_REPOS_PATH"
+
+          KERNEL_REPOS=$(echo "${KERNEL_REPOS_PATH#./}" | cut -d/ -f1)
+
+          echo "🔎 Detected Kernel Repository: $KERNEL_REPOS"
+          echo "KERNEL_REPOS=$KERNEL_REPOS" >> $GITHUB_ENV
+
           echo "------------------------------"
           echo "🧹 Cleaning ABI Protected Exports..."
           echo "------------------------------"
+
           for dir in kernel_platform/common kernel_platform/msm-kernel; do
-            [[ -f "$dir/BUILD.bazel" ]] && sed -i '/protected_exports_list/d' "$dir/BUILD.bazel"
-            find "$dir/android" -type f -name "abi_gki_protected_exports_*" -delete 2>/dev/null || true
+            if [[ -f "$dir/BUILD.bazel" ]]; then
+              sed -i '/protected_exports_list/d' "$dir/BUILD.bazel"
+            fi
+
+            rm -f "$dir/android/abi_gki_protected_exports_"* || true
           done
-      
-          echo ""
-          echo "🎉 Repository Ready! Incremental Sync Complete"
+ 
+          echo "🎉 Repository Sync Complete"
           
       # ==============================
       # Kernel Version Setup (Optimized)
