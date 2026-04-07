@@ -990,38 +990,66 @@ jobs:
       # Initialize and Sync Repository
       # ==============================
       - name: Initialize and Sync Repository
+        if: ${{ env.clo_cla_tools_found == 'true' }}  # Only runs if Clo-Cla Tools are found
         env:
           FILE: ${{ github.event.inputs.FILE }}
         run: |
           set -eux
-      
+
           echo "------------------------------"
           echo "📁 Preparing Workspace..."
           echo "------------------------------"
-      
+          
           WORKDIR="kernel_workspace"
           mkdir -p "$WORKDIR"
           cd "$WORKDIR"
-      
-          # Use fallback manifest
+
           mkdir -p .repo/manifests
           cp "$GITHUB_WORKSPACE/.repo/manifests_fallback/${FILE}.xml" ".repo/manifests/${FILE}.xml"
-      
+
           BASE_URL="https://github.com/${MANIFEST_REPO}/${MANIFEST_REPO_NAME}.git"
-      
+
           echo "------------------------------"
           echo "🚀 Initializing Repository..."
           echo "------------------------------"
-      
+          
+          # Attempt to initialize repository
           repo init -u "$BASE_URL" -b "$MANIFEST_BRANCH" -m "${FILE}.xml" \
             --depth=1 \
             --no-clone-bundle \
-            --no-tags
-      
+            --no-tags || {
+              echo "⚠️ Initializing repository failed. Falling back to OnePlus 15 kernel source..."
+              
+              # Fallback Mechanism: Sync CCTV18 Kernel Source for OnePlus 15
+              DEVICE="${{ github.event.inputs.FILE }}"
+              case "$DEVICE" in
+                "oneplus_15.xml")
+                  echo "📁 Fallback to syncing OnePlus 15 kernel source..."
+                  aria2c -s16 -x16 -k1M "https://github.com/cctv18/android_kernel_common_oneplus_sm8850/archive/refs/heads/oneplus/sm8850_v_16.0.0_oneplus_15.zip" -o common.zip
+                  unzip -q common.zip
+                  mv "android_kernel_common_oneplus_sm8850-oneplus-sm8850_v_16.0.0_oneplus_15" common
+                  rm -rf common.zip
+                  mkdir -p kernel_platform
+                  mv common kernel_platform/common  # Move the downloaded source to the expected path
+                  ;;
+                *)
+                  echo "⚠️ Device not recognized, using OnePlus 15 kernel source as fallback..."
+                  aria2c -s16 -x16 -k1M "https://github.com/cctv18/android_kernel_common_oneplus_sm8850/archive/refs/heads/oneplus/sm8850_v_16.0.0_oneplus_15.zip" -o common.zip
+                  unzip -q common.zip
+                  mv "android_kernel_common_oneplus_sm8850-oneplus-sm8850_v_16.0.0_oneplus_15" common
+                  rm -rf common.zip
+                  mkdir -p kernel_platform
+                  mv common kernel_platform/common  # Move the downloaded source to the expected path
+                  ;;
+              esac
+              
+              echo "📁 Fallback Kernel Source Available in: kernel_platform/common"
+            }
+
           echo "------------------------------"
           echo "📁 Syncing Repository..."
           echo "------------------------------"
-      
+          
           repo sync \
             -c \
             --force-sync \
@@ -1030,39 +1058,42 @@ jobs:
             --optimized-fetch \
             --prune \
             -j$(nproc)
-      
+
+          echo "🎉 Repository Sync Complete"
+
+      # Step 4: Detect Kernel Repository and Clean ABI Protected Exports
+      - name: Detect Kernel Repository and Clean ABI Protected Exports
+        run: |
           echo "🔎 Detecting Kernel Repository..."
           KERNEL_REPOS_PATH=$(find . -type f -name "build.config*" ! -path "*abi*" -print -quit)
-      
+          
           if [[ -z "$KERNEL_REPOS_PATH" ]]; then
             echo "⚠️ ERROR: No Build Configuration Found"
             exit 1
           fi
-      
+          
           echo "📌 Build Configuration Found: $KERNEL_REPOS_PATH"
-      
+          
           KERNEL_REPOS=$(dirname "${KERNEL_REPOS_PATH#./}")
-      
+          
           echo "------------------------------"
           echo "🔎 Detected Kernel Repository: $KERNEL_REPOS"
           echo "------------------------------"
-      
+          
           echo "KERNEL_REPOS=$KERNEL_REPOS" >> $GITHUB_ENV
-      
+          
+          # Clean ABI Protected Exports
           echo "------------------------------"
           echo "🧹 Cleaning ABI Protected Exports..."
           echo "------------------------------"
-      
+          
           for dir in kernel_platform/common kernel_platform/msm-kernel; do
             if [[ -f "$dir/BUILD.bazel" ]]; then
-              sed -i '/protected_exports_list/d' "$dir/BUILD.bazel"
+              sed -i '/protected_exports_list/d' "$dir/BUILD.bazel"  # Remove protected_exports_list if it exists
             fi
-      
-            rm -f "$dir/android/abi_gki_protected_exports_"* || true
+            
+            rm -f "$dir/android/abi_gki_protected_exports_"* || true  # Remove any ABI exports
           done
-      
-          echo ""
-          echo "🎉 Repository Sync Complete"
           
       # ==============================
       # Kernel Version Setup (Optimized)
