@@ -964,7 +964,7 @@ jobs:
       
           cp "$MANIFEST_SRC" "$MANIFEST_DST"
       
-          # Validate required variables
+          # Validate Required Variables
           : "${MANIFEST_REPO:?Missing MANIFEST_REPO}"
           : "${MANIFEST_REPO_NAME:?Missing MANIFEST_REPO_NAME}"
           : "${MANIFEST_BRANCH:?Missing MANIFEST_BRANCH}"
@@ -983,7 +983,8 @@ jobs:
           for i in 1 2 3; do
             echo "🔁 Initialization Attempt $i..."
       
-            rm -rf .repo/repo .repo/manifests.git || true
+            # Clean Possible Corrupted Repository State
+            rm -rf .repo/repo .repo/manifests.git .repo/project-objects || true
       
             if repo init \
               -u "$BASE_URL" \
@@ -1001,7 +1002,8 @@ jobs:
             sleep 15
           done
       
-          if [[ "$INIT_SUCCESS" != true ]]; then
+          # Strong Validation
+          if [[ "$INIT_SUCCESS" != true || ! -d ".repo" || ! -f ".repo/manifest.xml" ]]; then
             echo "❌ Repository Initialization Failed"
             exit 1
           fi
@@ -1032,12 +1034,20 @@ jobs:
       
             echo "⚠️ Sync Failed, Cleaning Partial Repositories..."
       
-            # Clean Broken Projects (Common CI Issue)
             repo forall -c 'git reset --hard || true; git clean -fd || true' || true
       
             echo "⏳ Retrying in 20 Seconds..."
             sleep 20
           done
+      
+          # 🔥 Fallback Sync
+          if [[ "$SYNC_SUCCESS" != true ]]; then
+            echo "⚠️ Trying Fallback Sync..."
+      
+            if repo sync -c --force-sync -j"$JOBS"; then
+              SYNC_SUCCESS=true
+            fi
+          fi
       
           if [[ "$SYNC_SUCCESS" != true ]]; then
             echo "❌ Repository Sync Failed"
@@ -1048,7 +1058,7 @@ jobs:
           echo "🔎 Detecting Kernel Repository..."
           echo "------------------------------"
       
-          KERNEL_REPOS_PATH=$(find . -type f -name "build.config*" ! -path "*abi*" | head -n 1)
+          KERNEL_REPOS_PATH=$(find . -type f -name "build.config*" ! -path "*abi*" | sort | head -n 1)
       
           if [[ -z "$KERNEL_REPOS_PATH" ]]; then
             echo "❌ ERROR: No Build Configuration Found"
@@ -1057,7 +1067,8 @@ jobs:
       
           echo "📌 Found: $KERNEL_REPOS_PATH"
       
-          KERNEL_REPOS=$(echo "$KERNEL_REPOS_PATH" | cut -d/ -f2)
+          # More reliable extraction
+          KERNEL_REPOS=$(dirname "$KERNEL_REPOS_PATH" | cut -d/ -f2)
       
           if [[ -z "$KERNEL_REPOS" ]]; then
             echo "❌ ERROR: Failed to Detect Kernel Repository Directory"
@@ -1076,7 +1087,7 @@ jobs:
               sed -i '/protected_exports_list/d' "$dir/BUILD.bazel"
             fi
       
-            rm -f "$dir"/android/abi_gki_protected_exports_* 2>/dev/null || true
+            find "$dir/android" -type f -name "abi_gki_protected_exports_*" -delete 2>/dev/null || true
           done
       
           echo ""
