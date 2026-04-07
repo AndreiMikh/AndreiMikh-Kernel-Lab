@@ -880,60 +880,52 @@ jobs:
           fi
 
       # ==============================
-      # Install Google Repository Tool (With Fallback)
+      # Install Repository Tool (Fallback and Cached)
       # ==============================
-      - name: Install Google Repository Tool (With Fallback)
+      - name: Install Repository Tool (Fallback and Cached)
         shell: bash
         run: |
           set -euo pipefail
       
-          echo "------------------------------"
-          echo "🚀 Installing Repository Tool (With Fallback)..."
-          echo "------------------------------"
-      
+          REPO_BIN="/usr/local/bin/repo"
           GOOGLE_URL="https://storage.googleapis.com/git-repo-downloads/repo"
           GITHUB_URL="https://raw.githubusercontent.com/GerritCodeReview/git-repo/main/repo"
-          REPO_BIN="/usr/local/bin/repo"
       
-          download_repo() {
-            local url="$1"
-            echo "🔎 Attempting download from: $url"
-            curl -fL --retry 3 --retry-delay 5 "$url" -o repo && return 0 || return 1
-          }
+          echo "------------------------------"
+          echo "🚀 Checking Repository Tool Installation..."
+          echo "------------------------------"
       
-          # Try Google first
-          if download_repo "$GOOGLE_URL"; then
-            echo "✅ Downloaded from Google"
+          if command -v repo &>/dev/null; then
+            echo "🎉 Repository Already Installed at $(Which Repository)"
           else
-            echo "⚠️ Google Download Failed, Switching to GitHub Mirror..."
-            
-            if download_repo "$GITHUB_URL"; then
-              echo "✅ Downloaded from GitHub Mirror"
+            download() {
+              echo "🔎 Downloading from $1 ..."
+              curl -fL --retry 3 --retry-delay 5 "$1" -o repo
+            }
+      
+            echo "🚀 Installing Repository Tool..."
+            if download "$GOOGLE_URL"; then
+              echo "🎉 Downloaded from Google"
             else
-              echo "❌ ERROR: Failed to Download Repository Tool from Both Sources"
-              exit 1
+              echo "⚠️ Google Download Failed, Trying GitHub Mirror..."
+              download "$GITHUB_URL" || { echo "❌ Failed to Download Repository Tool from All Sources"; exit 1; }
             fi
+      
+            chmod +x repo
+            sudo mv repo "$REPO_BIN"
+            echo "🎉 Repository Installed at $REPO_BIN"
           fi
       
-          echo "⚙️ Setting Executable Permissions..."
-          chmod 0755 repo
-      
-          echo "♻️ Installing to $REPO_BIN"
-          sudo mv repo "$REPO_BIN"
-      
-          export PATH="/usr/local/bin:$PATH"
-      
-          echo ""
-          echo "🛠️ Verifying Installation:"
+          echo "🛠️ Verifying Installation..."
           repo --version
       
           echo ""
           echo "🎉 Repository Tool Installed Successfully"
 
       # ==============================
-      # Initialize and Sync Repository
+      # Initialize and Incremental Sync Repository
       # ==============================
-      - name: Initialize and Sync Repository
+      - name: Initialize and Incremental Sync Repository
         shell: bash
         env:
           FILE: ${{ github.event.inputs.FILE }}
@@ -943,155 +935,85 @@ jobs:
           echo "------------------------------"
           echo "📁 Preparing Workspace..."
           echo "------------------------------"
-      
           WORKDIR="kernel_workspace"
           mkdir -p "$WORKDIR"
           cd "$WORKDIR"
       
-          echo "------------------------------"
-          echo "📄 Setting Up Manifest..."
-          echo "------------------------------"
-      
-          mkdir -p .repo/manifests
-      
-          MANIFEST_SRC="$GITHUB_WORKSPACE/.repo/manifests_fallback/${FILE}.xml"
-          MANIFEST_DST=".repo/manifests/${FILE}.xml"
-      
-          if [[ ! -f "$MANIFEST_SRC" ]]; then
-            echo "❌ ERROR: Manifest File Not Found: $MANIFEST_SRC"
-            exit 1
-          fi
-      
-          cp "$MANIFEST_SRC" "$MANIFEST_DST"
-      
-          # Validate Required Variables
+          # Validate Essential Variables
           : "${MANIFEST_REPO:?Missing MANIFEST_REPO}"
           : "${MANIFEST_REPO_NAME:?Missing MANIFEST_REPO_NAME}"
           : "${MANIFEST_BRANCH:?Missing MANIFEST_BRANCH}"
-      
           BASE_URL="https://github.com/${MANIFEST_REPO}/${MANIFEST_REPO_NAME}.git"
       
           echo "------------------------------"
           echo "🚀 Initializing Repository..."
           echo "------------------------------"
-      
-          export REPO_DISABLE_UPDATE=1
-          git config --global http.version HTTP/1.1
-      
-          INIT_SUCCESS=false
-      
-          for i in 1 2 3; do
-            echo "🔁 Initialization Attempt $i..."
-      
-            # Clean Possible Corrupted Repository State
-            rm -rf .repo/repo .repo/manifests.git .repo/project-objects || true
-      
-            if repo init \
-              -u "$BASE_URL" \
-              -b "$MANIFEST_BRANCH" \
-              -m "${FILE}.xml" \
-              --depth=1 \
-              --no-clone-bundle \
-              --no-tags; then
-      
-              INIT_SUCCESS=true
-              break
-            fi
-      
-            echo "⚠️ Initialization Failed, Retrying in 15 Seconds..."
-            sleep 15
-          done
-      
-          # Strong Validation
-          if [[ "$INIT_SUCCESS" != true || ! -d ".repo" || ! -f ".repo/manifest.xml" ]]; then
-            echo "❌ Repository Initialization Failed"
-            exit 1
+          if [[ ! -d ".repo" ]]; then
+            repo init -u "$BASE_URL" -b "$MANIFEST_BRANCH" --depth=1 --no-tags --no-clone-bundle
+            echo "🎉 Repository Initialized"
+          else
+            echo "🎉 Using Cached Repository"
           fi
       
-          echo "------------------------------"
-          echo "♻️ Syncing Repository..."
-          echo "------------------------------"
+          # Setup Local Manifests Safely
+          LOCAL_MANIFESTS=".repo/local_manifests"
+          mkdir -p "$LOCAL_MANIFESTS"
+          cp "$GITHUB_WORKSPACE/.repo/manifests_fallback/${FILE}.xml" "$LOCAL_MANIFESTS/"
       
-          SYNC_SUCCESS=false
           JOBS=$(nproc 2>/dev/null || echo 4)
+          echo "------------------------------"
+          echo "⚡ Performing Incremental Kernel Sync..."
+          echo "------------------------------"
       
-          for i in 1 2 3; do
-            echo "🔁 Sync Attempt $i..."
+          # Incremental Kernel Sync
+          SYNC_SUCCESS=false
+          KERNEL_PROJECTS=$(repo list -p | grep '^kernel_platform/' || true)
+          if [[ -z "$KERNEL_PROJECTS" ]]; then
+            echo "⚠️ No Kernel Projects Detected, Falling Back to Full Kernel Platform Sync"
+            KERNEL_PROJECTS="kernel_platform"
+          fi
       
-            if repo sync \
-              -c \
-              --force-sync \
-              --optimized-fetch \
-              --retry-fetches=3 \
-              --no-clone-bundle \
-              --no-tags \
-              --prune \
-              -j"$JOBS"; then
-      
+          for attempt in 1 2 3; do
+            echo "🔁 Sync Attempt $attempt..."
+            if repo sync $KERNEL_PROJECTS -c --force-sync --optimized-fetch --retry-fetches=3 --no-tags --prune -j"$JOBS"; then
               SYNC_SUCCESS=true
+              echo "🎉 Incremental Sync Successful"
               break
             fi
-      
             echo "⚠️ Sync Failed, Cleaning Partial Repositories..."
-      
             repo forall -c 'git reset --hard || true; git clean -fd || true' || true
-      
-            echo "⏳ Retrying in 20 Seconds..."
-            sleep 20
+            sleep 10
           done
       
-          # 🔥 Fallback Sync
           if [[ "$SYNC_SUCCESS" != true ]]; then
-            echo "⚠️ Trying Fallback Sync..."
-      
-            if repo sync -c --force-sync -j"$JOBS"; then
-              SYNC_SUCCESS=true
-            fi
+            echo "⚠️ Incremental Sync Failed, Performing Full Fallback Sync..."
+            repo sync kernel_platform -c --force-sync -j"$JOBS" || { echo "⚠️ Repository Sync Failed"; exit 1; }
           fi
       
-          if [[ "$SYNC_SUCCESS" != true ]]; then
-            echo "❌ Repository Sync Failed"
-            exit 1
-          fi
-      
+          # Detect Kernel Repository Reliably
           echo "------------------------------"
           echo "🔎 Detecting Kernel Repository..."
           echo "------------------------------"
-      
-          KERNEL_REPOS_PATH=$(find . -type f -name "build.config*" ! -path "*abi*" | sort | head -n 1)
-      
-          if [[ -z "$KERNEL_REPOS_PATH" ]]; then
-            echo "❌ ERROR: No Build Configuration Found"
+          KERNEL_PATH=$(find kernel_platform -type f -name "build.config*" | head -n 1)
+          if [[ -z "$KERNEL_PATH" ]]; then
+            echo "⚠️ No Kernel Build Configuration Found"
             exit 1
           fi
+          KERNEL_REPO=$(dirname "$KERNEL_PATH" | cut -d/ -f2)
+          echo "🔎 Kernel Repository Detected: $KERNEL_REPO"
+          echo "KERNEL_REPOS=$KERNEL_REPO" >> "$GITHUB_ENV"
       
-          echo "📌 Found: $KERNEL_REPOS_PATH"
-      
-          # More reliable extraction
-          KERNEL_REPOS=$(dirname "$KERNEL_REPOS_PATH" | cut -d/ -f2)
-      
-          if [[ -z "$KERNEL_REPOS" ]]; then
-            echo "❌ ERROR: Failed to Detect Kernel Repository Directory"
-            exit 1
-          fi
-      
-          echo "🔎 Kernel Repository: $KERNEL_REPOS"
-          echo "KERNEL_REPOS=$KERNEL_REPOS" >> "$GITHUB_ENV"
-      
+          # Clean ABI Protected Exports
           echo "------------------------------"
           echo "🧹 Cleaning ABI Protected Exports..."
           echo "------------------------------"
-      
           for dir in kernel_platform/common kernel_platform/msm-kernel; do
-            if [[ -f "$dir/BUILD.bazel" ]]; then
-              sed -i '/protected_exports_list/d' "$dir/BUILD.bazel"
-            fi
-      
+            [[ -f "$dir/BUILD.bazel" ]] && sed -i '/protected_exports_list/d' "$dir/BUILD.bazel"
             find "$dir/android" -type f -name "abi_gki_protected_exports_*" -delete 2>/dev/null || true
           done
-      
+
           echo ""
-          echo "🎉 Repository Ready"
+          echo "🎉 Repository Ready! Incremental Sync Complete"
           
       # ==============================
       # Kernel Version Setup (Optimized)
