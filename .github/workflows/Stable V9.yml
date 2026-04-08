@@ -131,10 +131,15 @@ on:
           - 1/lz4kd/8589934592     # 08Gib   
 
       ZRAM_CUSTOM:
-        type: boolean
+        type: choice
         description: "Enable LZ4 1.10.0 (6.1 and 6.6) / ZSTD 1.5.7? (6.1) Only if ZRAM (LZ4KD) is Off (Applicable for Dynamic Owner Custom Manifest)"
         required: false
-        default: false
+        default: "NONE"
+        options:
+          - NONE
+          - LZ4-1.10.0
+          - LZ4-1.10.0+LZ4KD  
+          - EXTERNAL-ZRAM
         
       SUFFIX:
         type: string
@@ -191,13 +196,13 @@ on:
         type: boolean
         description: "Apply Hmbird / Windspeed / Fengchi (Oryon Platform SM-8750)?"
         required: true
-        default: true
+        default: false
 
       SCHEDULERS:
         type: choice
         description: "Apply CPU or I/O Scheduler? (Applicable for Dynamic Owner Custom Manifest)"
         required: true
-        default: "None"
+        default: "NONE"
         options:
           - ADIOS
           - BORE
@@ -220,7 +225,7 @@ on:
         type: boolean
         description: "Apply ReKernel? (Applicable for Dynamic Owner Custom Manifest)"
         required: true
-        default: false
+        default: true
         
       SPACE_NOCLEAN:
         type: boolean
@@ -246,9 +251,14 @@ jobs:
           github.event.inputs.BBR == 'true' && 'BBR ' || ''),
           (github.event.inputs.LXCDOCKER == 'true' && 'LXC ' || ''),
           (github.event.inputs.ZRAM == '1/LZ4KD/8589934592' && 'LZ4KD ' || ''),
-          (github.event.inputs['ZRAM_CUSTOM'] == 'true' && 'LZ4 ' || ''),
           (contains(github.event.inputs.FILE, '_aosp') && 'AOSP ' || ''),
 
+          (
+            github.event.inputs.ZRAM_CUSTOM == 'LZ4-1.10.0' && 'LZ4(1.10.0) ' ||
+            github.event.inputs.ZRAM_CUSTOM == 'LZ4-1.10.0+LZ4KD' && 'LZ4(1.10.0) + LZ4KD ' ||
+            github.event.inputs.ZRAM_CUSTOM == 'EXTERNAL-ZRAM' && 'External LZ4/ZSTD ' || ''
+          ),
+          
           (
             github.event.inputs.SCHEDULERS == 'ADIOS' && 'ADIOS ' ||
             github.event.inputs.SCHEDULERS == 'SSG' && 'SSG ' ||
@@ -692,9 +702,7 @@ jobs:
       - name: Check Disk Space
         shell: bash
         run: |
-          echo "------------------------------"
           echo "🚀 Disk Usage Before Kernel Build..."
-          echo "------------------------------"
           echo ""
       
           echo "📌 Filesystem Disk Usage:"
@@ -776,9 +784,7 @@ jobs:
       - name: Configure Git Identity
         shell: bash
         run: |
-          echo "------------------------------"
           echo "🚀 Configuring Git Identity..."
-          echo "------------------------------"
           echo ""
 
           if ! git config --global user.name >/dev/null; then
@@ -936,9 +942,7 @@ jobs:
         run: |
           set -eux
       
-          echo "------------------------------"
           echo "📁 Preparing Workspace..."
-          echo "------------------------------"
       
           WORKDIR="kernel_workspace"
           mkdir -p "$WORKDIR"
@@ -950,18 +954,14 @@ jobs:
       
           BASE_URL="https://github.com/${MANIFEST_REPO}/${MANIFEST_REPO_NAME}.git"
       
-          echo "------------------------------"
           echo "🚀 Initializing Repository..."
-          echo "------------------------------"
       
           repo init -u "$BASE_URL" -b "$MANIFEST_BRANCH" -m "${FILE}.xml" \
             --depth=1 \
             --no-clone-bundle \
             --no-tags
       
-          echo "------------------------------"
           echo "📁 Syncing Repository..."
-          echo "------------------------------"
       
           repo sync \
             -c \
@@ -984,15 +984,11 @@ jobs:
       
           KERNEL_REPOS=$(dirname "${KERNEL_REPOS_PATH#./}")
       
-          echo "------------------------------"
           echo "🔎 Detected Kernel Repository: $KERNEL_REPOS"
-          echo "------------------------------"
       
           echo "KERNEL_REPOS=$KERNEL_REPOS" >> $GITHUB_ENV
       
-          echo "------------------------------"
           echo "🧹 Cleaning ABI Protected Exports..."
-          echo "------------------------------"
       
           for dir in kernel_platform/common kernel_platform/msm-kernel; do
             if [[ -f "$dir/BUILD.bazel" ]]; then
@@ -1735,17 +1731,17 @@ jobs:
           echo ""
           echo "🎉 SUSFS Meta Installation Completed Successfully!"
      
-          # ZRAM + LZ4/ZSTD Patch Installer
-           
+          # ZRAM + LZ4/ZSTD Patch Installer          
           echo ""
-          echo "🔧 ZRAM Patch Installation..."
+          echo "🔧 Starting ZRAM Patch Installation..."
           
+          # Workspace and Kernel Paths
           WORKSPACE="${GITHUB_WORKSPACE}/kernel_workspace"
           KERNEL_DIR="${WORKSPACE}/kernel_platform"
           PATCH_BASE="${WORKSPACE}/AndreiMikh-Kernel-Lab/patches"
           
           ZRAM_VAL="${{ github.event.inputs.ZRAM }}"
-          ZRAM_LZ4="${{ github.event.inputs['ZRAM_CUSTOM'] }}"
+          ZRAM_CUSTOM="${{ github.event.inputs['ZRAM_CUSTOM'] }}"
           KERNEL_VERSION="${{ env.KERNEL_VERSION }}"
           
           # Validate Kernel Directory
@@ -1757,9 +1753,9 @@ jobs:
           
           cd "$KERNEL_DIR"
           
-          # Apply SukiSU ZRAM Patch
+          # Function: Apply SukiSU ZRAM Patches
           apply_sukisu_zram() {
-              echo "🚀 Applying SukiSU ZRAM patches..."
+              echo "🚀 Applying SukiSU ZRAM Patches..."
           
               local src="${WORKSPACE}/SukiSU_patch/other/zram"
               local dst="./common"
@@ -1767,17 +1763,20 @@ jobs:
               echo "📂 Source : $src"
               echo "📂 Target : $dst"
           
+              # Ensure Target Directories Exist
               mkdir -p \
                   "$dst/include/linux" \
                   "$dst/lib" \
                   "$dst/crypto" \
                   "$dst/lib/lz4k_oplus"
           
+              # Copy Patch Files Safely
               cp -r "$src/lz4k/include/linux/." "$dst/include/linux/" 2>/dev/null || true
               cp -r "$src/lz4k/lib/." "$dst/lib/" 2>/dev/null || true
               cp -r "$src/lz4k/crypto/." "$dst/crypto/" 2>/dev/null || true
               cp -r "$src/lz4k_oplus/." "$dst/lib/lz4k_oplus/" 2>/dev/null || true
           
+              # Ensure Kernel Configuration Inclusion
               local kconfig="$dst/lib/Kconfig"
               if [[ -f "$kconfig" ]] && ! grep -q 'lib/lz4k_oplus/Kconfig' "$kconfig"; then
                   echo 'source "lib/lz4k_oplus/Kconfig"' >> "$kconfig"
@@ -1786,7 +1785,7 @@ jobs:
               echo "✔️ SukiSU ZRAM Patches Applied"
           }
           
-          # Patch Helper (Safe / Idempotent)
+          # Function: Safe Patch Application
           apply_patch() {
               local patch="$1"
           
@@ -1803,7 +1802,7 @@ jobs:
               fi
           }
           
-          # Apply ZRAM Patch (if Enabled)
+          # Apply SukiSU ZRAM if Enabled
           if [[ "$ZRAM_VAL" == 1* ]]; then
               apply_sukisu_zram
           else
@@ -1815,100 +1814,58 @@ jobs:
           # Resolve Kernel Common Path
           KCOMMON="./kernel_platform/common"
           [[ ! -d "$KCOMMON" ]] && KCOMMON="./common"
-          
           echo
-          echo "📂 Kernel Source: $KCOMMON"
+          echo "📂 Kernel Source Directory: $KCOMMON"
           
-          # Case 1: ZRAM + LZ4 Enabled
-          if [[ "$ZRAM_LZ4" == "true" && "$ZRAM_VAL" == 1* ]]; then
+          # Patch Cases          
+          # Case 1: LZ4 + ZRAM (LZ4KD of SukiSU)
+          if [[ "$ZRAM_CUSTOM" == "LZ4-1.10.0+LZ4KD" && "$ZRAM_VAL" == 1* ]]; then
           
-              echo "⚙️ Mode: ZRAM + LZ4"
+              echo "⚙️ Mode: LZ4 + ZRAM (LZ4KD of SukiSU Patches)"
+              mkdir -p "$KCOMMON/lib"
           
-              mkdir -p \
-                  "$KCOMMON/lib" \
-                  "$KCOMMON/fs/f2fs/lz4armv8"
-          
-              # Validate Required Patch
-              [[ -f "$PATCH_BASE/001-lz4.patch" ]] || {
-                  echo "⚠️ Required Patch Missing: 001-lz4.patch"
-                  exit 1
-              }
-          
-              # Copy Patches
+              [[ -f "$PATCH_BASE/001-lz4.patch" ]] || { echo "⚠️ Required Patch Missing: 001-lz4.patch"; exit 1; }
               cp "$PATCH_BASE/001-lz4.patch" "$KCOMMON/"
               [[ -f "$PATCH_BASE/002-zstd.patch" ]] && cp "$PATCH_BASE/002-zstd.patch" "$KCOMMON/"
-          
-              # Copy Required LZ4 ARMv8 Sources
-              mkdir -p "$KCOMMON/fs/f2fs/lz4armv8"
-              
-              for f in lz4accel.c lz4accel.h lz4armv8.S; do
-                  if [[ ! -f "$PATCH_BASE/$f" ]]; then
-                      echo "❌ Missing Required File: $f"
-                      exit 1
-                  fi
-                  cp "$PATCH_BASE/$f" "$KCOMMON/fs/f2fs/lz4armv8/"
-              done
-              
-              echo "✔️ LZ4 ARMv8 Sources Ready"
-
-              # Ensure Compiler can Find LZ4 Headers
-              F2FS_MAKEFILE="$KCOMMON/fs/f2fs/Makefile"
-              
-              if ! grep -q "lz4armv8" "$F2FS_MAKEFILE"; then
-                  echo 'ccflags-y += -I$(srctree)/fs/f2fs/lz4armv8' >> "$F2FS_MAKEFILE"
-                  echo "✔️ Include Path Added to F2FS Makefile"
-              fi
           
               cd "$KCOMMON"
           
               case "$KERNEL_VERSION" in
-                  6.1*)
+                  6.1*) 
                       echo "🧩 Kernel 6.1 Detected"
                       apply_patch "001-lz4.patch"
                       [[ -f 002-zstd.patch ]] && apply_patch "002-zstd.patch"
                       ;;
-                  6.6*)
+                  6.6*) 
                       echo "🧩 Kernel 6.6 Detected"
                       apply_patch "001-lz4.patch"
                       ;;
-                  *)
+                  *) 
                       echo "⚠️ Unsupported Kernel Version: $KERNEL_VERSION"
                       ;;
               esac
           
               rm -f 001-lz4.patch 002-zstd.patch
               cd - >/dev/null
-          
               echo "✔️ Full Patch Set Applied"
           
           # Case 2: LZ4 Only (ZRAM Disabled)
-          elif [[ "$ZRAM_LZ4" == "true" && "$ZRAM_VAL" == 0* ]]; then
+          elif [[ "$ZRAM_CUSTOM" == "LZ4-1.10.0" && "$ZRAM_VAL" == 0* ]]; then
           
               echo "⚙️ Mode: LZ4 Only"
-          
               mkdir -p "$KCOMMON/lib"
-          
-              [[ -f "$PATCH_BASE/001-lz4.patch" ]] || {
-                  echo "❌ Required Patch Missing: 001-lz4.patch"
-                  exit 1
-              }
+              [[ -f "$PATCH_BASE/001-lz4.patch" ]] || { echo "⚠️ Required Patch Missing: 001-lz4.patch"; exit 1; }
           
               cp "$PATCH_BASE/001-lz4.patch" "$KCOMMON/"
-              [[ -f "$PATCH_BASE/lz4armv8.S" ]] && cp "$PATCH_BASE/lz4armv8.S" "$KCOMMON/lib/"
-          
               cd "$KCOMMON"
           
               case "$KERNEL_VERSION" in
-                  6.1*)
+                  6.1*) 
                       echo "🧩 Kernel 6.1 Detected"
                       apply_patch "001-lz4.patch"
-          
-                      if [[ -f "$PATCH_BASE/002-zstd.patch" ]]; then
-                          cp "$PATCH_BASE/002-zstd.patch" .
-                          apply_patch "002-zstd.patch"
-                      fi
+                      [[ -f "$PATCH_BASE/002-zstd.patch" ]] && { cp "$PATCH_BASE/002-zstd.patch" .; apply_patch "002-zstd.patch"; }
                       ;;
-                  6.6*)
+                  6.6*) 
                       echo "🧩 Kernel 6.6 Detected"
                       apply_patch "001-lz4.patch"
                       ;;
@@ -1916,12 +1873,59 @@ jobs:
           
               rm -f 001-lz4.patch 002-zstd.patch
               cd - >/dev/null
-          
               echo "✔️ LZ4 Only Patch Applied"
           
-          # Case 3: Disabled
+          # Case 3: External ZRAM Patch Repository
+          elif [[ "$ZRAM_CUSTOM" == "EXTERNAL-ZRAM" ]]; then
+          
+              echo "⚙️ Mode: External ZRAM Patch Repository"
+          
+              EXTERNAL_REPO="https://github.com/Xiaomichael/kernel_patches.git"
+              EXTERNAL_BRANCH="patches" 
+              DEST_DIR="$WORKSPACE/kernel_patches"
+          
+              # Remove Existing Clone if Present
+              [[ -d "$DEST_DIR" ]] && rm -rf "$DEST_DIR"
+          
+              echo "📥 Cloning $EXTERNAL_REPO (branch: $EXTERNAL_BRANCH) into $DEST_DIR..."
+              git clone --depth 1 --branch "$EXTERNAL_BRANCH" "$EXTERNAL_REPO" "$DEST_DIR" || {
+                  echo "⚠️ Failed to Clone External ZRAM Repository"
+                  exit 1
+              }
+          
+              echo "✔️ External ZRAM Patches Cloned Successfully"
+              mkdir -p "$KCOMMON/lib"
+          
+              # Copy Patches from the ZRAM / Folder Inside the Repository
+              ZRAM_PATCH_DIR="$DEST_DIR/zram"
+          
+              [[ -f "$ZRAM_PATCH_DIR/001-lz4.patch" ]] && cp "$ZRAM_PATCH_DIR/001-lz4.patch" "$KCOMMON/"
+              [[ -f "$ZRAM_PATCH_DIR/002-zstd.patch" ]] && cp "$ZRAM_PATCH_DIR/002-zstd.patch" "$KCOMMON/"
+              [[ -f "$ZRAM_PATCH_DIR/lz4armv8.S" ]] && cp "$ZRAM_PATCH_DIR/lz4armv8.S" "$KCOMMON/lib/"
+          
+              cd "$KCOMMON"
+          
+              case "$KERNEL_VERSION" in
+                  6.1*)
+                      echo "🧩 Kernel 6.1 Detected"
+                      [[ -f "001-lz4.patch" ]] && apply_patch "001-lz4.patch"
+                      [[ -f "002-zstd.patch" ]] && apply_patch "002-zstd.patch"
+                      ;;
+                  6.6*)
+                      echo "🧩 Kernel 6.6 Detected"
+                      [[ -f "001-lz4.patch" ]] && apply_patch "001-lz4.patch"
+                      ;;
+                  *)
+                      echo "⚠️ Unsupported Kernel Version: $KERNEL_VERSION"
+                      ;;
+              esac
+          
+              cd - >/dev/null
+              echo "✔️ External ZRAM Patch Set Applied"
+          
+          # Case 4: Disabled / Unsupported
           else
-              echo "⚠️ LZ4 Patching Disabled — Skipping"
+              echo "⚠️ ZRAM/LZ4 Patch Disabled or Unsupported — Skipping"
           fi
           
           echo ""
@@ -3757,8 +3761,12 @@ jobs:
           fi
 
           # ZRAM LZ4 1.10.0 + ZSTD 1.5.7 Flag
-          if [ "${{ github.event.inputs.ZRAM_CUSTOM }}" = "true" ]; then
-            SUFFIX="${SUFFIX}-(LZ4)"
+          if [ "${{ github.event.inputs.ZRAM_CUSTOM }}" = "LZ4-1.10.0" ]; then
+            SUFFIX="${SUFFIX}-LZ4(1.10.0)"
+          if [ "${{ github.event.inputs.ZRAM_CUSTOM }}" = "LZ4-1.10.0+LZ4KD" ]; then
+            SUFFIX="${SUFFIX}-LZ4(1.10.0)+LZ4KD"
+          if [ "${{ github.event.inputs.ZRAM_CUSTOM }}" = "EXTERNAL-ZRAM" ]; then
+            SUFFIX="${SUFFIX}-LZ4"
           fi
 
           # SUSFS for OKI / GKI Selection
