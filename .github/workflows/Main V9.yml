@@ -197,7 +197,7 @@ on:
         type: choice
         description: "Apply CPU or I/O Scheduler? (Applicable for Dynamic Owner Custom Manifest)"
         required: true
-        default: "NONE"
+        default: "None"
         options:
           - ADIOS
           - BORE
@@ -218,7 +218,7 @@ on:
 
       RE_KERNEL:
         type: boolean
-        description: "Apply Re-Kernel / Re-Kernel NetLink?"
+        description: "Apply ReKernel? (Applicable for Dynamic Owner Custom Manifest)"
         required: true
         default: false
         
@@ -1736,66 +1736,65 @@ jobs:
           echo "🎉 SUSFS Meta Installation Completed Successfully!"
      
           # ZRAM + LZ4/ZSTD Patch Installer
-
+           
           echo ""
           echo "🔧 ZRAM Patch Installation..."
-
+          
           WORKSPACE="${GITHUB_WORKSPACE}/kernel_workspace"
           KERNEL_DIR="${WORKSPACE}/kernel_platform"
           PATCH_BASE="${WORKSPACE}/AndreiMikh-Kernel-Lab/patches"
-          GITHUB_PATCH_BASE="https://github.com/Xiaomichael/kernel_patches/tree/patches/zram"
-
+          
           ZRAM_VAL="${{ github.event.inputs.ZRAM }}"
           ZRAM_LZ4="${{ github.event.inputs['ZRAM_CUSTOM'] }}"
           KERNEL_VERSION="${{ env.KERNEL_VERSION }}"
-
+          
           # Validate Kernel Directory
           if [[ ! -d "$KERNEL_DIR" ]]; then
               echo "⚠️ Kernel Platform Directory Not Found:"
               echo "   $KERNEL_DIR"
               exit 1
           fi
-
+          
           cd "$KERNEL_DIR"
-
+          
           # Apply SukiSU ZRAM Patch
           apply_sukisu_zram() {
               echo "🚀 Applying SukiSU ZRAM patches..."
-
+          
               local src="${WORKSPACE}/SukiSU_patch/other/zram"
               local dst="./common"
-
+          
               echo "📂 Source : $src"
               echo "📂 Target : $dst"
-
+          
               mkdir -p \
                   "$dst/include/linux" \
                   "$dst/lib" \
                   "$dst/crypto" \
                   "$dst/lib/lz4k_oplus"
-
+          
               cp -r "$src/lz4k/include/linux/." "$dst/include/linux/" 2>/dev/null || true
               cp -r "$src/lz4k/lib/." "$dst/lib/" 2>/dev/null || true
               cp -r "$src/lz4k/crypto/." "$dst/crypto/" 2>/dev/null || true
               cp -r "$src/lz4k_oplus/." "$dst/lib/lz4k_oplus/" 2>/dev/null || true
-
+          
               local kconfig="$dst/lib/Kconfig"
               if [[ -f "$kconfig" ]] && ! grep -q 'lib/lz4k_oplus/Kconfig' "$kconfig"; then
                   echo 'source "lib/lz4k_oplus/Kconfig"' >> "$kconfig"
               fi
-
+          
               echo "✔️ SukiSU ZRAM Patches Applied"
           }
-
+          
           # Patch Helper (Safe / Idempotent)
           apply_patch() {
               local patch="$1"
-
+          
               if [[ ! -f "$patch" ]]; then
                   echo "⚠️ Missing Patch: $(basename "$patch")"
                   exit 1
               fi
-
+          
               if git apply --check "$patch" >/dev/null 2>&1; then
                   git apply -p1 "$patch"
                   echo "✔️ Applied: $(basename "$patch")"
@@ -1803,57 +1802,65 @@ jobs:
                   echo "⚠️ Skipped: $(basename "$patch") (Already Applied or Conflict)"
               fi
           }
-
+          
           # Apply ZRAM Patch (if Enabled)
           if [[ "$ZRAM_VAL" == 1* ]]; then
               apply_sukisu_zram
           else
               echo "⚠️ ZRAM Disabled — Skipping SukiSU Patch"
           fi
-
+          
           cd "$WORKSPACE"
-
+          
           # Resolve Kernel Common Path
           KCOMMON="./kernel_platform/common"
           [[ ! -d "$KCOMMON" ]] && KCOMMON="./common"
-
-          echo ""
+          
+          echo
           echo "📂 Kernel Source: $KCOMMON"
-
+          
           # Case 1: ZRAM + LZ4 Enabled
           if [[ "$ZRAM_LZ4" == "true" && "$ZRAM_VAL" == 1* ]]; then
-
+          
               echo "⚙️ Mode: ZRAM + LZ4"
-
+          
               mkdir -p \
                   "$KCOMMON/lib" \
                   "$KCOMMON/fs/f2fs/lz4armv8"
-
+          
               # Validate Required Patch
               [[ -f "$PATCH_BASE/001-lz4.patch" ]] || {
                   echo "⚠️ Required Patch Missing: 001-lz4.patch"
                   exit 1
               }
-
+          
               # Copy Patches
               cp "$PATCH_BASE/001-lz4.patch" "$KCOMMON/"
               [[ -f "$PATCH_BASE/002-zstd.patch" ]] && cp "$PATCH_BASE/002-zstd.patch" "$KCOMMON/"
-
+          
               # Copy Required LZ4 ARMv8 Sources
               mkdir -p "$KCOMMON/fs/f2fs/lz4armv8"
-    
+              
               for f in lz4accel.c lz4accel.h lz4armv8.S; do
                   if [[ ! -f "$PATCH_BASE/$f" ]]; then
-                      echo "⚠️ Missing Required File: $f"
+                      echo "❌ Missing Required File: $f"
                       exit 1
                   fi
                   cp "$PATCH_BASE/$f" "$KCOMMON/fs/f2fs/lz4armv8/"
               done
-
+              
               echo "✔️ LZ4 ARMv8 Sources Ready"
 
+              # Ensure Compiler can Find LZ4 Headers
+              F2FS_MAKEFILE="$KCOMMON/fs/f2fs/Makefile"
+              
+              if ! grep -q "lz4armv8" "$F2FS_MAKEFILE"; then
+                  echo 'ccflags-y += -I$(srctree)/fs/f2fs/lz4armv8' >> "$F2FS_MAKEFILE"
+                  echo "✔️ Include Path Added to F2FS Makefile"
+              fi
+          
               cd "$KCOMMON"
-
+          
               case "$KERNEL_VERSION" in
                   6.1*)
                       echo "🧩 Kernel 6.1 Detected"
@@ -1868,41 +1875,36 @@ jobs:
                       echo "⚠️ Unsupported Kernel Version: $KERNEL_VERSION"
                       ;;
               esac
-
+          
               rm -f 001-lz4.patch 002-zstd.patch
               cd - >/dev/null
-
+          
               echo "✔️ Full Patch Set Applied"
-
+          
           # Case 2: LZ4 Only (ZRAM Disabled)
           elif [[ "$ZRAM_LZ4" == "true" && "$ZRAM_VAL" == 0* ]]; then
-
+          
               echo "⚙️ Mode: LZ4 Only"
-
+          
               mkdir -p "$KCOMMON/lib"
-
-              # Use GitHub Patch Base for LZ4 Only
-              echo "📂 Cloning patches from GitHub repository: $GITHUB_PATCH_BASE"
-              git clone --depth 1 "$GITHUB_PATCH_BASE" "$KCOMMON/lz4_patches"
-
-              # Validate Required Patch
-              [[ -f "$KCOMMON/lz4_patches/001-lz4.patch" ]] || {
+          
+              [[ -f "$PATCH_BASE/001-lz4.patch" ]] || {
                   echo "❌ Required Patch Missing: 001-lz4.patch"
                   exit 1
               }
-
-              cp "$KCOMMON/lz4_patches/001-lz4.patch" "$KCOMMON/"
-              [[ -f "$KCOMMON/lz4_patches/lz4armv8.S" ]] && cp "$KCOMMON/lz4_patches/lz4armv8.S" "$KCOMMON/lib/"
-
+          
+              cp "$PATCH_BASE/001-lz4.patch" "$KCOMMON/"
+              [[ -f "$PATCH_BASE/lz4armv8.S" ]] && cp "$PATCH_BASE/lz4armv8.S" "$KCOMMON/lib/"
+          
               cd "$KCOMMON"
-
+          
               case "$KERNEL_VERSION" in
                   6.1*)
                       echo "🧩 Kernel 6.1 Detected"
                       apply_patch "001-lz4.patch"
-
-                      if [[ -f "$KCOMMON/lz4_patches/002-zstd.patch" ]]; then
-                          cp "$KCOMMON/lz4_patches/002-zstd.patch" .
+          
+                      if [[ -f "$PATCH_BASE/002-zstd.patch" ]]; then
+                          cp "$PATCH_BASE/002-zstd.patch" .
                           apply_patch "002-zstd.patch"
                       fi
                       ;;
@@ -1911,19 +1913,19 @@ jobs:
                       apply_patch "001-lz4.patch"
                       ;;
               esac
-
+          
               rm -f 001-lz4.patch 002-zstd.patch
               cd - >/dev/null
-
+          
               echo "✔️ LZ4 Only Patch Applied"
-
+          
           # Case 3: Disabled
           else
               echo "⚠️ LZ4 Patching Disabled — Skipping"
           fi
-
+          
           echo ""
-          echo "🎉 Patch Process Completed Successfully"             
+          echo "🎉 Patch Process Completed Successfully"
           
           # Kernel Compatibility Fixes
           cd ./kernel_platform/common
@@ -2663,15 +2665,15 @@ jobs:
           fi
  
       # ==============================
-      # Re-Kernel Patch Setup
+      # ReKernel Patch Setup
       # ==============================
-      - name: Re-Kernel / Re-Kernel NetLink Patch Setup
+      - name: ReKernel Patch Setup
         if: ${{ github.event.inputs.RE_KERNEL == 'true' }}
         run: |
           set -euo pipefail
 
           echo "------------------------------"
-          echo "🚀 Re-Kernel / Re-Kernel NetLink Patch Setup Setup..."
+          echo "🚀 ReKernel Patch Setup..."
           echo "------------------------------"
           echo ""
           
@@ -2690,7 +2692,7 @@ jobs:
 
           # Clone Repository (Shallow)
           if [[ ! -d "$REPO_DIR/.git" ]]; then
-            echo "📩 Cloning Re-Kernel Repository..."
+            echo "📩 Cloning ReKernel Repository..."
             git clone --depth=1 https://github.com/Sakion-Team/Re-Kernel.git "$REPO_DIR"
             echo "✔️ Repository Cloned"
           else
@@ -2706,11 +2708,11 @@ jobs:
           if grep -q "drivers/rekernel/Kconfig" "$KCONFIG_FILE" && \
             grep -q "CONFIG_REKERNEL" "$MAKEFILE" && \
             [[ -f "$TARGET_DIR/rekernel.c" ]]; then
-            echo "⚠️ Re-Kernel / Re-Kernel NetLink Already Applied"
+            echo "⚠️ ReKernel Already Applied"
             exit 0
           fi
 
-          echo "⚙️ Applying Re-Kernel..."
+          echo "⚙️ Applying ReKernel..."
 
           # Prepare Target Directory
           mkdir -p "$TARGET_DIR"
@@ -2751,7 +2753,7 @@ jobs:
             echo "⚠️ Kernel Short Patch Version Not Set"
           fi
 
-          echo "🎉 Re-Kernel Patch Applied Successfully"
+          echo "🎉 ReKernel Patch Applied Successfully"
           echo "------------------------------"
 
       # ==============================
@@ -2835,7 +2837,7 @@ jobs:
               esac
           done
 
-          # Re-Kernel / Re-Kernel NetLink Configuration
+          # ReKernel Configuration
           echo "🚀 Enabling Re-Kernel Support (for Use with Freezer, NoActive, ETC., to Improve Background App Freezing)..."
           
           # Use Underscore for Variable Name
@@ -2844,9 +2846,9 @@ jobs:
             echo "Enabling ReKernel Support..."
             echo "CONFIG_REKERNEL=y" >> "$CONFIG_FILE"
             echo "CONFIG_REKERNEL_NETWORK=y" >> "$CONFIG_FILE"
-            echo "🎉 Re-Kernel / Re-Kernel NetLink Enabled"
+            echo "🎉 ReKernel Enabled"
           else
-            echo "🚩 Re-Kernel / Re-Kernel NetLink Disabled"
+            echo "🚩 ReKernel Disabled"
           fi
                  
           # KSU Meta Root Engine Configuration
