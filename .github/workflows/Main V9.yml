@@ -1726,168 +1726,187 @@ jobs:
           else
               echo "♻️ KernelSU / KernelSU-Next Not Selected — Skipping Enable Patch"
           fi
-      
+
+          echo ""
           echo "🎉 SUSFS Meta Installation Completed Successfully!"
-          echo "------------------------------"
      
-          # Apply SukiSU ZRAM + Custom LZ4/ZSTD Patches Installer   
-          echo "------------------------------"
-          echo "ZRAM Patch Installation"
-          echo "------------------------------"
+          # ZRAM + LZ4/ZSTD Patch Installer
           
-          CURRENT_DIR="$GITHUB_WORKSPACE/kernel_workspace"
           
-          # Enter Kernel Platform Directory
-          if [ -d "$CURRENT_DIR/kernel_platform" ]; then
-              cd "$CURRENT_DIR/kernel_platform"
-          else
-              echo "⚠️ ERROR: Kernel Platform Directory Not Found at $CURRENT_DIR/kernel_platform"
+          echo ""
+          echo "🔧 ZRAM Patch Installation..."
+          
+          WORKSPACE="${GITHUB_WORKSPACE}/kernel_workspace"
+          KERNEL_DIR="${WORKSPACE}/kernel_platform"
+          PATCH_BASE="${WORKSPACE}/AndreiMikh-Kernel-Lab/patches"
+          
+          ZRAM_VAL="${{ github.event.inputs.ZRAM }}"
+          ZRAM_LZ4="${{ github.event.inputs['ZRAM_CUSTOM'] }}"
+          KERNEL_VERSION="${{ env.KERNEL_VERSION }}"
+          
+          # Validate Kernel Directory
+          if [[ ! -d "$KERNEL_DIR" ]]; then
+              echo "⚠️ Kernel Platform Directory Not Found:"
+              echo "   $KERNEL_DIR"
               exit 1
           fi
           
+          cd "$KERNEL_DIR"
+          
           # Apply SukiSU ZRAM Patch
-          if [[ "${{ github.event.inputs.ZRAM }}" == 1/* ]]; then
+          apply_sukisu_zram() {
+              echo "🚀 Applying SukiSU ZRAM patches..."
           
-              echo "🚀 Applying SukiSU ZRAM Patches..."
-
-              # Source Directory
-              SRC_BASE="$CURRENT_DIR/SukiSU_patch/other/zram"
-
-              # Target Directory
-              DEST_BASE="./common"
+              local src="${WORKSPACE}/SukiSU_patch/other/zram"
+              local dst="./common"
           
-              echo "📂 Source : $SRC_BASE"
-              echo "📂 Target : $DEST_BASE"
-
-              # Ensure Directories Exist
+              echo "📂 Source : $src"
+              echo "📂 Target : $dst"
+          
               mkdir -p \
-                  "$DEST_BASE/include/linux" \
-                  "$DEST_BASE/lib" \
-                  "$DEST_BASE/crypto" \
-                  "$DEST_BASE/lib/lz4k_oplus"
-
-              # Copy Header Files if Present
-              cp -r "$SRC_BASE/lz4k/include/linux/"* "$DEST_BASE/include/linux/"
-
-              # Copy Libraries if Present
-              cp -r "$SRC_BASE/lz4k/lib/"* "$DEST_BASE/lib/"
-
-              # Copy Crypto Implementation if Present
-              cp -r "$SRC_BASE/lz4k/crypto/"* "$DEST_BASE/crypto/"
-
-              # Copy OPlus LZ4K Module if Present
-              cp -r "$SRC_BASE/lz4k_oplus/"* "$DEST_BASE/lib/lz4k_oplus/"
-
-              # Ensure Kernel Configuration is Sourced
-              LIB_KCONFIG="$DEST_BASE/lib/Kconfig"
-              if ! grep -q 'lib/lz4k_oplus/Kconfig' "$LIB_KCONFIG"; then
-                  echo 'source "lib/lz4k_oplus/Kconfig"' >> "$LIB_KCONFIG"
+                  "$dst/include/linux" \
+                  "$dst/lib" \
+                  "$dst/crypto" \
+                  "$dst/lib/lz4k_oplus"
+          
+              cp -r "$src/lz4k/include/linux/." "$dst/include/linux/" 2>/dev/null || true
+              cp -r "$src/lz4k/lib/." "$dst/lib/" 2>/dev/null || true
+              cp -r "$src/lz4k/crypto/." "$dst/crypto/" 2>/dev/null || true
+              cp -r "$src/lz4k_oplus/." "$dst/lib/lz4k_oplus/" 2>/dev/null || true
+          
+              local kconfig="$dst/lib/Kconfig"
+              if [[ -f "$kconfig" ]] && ! grep -q 'lib/lz4k_oplus/Kconfig' "$kconfig"; then
+                  echo 'source "lib/lz4k_oplus/Kconfig"' >> "$kconfig"
               fi
           
-              echo "✔️ SukiSU ZRAM Patch Applied"
+              echo "✔️ SukiSU ZRAM Patches Applied"
+          }
           
+          # Patch Helper (Safe / Idempotent)
+          apply_patch() {
+              local patch="$1"
+          
+              if [[ ! -f "$patch" ]]; then
+                  echo "⚠️ Missing Patch: $(basename "$patch")"
+                  exit 1
+              fi
+          
+              if git apply --check "$patch" >/dev/null 2>&1; then
+                  git apply -p1 "$patch"
+                  echo "✔️ Applied: $(basename "$patch")"
+              else
+                  echo "⚠️ Skipped: $(basename "$patch") (Already Applied or Conflict)"
+              fi
+          }
+          
+          # Apply ZRAM Patch (if Enabled)
+          if [[ "$ZRAM_VAL" == 1* ]]; then
+              apply_sukisu_zram
           else
-              echo "⚠️ ZRAM Disabled — Skipping SukiSU ZRAM Patch"
+              echo "⚠️ ZRAM Disabled — Skipping SukiSU Patch"
           fi
-                  
-          # Return to Root Workspace
-          cd "$CURRENT_DIR"          
           
-          # Custom LZ4 1.10.0 / ZSTD 1.5.7 Patches       
-          PATCH_BASE="./AndreiMikh-Kernel-Lab/patches"
+          cd "$WORKSPACE"
           
+          # Resolve Kernel Common Path
           KCOMMON="./kernel_platform/common"
           [[ ! -d "$KCOMMON" ]] && KCOMMON="./common"
           
           echo
-          echo "📂 Kernel Directory: $KCOMMON"
-                    
-          # Case 1: ZRAM Enabled + LZ4 Enabled
-          ZRAM_VAL="${{ github.event.inputs.ZRAM }}"
-          ZRAM_LZ4="${{ github.event.inputs['ZRAM_CUSTOM'] }}"
-
-          if [[ "$ZRAM_LZ4" == "true" && "$ZRAM_VAL" == 1/* ]]; then
-              echo "⚙️ ZRAM + LZ4 Enabled — Applying Full Patch Set"
-
-              # Ensure Custom ZRAM Directories Exists
+          echo "📂 Kernel Source: $KCOMMON"
+          
+          # Case 1: ZRAM + LZ4 Enabled
+          if [[ "$ZRAM_LZ4" == "true" && "$ZRAM_VAL" == 1* ]]; then
+          
+              echo "⚙️ Mode: ZRAM + LZ4"
+          
               mkdir -p \
-                  "$KCOMMON/" \
                   "$KCOMMON/lib" \
                   "$KCOMMON/fs/f2fs/lz4armv8"
-
+          
+              # Validate Required Patch
+              [[ -f "$PATCH_BASE/001-lz4.patch" ]] || {
+                  echo "⚠️ Required Patch Missing: 001-lz4.patch"
+                  exit 1
+              }
+          
               # Copy Patches
-              [[ -f "$PATCH_BASE/001-lz4.patch" ]] && cp "$PATCH_BASE/001-lz4.patch" "$KCOMMON/"
+              cp "$PATCH_BASE/001-lz4.patch" "$KCOMMON/"
               [[ -f "$PATCH_BASE/002-zstd.patch" ]] && cp "$PATCH_BASE/002-zstd.patch" "$KCOMMON/"
-
-              # Copy Source Files
-              for file in lz4accel.c lz4accel.h lz4armv8.S; do
-                  if [[ -f "$PATCH_BASE/$file" ]]; then
-                      cp "$PATCH_BASE/$file" "$KCOMMON/fs/f2fs/lz4armv8/"
-                  else
-                      echo "⚠️ Missing File: $file"
-                  fi
+          
+              # Copy Optional Sources
+              for f in lz4accel.c lz4accel.h lz4armv8.S; do
+                  [[ -f "$PATCH_BASE/$f" ]] && cp "$PATCH_BASE/$f" "$KCOMMON/fs/f2fs/lz4armv8/" \
+                      || echo "⚠️ Missing Optional File: $f"
               done
           
               cd "$KCOMMON"
           
-              case "${{ env.KERNEL_VERSION }}" in
-                  6.1)
-                      echo "⚙️ Applying LZ4 + ZSTD Patches (Kernel 6.1)"
-                      [[ -f 001-lz4.patch ]] && git apply -p1 001-lz4.patch || echo "⚠️ LZ4 patch skipped"
-                      [[ -f 002-zstd.patch ]] && patch -p1 < 002-zstd.patch || echo "⚠️ ZSTD patch skipped"
+              case "$KERNEL_VERSION" in
+                  6.1*)
+                      echo "🧩 Kernel 6.1 Detected"
+                      apply_patch "001-lz4.patch"
+                      [[ -f 002-zstd.patch ]] && apply_patch "002-zstd.patch"
                       ;;
-                  6.6)
-                      echo "⚙️ Applying LZ4 Patch (Kernel 6.6)"
-                      [[ -f 001-lz4.patch ]] && git apply -p1 001-lz4.patch || echo "⚠️ LZ4 patch skipped"
+                  6.6*)
+                      echo "🧩 Kernel 6.6 Detected"
+                      apply_patch "001-lz4.patch"
                       ;;
                   *)
-                      echo "⚠️ Unsupported Kernel Version: ${{ env.KERNEL_VERSION }}"
+                      echo "⚠️ Unsupported Kernel Version: $KERNEL_VERSION"
                       ;;
               esac
           
+              rm -f 001-lz4.patch 002-zstd.patch
               cd - >/dev/null
-
-              echo "✔️ Full ZRAM LZ4 Patch Section Completed"
-                    
-          # Case 2: ZRAM Disabled + LZ4 Enabled
-          elif [[ "${{ github.event.inputs['ZRAM_CUSTOM'] }}" == "true" && "${{ github.event.inputs.ZRAM }}" == 0* ]]; then
-
-              echo "♻️ ZRAM Disabled but LZ4 Enabled — Applying Alternate Patch..."
-
-              # Always Copy LZ4 Patch and ARMv8 Support
-              cp "$PATCH_BASE/001-lz4.patch" "$KCOMMON/" 2>/dev/null || true
-              cp "$PATCH_BASE/lz4armv8.S" "$KCOMMON/lib/" 2>/dev/null || true
-
+          
+              echo "✔️ Full Patch Set Applied"
+          
+          # Case 2: LZ4 Only (ZRAM Disabled)
+          elif [[ "$ZRAM_LZ4" == "true" && "$ZRAM_VAL" == 0* ]]; then
+          
+              echo "⚙️ Mode: LZ4 Only"
+          
+              mkdir -p "$KCOMMON/lib"
+          
+              [[ -f "$PATCH_BASE/001-lz4.patch" ]] || {
+                  echo "❌ Required Patch Missing: 001-lz4.patch"
+                  exit 1
+              }
+          
+              cp "$PATCH_BASE/001-lz4.patch" "$KCOMMON/"
+              [[ -f "$PATCH_BASE/lz4armv8.S" ]] && cp "$PATCH_BASE/lz4armv8.S" "$KCOMMON/lib/"
+          
               cd "$KCOMMON"
-
-              case "${{ env.KERNEL_VERSION }}" in
-                  6.1)
-                      echo "⚙️ Applying LZ4 + ZSTD Patches (Kernel 6.1)"
-
-                      # Copy and Apply ZSTD Patch (Kernel 6.1)
-                      cp "$PATCH_BASE/002-zstd.patch" "$KCOMMON/" 2>/dev/null || true
-                      git apply -p1 001-lz4.patch || true
-                      patch -p1 < 002-zstd.patch || true
+          
+              case "$KERNEL_VERSION" in
+                  6.1*)
+                      echo "🧩 Kernel 6.1 Detected"
+                      apply_patch "001-lz4.patch"
+          
+                      if [[ -f "$PATCH_BASE/002-zstd.patch" ]]; then
+                          cp "$PATCH_BASE/002-zstd.patch" .
+                          apply_patch "002-zstd.patch"
+                      fi
                       ;;
-                  6.6)
-                      echo "⚙️ Applying LZ4 Patch (Kernel 6.6)"
-                      git apply -p1 001-lz4.patch || true
+                  6.6*)
+                      echo "🧩 Kernel 6.6 Detected"
+                      apply_patch "001-lz4.patch"
                       ;;
               esac
-
+          
+              rm -f 001-lz4.patch 002-zstd.patch
               cd - >/dev/null
-
-              echo "✔️ Alternate LZ4 Patch Section Completed"
-
-          # Case 3: Skip
+          
+              echo "✔️ LZ4 Only Patch Applied"
+          
+          # Case 3: Disabled
           else
-
-              echo "⚠️ LZ4 Patch Disabled — Skipping"
-
+              echo "⚠️ LZ4 Patching Disabled — Skipping"
           fi
-
-          echo "🎉 ZRAM Patch Process Completed"
-          echo "------------------------------"
+          
+          echo ""
+          echo "🎉 Patch Process Completed Successfully"
           
           # Kernel Compatibility Fixes
           cd ./kernel_platform/common
