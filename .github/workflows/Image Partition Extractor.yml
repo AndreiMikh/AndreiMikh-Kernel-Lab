@@ -54,7 +54,7 @@ on:
           - Realme GT8 PRO
         default: 'OP 13'
       region:
-        description: 'Regional Version'
+        description: 'Region Version'
         required: true
         type: choice
         options:
@@ -63,64 +63,45 @@ on:
           - IN
           - CN
           - NA
-        default: 'GLO'
+        default: 'CN'
       version_index:
-        description: 'Version Index (0=Latest, 1=Second Latest, and So on..)'
+        description: 'Version Index (0=Latest, 1=Second Latest & So-on Etc)'
         required: true
         type: number
         default: 0
       partitions:
-        description: 'Partitions to Extract (Comma-Separated, e.g., boot,dtbo,vendor_boot; Leave Empty to Extract All)'
+        description: 'Partitions to Extract (Comma-Separated, e.g. boot, dtbo, vendor_boot, Leave Empty to Extract All)'
         required: false
         type: string
-        default: 'boot,init_boot,vendor_boot'
+        default: 'boot, init_boot, vendor_boot, vbmeta'
       extract_kernel_info:
-        description: 'Extract Kernel Build Time and Name'
+        description: 'Extract Kernel Build Time & Name'
         required: false
         type: boolean
         default: true
       workers:
-        description: 'Number of Parallel Worker Threads'
+        description: 'Number of Parallel Working Threads'
         required: false
         type: number
         default: 4
 
 jobs:
   extract:
-    name: 👾 Extract Partitions
+    name: Extract Partitions
     runs-on: ubuntu-latest
-
+    
     steps:
-      # Cache Python Dependencies to Speed up the Workflow
-      - name: 🔧 Cache Python Dependencies
-        uses: actions/cache@v4
-        with:
-          path: ~/.cache/pip
-          key: ${{ runner.os }}-python-${{ hashFiles('**/requirements.txt') }}
-          restore-keys: |
-            ${{ runner.os }}-python-
-
       - name: 📥 Checkout Code
         uses: actions/checkout@v4
       
-      - name: 🔧 Set up Python Environment
+      - name: 🔧 Setup Python Environment
         uses: actions/setup-python@v5
         with:
           python-version: '3.12'
       
-      - name: ⚙️ Install Dependencies
-        run: |
-          pip install httpx beautifulsoup4
-
-      # Validate the Version Index Before Proceeding
-      - name: 📊 Validate Version Index
-        run: |
-          if [ ${{ inputs.version_index }} -ge ${{ steps.get_ota.outputs.available_versions }} ]; then
-            echo "⚠️ ERROR: Version Index is Out of Range"
-            exit 1
-          fi
-
-      # Get OTA Download URL with Error Handling and Efficient Scraping
+      - name: 📦 Install Dependencies
+        run: pip install httpx beautifulsoup4
+      
       - name: 🔗 Get OTA Download URL
         id: get_ota
         run: |
@@ -128,54 +109,47 @@ jobs:
           import httpx
           import json
           import os
+          import re
           from bs4 import BeautifulSoup
-
+          
           device = "${{ inputs.device }}"
           region = "${{ inputs.region }}"
           version_index = ${{ inputs.version_index }}
-
+          
           url = "https://roms.danielspringer.at/index.php?view=ota"
-          try:
-              resp = httpx.get(url, follow_redirects=True, timeout=30)
-              resp.raise_for_status()
-          except httpx.RequestError as e:
-              print(f"Request failed: {e}")
-              exit(1)
-
+          resp = httpx.get(url, follow_redirects=True)
+          resp.raise_for_status()
+          
           soup = BeautifulSoup(resp.text, 'html.parser')
           select = soup.find('select', id='device')
           devices = json.loads(select['data-devices'])
-
+          
           if device not in devices:
               raise Exception(f"Device '{device}' not found")
-
+          
           device_regions = devices[device]
           if region not in device_regions:
               raise Exception(f"Region '{region}' not available for '{device}'")
-
+          
           versions = device_regions[region]
           if not versions:
               raise Exception(f"No versions for '{device}' in '{region}'")
-
+          
           if version_index >= len(versions):
               raise Exception(f"Version index {version_index} out of range (0-{len(versions)-1})")
-
+          
           version = versions[version_index]
           print(f"Selected: {device} | {region} | {version}")
-
+          
           post_data = {
               "device": device,
               "region": region,
               "version_index": str(version_index)
           }
-
-          try:
-              post_resp = httpx.post(url, data=post_data, follow_redirects=True, timeout=30)
-              post_resp.raise_for_status()
-          except httpx.RequestError as e:
-              print(f"Post request failed: {e}")
-              exit(1)
-
+          
+          post_resp = httpx.post(url, data=post_data, follow_redirects=True)
+          post_resp.raise_for_status()
+          
           post_soup = BeautifulSoup(post_resp.text, 'html.parser')
           
           download_url = None
@@ -185,66 +159,105 @@ jobs:
                   if href.startswith('http'):
                       download_url = href
                       break
-
+          
+          if not download_url:
+              for a in post_soup.find_all('a', href=True):
+                  href = a['href']
+                  if href.startswith('http'):
+                      download_url = href
+                      break
+          
           if not download_url:
               with open('response_debug.html', 'w') as f:
                   f.write(post_resp.text)
               raise Exception("Could not find download URL. Check response_debug.html")
-
+          
           print(f"Download URL: {download_url}")
           with open(os.environ['GITHUB_OUTPUT'], 'a') as f:
               f.write(f'ota_url={download_url}\n')
               f.write(f'version={version}\n')
           PYEOF
-
-      # Show the Extracted OTA information in the Summary
-      - name: 📋 Show Extracted OTA Information Summary
+      
+      - name: 📋 Show OTA Info
         run: |
-          echo "### 📱 Device Information" >> $GITHUB_STEP_SUMMARY
+          echo "### 📱 Device Info" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "- **Device**: ${{ inputs.device }}" >> $GITHUB_STEP_SUMMARY
           echo "- **Region**: ${{ inputs.region }}" >> $GITHUB_STEP_SUMMARY
           echo "- **Version**: ${{ steps.get_ota.outputs.version }}" >> $GITHUB_STEP_SUMMARY
           echo "- **OTA URL**: \`${{ steps.get_ota.outputs.ota_url }}\`" >> $GITHUB_STEP_SUMMARY
-
-      # Install Payload Dumper for Partition Extraction
-      - name: 🛠️ Install Payload Dumper
+      
+      - name: 🛠️ Install Payload-Dumper
         run: pip install git+https://github.com/5ec1cff/payload-dumper
-
-      # Extract Partitions with Optimized Parallel Workers
+      
       - name: 📂 Extract Partitions
         run: |
           OTA_URL="${{ steps.get_ota.outputs.ota_url }}"
           if [ -z "$OTA_URL" ]; then
-            echo "⚠️ ERROR: OTA URL is Empty, Cannot Proceed"
+            echo "⚠️ OTA URL is Empty, Cannot Proceed"
             exit 1
           fi
 
-          # Use Wget as a fallback in case range support is not available
-          wget --no-check-certificate "$OTA_URL" -O ./ota_image.zip
-
-          # Define the partitions to extract
           PARTITIONS_ARG=""
           if [ -n "${{ inputs.partitions }}" ]; then
             PARTITIONS_ARG="--partitions ${{ inputs.partitions }}"
-          else
-            # Default partitions to extract if none specified
-            PARTITIONS_ARG="--partitions boot,init_boot,vendor_boot,vbmeta"
           fi
 
           payload_dumper \
             $PARTITIONS_ARG \
             --workers ${{ inputs.workers }} \
             --out ./output \
-            ./ota_image.zip
+            "$OTA_URL"
 
-      # Extract Kernel Information if Needed
-      - name: 🔍 Extract Kernel Information
+      - name: 🔍 Extract Kernel Info
         id: kernel_info
         if: inputs.extract_kernel_info == true
         run: |
           BOOT_IMG="output/boot.img"
 
           if [ ! -f "$BOOT_IMG" ]; then
-            echo "::warning::boot.img not found, skipping kernel info extraction"
-            echo "found=false" >> $G
+            echo "⚠️ Boot Image Not Found, Skipping Kernel Info Extraction"
+            echo "found=false" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
+          echo "found=true" >> $GITHUB_OUTPUT
+
+          python3 << 'PYEOF'
+          import subprocess
+          import re
+          import os
+          import struct
+          
+          boot_img_path = "./output/boot.img"
+          kernel_version = None
+          kernel_time = None
+          full_string = None
+          
+          def search_version(text):
+              global kernel_version, kernel_time, full_string
+              
+              match = re.search(
+                  r'Linux version (\S+)\s+[^)]+\s+[^)]+\s+#1\s+SMP\s+PREEMPT\s+(.+)',
+                  text
+              )
+              if match:
+                  kernel_version = match.group(1)
+                  kernel_time = match.group(2).strip()
+                  full_string = f"Linux version {kernel_version} ... #1 SMP PREEMPT {Kernel Time}"
+                  return True
+              
+              ver_match = re.search(r'Linux\s+version\s+(\d+\.\d+\.\d+-[^\s]+)', text)
+              if not ver_match:
+                  ver_match = re.search(r'(\d+\.\d+\.\d+-android\d+-[^\s]+)', text)
+              
+              if ver_match:
+                  kernel_version = ver_match.group(1)
+                  time_match = re.search(
+                      r'#1\s+SMP\s+PREEMPT\s+((?:Mon|Tue|Wed|Thu|Fri|Sat|Sun)\s+\w+\s+\d+\s+[\d:]+\s+\w+\s+\d{4})',
+                      text
+                  )
+                  if time_match:
+                      kernel_time = time_match.group(1)
+                  full_string = f"Linux version {kernel_version} ... #1 SMP PREEMPT {Kernel Time or 'Unknown'}"
+                  return
