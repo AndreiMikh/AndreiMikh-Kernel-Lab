@@ -53,8 +53,9 @@ on:
           - Realme GT7 PRO
           - Realme GT8 PRO
         default: 'OP 13'
+        
       region:
-        description: 'Region Version'
+        description: 'Regional Version'
         required: true
         type: choice
         options:
@@ -64,21 +65,25 @@ on:
           - CN
           - NA
         default: 'GLO'
+        
       version_index:
         description: 'Version Index (0=Latest, 1=Second Latest & So-on Etc)'
         required: true
         type: number
         default: 0
+        
       partitions:
         description: 'Partitions to Extract (Comma Separated, Leave Empty to Extract Default Value)'
         required: false
         type: string
         default: 'boot,init_boot,vendor_boot,vbmeta'
+        
       extract_kernel_info:
         description: 'Extract Kernel Build Time & Name'
         required: false
         type: boolean
         default: true
+        
       workers:
         description: 'Number of Parallel Working Threads'
         required: false
@@ -102,8 +107,8 @@ jobs:
       - name: 📦 Install Dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y aria2  # Install aria2 for fast downloading
-          pip install httpx beautifulsoup4 payload-dumper  # Install required Python dependencies
+          sudo apt-get install -y aria2  # Install aria2 as a system package
+          pip install httpx beautifulsoup4  # Install Python dependencies
 
       - name: 🔗 Get OTA Download URL
         id: get_ota
@@ -112,6 +117,7 @@ jobs:
           import httpx
           import json
           import os
+          import re
           from bs4 import BeautifulSoup
 
           device = "${{ inputs.device }}"
@@ -155,16 +161,12 @@ jobs:
           post_soup = BeautifulSoup(post_resp.text, 'html.parser')
 
           download_url = None
-          # Search for download links related to OTA files (zip_viewer.php links)
           for a in post_soup.find_all('a', href=True):
               href = a['href']
-              if 'zip_viewer.php' in href:
-                  # Check if it's already a full URL or a relative one
+              if any(kw in href.lower() for kw in ['download', 'ota', 'firmware', 'update', '.zip']):
                   if href.startswith('http'):
                       download_url = href
-                  else:
-                      download_url = "https://roms.danielspringer.at" + href  # Add base URL for relative paths
-                  break
+                      break
 
           if not download_url:
               with open('response_debug.html', 'w') as f:
@@ -173,7 +175,7 @@ jobs:
 
           print(f"Download URL: {download_url}")
           with open(os.environ['GITHUB_OUTPUT'], 'a') as f:
-              f.write(f'zip_viewer_url={download_url}\n')
+              f.write(f'ota_url={download_url}\n')
               f.write(f'version={version}\n')
           PYEOF
 
@@ -184,35 +186,42 @@ jobs:
           echo "- *Device*: ${{ inputs.device }}" >> $GITHUB_STEP_SUMMARY
           echo "- *Region*: ${{ inputs.region }}" >> $GITHUB_STEP_SUMMARY
           echo "- *Version*: ${{ steps.get_ota.outputs.version }}" >> $GITHUB_STEP_SUMMARY
-          echo "- *ZIP Viewer URL*: \`${{ steps.get_ota.outputs.zip_viewer_url }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- *OTA URL*: \`${{ steps.get_ota.outputs.ota_url }}\`" >> $GITHUB_STEP_SUMMARY
 
       - name: 🛠️ Install Payload-Dumper
         run: pip install git+https://github.com/5ec1cff/payload-dumper
 
-      - name: 📂 Download and Extract Specified Partitions
+      - name: 📂 Download OTA and Extract Specified Partitions
         run: |
-          ZIP_VIEWER_URL="${{ steps.get_ota.outputs.zip_viewer_url }}"
-          if [ -z "$ZIP_VIEWER_URL" ]; then
-            echo "⚠️ ZIP Viewer URL is Empty, Cannot Proceed"
+          OTA_URL="${{ steps.get_ota.outputs.ota_url }}"
+          if [ -z "$OTA_URL" ]; then
+            echo "⚠️ OTA URL is Empty, Cannot Proceed"
             exit 1
           fi
 
-          # Use aria2c for faster downloads and check if it's already downloaded
-          PARTITIONS="${{ inputs.partitions }}"
-          IFS=',' read -ra PARTITION_LIST <<< "$PARTITIONS"
+          PARTITIONS_ARG=""
+          if [ -n "${{ inputs.partitions }}" ]; then
+            PARTITIONS_ARG="--partitions ${{ inputs.partitions }}"
+          fi
 
-          # Download each partition from the provided ZIP viewer URL
-          for partition in "${PARTITION_LIST[@]}"; do
-            PARTITION_URL="${ZIP_VIEWER_URL}&partition=${partition}"
-            echo "Downloading $partition from $PARTITION_URL..."
-            aria2c -x 16 -s 16 -j 4 -d ./output -o "$partition.img" "$PARTITION_URL"
-          done
+          # ⚙️ Use Caching Mechanism to Store Downloaded OTA after the First Download
+          if [ -f "./output/ota.zip" ]; then
+            echo "📩 OTA Already Downloaded, Skipping Download"
+          else
+            aria2c -x 16 -s 16 -j 4 -d ./output -o ota.zip "$OTA_URL"  # Download OTA file with aria2c for speed
+          fi
 
-      - name: 🧹 Cleanup
+          payload_dumper \
+            $PARTITIONS_ARG \
+            --workers ${{ inputs.workers }} \
+            --out ./output \
+            ./output/ota.zip
+
+      - name: 🧹 Clean Up
         run: |
-          echo "Cleaning up downloaded OTA files..."
-          rm -f ./output/*.img  # Clean up downloaded partition images
-          echo "Cleanup Complete"
+          echo "🧹 Cleaning Up Downloaded OTA File..."
+          rm -f ./output/ota.zip  # Remove the Downloaded OTA File After Extraction
+          echo "✔️ Clean Up Complete"
 
       - name: 🔍 Extract Kernel Build Information
         id: kernel_info
@@ -228,7 +237,7 @@ jobs:
 
           echo "found=true" >> $GITHUB_OUTPUT
 
-          # Extract Kernel Information using strings and regex
+          # 🧾 Extract Kernel Information using strings and regex
           python3 << 'PYEOF'
           import subprocess
           import re
@@ -270,10 +279,10 @@ jobs:
 
           result = subprocess.run(['strings', boot_img_path], capture_output=True, text=True)
           if search_version(result.stdout):
-              print("Kernel Version Found: ", kernel_version)
-              print("Kernel Build Time: ", kernel_time)
+              print("📂 Kernel Version Found: ", kernel_version)
+              print("📂 Kernel Build Time: ", kernel_time)
           else:
-              print("Could Not Extract Kernel Information")
+              print("⚠️ Could Not Extract Kernel Information")
 
           with open(os.environ['GITHUB_OUTPUT'], 'a') as f:
               f.write(f'kernel_version={kernel_version}\n')
