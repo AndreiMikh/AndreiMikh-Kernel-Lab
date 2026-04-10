@@ -73,7 +73,7 @@ on:
         description: 'Partitions to Extract (Comma Separated, Leave Empty to Extract Default Value)'
         required: false
         type: string
-        default: 'boot,init_boot,vendor_boot'
+        default: 'boot,init_boot,vendor_boot,vbmeta'
       extract_kernel_info:
         description: 'Extract Kernel Build Time & Name'
         required: false
@@ -102,8 +102,8 @@ jobs:
       - name: 📦 Install Dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y aria2  # Install aria2 as a system package
-          pip install httpx beautifulsoup4  # Install Python dependencies
+          sudo apt-get install -y aria2  # Install aria2 for fast downloading
+          pip install httpx beautifulsoup4 payload-dumper  # Install required Python dependencies
 
       - name: 🔗 Get OTA Download URL
         id: get_ota
@@ -155,12 +155,16 @@ jobs:
           post_soup = BeautifulSoup(post_resp.text, 'html.parser')
 
           download_url = None
+          # Search for download links related to OTA files (zip_viewer.php links)
           for a in post_soup.find_all('a', href=True):
               href = a['href']
-              if any(kw in href.lower() for kw in ['zip_viewer.php']):
-                  if href.startswith('https'):
-                      download_url = "https://roms.danielspringer.at" + href
-                      break
+              if 'zip_viewer.php' in href:
+                  # Check if it's already a full URL or a relative one
+                  if href.startswith('http'):
+                      download_url = href
+                  else:
+                      download_url = "https://roms.danielspringer.at" + href  # Add base URL for relative paths
+                  break
 
           if not download_url:
               with open('response_debug.html', 'w') as f:
@@ -185,7 +189,7 @@ jobs:
       - name: 🛠️ Install Payload-Dumper
         run: pip install git+https://github.com/5ec1cff/payload-dumper
 
-      - name: 📂 Download Partitions from ZIP Viewer and Extract
+      - name: 📂 Download and Extract Specified Partitions
         run: |
           ZIP_VIEWER_URL="${{ steps.get_ota.outputs.zip_viewer_url }}"
           if [ -z "$ZIP_VIEWER_URL" ]; then
@@ -193,21 +197,21 @@ jobs:
             exit 1
           fi
 
-          # Fetch the partition download links from the ZIP viewer page
-          PARTITIONS=("${{ inputs.partitions }}")
+          # Use aria2c for faster downloads and check if it's already downloaded
+          PARTITIONS="${{ inputs.partitions }}"
+          IFS=',' read -ra PARTITION_LIST <<< "$PARTITIONS"
 
-          for partition in "${PARTITIONS[@]}"; do
+          # Download each partition from the provided ZIP viewer URL
+          for partition in "${PARTITION_LIST[@]}"; do
             PARTITION_URL="${ZIP_VIEWER_URL}&partition=${partition}"
             echo "Downloading $partition from $PARTITION_URL..."
-            
-            # Download using aria2c as the fallback method for fast download
             aria2c -x 16 -s 16 -j 4 -d ./output -o "$partition.img" "$PARTITION_URL"
           done
 
       - name: 🧹 Cleanup
         run: |
-          echo "Cleaning up downloaded partition files..."
-          rm -f ./output/*.img  # Remove the downloaded partition files
+          echo "Cleaning up downloaded OTA files..."
+          rm -f ./output/*.img  # Clean up downloaded partition images
           echo "Cleanup Complete"
 
       - name: 🔍 Extract Kernel Build Information
