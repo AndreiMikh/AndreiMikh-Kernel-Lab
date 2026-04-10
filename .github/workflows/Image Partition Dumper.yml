@@ -73,7 +73,7 @@ on:
         description: 'Partitions to Extract (Comma Separated, Leave Empty to Extract Default Value)'
         required: false
         type: string
-        default: 'boot,init_boot,vendor_boot,vbmeta'
+        default: 'boot,init_boot,vendor_boot'
       extract_kernel_info:
         description: 'Extract Kernel Build Time & Name'
         required: false
@@ -112,7 +112,6 @@ jobs:
           import httpx
           import json
           import os
-          import re
           from bs4 import BeautifulSoup
 
           device = "${{ inputs.device }}"
@@ -158,9 +157,9 @@ jobs:
           download_url = None
           for a in post_soup.find_all('a', href=True):
               href = a['href']
-              if any(kw in href.lower() for kw in ['download', 'ota', 'firmware', 'update', '.zip']):
-                  if href.startswith('http'):
-                      download_url = href
+              if any(kw in href.lower() for kw in ['zip_viewer.php']):
+                  if href.startswith('https'):
+                      download_url = "https://roms.danielspringer.at" + href
                       break
 
           if not download_url:
@@ -170,7 +169,7 @@ jobs:
 
           print(f"Download URL: {download_url}")
           with open(os.environ['GITHUB_OUTPUT'], 'a') as f:
-              f.write(f'ota_url={download_url}\n')
+              f.write(f'zip_viewer_url={download_url}\n')
               f.write(f'version={version}\n')
           PYEOF
 
@@ -181,41 +180,34 @@ jobs:
           echo "- *Device*: ${{ inputs.device }}" >> $GITHUB_STEP_SUMMARY
           echo "- *Region*: ${{ inputs.region }}" >> $GITHUB_STEP_SUMMARY
           echo "- *Version*: ${{ steps.get_ota.outputs.version }}" >> $GITHUB_STEP_SUMMARY
-          echo "- *OTA URL*: \`${{ steps.get_ota.outputs.ota_url }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- *ZIP Viewer URL*: \`${{ steps.get_ota.outputs.zip_viewer_url }}\`" >> $GITHUB_STEP_SUMMARY
 
       - name: 🛠️ Install Payload-Dumper
         run: pip install git+https://github.com/5ec1cff/payload-dumper
 
-      - name: 📂 Download OTA and Extract Specified Partitions
+      - name: 📂 Download Partitions from ZIP Viewer and Extract
         run: |
-          OTA_URL="${{ steps.get_ota.outputs.ota_url }}"
-          if [ -z "$OTA_URL" ]; then
-            echo "⚠️ OTA URL is Empty, Cannot Proceed"
+          ZIP_VIEWER_URL="${{ steps.get_ota.outputs.zip_viewer_url }}"
+          if [ -z "$ZIP_VIEWER_URL" ]; then
+            echo "⚠️ ZIP Viewer URL is Empty, Cannot Proceed"
             exit 1
           fi
 
-          PARTITIONS_ARG=""
-          if [ -n "${{ inputs.partitions }}" ]; then
-            PARTITIONS_ARG="--partitions ${{ inputs.partitions }}"
-          fi
+          # Fetch the partition download links from the ZIP viewer page
+          PARTITIONS=("${{ inputs.partitions }}")
 
-          # Use Caching Mechanism to Store Downloaded OTA after the First Download
-          if [ -f "./output/ota.zip" ]; then
-            echo "OTA already downloaded. Skipping download."
-          else
-            aria2c -x 16 -s 16 -j 4 -d ./output -o ota.zip "$OTA_URL"  # Download OTA file with aria2c for speed
-          fi
-
-          payload_dumper \
-            $PARTITIONS_ARG \
-            --workers ${{ inputs.workers }} \
-            --out ./output \
-            ./output/ota.zip
+          for partition in "${PARTITIONS[@]}"; do
+            PARTITION_URL="${ZIP_VIEWER_URL}&partition=${partition}"
+            echo "Downloading $partition from $PARTITION_URL..."
+            
+            # Download using aria2c as the fallback method for fast download
+            aria2c -x 16 -s 16 -j 4 -d ./output -o "$partition.img" "$PARTITION_URL"
+          done
 
       - name: 🧹 Cleanup
         run: |
-          echo "Cleaning up downloaded OTA file..."
-          rm -f ./output/ota.zip  # Remove the Downloaded OTA File After Extraction
+          echo "Cleaning up downloaded partition files..."
+          rm -f ./output/*.img  # Remove the downloaded partition files
           echo "Cleanup Complete"
 
       - name: 🔍 Extract Kernel Build Information
