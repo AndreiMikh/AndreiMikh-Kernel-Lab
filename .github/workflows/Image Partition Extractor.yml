@@ -213,6 +213,72 @@ jobs:
           rm -f ./output/ota.zip  # Remove the downloaded OTA file after extraction
           echo "Clean up complete."
 
+      - name: 🔍 Extract Kernel Build Info
+        id: kernel_info
+        if: inputs.extract_kernel_info == true
+        run: |
+          BOOT_IMG="output/boot.img"
+
+          if [ ! -f "$BOOT_IMG" ]; then
+            echo "⚠️ Boot Image Not Found, Skipping Kernel Info Extraction"
+            echo "found=false" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
+          echo "found=true" >> $GITHUB_OUTPUT
+
+          # Extract Kernel Information using strings and regex
+          python3 << 'PYEOF'
+          import subprocess
+          import re
+          import os
+
+          boot_img_path = "./output/boot.img"
+          kernel_version = None
+          kernel_time = None
+          full_string = None
+
+          def search_version(text):
+              global kernel_version, kernel_time, full_string
+              
+              match = re.search(
+                  r'Linux version (\S+)\s+\([^)]+\)\s+\([^)]+\)\s+#1\s+SMP\s+PREEMPT\s+(.+)',
+                  text
+              )
+              if match:
+                  kernel_version = match.group(1)
+                  kernel_time = match.group(2).strip()
+                  full_string = f"Linux version {kernel_version} ... #1 SMP PREEMPT {kernel_time}"
+                  return True
+              
+              ver_match = re.search(r'Linux\s+version\s+(\d+\.\d+\.\d+-[^\s]+)', text)
+              if not ver_match:
+                  ver_match = re.search(r'(\d+\.\d+\.\d+-android\d+-[^\s]+)', text)
+              
+              if ver_match:
+                  kernel_version = ver_match.group(1)
+                  time_match = re.search(
+                      r'#1\s+SMP\s+PREEMPT\s+((?:Mon|Tue|Wed|Thu|Fri|Sat|Sun)\s+\w+\s+\d+\s+[\d:]+\s+\w+\s+\d{4})',
+                      text
+                  )
+                  if time_match:
+                      kernel_time = time_match.group(1)
+                  full_string = f"Linux version {kernel_version} ... #1 SMP PREEMPT {kernel_time or 'Unknown'}"
+                  return True
+              return False
+
+          result = subprocess.run(['strings', boot_img_path], capture_output=True, text=True)
+          if search_version(result.stdout):
+              print("Kernel Version Found: ", kernel_version)
+              print("Kernel Build Time: ", kernel_time)
+          else:
+              print("Could not extract kernel info.")
+
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as f:
+              f.write(f'kernel_version={kernel_version}\n')
+              f.write(f'kernel_time={kernel_time or "Unknown"}\n')
+          PYEOF
+
       - name: 📤 Upload Extracted Partitions as Artifact
         uses: actions/upload-artifact@v4
         with:
