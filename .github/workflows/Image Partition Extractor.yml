@@ -73,7 +73,7 @@ on:
         description: 'Partitions to Extract (Comma Separated, Leave Empty to Extract Default Value)'
         required: false
         type: string
-        default: 'boot,init_boot,vendor_boot'
+        default: 'boot,init_boot,vendor_boot,vbmeta'
       extract_kernel_info:
         description: 'Extract Kernel Build Time & Name'
         required: false
@@ -89,19 +89,22 @@ jobs:
   extract:
     name: 👾 Extract Partitions
     runs-on: ubuntu-latest
-    
+
     steps:
       - name: 📥 Checkout Code
         uses: actions/checkout@v4
-      
+
       - name: 🔧 Setup Python Environment
         uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-      
+
       - name: 📦 Install Dependencies
-        run: pip install httpx beautifulsoup4 aria2c
-      
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y aria2  # Install aria2 as a system package
+          pip install httpx beautifulsoup4  # Install Python dependencies
+
       - name: 🔗 Get OTA Download URL
         id: get_ota
         run: |
@@ -111,47 +114,47 @@ jobs:
           import os
           import re
           from bs4 import BeautifulSoup
-          
+
           device = "${{ inputs.device }}"
           region = "${{ inputs.region }}"
           version_index = ${{ inputs.version_index }}
-          
+
           url = "https://roms.danielspringer.at/index.php?view=ota"
           resp = httpx.get(url, follow_redirects=True)
           resp.raise_for_status()
-          
+
           soup = BeautifulSoup(resp.text, 'html.parser')
           select = soup.find('select', id='device')
           devices = json.loads(select['data-devices'])
-          
+
           if device not in devices:
               raise Exception(f"Device '{device}' not found")
-          
+
           device_regions = devices[device]
           if region not in device_regions:
               raise Exception(f"Region '{region}' not available for '{device}'")
-          
+
           versions = device_regions[region]
           if not versions:
               raise Exception(f"No versions for '{device}' in '{region}'")
-          
+
           if version_index >= len(versions):
               raise Exception(f"Version index {version_index} out of range (0-{len(versions)-1})")
-          
+
           version = versions[version_index]
           print(f"Selected: {device} | {region} | {version}")
-          
+
           post_data = {
               "device": device,
               "region": region,
               "version_index": str(version_index)
           }
-          
+
           post_resp = httpx.post(url, data=post_data, follow_redirects=True)
           post_resp.raise_for_status()
-          
+
           post_soup = BeautifulSoup(post_resp.text, 'html.parser')
-          
+
           download_url = None
           for a in post_soup.find_all('a', href=True):
               href = a['href']
@@ -159,25 +162,18 @@ jobs:
                   if href.startswith('http'):
                       download_url = href
                       break
-          
-          if not download_url:
-              for a in post_soup.find_all('a', href=True):
-                  href = a['href']
-                  if href.startswith('http'):
-                      download_url = href
-                      break
-          
+
           if not download_url:
               with open('response_debug.html', 'w') as f:
                   f.write(post_resp.text)
               raise Exception("Could not find download URL. Check response_debug.html")
-          
+
           print(f"Download URL: {download_url}")
           with open(os.environ['GITHUB_OUTPUT'], 'a') as f:
               f.write(f'ota_url={download_url}\n')
               f.write(f'version={version}\n')
           PYEOF
-      
+
       - name: 📋 Show OTA Info
         run: |
           echo "### 📱 Device Info" >> $GITHUB_STEP_SUMMARY
@@ -186,11 +182,11 @@ jobs:
           echo "- **Region**: ${{ inputs.region }}" >> $GITHUB_STEP_SUMMARY
           echo "- **Version**: ${{ steps.get_ota.outputs.version }}" >> $GITHUB_STEP_SUMMARY
           echo "- **OTA URL**: \`${{ steps.get_ota.outputs.ota_url }}\`" >> $GITHUB_STEP_SUMMARY
-      
+
       - name: 🛠️ Install Payload-Dumper
         run: pip install git+https://github.com/5ec1cff/payload-dumper
-      
-      - name: 📂 Extract Partitions
+
+      - name: 📂 Download OTA and Extract Partitions
         run: |
           OTA_URL="${{ steps.get_ota.outputs.ota_url }}"
           if [ -z "$OTA_URL" ]; then
@@ -203,12 +199,20 @@ jobs:
             PARTITIONS_ARG="--partitions ${{ inputs.partitions }}"
           fi
 
+          aria2c -x 16 -s 16 -j 4 -d ./output -o ota.zip "$OTA_URL"  # Download OTA file with aria2c for speed
+
           payload_dumper \
             $PARTITIONS_ARG \
             --workers ${{ inputs.workers }} \
             --out ./output \
-            "$OTA_URL"
+            ./output/ota.zip
 
+      - name: 🧹 Clean Up
+        run: |
+          echo "Cleaning up downloaded OTA file..."
+          rm -f ./output/ota.zip  # Remove the downloaded OTA file after extraction
+          echo "Clean up complete."
+          
       - name: 🔍 Extract Kernel Info
         id: kernel_info
         if: inputs.extract_kernel_info == true
@@ -247,4 +251,9 @@ jobs:
                   full_string = f"Linux version {kernel_version} ... #1 SMP PREEMPT {kernel_time}"
                   return True
               
-              ver_match = re.search(r'Linux\s+version
+              ver_match = re.search(r'Linux\s+version\s+(\d+\.\d+\.\d+-[^\s]+)', text)
+              if not ver_match:
+                  ver_match = re.search(r'(\d+\.\d+\.\d+-android\d+-[^\s]+)', text)
+              
+              if ver_match:
+                  kernel_version = ver_match.group(1)
