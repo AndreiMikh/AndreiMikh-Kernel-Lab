@@ -215,23 +215,48 @@ jobs:
           done < <(echo "$TO_DELETE_RUNS" | jq -c '.[]')
 
           echo "🧹 Cleaning this Workflow's Runs (📃 Excluding Current Run)..."
-          SELF_WORKFLOW_ID=$(gh api repos/$REPO/actions/workflows | jq -r '.workflows[] | select(.name == "Cleaner") | .id')
 
-          if [ -n "$SELF_WORKFLOW_ID" ]; then
-            SELF_RUNS=$(gh api "repos/$REPO/actions/workflows/$SELF_WORKFLOW_ID/runs?per_page=50" | jq -c '.workflow_runs[]')
+          # Get the Workflow ID of this Cleaner Workflow
+          SELF_WORKFLOW_ID=$(gh api repos/$REPO/actions/workflows 2>/dev/null \
+            | jq -r '.workflows[] | select(.name == "Cleaner") | .id')
 
-            while read run; do
-              ID=$(echo "$run" | jq -r '.id')
+          # Check if Cleaner Workflow Exists
+          if [[ -n "$SELF_WORKFLOW_ID" ]]; then
 
-              if [[ "$ID" == "$CURRENT_RUN_ID" ]]; then
-                continue
-              fi
+            # Fetch Latest Runs of Cleaner Workflow (Limit: 50)
+            # Suppress API Errors to Avoid Breaking Script
+            SELF_RUNS=$(gh api "repos/$REPO/actions/workflows/$SELF_WORKFLOW_ID/runs?per_page=50" 2>/dev/null \
+              | jq -c '.workflow_runs[]' || true)
 
-              echo "📌 Deleting Cleaner Previous Workflow Run ID: $ID"
+            # Only Proceed if Runs Exist
+            if [[ -n "$SELF_RUNS" ]]; then
 
-              gh api -X DELETE "repos/$REPO/actions/runs/$ID" || echo "⚠️ Delete Failed"
+              # Loop Through Each Run
+              while read run; do
+                # Extract Run ID
+                ID=$(echo "$run" | jq -r '.id')
 
-            done < <(echo "$SELF_RUNS")
+                # Skip Current Running Workflow (Important Safety Check)
+                if [[ "$ID" == "$CURRENT_RUN_ID" ]]; then
+                  continue
+                fi
+
+                # Log Deletion
+                echo "📌 Deleting Cleaner Previous Workflow Run ID: $ID"
+
+                # Delete the Workflow Run (Ignore Failures)
+                gh api -X DELETE "repos/$REPO/actions/runs/$ID" || echo "⚠️ Delete Failed"
+
+              done < <(echo "$SELF_RUNS")
+
+            else
+              # No Runs Found Case
+              echo "⚠️ No Previous Cleaner Runs Found"
+            fi
+
+          else
+            # Cleaner Workflow Not Found Case
+            echo "⚠️ Cleaner Workflow ID Not Found"
           fi
 
   clean-caches:
