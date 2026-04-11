@@ -244,46 +244,71 @@ jobs:
         device: ${{ fromJson(needs.matrix.outputs.devices) }}
 
     steps:
-      - name: 🚀 Trigger Build
+      - name: ⚙️ Setup GH CLI
+        run: |
+          sudo apt update
+          sudo apt install -y gh jq
+          echo "${{ secrets.GITHUB_TOKEN }}" | gh auth login --with-token
+
+      - name: 🚀 Trigger Build (CLI)
         id: trigger
-        uses: benc-uk/workflow-dispatch@v1
-        with:
-          workflow: ${{ github.event.inputs.TARGET_WORKFLOW }}
-          ref: LiquidAndrei
-          token: ${{ secrets.GITHUB_TOKEN }}
-          inputs: |
-            {
-              "FILE": "${{ matrix.device }}",
-              "KPATCH": "${{ github.event.inputs.KPATCH }}",
-              "MANAGER_SOURCE": "${{ github.event.inputs.MANAGER_SOURCE }}",
-              "SUSFS_REPOSITORY": "${{ github.event.inputs.SUSFS_REPOSITORY }}",
-              "GITHUB_REPOSITORY": "${{ github.event.inputs.GITHUB_REPOSITORY }}",
-              "ROOT_ENGINE": "${{ github.event.inputs.ROOT_ENGINE }}",
-              "ZRAM": "${{ github.event.inputs.ZRAM }}",
-              "ZRAM_CUSTOM": "${{ github.event.inputs.ZRAM_CUSTOM }}",
-              "BUILD_TIME": "${{ github.event.inputs.BUILD_TIME }}",
-              "SUFFIX": "${{ github.event.inputs.SUFFIX }}",
-              "SUSFS_VERSION": "${{ github.event.inputs.SUSFS_VERSION }}",
-              "LSM": "${{ github.event.inputs.LSM }}",
-              "SUBLEVEL": "${{ github.event.inputs.SUBLEVEL }}",
-              "NETFILTER": "${{ github.event.inputs.NETFILTER }}",
-              "BBR": "${{ github.event.inputs.BBR }}",
-              "LXCDOCKER": "${{ github.event.inputs.LXCDOCKER }}",
-              "SCHEDULERS": "${{ github.event.inputs.SCHEDULERS }}",
-              "SUSFS_DEV": "${{ github.event.inputs.SUSFS_DEV }}",
-              "RE_KERNEL": "${{ github.event.inputs.RE_KERNEL }}",
-              "FAST_BUILD": "${{ github.event.inputs.FAST_BUILD }}",
-              "WINDSPEED": "${{ github.event.inputs.WINDSPEED }}",
-              "SPACE_NOCLEAN": "${{ github.event.inputs.SPACE_NOCLEAN }}",
-              "BUILD_NOCCACHE": "${{ github.event.inputs.BUILD_NOCCACHE }}",
-              "XUS": "${{ github.event.inputs.XUS }}"
-            }
+        run: |
+          WORKFLOW="${{ github.event.inputs.TARGET_WORKFLOW }}"
+
+          echo "🚀 Dispatching workflow: $WORKFLOW for ${{ matrix.device }}"
+
+          RUN_ID=$(gh workflow run "$WORKFLOW" \
+            --ref LiquidAndrei \
+            -f FILE="${{ matrix.device }}" \
+            -f KPATCH="${{ github.event.inputs.KPATCH }}" \
+            -f MANAGER_SOURCE="${{ github.event.inputs.MANAGER_SOURCE }}" \
+            -f SUSFS_REPOSITORY="${{ github.event.inputs.SUSFS_REPOSITORY }}" \
+            -f GITHUB_REPOSITORY="${{ github.event.inputs.GITHUB_REPOSITORY }}" \
+            -f ROOT_ENGINE="${{ github.event.inputs.ROOT_ENGINE }}" \
+            -f ZRAM="${{ github.event.inputs.ZRAM }}" \
+            -f ZRAM_CUSTOM="${{ github.event.inputs.ZRAM_CUSTOM }}" \
+            -f BUILD_TIME="${{ github.event.inputs.BUILD_TIME }}" \
+            -f SUFFIX="${{ github.event.inputs.SUFFIX }}" \
+            -f SUSFS_VERSION="${{ github.event.inputs.SUSFS_VERSION }}" \
+            -f LSM="${{ github.event.inputs.LSM }}" \
+            -f SUBLEVEL="${{ github.event.inputs.SUBLEVEL }}" \
+            -f NETFILTER="${{ github.event.inputs.NETFILTER }}" \
+            -f BBR="${{ github.event.inputs.BBR }}" \
+            -f LXCDOCKER="${{ github.event.inputs.LXCDOCKER }}" \
+            -f SCHEDULERS="${{ github.event.inputs.SCHEDULERS }}" \
+            -f SUSFS_DEV="${{ github.event.inputs.SUSFS_DEV }}" \
+            -f RE_KERNEL="${{ github.event.inputs.RE_KERNEL }}" \
+            -f FAST_BUILD="${{ github.event.inputs.FAST_BUILD }}" \
+            -f WINDSPEED="${{ github.event.inputs.WINDSPEED }}" \
+            -f SPACE_NOCLEAN="${{ github.event.inputs.SPACE_NOCLEAN }}" \
+            -f BUILD_NOCCACHE="${{ github.event.inputs.BUILD_NOCCACHE }}" \
+            -f XUS="${{ github.event.inputs.XUS }}" \
+            --json | jq -r '.id')
+
+          if [[ -z "$RUN_ID" || "$RUN_ID" == "null" ]]; then
+            echo "⚠️ Failed to Get Run ID"
+            exit 1
+          fi
+
+          echo "✔️ RUN_ID=$RUN_ID"
+          echo "RUN_ID=$RUN_ID" >> $GITHUB_ENV
+
+      - name: 🔍 Debug Run ID
+        run: |
+          echo "RUN_ID=${{ steps.trigger.outputs.run_id }}"
 
       - name: 💾 Save Run ID
         run: |
           mkdir -p meta
           echo "${{ matrix.device }}" > meta/device.txt
-          echo "${{ steps.trigger.outputs.run_id }}" > meta/run_id.txt
+          RUN_ID="${{ steps.trigger.outputs.run_id }}"
+
+          if [[ -z "$RUN_ID" || "$RUN_ID" == "null" ]]; then
+            echo "⚠️ Failed to get Run ID"
+            exit 1
+          fi
+
+          echo "$RUN_ID" > meta/run_id.txt
 
       - uses: actions/upload-artifact@v4
         with:
@@ -323,7 +348,7 @@ jobs:
 # FETCH ARTIFACTS (30 MIN ROBUST)
 # =========================
   fetch:
-    needs: merge
+    needs: [merge, matrix]
     runs-on: ubuntu-latest
 
     if: ${{ needs.merge.outputs.map != '' && needs.merge.outputs.map != '{}' }}
@@ -331,8 +356,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        device: ${{ fromJson(needs.matrix.outputs.devices) }}
-
+        device: ${{ fromJson(needs.matrix.outputs.devices || '[]') }}
+        
     steps:
       - name: ⚙️ Setup
         run: |
@@ -350,7 +375,7 @@ jobs:
 
           echo "RUN_ID=$RUN_ID" >> $GITHUB_ENV
 
-      - name: ⏳ Wait for Completion (30 mins max)
+      - name: ⏳ Wait for Completion (30 Mins Max)
         run: |
           MAX=90
           SLEEP=20
@@ -365,14 +390,14 @@ jobs:
 
             if [[ "$STATUS" == "completed" ]]; then
               [[ "$CONCLUSION" == "success" ]] && exit 0
-              echo "❌ Failed: $CONCLUSION"
+              echo "⚠️ Failed: $CONCLUSION"
               exit 1
             fi
 
             sleep $SLEEP
           done
 
-          echo "❌ Timeout"
+          echo "⚠️ Timeout"
           exit 1
 
       - name: 📦 Download Artifacts
