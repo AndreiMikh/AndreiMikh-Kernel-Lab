@@ -3840,70 +3840,104 @@ jobs:
       # ==============================
       - name: Regional Variant from Kernel Image
         run: |
-          set -e
+          set -euo pipefail
 
           echo "------------------------------"
-          echo "🔍 Detecting Kernel Variant..."
+          echo "🔍 Detecting ROM Base..."
           echo "------------------------------"
 
-          # Path to Extracted Kernel Image (AnyKernel3 Format)
           IMAGE_PATH="AnyKernel3/Image"
 
-          # Exit Early if Kernel Image is Missing
           if [[ ! -f "$IMAGE_PATH" ]]; then
             echo "⚠️ Kernel Image Not Found at $IMAGE_PATH"
-            echo "BOOT_VARIANT=Unknown" >> $GITHUB_ENV
+            echo "ROM_BASE=Unknown" >> $GITHUB_ENV
+            echo "ROM_CONFIDENCE=Low" >> $GITHUB_ENV
             exit 0
           fi
 
           echo "✔️ Found Kernel Image: $IMAGE_PATH"
 
-          # Default Fallback Value
-          VARIANT="Unknown"
-
-          # Extract Readable Strings from Kernel (Can be Large)
           STRINGS_OUTPUT=$(strings "$IMAGE_PATH" 2>/dev/null || true)
-
-          # Normalize to Lowercase Once (Faster Matching in Later Steps)
           LOWER_STRINGS=$(printf "%s" "$STRINGS_OUTPUT" | tr '[:upper:]' '[:lower:]')
 
-          echo "🔎 Debug Matches (Top 10 Relevant Lines):"
-          # Show Only Useful Lines to Avoid Log Spam
+          echo "🔎 Debug Matches (Top 15 Relevant Lines):"
           printf "%s\n" "$STRINGS_OUTPUT" \
-            | grep -iE "androidboot|fingerprint|oplus|coloros|oxygen" \
-            | head -n 10 || true
+            | grep -iE "androidboot|fingerprint|oplus|coloros|oxygen|hwc|build" \
+            | head -n 15 || true
 
           echo "------------------------------"
           echo "🧠 Analyzing Kernel Strings..."
           echo "------------------------------"
 
-          # 🌏 Region Detection Logic
-          if [[ "$LOWER_STRINGS" == *coloros* ]]; then
-            VARIANT="🇨🇳 China"
-            echo "🇨🇳 Detected ColorOS Markers → China Variant"
+          SCORE_COLOROS=0
+          SCORE_OXYGEN=0
 
-          elif [[ "$LOWER_STRINGS" == *oxygen* ]]; then
-            VARIANT="🌍 Global"
-            echo "🌍 Detected OxygenOS Markers → Global Variant"
+          # ColorOS Detection
+          [[ "$LOWER_STRINGS" =~ coloros ]] && ((SCORE_COLOROS+=4))
+          [[ "$LOWER_STRINGS" =~ oplus.*cn|cn.*oplus ]] && ((SCORE_COLOROS+=2))
+          [[ "$LOWER_STRINGS" =~ "\.cn" ]] && ((SCORE_COLOROS+=1))
+          [[ "$LOWER_STRINGS" =~ hwc=cn ]] && ((SCORE_COLOROS+=5))
 
-          elif [[ "$LOWER_STRINGS" == *europe* ]]; then
-            VARIANT="🇪🇺 Europe"
-            echo "🇪🇺 Detected Europe Markers → EU Variant"
+          # OxygenOS Detection 
+          [[ "$LOWER_STRINGS" =~ oxygen ]] && ((SCORE_OXYGEN+=4))
+          [[ "$LOWER_STRINGS" =~ global ]] && ((SCORE_OXYGEN+=2))
+          [[ "$LOWER_STRINGS" =~ "\.eu"|europe ]] && ((SCORE_OXYGEN+=2))
+          [[ "$LOWER_STRINGS" =~ "\.in"|india ]] && ((SCORE_OXYGEN+=2))
+          [[ "$LOWER_STRINGS" =~ hwc=global|hwc=eu|hwc=india ]] && ((SCORE_OXYGEN+=5))
 
-          elif [[ "$LOWER_STRINGS" == *india* ]]; then
-            VARIANT="🇮🇳 India"
-            echo "🇮🇳 Detected India Markers → India Variant"
+          # Fingerprint Hints
+          if echo "$LOWER_STRINGS" | grep -q "fingerprint"; then
+            echo "🔍 Found Build Fingerprint Hints..."
 
+            [[ "$LOWER_STRINGS" =~ user/release-keys ]] && ((SCORE_OXYGEN+=1))
+            [[ "$LOWER_STRINGS" =~ oppo|oplus ]] && ((SCORE_COLOROS+=1))
+          fi
+
+          # Manifest Fallback
+          if [[ $SCORE_COLOROS -eq 0 && $SCORE_OXYGEN -eq 0 ]]; then
+            echo "⚠️ No Strong Kernel Indicators → Checking Manifest..."
+
+            MANIFEST_INFO="$(printf "%s %s %s" "$MANIFEST_BRANCH" "$MANIFEST_REPO" "$FILE_CONF" | tr '[:upper:]' '[:lower:]')"
+
+            echo "🔎 Manifest Information: $MANIFEST_INFO"
+
+            [[ "$MANIFEST_INFO" =~ coloros|cn|china ]] && ((SCORE_COLOROS+=2))
+            [[ "$MANIFEST_INFO" =~ oxygen|global|eu|india ]] && ((SCORE_OXYGEN+=2))
+          fi
+
+          # Final Decision
+          if (( SCORE_COLOROS > SCORE_OXYGEN )); then
+            ROM_BASE="ColorOS"
+            MAX_SCORE=$SCORE_COLOROS
+          elif (( SCORE_OXYGEN > SCORE_COLOROS )); then
+            ROM_BASE="OxygenOS"
+            MAX_SCORE=$SCORE_OXYGEN
           else
-            echo "⚠️ No Clear Region Markers Found → Using UNKNOWN"
+            ROM_BASE="Unknown"
+            MAX_SCORE=0
+          fi
+
+          # Confidence
+          if (( MAX_SCORE >= 5 )); then
+            CONFIDENCE="High"
+          elif (( MAX_SCORE >= 3 )); then
+            CONFIDENCE="Medium"
+          else
+            CONFIDENCE="Low"
           fi
 
           echo "------------------------------"
-          echo "📌 Final Detected Variant: $VARIANT"
+          echo "📊 Score Breakdown:"
+          echo "🎨 ColorOS : $SCORE_COLOROS"
+          echo "🌍 OxygenOS: $SCORE_OXYGEN"
           echo "------------------------------"
 
-          # Export for Later Workflow Steps
-          echo "BOOT_VARIANT=$VARIANT" >> $GITHUB_ENV
+          echo "📌 Final ROM Base: $ROM_BASE"
+          echo "🎯 Confidence Level: $CONFIDENCE"
+          echo "------------------------------"
+
+          echo "ROM_BASE=$ROM_BASE" >> $GITHUB_ENV
+          echo "ROM_CONFIDENCE=$CONFIDENCE" >> $GITHUB_ENV
 
       # ==============================
       # KernelPatch-Module and Replace with Patched Image
@@ -4371,7 +4405,7 @@ jobs:
             echo ""
             echo "| Category | Value |"
             echo "|----------|-------|"
-            echo "| 🌏 Regional Variant | \`${{ env.BOOT_VARIANT || 'Unknown' }}\` |"
+            echo "| 🌏 ROM Base Variant | \`${{ env.ROM_BASE || 'Unknown' }}\` |"
             echo "| 🔐 Root / KSU Manager Variant | \`${{ github.event.inputs.ROOT_ENGINE }}\` |"
             echo "| 📱 Device Model | \`${{ env.FILE_BASE }}\` |"
             echo "| 🔧 Kernel Version | \`${{ env.KANDROID_VERSION }}-${{ env.KERNEL_VERSION }}-${{ env.TKERNEL_VERSION }}\` |"
