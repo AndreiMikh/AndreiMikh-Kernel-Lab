@@ -289,24 +289,105 @@ jobs:
               f.write(f'kernel_time={kernel_time or "Unknown"}\n')
           PYEOF
 
-      - name: 📋 Show Kernel Build Information
+      - name: 🌏 Detect Region from Boot Image
+        id: detect_region
         run: |
-          echo "### 🔧 Kernel Build Information" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "| *Kernel Version* | \`${{ steps.kernel_info.outputs.kernel_version || 'Unknown' }}\` |" >> $GITHUB_STEP_SUMMARY
-          echo "| *Build Time* | \`${{ steps.kernel_info.outputs.kernel_time || 'Unknown' }}\` |" >> $GITHUB_STEP_SUMMARY
+          BOOT_IMG="output/boot.img"
 
-      - name: 📋 Kernel Information (Fallback)
-        if: steps.kernel_info.outputs.found != 'true'
+          VARIANT="Unknown"
+          CONFIDENCE="Low"
+
+          if [[ ! -f "$BOOT_IMG" ]]; then
+            echo "⚠️ Boot Image Not Found → Cannot Detect Region"
+            echo "variant=$VARIANT" >> $GITHUB_OUTPUT
+            echo "confidence=$CONFIDENCE" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
+          echo "🔍 Scanning boot.img for region markers..."
+
+          # Extract strings once (optimized)
+          STRINGS_OUTPUT=$(strings "$BOOT_IMG" 2>/dev/null || true)
+          LOWER_STRINGS=$(printf "%s" "$STRINGS_OUTPUT" | tr '[:upper:]' '[:lower:]')
+
+          echo "🔎 Debug Matches:"
+          printf "%s\n" "$STRINGS_OUTPUT" \
+            | grep -iE "androidboot|fingerprint|oplus|coloros|oxygen" \
+            | head -n 10 || true
+
+          echo "------------------------------"
+          echo "🧠 Detecting Region..."
+          echo "------------------------------"
+
+          # HIGH CONFIDENCE (boot markers)
+          if [[ "$LOWER_STRINGS" == *coloros* ]]; then
+            VARIANT="🇨🇳 China"
+            CONFIDENCE="High"
+            echo "🇨🇳 ColorOS detected → China"
+
+          elif [[ "$LOWER_STRINGS" == *oxygen* ]]; then
+            VARIANT="🌍 Global"
+            CONFIDENCE="High"
+            echo "🌍 OxygenOS detected → Global"
+
+          elif [[ "$LOWER_STRINGS" == *europe* || "$LOWER_STRINGS" == *eea* ]]; then
+            VARIANT="🇪🇺 Europe"
+            CONFIDENCE="High"
+            echo "🇪🇺 EU markers detected → Europe"
+
+          elif [[ "$LOWER_STRINGS" == *india* ]]; then
+            VARIANT="🇮🇳 India"
+            CONFIDENCE="High"
+            echo "🇮🇳 India markers detected → India"
+
+          else
+            echo "⚠️ No Strong Boot Markers Found → Using Input Region"
+
+            # FALLBACK: use workflow input (medium confidence)
+            case "${{ inputs.region }}" in
+              CN)
+                VARIANT="🇨🇳 China"
+                ;;
+              GLO|NA)
+                VARIANT="🌍 Global"
+                ;;
+              EU)
+                VARIANT="🇪🇺 Europe"
+                ;;
+              IN)
+                VARIANT="🇮🇳 India"
+                ;;
+              *)
+                VARIANT="Unknown"
+                ;;
+            esac
+
+            CONFIDENCE="Medium"
+            echo "📦 Fallback → Using Input Region: $VARIANT"
+          fi
+
+          echo "------------------------------"
+          echo "📌 Final Variant: $VARIANT"
+          echo "🎯 Confidence: $CONFIDENCE"
+          echo "------------------------------"
+
+          echo "variant=$VARIANT" >> $GITHUB_OUTPUT
+          echo "confidence=$CONFIDENCE" >> $GITHUB_OUTPUT
+
+      - name: 📊 Build Summary
         run: |
-          echo "### 🔧 Kernel Build Information" >> $GITHUB_STEP_SUMMARY
+          echo "### 📊 Build Summary" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
-          echo "| *Kernel Version* | \`Not Extracted\` |" >> $GITHUB_STEP_SUMMARY
-          echo "| *Build Time* | \`Not Extracted\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| Category | Value |" >> $GITHUB_STEP_SUMMARY
+          echo "|----------|-------|" >> $GITHUB_STEP_SUMMARY
+          echo "| 🌏 Variant | \`${{ steps.detect_region.outputs.variant }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| 🎯 Confidence | \`${{ steps.detect_region.outputs.confidence }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| 🔧 Kernel Version | \`${{ steps.kernel_info.outputs.kernel_version || 'Unknown' }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| 🕒 Build Time | \`${{ steps.kernel_info.outputs.kernel_time || 'Unknown' }}\` |" >> $GITHUB_STEP_SUMMARY
 
       - name: 📤 Upload Extracted Partitions as Artifact
         uses: actions/upload-artifact@v4
         with:
           name: Extracted-Partitions
           path: ./output/*.img
-          retention-days: 7
+          retention-days: 30
