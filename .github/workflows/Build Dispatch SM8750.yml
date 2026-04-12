@@ -259,7 +259,8 @@ jobs:
 
           echo "🚀 Dispatching: $WORKFLOW for ${{ matrix.device }}"
 
-          RUN_URL=$(gh workflow run "$WORKFLOW" \
+          # Trigger Once (No Duplicate Calls)
+          gh workflow run "$WORKFLOW" \
             --ref LiquidAndrei \
             -f FILE="${{ matrix.device }}" \
             -f KPATCH="${{ github.event.inputs.KPATCH }}" \
@@ -284,19 +285,38 @@ jobs:
             -f WINDSPEED="${{ github.event.inputs.WINDSPEED }}" \
             -f SPACE_NOCLEAN="${{ github.event.inputs.SPACE_NOCLEAN }}" \
             -f BUILD_NOCCACHE="${{ github.event.inputs.BUILD_NOCCACHE }}" \
-            -f XUS="${{ github.event.inputs.XUS }}" \
-            --json url -q .url)
+            -f XUS="${{ github.event.inputs.XUS }}"
 
-          echo "RUN_URL=$RUN_URL"
+          echo "⏳ Waiting for Correct Run (Device: ${{ matrix.device }})..."
 
-          RUN_ID=$(echo "$RUN_URL" | grep -o '[0-9]\+$')
+          # Poll for the Correct Run Tied to this Device
+          for i in {1..20}; do
+            RUN_ID=$(gh run list \
+              --workflow "$WORKFLOW" \
+              --branch LiquidAndrei \
+              --event workflow_dispatch \
+              --json databaseId,displayTitle,createdAt \
+              | jq -r --arg dev "${{ matrix.device }}" '
+                  map(select(.displayTitle | contains($dev)))
+                  | sort_by(.createdAt)
+                  | reverse
+                  | .[0].databaseId // empty
+                ')
 
-          if [[ -z "${RUN_ID:-}" || "$RUN_ID" == "null" ]]; then
-            echo "⚠️ Failed to Get Run ID"
+            if [[ -n "$RUN_ID" ]]; then
+              echo "✔️ Found Run ID=$RUN_ID"
+              break
+            fi
+
+            echo "Retry $i..."
+            sleep 3
+          done
+
+          if [[ -z "$RUN_ID" ]]; then
+            echo "❌ Failed to Resolve Run ID"
             exit 1
           fi
 
-          echo "✔️ RUN_ID=$RUN_ID"
           echo "RUN_ID=$RUN_ID" >> $GITHUB_ENV
           
       - name: 🔍 Debug Run ID
