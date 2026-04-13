@@ -321,91 +321,101 @@ jobs:
       # =========================
 
       # =========================
-      - name: 🌏 Detect Region and ROM from Boot Image
+      - name: 🌏 Advanced ROM Base Detection
         id: detect_region
         run: |
-          BOOT_IMG="output/boot.img"
-          
-          VARIANT="${{ inputs.region }}"
-          CONFIDENCE="User Input"
-          ROM_TYPE="Unknown"
-          
-          STRINGS_OUTPUT=$(strings "$BOOT_IMG" 2>/dev/null || true)
+          echo "------------------------------"
+          echo "🔍 Detecting ROM Base..."
+          echo "------------------------------"
+
+          IMAGE_PATH="output/boot.img"
+
+          if [[ ! -f "$IMAGE_PATH" ]]; then
+            echo "⚠️ Boot Image Not Found at $IMAGE_PATH"
+            echo "variant=Unknown" >> $GITHUB_OUTPUT
+            echo "confidence=Low" >> $GITHUB_OUTPUT
+            echo "rom_type=Unknown" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
+          echo "✔️ Found Boot Image: $IMAGE_PATH"
+
+          STRINGS_OUTPUT=$(strings "$IMAGE_PATH" 2>/dev/null || true)
           LOWER_STRINGS=$(printf "%s" "$STRINGS_OUTPUT" | tr '[:upper:]' '[:lower:]')
-          
-          # Single Truth Flags
-          IS_OEM=false
-          IS_CN=false
-          
-          echo "🔎 Boot Signal Sample:"
-          printf "%s\n" "$STRINGS_OUTPUT" | grep -iE "androidboot|oplus|coloros|oxygen|eea|india|europe" | head -n 20 || true
-          
-          # ROM Type Detection (Independent)
-          if [[ "$LOWER_STRINGS" == *coloros* || "$LOWER_STRINGS" == *oplus* ]]; then
-            ROM_TYPE="🎨 ColorOS / OPlus"
-            IS_OEM=true
-            IS_CN=true
-          
-          elif [[ "$LOWER_STRINGS" == *oxygenos* ]]; then
-            ROM_TYPE="💨 OxygenOS"
-            IS_OEM=true
-          
+
+          echo "🔎 Debug Matches (Top 15 Relevant Lines):"
+          printf "%s\n" "$STRINGS_OUTPUT" \
+            | grep -iE "androidboot|fingerprint|oplus|coloros|oxygen|hwc|build" \
+            | head -n 15 || true
+
+          echo "------------------------------"
+          echo "🧠 Analyzing Kernel Strings..."
+          echo "------------------------------"
+
+          SCORE_COLOROS=0
+          SCORE_OXYGEN=0
+
+          # ColorOS Detection
+          [[ "$LOWER_STRINGS" =~ coloros ]] && ((SCORE_COLOROS+=4))
+          [[ "$LOWER_STRINGS" =~ oplus.*cn|cn.*oplus ]] && ((SCORE_COLOROS+=2))
+          [[ "$LOWER_STRINGS" =~ "\.cn" ]] && ((SCORE_COLOROS+=1))
+          [[ "$LOWER_STRINGS" =~ hwc=cn ]] && ((SCORE_COLOROS+=5))
+
+          # OxygenOS Detection 
+          [[ "$LOWER_STRINGS" =~ oxygen ]] && ((SCORE_OXYGEN+=4))
+          [[ "$LOWER_STRINGS" =~ global ]] && ((SCORE_OXYGEN+=2))
+          [[ "$LOWER_STRINGS" =~ "\.eu"|europe ]] && ((SCORE_OXYGEN+=2))
+          [[ "$LOWER_STRINGS" =~ "\.in"|india ]] && ((SCORE_OXYGEN+=2))
+          [[ "$LOWER_STRINGS" =~ hwc=global|hwc=eu|hwc=india ]] && ((SCORE_OXYGEN+=5))
+
+          # Fingerprint Hints
+          if echo "$LOWER_STRINGS" | grep -q "fingerprint"; then
+            echo "🔍 Found Build Fingerprint Hints..."
+ 
+            [[ "$LOWER_STRINGS" =~ user/release-keys ]] && ((SCORE_OXYGEN+=1))
+            [[ "$LOWER_STRINGS" =~ oppo|oplus ]] && ((SCORE_COLOROS+=1))
           fi
-          
-          # Region Detection (Fixed Priority System)          
-          if [[ "$IS_CN" == true ]]; then
-            VARIANT="🇨🇳 China"
-            CONFIDENCE="High (OEM Strong)"
-          
-          elif [[ "$LOWER_STRINGS" == *oxygenos* ]]; then
-            VARIANT="🌍 Global"
-            CONFIDENCE="High (OEM Strong)"
-          
-          elif [[ "$IS_OEM" == false ]]; then
-          
-            # Only use weak region tags if NO OEM detected
-            if [[ "$LOWER_STRINGS" == *eea* || "$LOWER_STRINGS" == *europe* ]]; then
-              VARIANT="🇪🇺 Europe"
-              CONFIDENCE="Medium (Region Tag)"
-          
-            elif [[ "$LOWER_STRINGS" == *india* ]]; then
-              VARIANT="🇮🇳 India"
-              CONFIDENCE="Medium (Region Tag)"
-            fi
-          
+
+          # Final Decision
+          if (( SCORE_COLOROS > SCORE_OXYGEN )); then
+            ROM_BASE="🌏🇨🇳 ColorOS"
+            MAX_SCORE=$SCORE_COLOROS
+
+          elif (( SCORE_OXYGEN > SCORE_COLOROS )); then
+            ROM_BASE="🌏🇺🇸 OxygenOS"
+            MAX_SCORE=$SCORE_OXYGEN
+
+          elif (( SCORE_COLOROS > 0 )); then
+            ROM_BASE="🌏🇨🇳 ColorOS / 🌏🇺🇸 OxygenOS"
+            MAX_SCORE=$SCORE_COLOROS
+
           else
-            # Input Fallback
-            case "${{ inputs.region }}" in
-              CN) VARIANT="🇨🇳 China" ;;
-              GLO|NA) VARIANT="🌍 Global" ;;
-              EU) VARIANT="🇪🇺 Europe" ;;
-              IN) VARIANT="🇮🇳 India" ;;
-              *) VARIANT="Unknown" ;;
-            esac
-          
-            CONFIDENCE="Medium (Input Fallback)"
+            ROM_BASE="Unknown"
+            MAX_SCORE=0
           fi
-          
-          # Final Safety Override (Clean Logic)
-          if [[ "$IS_CN" == true ]]; then
-            if [[ "$VARIANT" == "🇪🇺 Europe" || "$VARIANT" == "🇮🇳 India" || "$VARIANT" == "🌍 Global" ]]; then
-              VARIANT="🇨🇳 China"
-              CONFIDENCE="Corrected (OEM CN Override)"
-            fi
+
+          # Confidence
+          if (( MAX_SCORE >= 5 )); then
+            CONFIDENCE="High"
+          elif (( MAX_SCORE >= 3 )); then
+            CONFIDENCE="Medium"
+          else
+            CONFIDENCE="Low"
           fi
-          
-          # Final Output          
-          echo ""
+
           echo "------------------------------"
-          echo "📌 Final Result"
-          echo "📱 ROM: $ROM_TYPE"
-          echo "🌏 Region: $VARIANT"
-          echo "🎯 Confidence: $CONFIDENCE"
+          echo "📊 Score Breakdown:"
+          echo "🌏🇨🇳 ColorOS : $SCORE_COLOROS"
+          echo "🌏🇺🇸 OxygenOS: $SCORE_OXYGEN"
           echo "------------------------------"
-          
-          echo "variant=$VARIANT" >> $GITHUB_OUTPUT
+
+          echo "📌 Final ROM Base: $ROM_BASE"
+          echo "🎯 Confidence Level: $CONFIDENCE"
+          echo "------------------------------"
+
+          echo "variant=$ROM_BASE" >> $GITHUB_OUTPUT
           echo "confidence=$CONFIDENCE" >> $GITHUB_OUTPUT
-          echo "rom_type=$ROM_TYPE" >> $GITHUB_OUTPUT
+          echo "rom_type=$ROM_BASE" >> $GITHUB_OUTPUT
           
       # =========================
 
