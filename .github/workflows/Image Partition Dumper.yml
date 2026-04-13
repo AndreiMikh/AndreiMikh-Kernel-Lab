@@ -327,26 +327,37 @@ jobs:
           echo "------------------------------"
           echo "🔍 Detecting ROM Base..."
           echo "------------------------------"
+ 
+          # ==============================
+          # Multi-Source String Extraction
+          # ==============================
 
-          IMAGE_PATH="output/boot.img"
+          STRINGS_OUTPUT=""
 
-          if [[ ! -f "$IMAGE_PATH" ]]; then
-            echo "⚠️ Boot Image Not Found at $IMAGE_PATH"
+          if [[ -f "output/vendor_boot.img" ]]; then
+            echo "📦 Using Vendor Boot Image (Primary Source)"
+            STRINGS_OUTPUT+="$(strings output/vendor_boot.img 2>/dev/null || true)\n"
+          fi
+
+          if [[ -f "output/boot.img" ]]; then
+            echo "📦 Using Boot Image (Secondary Source)"
+            STRINGS_OUTPUT+="$(strings output/boot.img 2>/dev/null || true)\n"
+          fi
+
+          if [[ -z "$STRINGS_OUTPUT" ]]; then
+            echo "⚠️ No Valid Images Found"
             echo "variant=Unknown" >> $GITHUB_OUTPUT
             echo "confidence=Low" >> $GITHUB_OUTPUT
             echo "rom_type=Unknown" >> $GITHUB_OUTPUT
             exit 0
           fi
 
-          echo "✔️ Found Boot Image: $IMAGE_PATH"
+          LOWER_STRINGS=$(printf "%b" "$STRINGS_OUTPUT" | tr '[:upper:]' '[:lower:]')
 
-          STRINGS_OUTPUT=$(strings "$IMAGE_PATH" 2>/dev/null || true)
-          LOWER_STRINGS=$(printf "%s" "$STRINGS_OUTPUT" | tr '[:upper:]' '[:lower:]')
-
-          echo "🔎 Debug Matches (Top 15 Relevant Lines):"
-          printf "%s\n" "$STRINGS_OUTPUT" \
+          echo "🔎 Debug Matches (Top 20 Relevant Lines):"
+          printf "%b" "$STRINGS_OUTPUT" \
             | grep -iE "androidboot|fingerprint|oplus|coloros|oxygen|hwc|build" \
-            | head -n 15 || true
+            | head -n 20 || true
 
           echo "------------------------------"
           echo "🧠 Analyzing Kernel Strings..."
@@ -355,28 +366,45 @@ jobs:
           SCORE_COLOROS=0
           SCORE_OXYGEN=0
 
-          # ColorOS Detection
-          [[ "$LOWER_STRINGS" =~ coloros ]] && ((SCORE_COLOROS+=4))
-          [[ "$LOWER_STRINGS" =~ oplus.*cn|cn.*oplus ]] && ((SCORE_COLOROS+=2))
-          [[ "$LOWER_STRINGS" =~ "\.cn" ]] && ((SCORE_COLOROS+=1))
-          [[ "$LOWER_STRINGS" =~ hwc=cn ]] && ((SCORE_COLOROS+=5))
+          # ==============================
+          # Strong OEM Signals (High Priority)
+          # ==============================
 
+          [[ "$LOWER_STRINGS" =~ hwc=cn ]] && ((SCORE_COLOROS+=10))
+          [[ "$LOWER_STRINGS" =~ hwc=global || "$LOWER_STRINGS" =~ hwc=eu || "$LOWER_STRINGS" =~ hwc=india ]] && ((SCORE_OXYGEN+=10))
+
+          # ==============================
+          # ColorOS Detection
+          # ==============================
+
+          [[ "$LOWER_STRINGS" =~ coloros ]] && ((SCORE_COLOROS+=4))
+          [[ "$LOWER_STRINGS" =~ oplus.*cn || "$LOWER_STRINGS" =~ cn.*oplus ]] && ((SCORE_COLOROS+=2))
+          [[ "$LOWER_STRINGS" =~ \.cn ]] && ((SCORE_COLOROS+=1))
+
+          # ==============================
           # OxygenOS Detection 
+          # ==============================
+
           [[ "$LOWER_STRINGS" =~ oxygen ]] && ((SCORE_OXYGEN+=4))
           [[ "$LOWER_STRINGS" =~ global ]] && ((SCORE_OXYGEN+=2))
-          [[ "$LOWER_STRINGS" =~ "\.eu"|europe ]] && ((SCORE_OXYGEN+=2))
-          [[ "$LOWER_STRINGS" =~ "\.in"|india ]] && ((SCORE_OXYGEN+=2))
-          [[ "$LOWER_STRINGS" =~ hwc=global|hwc=eu|hwc=india ]] && ((SCORE_OXYGEN+=5))
+          [[ "$LOWER_STRINGS" =~ \.eu || "$LOWER_STRINGS" =~ europe ]] && ((SCORE_OXYGEN+=2))
+          [[ "$LOWER_STRINGS" =~ \.in || "$LOWER_STRINGS" =~ india ]] && ((SCORE_OXYGEN+=2))
 
+          # ==============================
           # Fingerprint Hints
+          # ==============================
+
           if echo "$LOWER_STRINGS" | grep -q "fingerprint"; then
             echo "🔍 Found Build Fingerprint Hints..."
- 
+
             [[ "$LOWER_STRINGS" =~ user/release-keys ]] && ((SCORE_OXYGEN+=1))
-            [[ "$LOWER_STRINGS" =~ oppo|oplus ]] && ((SCORE_COLOROS+=1))
+            [[ "$LOWER_STRINGS" =~ oppo || "$LOWER_STRINGS" =~ oplus ]] && ((SCORE_COLOROS+=1))
           fi
 
-          # Final Decision
+          # ==============================
+          # Final Decision Logic
+          # ==============================
+
           if (( SCORE_COLOROS > SCORE_OXYGEN )); then
             ROM_BASE="🇨🇳 ColorOS"
             MAX_SCORE=$SCORE_COLOROS
@@ -398,7 +426,10 @@ jobs:
             MAX_SCORE=$SCORE_COLOROS
           fi
 
-          # Confidence
+          # ==============================
+          # Confidence Calculation
+          # ==============================
+
           if (( MAX_SCORE >= 5 )); then
             CONFIDENCE="High"
           elif (( MAX_SCORE >= 3 )); then
@@ -409,8 +440,8 @@ jobs:
 
           echo "------------------------------"
           echo "📊 Score Breakdown:"
-          echo "🌏🇨🇳 ColorOS : $SCORE_COLOROS"
-          echo "🌏🇺🇸 OxygenOS: $SCORE_OXYGEN"
+          echo "🇨🇳 ColorOS : $SCORE_COLOROS"
+          echo "🇺🇸 OxygenOS: $SCORE_OXYGEN"
           echo "------------------------------"
 
           echo "📌 Final ROM Base: $ROM_BASE"
@@ -420,7 +451,7 @@ jobs:
           echo "variant=$ROM_BASE" >> $GITHUB_OUTPUT
           echo "confidence=$CONFIDENCE" >> $GITHUB_OUTPUT
           echo "rom_type=$ROM_BASE" >> $GITHUB_OUTPUT
-          
+
       # =========================
 
       # =========================
