@@ -4504,43 +4504,122 @@ jobs:
           echo "🎉 ZRAM Addon Module Prepared Successfully"
 
       # ==============================
-      # Generate Release Checksums
+      # Download Selected Root Engine Manager Source APK
       # ==============================
-      - name: 🔧 Generate Release Checksums
+      - name: 🔧 Download Selected Root Engine Manager Source APK
+        continue-on-error: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -uo pipefail
+
+          echo "------------------------------"
+          echo "🚀 Root Engine Manager Download Processing..."
+          echo "------------------------------"
+          echo ""
+
+          REPO="${{ steps.manager.outputs.KSU_REPO }}"
+          BRANCH="${{ steps.manager.outputs.MANAGER_BRANCH }}"
+          ARTIFACT="${{ steps.manager.outputs.MANAGER_ARTIFACT }}"
+
+          APK_DIR="${GITHUB_WORKSPACE}/ManagerAPK"
+
+          echo "📂 Repository: $REPO"
+          echo "📂 Branch:     $BRANCH"
+          echo "📂 Artifact:   $ARTIFACT"
+          echo "📂 Output Dir: $APK_DIR"
+          echo "------------------------------"
+
+          mkdir -p "$APK_DIR"
+
+          # Get Latest Successful Run
+          run_id=$(gh api \
+            "repos/$REPO/actions/runs?branch=$BRANCH&status=success&per_page=1" \
+            --jq '.workflow_runs[0].id' 2>/dev/null || true)
+
+          if [[ -z "${run_id:-}" || "$run_id" == "null" ]]; then
+            echo "⚠️ No Successful Workflow Run Found — Skipping..."
+            exit 0
+          fi
+
+          echo "🔎 Found Run ID: $run_id"
+
+          # Get artifact URL
+          artifact_url=$(gh api \
+            "repos/$REPO/actions/runs/$run_id/artifacts" \
+            --jq ".artifacts[] | select(.name == \"$ARTIFACT\") | .archive_download_url" \
+            2>/dev/null | head -n1 || true)
+
+          if [[ -z "${artifact_url:-}" ]]; then
+            echo "⚠️ Artifact '$ARTIFACT' Not Found — Skipping..."
+            exit 0
+          fi
+
+          # Download Artifact (Fail-Safe)
+          echo "📩 Downloading Artifact..."
+
+          if ! curl -fL -H "Authorization: token $GITHUB_TOKEN" -o manager.zip "$artifact_url"; then
+            echo "⚠️ Download Failed — Skipping..."
+            exit 0
+          fi
+
+          # Extract APK
+          echo "⚙️ Extracting APK..."
+
+          if unzip -o -j manager.zip "*.apk" -d "$APK_DIR"; then
+            echo "✔️ APK extracted"
+          else
+            echo "⚠️ No APK Found in Artifact"
+          fi
+
+          rm -f manager.zip
+
+          # Verify Results
+          APK_COUNT=$(ls "$APK_DIR"/*.apk 2>/dev/null | wc -l || true)
+
+          if [[ "$APK_COUNT" -gt 0 ]]; then
+            echo "📦 Found $APK_COUNT APK(s):"
+            ls -lh "$APK_DIR"
+          else
+            echo "⚠️ No APK Files Present After Extraction"
+          fi
+
+          echo ""
+          echo "🎉 Done"
+
+      # ==============================
+      # Generate Per-File SHA256 Checksums
+      # ==============================
+      - name: 🔧 Generate Per-File SHA256 Checksums
         shell: bash
         run: |
           set -euo pipefail
 
           echo "--------------------------------------"
-          echo "🔐 Generating Release Checksums..."
+          echo "🚀 Generating Per-File SHA256 Checksums..."
           echo "--------------------------------------"
 
           cd "$GITHUB_WORKSPACE"
 
           shopt -s nullglob globstar
 
-          # Only Hash Actual Files (No Directories)
-          FILES=( AnyKernel3/**/* ZRAM-Module/**/*.ko )
+          FILES=( AnyKernel3/* ZRAM-Module/**/* ManagerAPK/* )
 
-          # Filter Only Regular Files
-          FINAL_FILES=()
-          for f in "${FILES[@]}"; do
-            [[ -f "$f" ]] && FINAL_FILES+=( "$f" )
-          done
-
-          if [ ${#FINAL_FILES[@]} -eq 0 ]; then
-            echo "⚠️ No Valid Files Found for Hashing!"
+          if [ ${#FILES[@]} -eq 0 ]; then
+            echo "⚠️ No Files Found"
             exit 0
           fi
 
-          sha256sum "${FINAL_FILES[@]}" | tee AnyKernel3/SHA256SUMS.txt
+          for f in "${FILES[@]}"; do
+            # Skip Non-Files and Existing SHA256 Files
+            [[ ! -f "$f" || "$f" == *.sha256 ]] && continue
+
+            sha256sum "$f" > "${f}.sha256"
+            echo "✔️ Generated: ${f}.sha256"
+          done
 
           echo ""
-          echo "📄 SHA256SUMS.txt Content:"
-          cat AnyKernel3/SHA256SUMS.txt
-
-          echo ""
-          echo "🎉 Release Checksums Successfully Generated"
+          echo "🎉 Per-File SHA256 Generation Complete"
   
       # ==============================
       # Upload Flashable Kernel Artifact
@@ -4569,6 +4648,21 @@ jobs:
 
           # Path to the Extracted ZRAM Module Files
           path: ZRAM-Module/*
+
+      # ==============================
+      # Upload Manager APK
+      # ==============================
+      - name: 🔧 Upload Manager APK
+        if: hashFiles('ManagerAPK/*.apk') != ''
+        uses: actions/upload-artifact@v4
+        with:
+          # Composed Artifact Name
+          name: "Manager-APK-With-Hash-${{ env.KERNEL_VERSION }}"
+
+          # Directory Path
+          path: |
+            ManagerAPK/*.apk
+            ManagerAPK/*.sha256
 
       # ==============================
       # Post Build Disk Check
