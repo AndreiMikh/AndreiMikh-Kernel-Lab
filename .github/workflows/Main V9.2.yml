@@ -4211,56 +4211,70 @@ jobs:
       - name: 🔧 KernelPatch-Next Patch and Replace with Patched Image
         if: ${{ github.event.inputs.KERNELPATCH == 'KPN' }}
         run: |
-          set -e
+          set -euo pipefail
 
           echo "------------------------------"
           echo "🚀 Starting KernelPatch-Next Patch..."
           echo "------------------------------"
           echo ""
 
-          # Automatically Find the Directory Containing 'Image'
-          OUT_DIR=$(find "${GITHUB_WORKSPACE}/kernel_workspace" -type f -name Image -exec dirname {} \; | head -n 1)
+          # Locate Kernel Image
+          IMAGE_PATH=$(find "${GITHUB_WORKSPACE}/kernel_workspace" -type f -name Image | head -n 1)
 
-          if [[ -z "$OUT_DIR" ]]; then
-            echo "⚠️ Could Not Find Kernel Image in Kernel Workspace"
-            exit 1
-          fi
+          [[ -z "${IMAGE_PATH:-}" ]] && { echo "⚠️ Kernel Image Not Found"; exit 1; }
 
-          echo "✔️ Found Kernel Image in: $OUT_DIR"
+          OUT_DIR=$(dirname "$IMAGE_PATH")
+
+          echo "📌 Found Kernel Image in: $OUT_DIR"
           cd "$OUT_DIR"
 
-          # Download KernelPatch-Next Tools
+          [[ ! -f Image ]] && { echo "⚠️ Image Missing"; exit 1; }
+
+          echo "📏 Original Image Size:"
+          ls -lh Image
+
+          # Download Tools 
           echo "📥 Downloading KernelPatch-Next Tools..."
-          wget -q https://github.com/KernelSU-Next/KPatch-Next/releases/latest/download/kptools-linux
-          wget -q https://github.com/KernelSU-Next/KPatch-Next/releases/latest/download/kpimg-linux
+
+          wget --tries=3 --timeout=20 -O kptools-linux \
+            https://github.com/KernelSU-Next/KPatch-Next/releases/latest/download/kptools-linux \
+            || { echo "⚠️ Failed to Download KPTOOLS-Linux"; exit 1; }
+
+          wget --tries=3 --timeout=20 -O kpimg-linux \
+            https://github.com/KernelSU-Next/KPatch-Next/releases/latest/download/kpimg-linux \
+            || { echo "⚠️ Failed to Download KPIMG-Linux"; exit 1; }
+
+          [[ ! -s kptools-linux ]] && { echo "⚠️ KPTOOLS-Linux is Empty"; exit 1; }
+          [[ ! -s kpimg-linux ]] && { echo "⚠️ KPIMG-Linux is Empty"; exit 1; }
 
           chmod +x kptools-linux kpimg-linux
 
           # Apply Patch
-          if [[ ! -f Image ]]; then
-            echo "⚠️ Image Not Found in $OUT_DIR"
-            exit 1
-          fi
+          echo "⚙️ Patching Kernel Image..."
 
-          echo "🛠️ Patching Kernel Image..."
           ./kptools-linux -p -i Image -k kpimg-linux -o oImage
 
-          # Replace Original Image
-          echo "✔️ Replacing Original Image with Patched Version..."
-          rm -f Image
-          mv oImage Image
+          [[ ! -f oImage ]] && { echo "⚠️ Patch Failed (No oImage)"; exit 1; }
+          [[ ! -s oImage ]] && { echo "⚠️ Patched Image is Empty"; exit 1; }
 
-          # Optional: Copy to AnyKernel3
+          echo "📏 Patched Image Size:"
+          ls -lh oImage
+
+          # Replace Image
+          echo "✔️ Replacing Image..."
+          mv -f oImage Image
+
+          # Sync to AnyKernel3
           ANYKERNEL_DIR="${GITHUB_WORKSPACE}/AnyKernel3"
-          if [[ -d "$ANYKERNEL_DIR" ]]; then
-            echo "🛠️ Copying Patched Image to AnyKernel3..."
-            cp Image "$ANYKERNEL_DIR/Image"
-          else
-            echo "⚠️ AnyKernel3 Directory Not Found, Skipping Copy"
-          fi
 
+          [[ ! -d "$ANYKERNEL_DIR" ]] && { echo "⚠️ AnyKernel3 Not Found"; exit 1; }
+
+          echo "📩 Copying to AnyKernel3..."
+          cp Image "$ANYKERNEL_DIR/Image"
+   
+          echo ""
           echo "🎉 KernelPatch-Next Patch Completed"
-
+    
       # ==============================
       # Download Selected Root Engine Manager Source APK
       # ==============================
