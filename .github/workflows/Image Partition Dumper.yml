@@ -96,20 +96,33 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
+    
+      # =========================
+
+      # =========================
       - name: 📥 Checkout Code
         uses: actions/checkout@v4
 
+      # =========================
+
+      # =========================
       - name: 🔧 Setup Python Environment
         uses: actions/setup-python@v5
         with:
           python-version: '3.12'
 
+      # =========================
+
+      # =========================
       - name: 📦 Install Dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y aria2  # Install aria2 as a system package
           pip install httpx beautifulsoup4  # Install Python dependencies
 
+      # =========================
+
+      # =========================
       - name: 🔗 Get OTA Download URL
         id: get_ota
         run: |
@@ -179,6 +192,9 @@ jobs:
               f.write(f'version={version}\n')
           PYEOF
 
+      # =========================
+
+      # =========================
       - name: 📋 Show OTA Information
         run: |
           echo "📱 Device Information" >> $GITHUB_STEP_SUMMARY
@@ -188,12 +204,21 @@ jobs:
           echo "- *Version*: ${{ steps.get_ota.outputs.version }}" >> $GITHUB_STEP_SUMMARY
           echo "- *OTA URL*: \`${{ steps.get_ota.outputs.ota_url }}\`" >> $GITHUB_STEP_SUMMARY
 
+      # =========================
+
+      # =========================
       - name: 🛠️ Install Payload-Dumper
         run: pip install git+https://github.com/5ec1cff/payload-dumper
 
+      # =========================
+
+      # =========================
       - name: 📁 Prepare Output Directory
         run: mkdir -p ./output
 
+      # =========================
+
+      # =========================
       - name: 📂 Download OTA and Extract Specified Partitions
         run: |
           OTA_URL="${{ steps.get_ota.outputs.ota_url }}"
@@ -215,12 +240,18 @@ jobs:
             --out ./output \
             ./output/ota.zip
 
+      # =========================
+
+      # =========================
       - name: 🧹 Clean Up
         run: |
           echo "🧹 Cleaning Up Downloaded OTA File..."
           rm -f ./output/ota.zip  # Remove the Downloaded OTA File After Extraction
           echo "✔️ Clean Up Complete"
 
+      # =========================
+      
+      # =========================
       - name: 🔍 Extract Kernel Build Information
         id: kernel_info
         if: ${{ inputs.extract_kernel_info == true }}
@@ -287,113 +318,98 @@ jobs:
               f.write(f'kernel_time={kernel_time or "Unknown"}\n')
           PYEOF
 
+      # =========================
+
+      # =========================
       - name: 🌏 Detect Region and ROM from Boot Image
         id: detect_region
         run: |
           BOOT_IMG="output/boot.img"
-
-          VARIANT="Unknown"
-          CONFIDENCE="Low"
+          
+          VARIANT="${{ inputs.region }}"
+          CONFIDENCE="User Input"
           ROM_TYPE="Unknown"
-
-          if [[ ! -f "$BOOT_IMG" ]]; then
-            echo "⚠️ Boot Image Not Found → Cannot Detect Region"
-            echo "variant=$VARIANT" >> $GITHUB_OUTPUT
-            echo "confidence=$CONFIDENCE" >> $GITHUB_OUTPUT
-            echo "rom_type=$ROM_TYPE" >> $GITHUB_OUTPUT
-            exit 0
-          fi
-
-          echo "🔍 Scanning Boot Image for Markers..."
-
-          # Extract Strings Once (Optimized)
+          
           STRINGS_OUTPUT=$(strings "$BOOT_IMG" 2>/dev/null || true)
           LOWER_STRINGS=$(printf "%s" "$STRINGS_OUTPUT" | tr '[:upper:]' '[:lower:]')
-
-          echo "🔎 Debug Matches:"
-          printf "%s\n" "$STRINGS_OUTPUT" \
-            | grep -iE "androidboot|fingerprint|oplus|coloros|oxygen" \
-            | head -n 10 || true
-
-          echo "------------------------------"
-          echo "📱 Detecting ROM Type..."
-          echo "------------------------------"
-          # ROM Type Detection
-          if [[ "$LOWER_STRINGS" == *coloros* ]]; then
-            ROM_TYPE="🎨 ColorOS"
-            echo "🎨 ColorOS Detected"
-
-          elif [[ "$LOWER_STRINGS" == *oxygen* ]]; then
+          
+          # Single Truth Flags
+          IS_OEM=false
+          IS_CN=false
+          
+          echo "🔎 Boot Signal Sample:"
+          printf "%s\n" "$STRINGS_OUTPUT" | grep -iE "androidboot|oplus|coloros|oxygen|eea|india|europe" | head -n 20 || true
+          
+          # ROM Type Detection (Independent)
+          if [[ "$LOWER_STRINGS" == *coloros* || "$LOWER_STRINGS" == *oplus* ]]; then
+            ROM_TYPE="🎨 ColorOS / OPlus"
+            IS_OEM=true
+            IS_CN=true
+          
+          elif [[ "$LOWER_STRINGS" == *oxygenos* ]]; then
             ROM_TYPE="💨 OxygenOS"
-            echo "💨 OxygenOS Detected"
-
-          else
-            echo "⚠️ ROM Type Not Clearly Detected"
+            IS_OEM=true
+          
           fi
-
-          echo "------------------------------"
-          echo "🧠 Detecting Region..."
-          echo "------------------------------"
-          # 🌏 REGION DETECTION (HIGH CONFIDENCE)
-          if [[ "$LOWER_STRINGS" == *coloros* ]]; then
+          
+          # Region Detection (Fixed Priority System)          
+          if [[ "$IS_CN" == true ]]; then
             VARIANT="🇨🇳 China"
-            CONFIDENCE="High"
-            echo "🇨🇳 ColorOS Markers → China"
-
-          elif [[ "$LOWER_STRINGS" == *oxygen* ]]; then
+            CONFIDENCE="High (OEM Strong)"
+          
+          elif [[ "$LOWER_STRINGS" == *oxygenos* ]]; then
             VARIANT="🌍 Global"
-            CONFIDENCE="High"
-            echo "🌍 OxygenOS Markers → Global"
-
-          elif [[ "$LOWER_STRINGS" == *europe* || "$LOWER_STRINGS" == *eea* ]]; then
-            VARIANT="🇪🇺 Europe"
-            CONFIDENCE="High"
-            echo "🇪🇺 EU Markers Detected"
-
-          elif [[ "$LOWER_STRINGS" == *india* ]]; then
-            VARIANT="🇮🇳 India"
-            CONFIDENCE="High"
-            echo "🇮🇳 India Markers Detected"
-
+            CONFIDENCE="High (OEM Strong)"
+          
+          elif [[ "$IS_OEM" == false ]]; then
+          
+            # Only use weak region tags if NO OEM detected
+            if [[ "$LOWER_STRINGS" == *eea* || "$LOWER_STRINGS" == *europe* ]]; then
+              VARIANT="🇪🇺 Europe"
+              CONFIDENCE="Medium (Region Tag)"
+          
+            elif [[ "$LOWER_STRINGS" == *india* ]]; then
+              VARIANT="🇮🇳 India"
+              CONFIDENCE="Medium (Region Tag)"
+            fi
+          
           else
-            echo "⚠️ No Strong Boot Markers → Using Input Region"
-
-            # Fallback - Medium Confidence
+            # Input Fallback
             case "${{ inputs.region }}" in
-              CN)
-                VARIANT="🇨🇳 China"
-                ;;
-              GLO|NA)
-                VARIANT="🌍 Global"
-                ;;
-              EU)
-                VARIANT="🇪🇺 Europe"
-                ;;
-              IN)
-                VARIANT="🇮🇳 India"
-                ;;
-              *)
-                VARIANT="Unknown"
-                ;;
+              CN) VARIANT="🇨🇳 China" ;;
+              GLO|NA) VARIANT="🌍 Global" ;;
+              EU) VARIANT="🇪🇺 Europe" ;;
+              IN) VARIANT="🇮🇳 India" ;;
+              *) VARIANT="Unknown" ;;
             esac
-
-            CONFIDENCE="Medium"
-            echo "📦 Fallback → Input Region: $VARIANT"
+          
+            CONFIDENCE="Medium (Input Fallback)"
           fi
-
+          
+          # Final Safety Override (Clean Logic)
+          if [[ "$IS_CN" == true ]]; then
+            if [[ "$VARIANT" == "🇪🇺 Europe" || "$VARIANT" == "🇮🇳 India" || "$VARIANT" == "🌍 Global" ]]; then
+              VARIANT="🇨🇳 China"
+              CONFIDENCE="Corrected (OEM CN Override)"
+            fi
+          fi
+          
+          # Final Output          
           echo ""
           echo "------------------------------"
-          echo "📌 Final Variant: $VARIANT"
+          echo "📌 Final Result"
+          echo "📱 ROM: $ROM_TYPE"
+          echo "🌏 Region: $VARIANT"
           echo "🎯 Confidence: $CONFIDENCE"
-          echo "📱 ROM Type: $ROM_TYPE"
           echo "------------------------------"
-          echo ""
-
-          # Export Outputs
+          
           echo "variant=$VARIANT" >> $GITHUB_OUTPUT
           echo "confidence=$CONFIDENCE" >> $GITHUB_OUTPUT
           echo "rom_type=$ROM_TYPE" >> $GITHUB_OUTPUT
+          
+      # =========================
 
+      # =========================
       - name: 📊 Build Summary
         run: |
           KV="${{ steps.kernel_info.outputs.kernel_version }}"
@@ -411,7 +427,10 @@ jobs:
           echo "| 🎯 Confidence Level | \`${{ steps.detect_region.outputs.confidence }}\` |" >> $GITHUB_STEP_SUMMARY
           echo "| 🔧 Kernel Version | \`$KV\` |" >> $GITHUB_STEP_SUMMARY
           echo "| 🕒 Build Time | \`$KT\` |" >> $GITHUB_STEP_SUMMARY
-            
+          
+      # =========================
+
+      # =========================
       - name: 📤 Upload Extracted Partitions as Artifact
         uses: actions/upload-artifact@v4
         with:
