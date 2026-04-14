@@ -334,41 +334,36 @@ jobs:
           # Wait Until the Run Appears (Robust Polling)
           echo "⏳ Waiting for Workflow Run to Appear..."
 
-          echo "🔍 Resolving Run ID..."
+          echo "🔍 Resolving Run ID (No Unique Tag)..."
 
-          # Try Instant Fetch First (Fast Path)
+          # Get Timestamp Before Dispatch
+          START_TIME=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+
+          # Trigger Workflow
+          gh workflow run "$WORKFLOW" \
+            --ref LiquidAndrei \
+            -f FILE="${{ matrix.device }}" \
+            -f KERNELPATCH="${{ github.event.inputs.KERNELPATCH }}" \
+            # (keep your other -f inputs...)
+
+          echo "⏳ Waiting for Run to Register..."
+
+          sleep 3
+
+          # Fetch Latest Matching Run After Timestamp
           RUN_ID=$(gh api \
             "/repos/${GITHUB_REPOSITORY}/actions/runs?per_page=20" \
-            | jq -r --arg tag "$UNIQUE_TAG" '
+            | jq -r --arg time "$START_TIME" '
                 .workflow_runs
-                | map(select(.display_title | contains($tag)))
-                | first
-                | .id // empty
+                | map(select(.created_at > $time))
+                | sort_by(.created_at)
+                | reverse
+                | .[0].id // empty
               ')
 
-          # Fallback (Short Retry, Not Heavy Polling)
+          # Validate
           if [[ -z "$RUN_ID" ]]; then
-            echo "⏳ Run Not Visible Yet, Retrying..."
-
-            for i in {1..5}; do
-              sleep 2
-
-              RUN_ID=$(gh api \
-                "/repos/${GITHUB_REPOSITORY}/actions/runs?per_page=20" \
-                | jq -r --arg tag "$UNIQUE_TAG" '
-                    .workflow_runs
-                    | map(select(.display_title | contains($tag)))
-                    | first
-                    | .id // empty
-                  ')
-
-              [[ -n "$RUN_ID" ]] && break
-            done
-          fi
-
-          # Final Validation
-          if [[ -z "$RUN_ID" ]]; then
-            echo "❌ Failed to Resolve Run ID"
+            echo "❌ Failed to Re-Solve Run ID"
             exit 1
           fi
 
