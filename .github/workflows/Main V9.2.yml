@@ -4530,12 +4530,14 @@ jobs:
           echo "📂 Output Dir: $APK_DIR"
           echo "------------------------------"
 
-          mkdir -p "$APK_DIR"
-
+          # Prepare Directory
+          mkdir -p "$APK_DIR" || true
+     
           # Get Latest Successful Run
           run_id=$(gh api \
-            "repos/$REPO/actions/runs?branch=$BRANCH&status=success&per_page=1" \
-            --jq '.workflow_runs[0].id' 2>/dev/null || true)
+            "repos/$REPO/actions/runs?branch=$BRANCH&status=success&per_page=10" \
+            --jq '.workflow_runs[] | select(.name | test("build|release|apk"; "i")) | .id' \
+            | head -n1)
 
           if [[ -z "${run_id:-}" || "$run_id" == "null" ]]; then
             echo "⚠️ No Successful Workflow Run Found — Skipping..."
@@ -4544,15 +4546,24 @@ jobs:
 
           echo "🔎 Found Run ID: $run_id"
 
-          # Get artifact URL
+          # Debug - Listing Artifacts from Run
+          echo "📦 Listing Artifacts from Run:"
+          gh api "repos/$REPO/actions/runs/$run_id/artifacts" \
+            --jq '.artifacts[]?.name'
+     
+          # Get Artifact URL
           artifact_url=$(gh api \
             "repos/$REPO/actions/runs/$run_id/artifacts" \
             --jq ".artifacts[] | select(.name == \"$ARTIFACT\") | .archive_download_url" \
-            2>/dev/null | head -n1 || true)
+            2>/dev/null | head -n1)
 
+          # Fallback: Take First Artifact if Exact Match Not Found
           if [[ -z "${artifact_url:-}" ]]; then
-            echo "⚠️ Artifact '$ARTIFACT' Not Found — Skipping..."
-            exit 0
+            echo "⚠️ Exact Artifact Not Found — Using First Available Artifact"
+            artifact_url=$(gh api \
+              "repos/$REPO/actions/runs/$run_id/artifacts" \
+              --jq '.artifacts[0].archive_download_url' \
+              2>/dev/null || echo "")
           fi
 
           # Download Artifact (Fail-Safe)
@@ -4567,12 +4578,12 @@ jobs:
           echo "⚙️ Extracting APK..."
 
           if unzip -o -j manager.zip "*.apk" -d "$APK_DIR"; then
-            echo "✔️ APK extracted"
+            echo "📌 APK Extracted"
           else
             echo "⚠️ No APK Found in Artifact"
           fi
 
-          rm -f manager.zip
+          rm -f manager.zip || true
 
           # Verify Results
           APK_COUNT=$(ls "$APK_DIR"/*.apk 2>/dev/null | wc -l || true)
@@ -4581,7 +4592,7 @@ jobs:
             echo "📦 Found $APK_COUNT APK(s):"
             ls -lh "$APK_DIR"
           else
-            echo "⚠️ No APK Files Present After Extraction"
+            echo "⚠️ No APK File(s) Present After Extraction"
           fi
 
           echo ""
