@@ -1,0 +1,186 @@
+name: Sync ReSukiSU Builds (Auto Changelog)
+
+on:
+  schedule:
+    - cron: '0 */8 * * *'
+  workflow_dispatch:
+
+env:
+  N_LATEST_RUNS: 50
+  TARGET_REPO: ReSukiSU/ReSukiSU
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: 📥 Checkout
+        uses: actions/checkout@v4
+
+      - name: 🚀 Fetch, Process and Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          echo "🔍 Fetching latest $N_LATEST_RUNS runs..."
+
+          runs=$(gh api "repos/$TARGET_REPO/actions/runs?branch=main&per_page=$N_LATEST_RUNS" \
+            --jq '[.workflow_runs[] | select(.event != "pull_request")] | reverse')
+
+          echo "$runs" | jq -c '.[]' | while read -r run; do
+              run_id=$(jq -r '.id' <<< "$run")
+              run_title=$(jq -r '.display_title' <<< "$run")
+              run_url=$(jq -r '.html_url' <<< "$run")
+
+              tag_name="ReSukiSU_${run_id}"
+
+              echo "----------------------------------------"
+              echo "📦 Run: $run_id"
+
+              # Skip existing release
+              if gh release view "$tag_name" >/dev/null 2>&1; then
+                  echo "⏭️ Already Released"
+                  continue
+              fi
+
+              artifacts=$(gh api "repos/$TARGET_REPO/actions/runs/$run_id/artifacts")
+
+              # Require Manager-Release
+              if ! jq -e '.artifacts[] | select(.name=="Manager-release")' <<< "$artifacts" >/dev/null; then
+                  echo "⏭️ No Manager-Release"
+                  continue
+              fi
+
+              echo "Valid Run Detected"
+
+              workdir=$(mktemp -d)
+              cd "$workdir"
+
+              # Download Artifacts
+              jq -c '.artifacts[]' <<< "$artifacts" | while read -r art; do
+                  id=$(jq -r '.id' <<< "$art")
+                  name=$(jq -r '.name' <<< "$art")
+
+                  echo "⬇️ $name"
+                  gh api "repos/$TARGET_REPO/actions/artifacts/$id/zip" > "${name}.zip"
+              done
+
+              # Extract Artifacts
+              for zip in *.zip; do
+                  [[ ! -f "$zip" ]] && continue
+
+                  if [[ "$zip" == ksud-* || "$zip" == ksuinit.zip || "$zip" == Spoofed-* ]]; then
+                      echo "🗑️ Skipping $zip"
+                      continue
+                  fi
+
+                  echo "📦 Extracting $zip"
+                  unzip -q -o "$zip"
+                  rm -f "$zip"
+              done
+
+              # Move APKs
+              if [ -d apk ]; then
+                  find apk -type f -name "*.apk" -exec mv {} . \;
+                  rm -rf apk
+              fi
+
+              # Package Files
+              shopt -s nullglob
+              ko_files=(*.ko)
+
+              if [ ${#ko_files[@]} -gt 0 ]; then
+                  echo "🗜️ Packaging .ko files"
+                  zip -q lkm-all.zip "${ko_files[@]}"
+                  rm -f "${ko_files[@]}"
+              fi
+
+              # Detect APK + Version
+              apk=$(ls ReSukiSU*_?????-*.apk 2>/dev/null | head -n 1 || true)
+
+              if [ -z "$apk" ]; then
+                  echo "No Valid APK"
+                  cd -
+                  rm -rf "$workdir"
+                  continue
+              fi
+
+              if [[ "$apk" =~ _([0-9]{5})- ]]; then
+                  version="${BASH_REMATCH[1]}"
+              else
+                  echo "Version Parse Failed"
+                  cd -
+                  rm -rf "$workdir"
+                  continue
+              fi
+
+              release_name="v${version}"
+
+              echo "🚀 Preparing Release $release_name"
+
+              # ----------------------------
+              # 🧠 AutoChangelog Generation
+              # ----------------------------
+              prev_tag=$(gh release list --limit 1 --json tagName -q '.[0].tagName' 2>/dev/null || true)
+
+              echo "🔎 Previous Tag: ${prev_tag:-none}"
+
+              if [ -n "$prev_tag" ]; then
+                  commits=$(gh api \
+                    "repos/$TARGET_REPO/compare/$prev_tag...main" \
+                    --jq '.commits[] | .commit.message')
+              else
+                  commits=$(gh api \
+                    "repos/$TARGET_REPO/commits?per_page=15" \
+                    --jq '.[].commit.message')
+              fi
+
+              # Clean + Format Commits
+              changelog=$(echo "$commits" \
+                | sed 's/\r//g' \
+                | sed '/^$/d' \
+                | sed 's/^/- /')
+
+              if [ -z "$changelog" ]; then
+                  changelog="- No Meaningful Changes"
+              fi
+
+              # Collect Assets
+              mapfile -t assets < <(find . -maxdepth 1 -type f)
+
+              if [ ${#assets[@]} -eq 0 ]; then
+                  echo "No Assets"
+                  cd -
+                  rm -rf "$workdir"
+                  continue
+              fi
+
+              # Build release notes
+              release_notes=$(cat <<EOF
+              ### 📦 $release_name
+              
+              ### 🆕 Changes
+              $changelog
+              
+              ---
+              
+              ### 🔗 Source
+              $run_url
+              EOF
+              )
+              
+              # Create Release
+              gh release create "$tag_name" "${assets[@]}" \
+                --title "$release_name" \
+                --notes "$release_notes"
+
+              echo "Release Created"
+
+              cd -
+              rm -rf "$workdir"
+          done
+
+          echo "🎉 All Done!"
