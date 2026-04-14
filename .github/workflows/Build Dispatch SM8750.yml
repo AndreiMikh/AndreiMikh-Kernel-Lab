@@ -608,13 +608,13 @@ jobs:
 
           case "$CHANNEL" in
             stable)
-              TAG="SM8750-Stable-${RUN}"
+              TAG="SM8750-Stable-BuildNumber-${RUN}"
               ;;
             beta)
-              TAG="SM8750-Beta-${RUN}"
+              TAG="SM8750-Beta-BuildNumber-${RUN}"
               ;;
             nightly|*)
-              TAG="SM8750-Nightly-${RUN}"
+              TAG="SM8750-Nightly-BuildNumber-${RUN}"
               ;;
           esac
 
@@ -625,96 +625,107 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          set -e
-      
+          set -euo pipefail
+
           cd "$GITHUB_WORKSPACE"
-      
-          echo "Repo (env): $GITHUB_REPOSITORY"
-      
-          # 🔍 Debug (Safe, Non-Fatal)
+
+          echo "Repo: $GITHUB_REPOSITORY"
+
           gh auth status || true
           gh repo view "$GITHUB_REPOSITORY" || true
-      
+
           CHANNEL="${{ github.event.inputs.RELEASECHANNEL }}"
           RUN="${GITHUB_RUN_NUMBER}"
-      
+
           CHANNEL_LOWER=$(echo "$CHANNEL" | tr '[:upper:]' '[:lower:]')
-      
+
           case "$CHANNEL_LOWER" in
             stable)
-              TAG="SM8750-Stable-${RUN}"
+              TAG="SM8750-Stable-BuildNumber-${RUN}"
               PRERELEASE="false"
               LATEST="true"
               ;;
             beta)
-              TAG="SM8750-Beta-${RUN}"
+              TAG="SM8750-Beta-BuildNumber-${RUN}"
               PRERELEASE="true"
               LATEST="false"
               ;;
             nightly|*)
-              TAG="SM8750-Nightly-${RUN}"
+              TAG="SM8750-Nightly-BuildNumber-${RUN}"
               PRERELEASE="true"
               LATEST="false"
               ;;
           esac
-      
+
           echo "TAG=$TAG"
-          TITLE="🚀 SM8750 ${CHANNEL} Build Number ${RUN}"
-      
-          # Debug
-          echo "Checking Release Inputs..."
-          ls -lah
-          
-          # Detect Zip Safely
-          ZIP_FILE=$(find . -type f -name "*.zip" | sort | head -n 1)
-          
-          if [[ -z "$ZIP_FILE" ]]; then
-            echo "❌ No Zip Found"
+          TITLE="🚀 SM8750 ${CHANNEL} | Build Number ${RUN}"
+
+          echo "🔍 Scanning Release Assets..."
+
+          ASSETS=()
+
+          # 1. Add Bundle Zip
+          BUNDLE_ZIP=$(find . -type f -name "SM8750-Kernel-Bundle-*.zip" | head -n 1)
+
+          if [[ -z "$BUNDLE_ZIP" || ! -s "$BUNDLE_ZIP" ]]; then
+            echo "❌ Missing Bundle Zip"
             exit 1
           fi
-          
-          if [[ ! -s "$ZIP_FILE" ]]; then
-            echo "❌ Zip Exists but is Empty"
+
+          ASSETS+=("$BUNDLE_ZIP")
+          echo "📦 Bundle: $BUNDLE_ZIP"
+
+          # 2. Add All Final Device Zips
+          echo "📦 Collecting Final Device Zips..."
+
+          while IFS= read -r zip; do
+            ASSETS+=("$zip")
+          done < <(
+            find . -type f -name "*.zip" \
+              ! -name "SM8750-Kernel-Bundle-*.zip" \
+              | sort
+          )
+
+          # 3. Safety Check
+          if [[ ${#ASSETS[@]} -eq 0 ]]; then
+            echo "❌ No Release Assets Found"
             exit 1
           fi
-          
-          echo "📦 Selected Zip: $ZIP_FILE"
-          
-          # Release Notes Safely
-          if [[ ! -s release_notes.txt ]]; then
-            echo "⚠️ Missing Release Notes → Generating Fallback"
-          
-            cat > release_notes.txt <<EOF
-          SM8750 Kernel Release
-          
-          Build: ${RUN}
-          Repository: ${GITHUB_REPOSITORY}
-          Branch: ${GITHUB_REF_NAME}
-          
-          **Auto-Generated**
-          EOF
+
+          echo "📦 Assets to Upload:"
+          printf '%s\n' "${ASSETS[@]}"
+
+          # 4. Release Notes
+          if [[ ! -s Release.txt ]]; then
+            cat > Release.txt <<EOF
+              SM8750 Kernel Release
+              
+              Build: ${RUN}
+              Repository: ${GITHUB_REPOSITORY}
+              Branch: ${GITHUB_REF_NAME}
+              
+              Auto-Generated Release
+              EOF
           fi
-          
-          echo "📄 Release Notes OK"
-          
-          # Idempotent Release Logic
+
+          # 5. Idempotent Check
           set +e
           gh release view "$TAG" >/dev/null 2>&1
-          RELEASE_EXISTS=$?
+          EXISTS=$?
           set -e
-          
-          if [[ "$RELEASE_EXISTS" -eq 0 ]]; then
-            echo "♻️ Release Already Exists → Skipping Creation"
+
+          if [[ "$EXISTS" -eq 0 ]]; then
+            echo "♻️ Release Already Exists → Skipping"
             exit 0
           fi
-          
-          # Create Release
+
+          # 6. Create Release
           echo "🚀 Creating Release: $TAG"
-          
+
           gh release create "$TAG" \
             --repo "$GITHUB_REPOSITORY" \
             --title "$TITLE" \
-            --notes-file release_notes.txt \
+            --notes-file Release.txt \
             --prerelease=$PRERELEASE \
             --latest=$LATEST \
-            "$ZIP_FILE"
+            "${ASSETS[@]}"
