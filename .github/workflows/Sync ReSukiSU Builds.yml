@@ -1,4 +1,4 @@
-name: Sync ReSukiSU Builds (Auto Changelog)
+name: Sync ReSukiSU Builds (Auto-Changelog)
 
 on:
   schedule:
@@ -37,10 +37,12 @@ jobs:
 
               tag_name="ReSukiSU_${run_id}"
 
-              echo "----------------------------------------"
+              echo ""
               echo "📦 Run: $run_id"
 
-              # Skip existing release
+              # ----------------------------
+              # Skip Existing Release
+              # ----------------------------
               if gh release view "$tag_name" >/dev/null 2>&1; then
                   echo "⏭️ Already Released"
                   continue
@@ -48,7 +50,9 @@ jobs:
 
               artifacts=$(gh api "repos/$TARGET_REPO/actions/runs/$run_id/artifacts")
 
+              # ----------------------------
               # Require Manager-Release
+              # ----------------------------
               if ! jq -e '.artifacts[] | select(.name=="Manager-release")' <<< "$artifacts" >/dev/null; then
                   echo "⏭️ No Manager-Release"
                   continue
@@ -59,7 +63,9 @@ jobs:
               workdir=$(mktemp -d)
               cd "$workdir"
 
+              # ----------------------------
               # Download Artifacts
+              # ----------------------------
               jq -c '.artifacts[]' <<< "$artifacts" | while read -r art; do
                   id=$(jq -r '.id' <<< "$art")
                   name=$(jq -r '.name' <<< "$art")
@@ -68,7 +74,9 @@ jobs:
                   gh api "repos/$TARGET_REPO/actions/artifacts/$id/zip" > "${name}.zip"
               done
 
+              # ----------------------------
               # Extract Artifacts
+              # ----------------------------
               for zip in *.zip; do
                   [[ ! -f "$zip" ]] && continue
 
@@ -82,13 +90,17 @@ jobs:
                   rm -f "$zip"
               done
 
+              # ----------------------------
               # Move APKs
+              # ----------------------------
               if [ -d apk ]; then
                   find apk -type f -name "*.apk" -exec mv {} . \;
                   rm -rf apk
               fi
 
+              # ----------------------------
               # Package Files
+              # ----------------------------
               shopt -s nullglob
               ko_files=(*.ko)
 
@@ -98,7 +110,9 @@ jobs:
                   rm -f "${ko_files[@]}"
               fi
 
+              # ----------------------------
               # Detect APK + Version
+              # ----------------------------
               apk=$(ls ReSukiSU*_?????-*.apk 2>/dev/null | head -n 1 || true)
 
               if [ -z "$apk" ]; then
@@ -122,23 +136,27 @@ jobs:
               echo "🚀 Preparing Release $release_name"
 
               # ----------------------------
-              # 🧠 AutoChangelog Generation
+              # Auto-Changelog Generation
               # ----------------------------
-              prev_tag=$(gh release list --limit 1 --json tagName -q '.[0].tagName' 2>/dev/null || true)
-
+              prev_tag=$(gh release list --limit 1 --json tagName,createdAt \
+                --jq 'sort_by(.createdAt) | last | .tagName' 2>/dev/null || true)
+              
               echo "🔎 Previous Tag: ${prev_tag:-none}"
-
+              
               if [ -n "$prev_tag" ]; then
                   commits=$(gh api \
                     "repos/$TARGET_REPO/compare/$prev_tag...main" \
-                    --jq '.commits[] | .commit.message')
+                    --jq '.commits[] | select(.commit.message | test("Merge") | not) | .commit.message'
+              
               else
                   commits=$(gh api \
                     "repos/$TARGET_REPO/commits?per_page=15" \
                     --jq '.[].commit.message')
               fi
 
+              # ----------------------------
               # Clean + Format Commits
+              # ----------------------------
               changelog=$(echo "$commits" \
                 | sed 's/\r//g' \
                 | sed '/^$/d' \
@@ -148,7 +166,9 @@ jobs:
                   changelog="- No Meaningful Changes"
               fi
 
+              # ----------------------------
               # Collect Assets
+              # ----------------------------
               mapfile -t assets < <(find . -maxdepth 1 -type f)
 
               if [ ${#assets[@]} -eq 0 ]; then
@@ -158,21 +178,12 @@ jobs:
                   continue
               fi
 
-              # Build release notes
-              release_notes=$(cat <<EOF
-              ### 📦 $release_name
-              
-              ### 🆕 Changes
-              $changelog
-              
-              ---
-              
-              ### 🔗 Source
-              $run_url
-              EOF
-              )
-              
+              release_notes=$(printf "### 📦 %s\n\n### 🆕 Changes\n%s\n\n---\n\n### 🔗 Source\n%s\n" \
+                "$release_name" "$changelog" "$run_url")
+
+              # ----------------------------
               # Create Release
+              # ----------------------------
               gh release create "$tag_name" "${assets[@]}" \
                 --title "$release_name" \
                 --notes "$release_notes"
