@@ -334,31 +334,45 @@ jobs:
           # Wait Until the Run Appears (Robust Polling)
           echo "⏳ Waiting for Workflow Run to Appear..."
 
-          for i in {1..20}; do
-                RUN_ID=$(gh run list \
-                  --workflow "$WORKFLOW" \
-                  --json databaseId,displayTitle \
-                  --limit 20 \
-                  | jq -r --arg tag "$UNIQUE_TAG" '
-                      map(select(.displayTitle | contains($tag)))
-                      | .[0].databaseId
-                    ')
+          echo "🔍 Resolving Run ID..."
 
-            if [[ -n "$RUN_ID" && "$RUN_ID" != "null" ]]; then
-              echo "✔️ Found Run ID=$RUN_ID"
-              break
-            fi
+          # Try Instant Fetch First (Fast Path)
+          RUN_ID=$(gh api \
+            "/repos/${GITHUB_REPOSITORY}/actions/runs?per_page=20" \
+            | jq -r --arg tag "$UNIQUE_TAG" '
+                .workflow_runs
+                | map(select(.display_title | contains($tag)))
+                | first
+                | .id // empty
+              ')
 
-            echo "Retry $i... Waiting..."
-            sleep 5
-          done
+          # Fallback (Short Retry, Not Heavy Polling)
+          if [[ -z "$RUN_ID" ]]; then
+            echo "⏳ Run Not Visible Yet, Retrying..."
+
+            for i in {1..5}; do
+              sleep 2
+
+              RUN_ID=$(gh api \
+                "/repos/${GITHUB_REPOSITORY}/actions/runs?per_page=20" \
+                | jq -r --arg tag "$UNIQUE_TAG" '
+                    .workflow_runs
+                    | map(select(.display_title | contains($tag)))
+                    | first
+                    | .id // empty
+                  ')
+
+              [[ -n "$RUN_ID" ]] && break
+            done
+          fi
 
           # Final Validation
-          if [[ -z "${RUN_ID:-}" || "$RUN_ID" == "null" ]]; then
-            echo "❌ Failed to Get Run ID After Retries"
+          if [[ -z "$RUN_ID" ]]; then
+            echo "❌ Failed to Resolve Run ID"
             exit 1
           fi
 
+          echo "✔️ Run ID=$RUN_ID"
           echo "RUN_ID=$RUN_ID" >> $GITHUB_ENV
           
       - name: 🔍 Debug Run ID
