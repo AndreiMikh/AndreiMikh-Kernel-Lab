@@ -22,8 +22,10 @@ jobs:
       - name: 🚀 Fetch, Process and Release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ env.TARGET_REPO }}
         run: |
           set -euo pipefail
+          export GH_REPO="$TARGET_REPO"
 
           echo "🔍 Fetching latest $N_LATEST_RUNS runs..."
 
@@ -43,12 +45,12 @@ jobs:
               # ----------------------------
               # Skip Existing Release
               # ----------------------------
-              if gh release view "$tag_name" >/dev/null 2>&1; then
+              if gh release view --repo "$TARGET_REPO" "$tag_name" >/dev/null 2>&1; then
                   echo "⏭️ Already Released"
                   continue
               fi
 
-              artifacts=$(gh api "repos/$TARGET_REPO/actions/runs/$run_id/artifacts")
+              artifacts=$(gh api --repo "$TARGET_REPO" "repos/$TARGET_REPO/actions/runs/$run_id/artifacts")
 
               # ----------------------------
               # Require Manager-Release
@@ -58,9 +60,8 @@ jobs:
                   continue
               fi
 
-              echo "Valid Run Detected"
-
               workdir=$(mktemp -d)
+              echo "📁 Workdir: $workdir"
               cd "$workdir"
 
               # ----------------------------
@@ -71,7 +72,7 @@ jobs:
                   name=$(jq -r '.name' <<< "$art")
 
                   echo "⬇️ $name"
-                  gh api "repos/$TARGET_REPO/actions/artifacts/$id/zip" > "${name}.zip"
+                  gh api --repo "$TARGET_REPO" "repos/$TARGET_REPO/actions/artifacts/$id/zip" > "${name}.zip"
               done
 
               # ----------------------------
@@ -80,10 +81,12 @@ jobs:
               for zip in *.zip; do
                   [[ ! -f "$zip" ]] && continue
 
-                  if [[ "$zip" == ksud-* || "$zip" == ksuinit.zip || "$zip" == Spoofed-* ]]; then
-                      echo "🗑️ Skipping $zip"
-                      continue
-                  fi
+                  case "$zip" in
+                      ksud-*|ksuinit.zip|Spoofed-*)
+                          echo "🗑️ Skipping $zip"
+                          continue
+                          ;;
+                  esac
 
                   echo "📦 Extracting $zip"
                   unzip -q -o "$zip"
@@ -99,7 +102,7 @@ jobs:
               fi
 
               # ----------------------------
-              # Package Files
+              # Package .ko files
               # ----------------------------
               shopt -s nullglob
               ko_files=(*.ko)
@@ -117,7 +120,7 @@ jobs:
 
               if [ -z "$apk" ]; then
                   echo "No Valid APK"
-                  cd -
+                  cd - >/dev/null
                   rm -rf "$workdir"
                   continue
               fi
@@ -126,13 +129,12 @@ jobs:
                   version="${BASH_REMATCH[1]}"
               else
                   echo "Version Parse Failed"
-                  cd -
+                  cd - >/dev/null
                   rm -rf "$workdir"
                   continue
               fi
 
               release_name="v${version}"
-
               echo "🚀 Preparing Release $release_name"
 
               # ----------------------------
@@ -144,22 +146,22 @@ jobs:
                 --json tagName,createdAt \
                 --jq 'map(select(.tagName != null)) | sort_by(.createdAt) | last | .tagName' \
                 2>/dev/null || true)
-              
+
               echo "🔎 Previous Tag: ${prev_tag:-none}"
-              
+
               if [ -n "$prev_tag" ] && [ "$prev_tag" != "null" ]; then
-                  commits=$(gh api \
+                  commits=$(gh api --repo "$TARGET_REPO" \
                     "repos/$TARGET_REPO/compare/$prev_tag...main" \
                     --jq '.commits[] | select(.commit.message | test("Merge") | not) | .commit.message' \
                     2>/dev/null || true)
               else
-                  commits=$(gh api \
+                  commits=$(gh api --repo "$TARGET_REPO" \
                     "repos/$TARGET_REPO/commits?per_page=15" \
                     --jq '.[].commit.message')
               fi
 
               # ----------------------------
-              # Clean + Format Commits
+              # Format Changelog
               # ----------------------------
               changelog=$(echo "$commits" \
                 | sed 's/\r//g' \
@@ -177,7 +179,7 @@ jobs:
 
               if [ ${#assets[@]} -eq 0 ]; then
                   echo "No Assets"
-                  cd -
+                  cd - >/dev/null
                   rm -rf "$workdir"
                   continue
               fi
@@ -188,13 +190,13 @@ jobs:
               # ----------------------------
               # Create Release
               # ----------------------------
-              gh release create "$tag_name" "${assets[@]}" \
+              gh release create --repo "$TARGET_REPO" "$tag_name" "${assets[@]}" \
                 --title "$release_name" \
                 --notes "$release_notes"
 
-              echo "Release Created"
+              echo "✅ Release Created"
 
-              cd -
+              cd - >/dev/null
               rm -rf "$workdir"
           done
 
