@@ -19,22 +19,23 @@ jobs:
       - name: 📥 Checkout
         uses: actions/checkout@v4
 
-      - name: 🚀 Fetch, Process and Release
+      - name: 🚀 Sync Builds + Auto Release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          GH_REPO: ${{ env.TARGET_REPO }}
+        shell: bash
         run: |
           set -euo pipefail
-          export GH_REPO="$TARGET_REPO"
 
-          echo "🔍 Fetching latest $N_LATEST_RUNS runs..."
+          echo "🔍 Fetching latest runs..."
 
-          runs=$(gh api "repos/$TARGET_REPO/actions/runs?branch=main&per_page=$N_LATEST_RUNS" \
-            --jq '[.workflow_runs[] | select(.event != "pull_request")] | reverse')
+          runs=$(gh api "repos/$TARGET_REPO/actions/runs?per_page=$N_LATEST_RUNS" \
+            --jq '.workflow_runs
+              | map(select(.event != "pull_request"))
+              | sort_by(.created_at)
+              | reverse')
 
           echo "$runs" | jq -c '.[]' | while read -r run; do
               run_id=$(jq -r '.id' <<< "$run")
-              run_title=$(jq -r '.display_title' <<< "$run")
               run_url=$(jq -r '.html_url' <<< "$run")
 
               tag_name="ReSukiSU_${run_id}"
@@ -42,162 +43,151 @@ jobs:
               echo ""
               echo "📦 Run: $run_id"
 
-              # ----------------------------
-              # Skip Existing Release
-              # ----------------------------
-              if gh release view --repo "$TARGET_REPO" "$tag_name" >/dev/null 2>&1; then
-                  echo "⏭️ Already Released"
+              # Skip if already released
+              if gh release view "$tag_name" >/dev/null 2>&1; then
+                  echo "⏭️ Already released"
                   continue
               fi
 
-              artifacts=$(gh api --repo "$TARGET_REPO" "repos/$TARGET_REPO/actions/runs/$run_id/artifacts")
+              artifacts_json=$(gh api "repos/$TARGET_REPO/actions/runs/$run_id/artifacts")
 
-              # ----------------------------
-              # Require Manager-Release
-              # ----------------------------
-              if ! jq -e '.artifacts[] | select(.name=="Manager-release")' <<< "$artifacts" >/dev/null; then
-                  echo "⏭️ No Manager-Release"
+              # Require Manager-release
+              if ! echo "$artifacts_json" | jq -e '.artifacts[] | select(.name=="Manager-release")' >/dev/null; then
+                  echo "⏭️ No Manager-release"
                   continue
               fi
 
               workdir=$(mktemp -d)
-              echo "📁 Workdir: $workdir"
               cd "$workdir"
 
-              # ----------------------------
-              # Download Artifacts
-              # ----------------------------
-              jq -c '.artifacts[]' <<< "$artifacts" | while read -r art; do
+              echo "⬇️ Downloading artifacts..."
+
+              echo "$artifacts_json" | jq -c '.artifacts[]' | while read -r art; do
                   id=$(jq -r '.id' <<< "$art")
                   name=$(jq -r '.name' <<< "$art")
 
-                  echo "⬇️ $name"
-                  gh api --repo "$TARGET_REPO" "repos/$TARGET_REPO/actions/artifacts/$id/zip" > "${name}.zip"
+                  gh api "repos/$TARGET_REPO/actions/artifacts/$id/zip" > "${name}.zip"
               done
 
-              # ----------------------------
-              # Extract Artifacts
-              # ----------------------------
+              echo "📦 Extracting..."
+
               for zip in *.zip; do
                   [[ ! -f "$zip" ]] && continue
 
                   case "$zip" in
-                      ksud-*|ksuinit.zip|Spoofed-*)
-                          echo "🗑️ Skipping $zip"
-                          continue
-                          ;;
+                    ksud-*|ksuinit.zip|Spoofed-*) 
+                      echo "🗑️ Skipping $zip"
+                      continue
+                      ;;
                   esac
 
-                  echo "📦 Extracting $zip"
                   unzip -q -o "$zip"
                   rm -f "$zip"
               done
 
-              # ----------------------------
               # Move APKs
-              # ----------------------------
-              if [ -d apk ]; then
+              if [[ -d apk ]]; then
                   find apk -type f -name "*.apk" -exec mv {} . \;
                   rm -rf apk
               fi
 
-              # ----------------------------
-              # Package .ko files
-              # ----------------------------
+              # Package kernel objects
               shopt -s nullglob
               ko_files=(*.ko)
 
-              if [ ${#ko_files[@]} -gt 0 ]; then
+              if (( ${#ko_files[@]} > 0 )); then
                   echo "🗜️ Packaging .ko files"
                   zip -q lkm-all.zip "${ko_files[@]}"
                   rm -f "${ko_files[@]}"
               fi
 
-              # ----------------------------
-              # Detect APK + Version
-              # ----------------------------
-              apk=$(ls ReSukiSU*_?????-*.apk 2>/dev/null | head -n 1 || true)
+              # Detect APK
+              apk_file=$(ls ReSukiSU*_?????-*.apk 2>/dev/null | head -n 1 || true)
 
-              if [ -z "$apk" ]; then
-                  echo "No Valid APK"
+              if [[ -z "$apk_file" ]]; then
+                  echo "❌ No APK found"
                   cd - >/dev/null
                   rm -rf "$workdir"
                   continue
               fi
 
-              if [[ "$apk" =~ _([0-9]{5})- ]]; then
+              if [[ "$apk_file" =~ _([0-9]{5})- ]]; then
                   version="${BASH_REMATCH[1]}"
               else
-                  echo "Version Parse Failed"
+                  echo "❌ Version parse failed"
                   cd - >/dev/null
                   rm -rf "$workdir"
                   continue
               fi
 
               release_name="v${version}"
-              echo "🚀 Preparing Release $release_name"
+
+              echo "🚀 Release: $release_name"
 
               # ----------------------------
-              # Auto-Changelog Generation
+              # SAFE changelog generation
               # ----------------------------
               prev_tag=$(gh release list \
-                --repo "$TARGET_REPO" \
-                --limit 20 \
+                --limit 1 \
                 --json tagName,createdAt \
                 --jq 'map(select(.tagName != null)) | sort_by(.createdAt) | last | .tagName' \
                 2>/dev/null || true)
 
-              echo "🔎 Previous Tag: ${prev_tag:-none}"
+              echo "🔎 Previous tag: ${prev_tag:-none}"
 
-              if [ -n "$prev_tag" ] && [ "$prev_tag" != "null" ]; then
-                  commits=$(gh api --repo "$TARGET_REPO" \
+              if [[ -n "$prev_tag" && "$prev_tag" != "null" ]]; then
+                  commits=$(gh api \
                     "repos/$TARGET_REPO/compare/$prev_tag...main" \
-                    --jq '.commits[] | select(.commit.message | test("Merge") | not) | .commit.message' \
+                    --jq '.commits[]
+                      | select(.commit.message | test("Merge") | not)
+                      | .commit.message' \
                     2>/dev/null || true)
               else
-                  commits=$(gh api --repo "$TARGET_REPO" \
+                  commits=$(gh api \
                     "repos/$TARGET_REPO/commits?per_page=15" \
                     --jq '.[].commit.message')
               fi
 
-              # ----------------------------
-              # Format Changelog
-              # ----------------------------
               changelog=$(echo "$commits" \
                 | sed 's/\r//g' \
                 | sed '/^$/d' \
                 | sed 's/^/- /')
 
-              if [ -z "$changelog" ]; then
-                  changelog="- No Meaningful Changes"
-              fi
+              [[ -z "$changelog" ]] && changelog="- No meaningful changes"
 
-              # ----------------------------
-              # Collect Assets
-              # ----------------------------
+              # Collect assets
               mapfile -t assets < <(find . -maxdepth 1 -type f)
 
-              if [ ${#assets[@]} -eq 0 ]; then
-                  echo "No Assets"
+              if (( ${#assets[@]} == 0 )); then
+                  echo "❌ No assets"
                   cd - >/dev/null
                   rm -rf "$workdir"
                   continue
               fi
 
-              release_notes=$(printf "### 📦 %s\n\n### 🆕 Changes\n%s\n\n---\n\n### 🔗 Source\n%s\n" \
-                "$release_name" "$changelog" "$run_url")
+              release_notes=$(cat <<EOF
+                ### 📦 $release_name
+                
+                ### 🆕 Changes
+                $changelog
+                
+                ---
+                
+                ### 🔗 Source
+                $run_url
+                EOF
+                )
 
-              # ----------------------------
-              # Create Release
-              # ----------------------------
-              gh release create --repo "$TARGET_REPO" "$tag_name" "${assets[@]}" \
+              echo "🚀 Creating release..."
+
+              gh release create "$tag_name" "${assets[@]}" \
                 --title "$release_name" \
                 --notes "$release_notes"
 
-              echo "✅ Release Created"
+              echo "✅ Release created"
 
               cd - >/dev/null
               rm -rf "$workdir"
           done
 
-          echo "🎉 All Done!"
+          echo "🎉 Done"
