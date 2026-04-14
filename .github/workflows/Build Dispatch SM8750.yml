@@ -12,6 +12,16 @@ on:
           - Stable V9.1.yml
           - Main V9.2.yml
 
+      RELEASECHANNEL:
+        type: choice
+        description: "Release Channel (Stable / Beta / Nightly)"
+        required: true
+        default: nightly
+        options:
+          - Stable
+          - Beta
+          - Nightly
+
       KERNELPATCH:
         type: choice
         description: "Kernel Patches Implementation Methods"
@@ -208,9 +218,9 @@ permissions:
   actions: write
   contents: read
 
-# =========================
+# --------------------------
 # Device Matrix
-# =========================
+# --------------------------
 jobs:
   matrix:
     runs-on: ubuntu-latest
@@ -232,9 +242,9 @@ jobs:
           printf '%s\n' "${DEVICES[@]}" | jq -R -s -c 'split("\n")[:-1]' > devices.json
           echo "devices=$(cat devices.json)" >> $GITHUB_OUTPUT
 
-# =========================
+# --------------------------
 # Dispatch Builds
-# =========================
+# --------------------------
   dispatch:
     needs: matrix
     runs-on: ubuntu-latest
@@ -349,9 +359,9 @@ jobs:
           name: meta-${{ env.DEVICE_NAME }}
           path: meta/
 
-# =========================
-# MERGE RUN IDS
-# =========================
+# --------------------------
+# Merge Run IDs
+# --------------------------
   merge:
     needs: dispatch
     runs-on: ubuntu-latest
@@ -378,9 +388,9 @@ jobs:
 
           echo "map=$(echo "$JSON" | jq -c .)" >> $GITHUB_OUTPUT
 
-# =========================
-# FETCH ARTIFACTS (30 MIN ROBUST)
-# =========================
+# --------------------------
+# Fetch Artifacts (30 Min Robust)
+# --------------------------
   fetch:
     needs: [merge, matrix]
     runs-on: ubuntu-latest
@@ -499,9 +509,9 @@ jobs:
           name: final-${{ env.DEVICE_NAME }}
           path: artifacts/${{ matrix.device }}
 
-# =========================
-# FINAL BUNDLE
-# =========================
+# --------------------------
+# Final Bundle
+# --------------------------
   bundle:
     needs: fetch
     runs-on: ubuntu-latest
@@ -521,7 +531,7 @@ jobs:
             cp -r "$dir"/. final_bundle/$dev/ || true
           done
 
-      - name: 🗜️ Create ZIP
+      - name: 🗜️ Create Zip
         run: |
           ZIP="SM8750-Kernel-Bundle-${GITHUB_RUN_NUMBER}.zip"
           zip -r "$ZIP" final_bundle
@@ -531,3 +541,72 @@ jobs:
         with:
           name: SM8750-Kernel-Bundle
           path: ${{ env.ZIP }}
+
+      - name: 🏷️ Generate Release Tag (Channel Aware)
+        run: |
+          CHANNEL="${{ github.event.inputs.RELEASECHANNEL }}"
+          RUN="${GITHUB_RUN_NUMBER}"
+
+          case "$CHANNEL" in
+            stable)
+              TAG="SM8750-Stable-${RUN}"
+              ;;
+            beta)
+              TAG="SM8750-Beta-${RUN}"
+              ;;
+            nightly|*)
+              TAG="SM8750-Nightly-${RUN}"
+              ;;
+          esac
+
+          echo "TAG=$TAG" >> $GITHUB_ENV
+          echo "CHANNEL=$CHANNEL" >> $GITHUB_ENV
+
+      - name: 🚀 Publish Channel-Based Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -e
+
+          TITLE="🚀 SM8750 ${CHANNEL^} Build #${GITHUB_RUN_NUMBER}"
+
+          printf "%s\n" \
+          "SM8750 Kernel Release (${CHANNEL})" \
+          "" \
+          "📱 Devices:" \
+          "- OnePlus 13 / 13S / 13T" \
+          "- OnePlus Ace 5 / Ace 6" \
+          "- OnePlus Pad 2 Pro / Pad 3" \
+          "" \
+          "🧠 Build Information:" \
+          "- Run ID: ${GITHUB_RUN_ID}" \
+          "- Workflow: ${GITHUB_WORKFLOW}" \
+          "- Branch: ${GITHUB_REF_NAME}" \
+          "- Channel: ${CHANNEL}" \
+          "" \
+          "📊 Status:" \
+          "- Full Automation Success" \
+          > release_notes.txt
+
+          # CHANNEL STRATEGY
+          case "$CHANNEL" in
+            stable)
+              PRERELEASE="false"
+              LATEST="true"
+              ;;
+            beta)
+              PRERELEASE="true"
+              LATEST="false"
+              ;;
+            nightly)
+              PRERELEASE="true"
+              LATEST="false"
+              ;;
+          esac
+
+          gh release create "$TAG" \
+            --title "$TITLE" \
+            --notes-file release_notes.txt \
+            --prerelease=$PRERELEASE \
+            --latest=$LATEST \
+            "$ZIP"
