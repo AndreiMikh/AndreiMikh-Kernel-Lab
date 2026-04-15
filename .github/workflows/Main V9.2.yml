@@ -4757,62 +4757,84 @@ jobs:
           echo "------------------------------"
           echo ""
       
-          echo "📩 [Step 3] Downloading APK Artifacts Only..."
+          echo "📩 [Step 3] Fetching Only Manager APK Artifacts..."
           
           artifact_urls=$(gh api \
             "repos/$REPO/actions/runs/$selected_run/artifacts" \
             --jq '.artifacts[]
-              | select(.name | test("apk|\\.apk|manager|release|build"; "i"))
+              | select(.name | test("manager"; "i"))
               | .archive_download_url' 2>/dev/null || true)
           
-          echo "🔍 [Debug] Artifact URLs:"
+          echo "------------------------------"
+          echo "🔍 Manager Artifact URLs:"
           echo "$artifact_urls"
+          echo "------------------------------"
           
-          if [[ -z "$artifact_urls" ]]; then
-            echo "⚠️ [Error] No Downloadable APK Artifacts Found"
+          # Count Safely
+          artifact_count=$(echo "$artifact_urls" | sed '/^$/d' | wc -l || true)
+          
+          echo "📦 Manager Artifact Count: $artifact_count"
+          
+          if [[ "$artifact_count" -eq 0 ]]; then
+            echo "⚠️ No Manager APK Artifacts Found"
             exit 0
           fi
           
           i=0
+          
           while IFS= read -r url || [[ -n "$url" ]]; do
             [[ -z "$url" ]] && continue
           
             ((i++))
             echo "⬇️ Downloading Artifact #$i"
           
-            http_code=$(curl -L \
+            zip_file="$APK_DIR/artifact_$i.zip"
+          
+            # Download
+            if ! curl -L \
               -H "Authorization: Bearer $GH_TOKEN" \
               -H "Accept: application/vnd.github+json" \
-              -w "%{http_code}" \
-              -o "$APK_DIR/artifact_$i.zip" \
-              "$url" || true)
+              --fail \
+              --silent \
+              --show-error \
+              -o "$zip_file" \
+              "$url"; then
           
-            if [[ "$http_code" -ne 200 ]]; then
-              echo "⚠️ [Skip] Artifact Download Failed (HTTP $http_code)"
-              rm -f "$APK_DIR/artifact_$i.zip"
+              echo "⚠️ Download Failed: $url"
+              rm -f "$zip_file"
               continue
             fi
           
-            unzip -o "$APK_DIR/artifact_$i.zip" -d "$APK_DIR"
-            rm -f "$APK_DIR/artifact_$i.zip"
+            # Verify Zip Before Unzipping
+            if ! unzip -t "$zip_file" >/dev/null 2>&1; then
+              echo "⚠️ Corrupted Zip Detected, Skipping..."
+              rm -f "$zip_file"
+              continue
+            fi
+          
+            # Extract
+            unzip -o "$zip_file" -d "$APK_DIR" >/dev/null
+            rm -f "$zip_file"
           
           done <<< "$artifact_urls"
       
           echo "🧹 [Step 4] Cleaning Non-APK Files..."
-      
-          find "$APK_DIR" -type f ! -name "*.apk" -delete
-      
+          
+          find "$APK_DIR" -type f ! -name "*.apk" -delete || true
+          
           echo "🔍 [Step 5] Verifying Output..."
-      
-          APK_COUNT=$(find "$APK_DIR" -type f -name "*.apk" | wc -l)
-      
+          
+          APK_COUNT=$(find "$APK_DIR" -type f -name "*.apk" | wc -l || true)
+          
+          echo "📦 APK Count: $APK_COUNT"
+          
           if [[ "$APK_COUNT" -gt 0 ]]; then
             echo "------------------------------"
             echo "📦 [Success] APKs Found: $APK_COUNT"
             ls -lh "$APK_DIR"
             echo "------------------------------"
           else
-            echo "⚠️ [Warning] No APK Files Found"
+            echo "⚠️ [Warning] No APK Files Found (Manager Build Likely Missing)"
           fi
 
           echo ""
