@@ -2964,179 +2964,78 @@ jobs:
           echo "🎉 ADIOS Scheduler Patch Process Complete!"
 
       # ==============================
-      # DroidspacesLXC Support
+      # DroidSpacesLXC Support
       # ==============================
-      - name: 🔧 DroidspacesLXC Support
+      - name: 🔧 DroidSpacesLXC Support
         if: ${{ github.event.inputs.LXCDOCKERSUPPORT == 'DroidSpacesLXC' }}
         shell: bash
         run: |
           set -euo pipefail
-          
+
           echo "------------------------------"
           echo "🚀 DroidSpacesLXC Patch Setup..."
           echo "------------------------------"
           echo ""
-          
-          # Detect Kernel Root
-          echo "🔍 Detecting Kernel Root..."
-          
+
+          echo "🔍 Attempting to Auto-Detect the Kernel Directory..."
+
+          # Kernel Common Directory Structure
           possible_kernel_dirs=(
             "${GITHUB_WORKSPACE}/kernel_workspace/kernel_platform/common"
             "${GITHUB_WORKSPACE}/kernel_workspace/kernel_platform"
             "${GITHUB_WORKSPACE}/kernel_workspace"
           )
-          
+
           KERNEL_DIR=""
-          
+
           for dir in "${possible_kernel_dirs[@]}"; do
-            echo "🔎 Checking: $dir"
-          
-            if [[ -d "$dir" ]] && \
-               [[ -f "$dir/Makefile" ]] && \
-               [[ -f "$dir/scripts/Makefile.build" ]]; then
+            echo "🔎 Checking Directory: $dir"
+            if [ -d "$dir" ] && { [ -f "$dir/Makefile" ] || [ -d "$dir/arch/arm64/configs" ]; }; then
               KERNEL_DIR="$dir"
-              echo "📌 Kernel Root Detected: $KERNEL_DIR"
+              echo "📌 Kernel Directory Detected: $KERNEL_DIR"
               break
             fi
           done
-          
-          if [[ -z "${KERNEL_DIR:-}" ]]; then
-            echo "⚠️ No Valid Kernel Root Found..."
-            exit 1
-          fi
-          
-          echo ""
-          
-          # Select Default Configuration
-          echo "⚙️ Selecting Default Configuration..."
-          
-          CONFIG_FILE=""
-          
-          if [[ -f "$KERNEL_DIR/arch/arm64/configs/gki_defconfig" ]]; then
-            CONFIG_FILE="$KERNEL_DIR/arch/arm64/configs/gki_defconfig"
-          elif [[ -f "$KERNEL_DIR/arch/arm64/configs/defconfig" ]]; then
-            CONFIG_FILE="$KERNEL_DIR/arch/arm64/configs/defconfig"
-          else
-            echo "⚠️ No Valid Default Configuration Found..."
-            exit 1
-          fi
-          
-          echo "📦 Using Configuration File: $CONFIG_FILE"
-          
-          echo ""
-          
-          # Kernel ABI Detector
-          echo "🫆 Detecting Kernel ABI Slot Layout..."
-          
-          SCHED_FILE="${KERNEL_DIR}/include/linux/sched.h"
-          
-          if [[ ! -f "$SCHED_FILE" ]]; then
-            echo "⚠️ Sched Header Not Found: $SCHED_FILE"
-            exit 1
-          fi
-          
-          # Normalize File (Remove Comments for Safety)
-          CLEAN_FILE=$(mktemp)
-          
-          sed -E 's/\/\*.*\*\///g' "$SCHED_FILE" \
-            | sed -E 's/\/\/.*//g' \
-            | tr -s ' ' \
-            > "$CLEAN_FILE"
-          
-          KABI_SLOT_MODE=""
-          
-          # Primary Detection Signals
-          if grep -qE "ANDROID_KABI_USE\\(1,[[:space:]]*\\)" "$CLEAN_FILE"; then
-            KABI_SLOT_MODE="1_2_3"
 
-          elif grep -qE "ANDROID_KABI_RESERVE\\(3\\)" "$CLEAN_FILE"; then
-            KABI_SLOT_MODE="3_4_5"
-          
-          elif grep -qE "ANDROID_KABI_RESERVE\\(1\\)" "$CLEAN_FILE"; then
-            KABI_SLOT_MODE="6_7_8"
-          
-          # Fallback Heuristic (Workflow Safety Net)
+          if [ -z "$KERNEL_DIR" ]; then
+            echo "⚠️ No Valid Kernel Directory Found; Exiting"
+            exit 1
+          fi
+
+          # Download Patch
+          PATCH_URL="https://raw.githubusercontent.com/AndreiMikh/AndreiMikh-Kernel-Lab/LiquidAndrei/patches/DroidspacesLXC.patch"
+          PATCH_FILE="$GITHUB_WORKSPACE/enable_sysvipc.patch"
+          CONFIG_FILE="$KERNEL_DIR/arch/arm64/configs/gki_defconfig"
+
+          echo "📩 Downloading Patch From:"
+          echo "   $PATCH_URL"
+          curl -fsSL "$PATCH_URL" -o "$PATCH_FILE" || {
+            echo "⚠️ Failed to Download Patch; Skipping..."
+          }
+
+          echo "🔧 Applying DroidSpacesLXC Support Patch..."
+
+          if [ ! -f "$PATCH_FILE" ]; then
+            echo "⚠️ Patch File Missing; Skipping Patch Application..."
           else
-            RESERVE_COUNT=$(grep -oE "ANDROID_KABI_RESERVE\\([0-9]+\\)" "$CLEAN_FILE" \
-              | sort -u | wc -l || true)
           
-            USE_COUNT=$(grep -c "ANDROID_KABI_USE" "$CLEAN_FILE" || true)
-          
-            if [[ "$USE_COUNT" -gt 0 ]]; then
-              KABI_SLOT_MODE="6_7_8"
-            elif [[ "$RESERVE_COUNT" -ge 3 ]]; then
-              KABI_SLOT_MODE="3_4_5"
-            elif [[ "$RESERVE_COUNT" -eq 1 ]]; then
-              KABI_SLOT_MODE="1_2_3"
+            # Check if Already Applied
+            if grep -q "CONFIG_SYSVIPC=y" "$CONFIG_FILE"; then
+              echo "✔️ Patch Already Applied; Skipping..."
+            else
+              echo "⚙️ Applying Patch..."
+              cd "$KERNEL_DIR"
+              patch -p1 -F3 --forward < "$PATCH_FILE" || true
             fi
-          fi
-          
-          rm -f "$CLEAN_FILE"
-          
-          # Final Validation
-          if [[ -z "${KABI_SLOT_MODE}" ]]; then
-            echo "⚠️ Unable to Detect Kernel ABI Layout..."
-            echo "📌 Debug Sample:"
-            grep -n "KABI" "$SCHED_FILE" | head -n 20 || true
-            exit 1
+
+            # Clean Up Patch File
+            echo "🧹 Cleaning Up Downloaded Patch..."
+            rm -f "$PATCH_FILE"
           fi
 
           echo ""
-          echo "------------------------------"
-          echo "📦 Kernel ABI Mode: $KABI_SLOT_MODE"
-          echo "------------------------------"
-          echo ""
-          
-          # Select Patch (WildKernels Kernel Patches Repository)
-          echo "📦 Selecting Kernel ABI Patch..."
-          
-          case "$KABI_SLOT_MODE" in
-            1_2_3) PATCH_NAME="fix_sysvipc_kabi_1_2_3.patch" ;;
-            3_4_5) PATCH_NAME="fix_sysvipc_kabi_3_4_5.patch" ;;
-            6_7_8) PATCH_NAME="fix_sysvipc_kabi_6_7_8.patch" ;;
-            *)
-              echo "⚠️ Invalid ABI Mode: ${KABI_SLOT_MODE:-unknown}"
-              exit 1
-              ;;
-          esac
-          
-          PATCH_URL="https://raw.githubusercontent.com/WildKernels/kernel_patches/main/common/droidspaces/$PATCH_NAME"
-          PATCH_FILE="$GITHUB_WORKSPACE/$PATCH_NAME"
-          
-          echo "📩 Downloading Patch: $PATCH_NAME"
-          
-          curl -fsSL "$PATCH_URL" -o "$PATCH_FILE"
-          
-          if [[ ! -s "$PATCH_FILE" ]]; then
-            echo "⚠️ Patch Download Failed or Empty..."
-            exit 1
-          fi
-          
-          # Apply Patch
-          echo ""
-          echo "🔧 Applying Patch..."
-          
-          cd "$KERNEL_DIR"
-          
-          if ! patch -p1 -F3 --forward < "$PATCH_FILE"; then
-            echo "⚠️ Patch Application Failed..."
-            exit 1
-          fi
-          
-          # Verify System V Interprocess Communication (SYSVIPC) Configuration
-          echo ""
-          echo "🔎 Verifying System V Interprocess Communication (SYSVIPC) Configuration..."
-          
-          if grep -q "CONFIG_SYSVIPC=y" "$CONFIG_FILE"; then
-            echo "✔ System V Interprocess Communication (SYSVIPC) Already Enabled"
-          else
-            echo "⚠️ System V Interprocess Communication (SYSVIPC) Not Enabled (Patch may be Ineffective)..."
-          fi
-          
-          rm -f "$PATCH_FILE"
-          
-          echo ""
-          echo "🎉 DroidSpacesLXC Patch Process Complete!"
+          echo "🎉 DroidspacesLXC Support Patch Process Complete!"
+
 
       # ==============================
       # Re-Kernel Setup
