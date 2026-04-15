@@ -2991,157 +2991,113 @@ jobs:
       # ==============================
       # DroidspacesLXC Support
       # ==============================
-      - name: 🔧 DroidspacesLXC Support
+      - name: 🔧 DroidSpacesLXC Patch Setup
         if: ${{ github.event.inputs.LXCDOCKERSUPPORT == 'DroidSpacesLXC' }}
         shell: bash
         run: |
           set -euo pipefail
-          
+    
           echo "------------------------------"
           echo "🚀 DroidSpacesLXC Patch Setup..."
           echo "------------------------------"
           echo ""
-          
-          # Detect Kernel Root
-          echo "🔍 Detecting Kernel Root..."
-          
-          possible_kernel_dirs=(
-            "${GITHUB_WORKSPACE}/kernel_workspace/kernel_platform/common"
-            "${GITHUB_WORKSPACE}/kernel_workspace/kernel_platform"
-            "${GITHUB_WORKSPACE}/kernel_workspace"
-          )
-          
-          KERNEL_DIR=""
-          
-          for dir in "${possible_kernel_dirs[@]}"; do
-            echo "🔎 Checking: $dir"
-          
-            if [[ -d "$dir" ]] && \
-               [[ -f "$dir/Makefile" ]] && \
-               [[ -f "$dir/scripts/Makefile.build" ]]; then
-              KERNEL_DIR="$dir"
-              echo "📌 Kernel Root Detected: $KERNEL_DIR"
-              break
-            fi
-          done
-          
-          if [[ -z "${KERNEL_DIR:-}" ]]; then
-            echo "⚠️ No Valid Kernel Root Found"
-            exit 1
-          fi
-          
-          # Kernel ABI Detector
-          echo "🧠 Detecting Kernel ABI Slot Layout..."
-          
+    
+          # Define Kernel Directory Directly
+          KERNEL_DIR="${GITHUB_WORKSPACE}/kernel_workspace/kernel_platform/common"
+    
+          # Check Header Existence
           SCHEDFILE="${KERNEL_DIR}/include/linux/sched.h"
-          
+    
+          echo "🔍 Checking if sched.h exists at: $SCHEDFILE"
+    
           if [[ ! -f "$SCHEDFILE" ]]; then
-            echo "⚠️ Sched Header Not Found: $SCHED_FILE"
+            echo "⚠️ Sched Header Not Found at: $SCHEDFILE"
             exit 1
           fi
-
-          # Kernel ABI Auto-Detection
-          KABI_SLOT=""
-          
-          # Primary Detection Signals
+    
+          echo "📌 Sched Header Found... Proceeding with Patch Application..."
+    
+          # Kernel ABI Detection based on sched.h
+          echo "🧠 Detecting Kernel ABI Slot Layout..."
+    
+          KABI=""
           if grep -q "ANDROID_KABI_USE(1," "$SCHEDFILE"; then
-            KABI="6-7-8"          
-     
+            KABI="6-7-8"
           elif grep -q "ANDROID_KABI_RESERVE(1);" "$SCHEDFILE"; then
-            KABI="1-2-3"          
-      
-          elif grep -q "ANDROID_KABI_RESERVE(3);" "SCHEDFILE"; then
-            KABI="3-4-5"         
-       
-          # Fallback Heuristic (CI Safety Net)
+            KABI="1-2-3"
+          elif grep -q "ANDROID_KABI_RESERVE(3);" "$SCHEDFILE"; then
+            KABI="3-4-5"
           else
-            RESERVE_COUNT=$(grep -oE "ANDROID_KABI_RESERVE\\([0-9]+\\)" "$SCHEDFILE" \
-              | sort -u | wc -l || true)          
-         
-            USE_COUNT=$(grep -c "ANDROID_KABI_USE" "$SCHEDFILE" || true)          
-           
-            if [[ "$USE_COUNT" -gt 0 ]]; then
-              KABI="6-7-8"
-            elif [[ "$RESERVE_COUNT" -ge 3 ]]; then
-              KABI="3-4-5"
-            elif [[ "$RESERVE_COUNT" -eq 1 ]]; then
-              KABI="1-2-3"
-            fi
-          fi
-          
-          rm -f "$SCHEDFILE"
-          
-          # Final Validation
-          if [[ -z "${KABI}" ]]; then
             echo "⚠️ Unable to Detect Kernel ABI Layout"
-            echo "📌 Debug Sample:"
-            grep -n "KABI" "$SCHEDFILE" | head -n 20 || true
             exit 1
           fi
-          
+    
           echo "------------------------------"
-          echo "📦 Kernel ABI Mode: $KABI"
+          echo "📦 Detected Kernel ABI Slot Layout: $KABI"
           echo "------------------------------"
-          echo ""
-          
-          # Select Patch (WildKernels)
+    
+          # Clone WildKernels Kernel Patches Repository
+          PATCH_REPO="https://github.com/WildKernels/kernel_patches.git"  # WildKernels repo URL
+          PATCH_DIR="${GITHUB_WORKSPACE}/kernel_workspace/kernel_patches"  # Directory to clone into
+    
+          echo "📩 Cloning WildKernels Kernel Patches Repository..."
+          git clone "$PATCH_REPO" "$PATCH_DIR"
+    
+          # Set up Patch Directory for DroidSpaces
+          PATCH_DIR="${PATCH_DIR}/main/common/droidspaces"
+    
+          # Select Patch (WildKernels) Based on the Detected Kernel ABI
           echo "📦 Selecting Kernel ABI Patch..."
-          
+    
           case "$KABI" in
             1-2-3) PATCHNAME="fix_sysvipc_kabi_1_2_3.patch" ;;
             3-4-5) PATCHNAME="fix_sysvipc_kabi_3_4_5.patch" ;;
             6-7-8) PATCHNAME="fix_sysvipc_kabi_6_7_8.patch" ;;
             *)
-              echo "⚠️ Invalid ABI Mode: ${KABI:-unknown}"
+              echo "⚠️ Invalid Kernel ABI Mode: ${KABI:-unknown}"
               exit 1
               ;;
           esac
-
-          # Patch Directory
-          URL="https://raw.githubusercontent.com/WildKernels/kernel_patches/main/common/droidspaces/$PATCHNAME"
-          PFILE="$GITHUB_WORKSPACE/$PATCHNAME"
-          
-          echo "📩 Downloading Patch From: $URL"          
-          curl -fsSL "$URL" -o "$PFILE" || {
-            echo "⚠️ Failed to Download Patch; Skipping..."
-          }
-
-          echo "
-          
-          if [[ ! -s "$PFILE" ]]; then
-            echo "⚠️ Patch Download Failed or Empty..."
+    
+          # Patch File Path in the Cloned Repository
+          PATCH_FILE="$PATCH_DIR/$PATCHNAME"
+    
+          # Check if the Patch File Exists
+          echo "🔍 Checking for patch file: $PATCH_FILE"
+          if [[ ! -f "$PATCH_FILE" ]]; then
+            echo "⚠️ Patch file not found: $PATCH_FILE"
             exit 1
           fi
-          
+    
           # Apply Patch
           echo ""
           echo "🔧 Applying Patch..."
-
-          # Kernel Directory
+    
+          # Navigate to the Kernel Directory
           cd "$KERNEL_DIR"
-          
+    
           APPLIED=false
-            for plevel in 0 1 2; do
-              echo "⚙️ Trying to Apply Patch with -p$plevel"
-              if patch -p$plevel --forward --dry-run < "$PFILE" > /dev/null 2>&1; then
-                patch -p$plevel --forward < "$PFILE"
-                echo "✔️ Patch Applied with -p$plevel"
-                APPLIED=true
-                break
-              fi
-            done
-
-            if [[ "$APPLIED" == false ]]; then
-              echo "⚠️ Skipped (Not Compatible / Already Applied)"
-              exit 1
+          for plevel in 0 1 2; do
+            echo "⚙️ Trying to Apply Patch with -p$plevel"
+            if patch -p$plevel --forward --dry-run < "$PATCH_FILE" > /dev/null 2>&1; then
+              patch -p$plevel --forward < "$PATCH_FILE"
+              echo "✔️ Patch Applied with -p$plevel"
+              APPLIED=true
+              break
             fi
-          
-          # Cleanup Downloaded Patch File
+          done
+    
+          if [[ "$APPLIED" == false ]]; then
+            echo "⚠️ Failed to Apply Patch (Not Compatible or Already Applied)"
+            exit 1
+          fi
+    
+          # Cleanup Downloaded Patch File 
           echo "🧹 Cleaning Up..."
-          rm -f "$PFILE"
-          
+          rm -rf "$PATCH_DIR"  
+    
           echo ""
-          echo "🎉 DroidSpacesLXC Patch Process Complete!"
+          echo "🎉 DroidSpacesLXC Patch Process Complete!"          
 
       # ==============================
       # Re-Kernel Setup
