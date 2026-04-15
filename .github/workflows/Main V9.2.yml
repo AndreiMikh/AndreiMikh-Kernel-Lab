@@ -4665,105 +4665,134 @@ jobs:
           echo "🎉 ZRAM Addon Module Prepared Successfully"
 
       # ==============================
-      # Download Selected Root Engine Manager Source APK
+      # AI APK Workflow Resolver (Hardened Information Logging)
       # ==============================
-      - name: 🔧 Download Selected Root Engine Manager Source APK
+      - name: 🔧 AI APK Workflow Resolver
         continue-on-error: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          set -uo pipefail
-
+          set -euo pipefail
+      
+          export GH_TOKEN="$GITHUB_TOKEN"
+      
           echo "------------------------------"
-          echo "🚀 Root Engine Manager Download Processing..."
+          echo "🚀 AI APK Resolver Started..."
           echo "------------------------------"
-          echo ""
-
+      
           REPO="${{ steps.manager.outputs.KSU_REPO }}"
           BRANCH="${{ steps.manager.outputs.MANAGER_BRANCH }}"
-          ARTIFACT="${{ steps.manager.outputs.MANAGER_ARTIFACT }}"
-
+      
           APK_DIR="${GITHUB_WORKSPACE}/ManagerAPK"
-
-          echo "📂 Repository: $REPO"
-          echo "📂 Branch:     $BRANCH"
-          echo "📂 Artifact:   $ARTIFACT"
-          echo "📂 Output Dir: $APK_DIR"
+          mkdir -p "$APK_DIR"
+          
+          echo ""
           echo "------------------------------"
-
-          # Prepare Directory
-          mkdir -p "$APK_DIR" || true
-     
-          # Get Latest Successful Run
-          run_id=$(gh api \
-            "repos/$REPO/actions/runs?branch=$BRANCH&status=success&per_page=10" \
-            --jq '.workflow_runs[] | select(.name | test("build|release|apk"; "i")) | .id' \
-            | head -n1)
-
-          if [[ -z "${run_id:-}" || "$run_id" == "null" ]]; then
-            echo "⚠️ No Successful Workflow Run Found — Skipping..."
+          echo "ℹ️ [Info] Repository       : $REPO"
+          echo "ℹ️ [Info] Branch           : $BRANCH"
+          echo "ℹ️ [Info] Output Directory : $APK_DIR"
+          echo "------------------------------"
+          echo ""
+      
+          echo "🔎 [Step 1] Fetching Latest Successful Workflow Runs..."
+      
+          # Safe Array of Runs
+          mapfile -t runs < <(
+            gh api \
+              "repos/$REPO/actions/runs?branch=$BRANCH&status=success&per_page=50" \
+              --jq '.workflow_runs
+                | sort_by(.created_at)
+                | reverse
+                | .[].id'
+          )
+      
+          if [[ ${#runs[@]} -eq 0 ]]; then
+            echo "⚠️ [Error] No Successful Runs Found"
             exit 0
           fi
-
-          echo "🔎 Found Run ID: $run_id"
-
-          # Debug - Listing Artifacts from Run
-          echo "📦 Listing Artifacts from Run:"
-          gh api "repos/$REPO/actions/runs/$run_id/artifacts" \
-            --jq '.artifacts[]?.name'
-     
-          # Get Artifact URL
-          artifact_url=$(gh api \
-            "repos/$REPO/actions/runs/$run_id/artifacts" \
-            --jq ".artifacts[] | select(.name == \"$ARTIFACT\") | .archive_download_url" \
-            2>/dev/null | head -n1)
-
-          # Fallback: Take First Artifact if Exact Match Not Found
-          if [[ -z "${artifact_url:-}" ]]; then
-            echo "⚠️ Exact Artifact Not Found — Using First Available Artifact"
-            artifact_url=$(gh api \
+      
+          echo "ℹ️ [Info] Found ${#runs[@]} Workflow Runs..."
+          echo "🔍 [Step 2] Scanning Runs for APK Artifacts..."
+      
+          selected_run=""
+          best_score=0
+      
+          for run_id in "${runs[@]}"; do
+            echo "------------------------------"
+            echo "🔍 [Check] Run ID: $run_id"
+      
+            artifact_names=$(gh api \
               "repos/$REPO/actions/runs/$run_id/artifacts" \
-              --jq '.artifacts[0].archive_download_url' \
-              2>/dev/null || echo "")
-          fi
-
-          # Ensure Artifact Exists
-          if [[ -z "${artifact_url:-}" ]]; then
-            echo "⚠️ No Artifact URL Resolved — Skipping..."
+              --jq '.artifacts[].name' 2>/dev/null || true)
+      
+            if [[ -z "$artifact_names" ]]; then
+              echo "⚠️ [SKIP] No Artifacts Found"
+              continue
+            fi
+      
+            score=0
+      
+            # AI Scoring Engine
+            if echo "$artifact_names" | grep -qi "apk"; then
+              score=$((score + 50))
+            fi
+      
+            if echo "$artifact_names" | grep -qi "manager"; then
+              score=$((score + 20))
+            fi
+      
+            if echo "$artifact_names" | grep -qi "release\|build"; then
+              score=$((score + 10))
+            fi
+      
+            echo "📊 [Info] Score for Run $run_id = $score"
+      
+            if [[ "$score" -gt "$best_score" ]]; then
+              best_score="$score"
+              selected_run="$run_id"
+              echo "🏆 [NEW BEST] Selected run updated → $run_id"
+            fi
+          done
+      
+          if [[ -z "$selected_run" ]]; then
+            echo "⚠️ [Error] No Valid APK Workflow Found"
             exit 0
-          fi
-
-          # Download Artifact
-          echo "📩 Downloading Artifact..."
-          if ! curl -fL -H "Authorization: token $GITHUB_TOKEN" -o manager.zip "$artifact_url"; then
-            echo "⚠️ Download Failed — Skipping..."
-            exit 0
-          fi
-
-          # Extract APK
-          echo "⚙️ Extracting APK..."
-
-          if unzip -o -j manager.zip "*.apk" -d "$APK_DIR" >/dev/null 2>&1; then
-            echo "📌 APK Extracted"
-          else
-            echo "⚠️ No APK Found in Artifact"
-          fi
-
-          rm -f manager.zip || true
-
-          # Verify Results
-          APK_COUNT=$(find "$APK_DIR" -maxdepth 1 -name "*.apk" | wc -l)
-
-          if [[ "$APK_COUNT" -gt 0 ]]; then
-            echo "📦 Found $APK_COUNT APK(s):"
-            ls -lh "$APK_DIR"
-          else
-            echo "⚠️ No APK File(s) Present After Extraction"
           fi
 
           echo ""
-          echo "🎉 Done"
+          echo "------------------------------"
+          echo "🏁 [Result] Selected Run: $selected_run"
+          echo "🏁 [Result] Best Score  : $best_score"
+          echo "------------------------------"
+          echo ""
+      
+          echo "📩 [Step 3] Downloading Artifacts..."
+      
+          gh run download "$selected_run" -D "$APK_DIR" || {
+            echo "⚠️ [Error] Artifact Download Failed"
+            exit 0
+          }
+      
+          echo "🧹 [Step 4] Cleaning Non-APK Files..."
+      
+          find "$APK_DIR" -type f ! -name "*.apk" -delete
+      
+          echo "🔍 [Step 5] Verifying Output..."
+      
+          APK_COUNT=$(find "$APK_DIR" -maxdepth 1 -name "*.apk" | wc -l)
+      
+          if [[ "$APK_COUNT" -gt 0 ]]; then
+            echo "------------------------------"
+            echo "📦 [Success] APKs Found: $APK_COUNT"
+            ls -lh "$APK_DIR"
+            echo "------------------------------"
+          else
+            echo "⚠️ [Warning] No APK Files Found"
+          fi
 
+          echo ""
+          echo "🎉 AI APK Resolver completed successfully"
+          
       # ==============================
       # Upload Flashable Kernel Artifact
       # ==============================
