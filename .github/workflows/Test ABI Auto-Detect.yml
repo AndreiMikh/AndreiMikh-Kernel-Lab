@@ -3045,13 +3045,13 @@ jobs:
           
           # Primary Detection Signals
           if grep -q "ANDROID_KABI_USE(1," "$SCHEDFILE"; then
-            KABI_SLOT="6_7_8"          
+            KABI="6-7-8"          
      
           elif grep -q "ANDROID_KABI_RESERVE(1);" "$SCHEDFILE"; then
-            KABI_SLOT="1_2_3"          
+            KABI="1-2-3"          
       
           elif grep -q "ANDROID_KABI_RESERVE(3);" "SCHEDFILE"; then
-            KABI_SLOT="3_4_5"         
+            KABI="3-4-5"         
        
           # Fallback Heuristic (CI Safety Net)
           else
@@ -3061,18 +3061,18 @@ jobs:
             USE_COUNT=$(grep -c "ANDROID_KABI_USE" "$SCHEDFILE" || true)          
            
             if [[ "$USE_COUNT" -gt 0 ]]; then
-              KABI_SLOT="6_7_8"
+              KABI="6-7-8"
             elif [[ "$RESERVE_COUNT" -ge 3 ]]; then
-              KABI_SLOT="3_4_5"
+              KABI="3-4-5"
             elif [[ "$RESERVE_COUNT" -eq 1 ]]; then
-              KABI_SLOT="1_2_3"
+              KABI="1-2-3"
             fi
           fi
           
           rm -f "$SCHEDFILE"
           
           # Final Validation
-          if [[ -z "${KABI_SLOT}" ]]; then
+          if [[ -z "${KABI}" ]]; then
             echo "⚠️ Unable to Detect Kernel ABI Layout"
             echo "📌 Debug Sample:"
             grep -n "KABI" "$SCHEDFILE" | head -n 20 || true
@@ -3080,32 +3080,32 @@ jobs:
           fi
           
           echo "------------------------------"
-          echo "📦 Kernel ABI Mode: $KABI_SLOT"
+          echo "📦 Kernel ABI Mode: $KABI"
           echo "------------------------------"
           echo ""
           
           # Select Patch (WildKernels)
           echo "📦 Selecting Kernel ABI Patch..."
           
-          case "$KABI_SLOT" in
-            1_2_3) PATCH_NAME="fix_sysvipc_kabi_1_2_3.patch" ;;
-            3_4_5) PATCH_NAME="fix_sysvipc_kabi_3_4_5.patch" ;;
-            6_7_8) PATCH_NAME="fix_sysvipc_kabi_6_7_8.patch" ;;
+          case "$KABI" in
+            1-2-3) PATCHNAME="fix_sysvipc_kabi_1_2_3.patch" ;;
+            3-4-5) PATCHNAME="fix_sysvipc_kabi_3_4_5.patch" ;;
+            6-7-8) PATCHNAME="fix_sysvipc_kabi_6_7_8.patch" ;;
             *)
-              echo "⚠️ Invalid ABI Mode: ${KABI_SLOT:-unknown}"
+              echo "⚠️ Invalid ABI Mode: ${KABI:-unknown}"
               exit 1
               ;;
           esac
 
           # Patch Directory
-          PATCH_URL="https://raw.githubusercontent.com/WildKernels/kernel_patches/main/common/droidspaces/$PATCH_NAME"
-          PATCH_FILE="$GITHUB_WORKSPACE/$PATCH_NAME"
+          URL="https://raw.githubusercontent.com/WildKernels/kernel_patches/main/common/droidspaces/$PATCHNAME"
+          PFILE="$GITHUB_WORKSPACE/$PATCHNAME"
           
-          echo "📩 Downloading Patch: $PATCH_NAME"
+          echo "📩 Downloading Patch: $PATCHNAME"
           
-          curl -fsSL "$PATCH_URL" -o "$PATCH_FILE"
+          curl -fsSL "$URL" -o "$PFILE"
           
-          if [[ ! -s "$PATCH_FILE" ]]; then
+          if [[ ! -s "$PFILE" ]]; then
             echo "⚠️ Patch Download Failed or Empty..."
             exit 1
           fi
@@ -3117,15 +3117,25 @@ jobs:
           # Kernel Directory
           cd "$KERNEL_DIR"
           
-          if ! patch -p1 -F3 --forward < "$PATCH_NAME"; then
-            echo "✔️ Patch Applied"
-          else
-            echo "⚠️ Patch Application Failed"
-            exit 1
-          fi
+          APPLIED=false
+            for plevel in 0 1 2; do
+              echo "⚙️ Trying to Apply Patch with -p$plevel"
+              if patch -p$plevel --forward --dry-run < "$PFILE" > /dev/null 2>&1; then
+                patch -p$plevel --forward < "$PFILE"
+                echo "✔️ Patch Applied with -p$plevel"
+                APPLIED=true
+                break
+              fi
+            done
+
+            if [[ "$APPLIED" == false ]]; then
+              echo "⚠️ Skipped (Not Compatible / Already Applied)"
+              exit 1
+            fi
           
-          # Clean Downloaded Patch File
-          rm -f "$PATCH_FILE"
+          # Cleanup Downloaded Patch File
+          echo "🧹 Cleaning Up..."
+          rm -f "$PFILE"
           
           echo ""
           echo "🎉 DroidSpacesLXC Patch Process Complete!"
