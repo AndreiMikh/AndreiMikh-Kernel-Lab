@@ -707,6 +707,14 @@ jobs:
               print_unicode "BUILDTIME" "${{ github.event.inputs.BUILDTIME }}"
               print_unicode "SUFFIX" "${{ github.event.inputs.SUFFIX }}"
 
+              # Force Disable Rust Globally
+              unset ENABLE_RUST || true
+              export ENABLE_RUST=false
+              echo "ENABLE_RUST=false" >> "$GITHUB_ENV"
+              
+              echo "🧠 Enable Rust (Effective): False"
+              echo "🚫 Rust Disabled Globally"
+
               echo ""
 
       # ==============================
@@ -1181,13 +1189,13 @@ jobs:
           if [[ -f "$CONFIG_FILE" ]]; then
             echo "🔎 Checking Build Configuration Constants..."
 
-            RUSTC_VERSION=$(grep '^RUSTC_VERSION=' "$CONFIG_FILE" | cut -d'=' -f2 || true)
+            RUSTC_VERSION=$(grep -m1 '^RUSTC_VERSION=' "$CONFIG_FILE" | sed 's/^RUSTC_VERSION=//' || true)
 
             if [[ -n "$RUSTC_VERSION" ]]; then
-              echo "📌 Rust Compiler Version Detected: $RUSTC_VERSION"
+              echo "📌 RUSTC Compiler Version Detected: $RUSTC_VERSION"
               RUST_ENABLED="true"
             else
-              echo "⚠️ No Rust Version Source Found"
+              echo "⚠️ No RUSTC Version Source Found"
             fi
           else
             echo "⚠️ Build Configuration Constants Not Found"
@@ -1195,7 +1203,7 @@ jobs:
 
           # 2️⃣ Fallback: Check if Toolchain Exists
           if [[ "$RUST_ENABLED" == "false" ]]; then
-            if [[ -d "prebuilts/rust" ]]; then
+            if [[ -x "prebuilts/rust/linux-x86/bin/rustc" ]]; then
               echo "📦 Rust Toolchain Detected (Fallback)"
               RUST_ENABLED="true"
             fi
@@ -1204,16 +1212,26 @@ jobs:
           # 3️⃣ Export to GitHub Environment
           if [[ "$RUST_ENABLED" == "true" ]]; then
             echo "ENABLE_RUST=true" >> "$GITHUB_ENV"
-
-            if [[ -n "$RUSTC_VERSION" ]]; then
-              echo "RUSTC_VERSION=$RUSTC_VERSION" >> "$GITHUB_ENV"
+          
+            # Ensure RUSTC Version is Always Defined
+            if [[ -z "$RUSTC_VERSION" ]]; then
+              if [[ -x "prebuilts/rust/linux-x86/bin/rustc" ]]; then
+                RUSTC_VERSION=$("prebuilts/rust/linux-x86/bin/rustc" --version | awk '{print $2}')
+                echo "🔍 Detected RUSTC from System: $RUSTC_VERSION"
+              else
+                RUSTC_VERSION="unknown"
+                echo "⚠️ RUSTC Enabled But Version Unknown"
+              fi
             fi
+          
+            echo "RUSTC_VERSION=$RUSTC_VERSION" >> "$GITHUB_ENV"
           else
             echo "ENABLE_RUST=false" >> "$GITHUB_ENV"
+            echo "RUSTC_VERSION=none" >> "$GITHUB_ENV"
           fi
 
           echo ""
-          echo "🎉 Rust Compilation Enabled: $RUST_ENABLED"
+          echo "🎉 ENABLE_RUST (Final): $RUST_ENABLED"
           
       # ==============================
       # Inject Custom Kernel Version Suffix
@@ -3461,13 +3479,33 @@ jobs:
             echo "CONFIG_DEBUG_INFO_BTF=n" >> "$CONFIG_FILE"
           fi
 
+          # Force Disable Rust Globally
+          ENABLE_RUST=false
+          echo "ENABLE_RUST=false" >> "$GITHUB_ENV"
+          
           # Enable Rust Support if Requested
           if [[ "$ENABLE_RUST" == "true" ]]; then
+            echo "🚀 Applying Rust Kernel Configuration..."
+          
             cat >> "$CONFIG_FILE" <<'EOF'
           CONFIG_RUST=y
           CONFIG_ANDROID_BINDER_IPC_RUST=m
           EOF
-            echo "🎉 Rust Support Request Applied and Granted"
+          
+            export LLVM=1
+            export LLVM_IAS=1
+          
+            if ! command -v bindgen >/dev/null 2>&1; then
+              echo "⚠️ Bindgen Not Found — Rust Kernel Build may Fail"
+            fi
+          
+            if [[ "$KERNEL_VERSION" == "6.1" ]]; then
+              echo "⚠️ Rust on Kernel 6.1 may be Incomplete"
+            fi
+          
+            echo "🎉 Rust Support Fully Configured"
+          else
+            echo "🚩 Rust Disabled Globally — Skipping Rust Configuration"
           fi
   
           # Remove Build Review
@@ -3757,10 +3795,21 @@ jobs:
           ccache -M 5G || echo "⚠️ Compiler Cache Not Available"
           
           if [[ "${ENABLE_RUST:-false}" == "true" ]]; then
+            echo "🦀 Setting up Rust Environment..."
+          
+            export RUST_PREBUILT="$GITHUB_WORKSPACE/kernel_workspace/kernel_platform/prebuilts/rust/linux-x86"
+          
+            if [[ -x "$RUST_PREBUILT/bin/rustc" ]]; then
+              export PATH="$RUST_PREBUILT/bin:$PATH"
+              echo "✔ rustc found: $("$RUST_PREBUILT/bin/rustc" --version)"
+            else
+              echo "⚠️ RUSTC Not Found in Pre-Builts!"
+            fi
+          
             export BINDGEN="bindgen"
             export LIBCLANG_PATH="$GITHUB_WORKSPACE/kernel_workspace/kernel_platform/$(dirname "$CLANG_PREBUILT_BIN")/lib"
           fi
-
+         
           # Enter Kernel Source Directory
           if [[ -f ./common/Makefile ]]; then
             cd ./common
@@ -3769,7 +3818,7 @@ jobs:
             exit 1
           fi
 
-          # Physical Path Remapping
+          # Physical Path Re-Mapping
           ROOT_REAL_PATH=$(realpath ../..) || { echo "⚠️ Real Path Failed"; exit 1; }
           
           MAP="-fdebug-prefix-map=$ROOT_REAL_PATH=."
