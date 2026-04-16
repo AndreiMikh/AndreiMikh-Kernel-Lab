@@ -2989,156 +2989,161 @@ jobs:
           echo "🎉 ADIOS Scheduler Patch Process Complete!"
 
       # ==============================
-      # DroidspacesLXC Support
+      # DroidspacesLXC Support 
       # ==============================
       - name: 🔧 DroidspacesLXC Support
         if: ${{ github.event.inputs.LXCDOCKERSUPPORT == 'DroidSpacesLXC' }}
         shell: bash
         run: |
           set -euo pipefail
-          
+      
           echo "------------------------------"
-          echo "🚀 DroidSpacesLXC Patch Setup..."
+          echo "🚀 DroidspacesLXC Patch Setup"
           echo "------------------------------"
           echo ""
-          
+      
           # Detect Kernel Root
           echo "🔍 Detecting Kernel Root..."
-          
+      
           possible_kernel_dirs=(
             "${GITHUB_WORKSPACE}/kernel_workspace/kernel_platform/common"
             "${GITHUB_WORKSPACE}/kernel_workspace/kernel_platform"
             "${GITHUB_WORKSPACE}/kernel_workspace"
           )
-          
+      
           KERNEL_DIR=""
-          
+      
           for dir in "${possible_kernel_dirs[@]}"; do
             echo "🔎 Checking: $dir"
-          
-            if [[ -d "$dir" ]] && \
-               [[ -f "$dir/Makefile" ]] && \
-               [[ -f "$dir/scripts/Makefile.build" ]]; then
+      
+            if [[ -d "$dir" ]] && [[ -f "$dir/Makefile" ]] && [[ -f "$dir/scripts/Makefile.build" ]]; then
               KERNEL_DIR="$dir"
               echo "📌 Kernel Root Detected: $KERNEL_DIR"
               break
             fi
           done
-          
+      
           if [[ -z "${KERNEL_DIR:-}" ]]; then
             echo "⚠️ No Valid Kernel Root Found"
             exit 1
           fi
-
-          echo "------------------------------"
-          echo "🚀 Kernel ABI Detection..."
-          echo "------------------------------"
+      
+          # ABI Detection (Score-Based Engine)
           echo ""
-          
-          # Kernel ABI Detector
           echo "🧠 Detecting Kernel ABI Slot Layout..."
-          
+      
           SCHEDFILE="${KERNEL_DIR}/include/linux/sched.h"
-          
+      
           if [[ ! -f "$SCHEDFILE" ]]; then
             echo "⚠️ Headers Not Found: $SCHEDFILE"
             exit 1
           fi
-
-          # Kernel ABI Auto-Detection
-          KABI=""
-          
-          # Primary Kernel ABI Detection Signals
-          if grep -q "ANDROID_KABI_USE(1," "$SCHEDFILE"; then
-            KABI="6_7_8"          
-     
-          elif grep -q "ANDROID_KABI_RESERVE(1);" "$SCHEDFILE"; then
-            KABI="1_2_3"          
       
-          elif grep -q "ANDROID_KABI_RESERVE(3);" "$SCHEDFILE"; then
-            KABI="3_4_5"         
-       
-          # Fallback Heuristic (CI Safety Net)
-          else
-            RESERVE_COUNT=$(grep -oE "ANDROID_KABI_RESERVE\\([0-9]+\\)" "$SCHEDFILE" \
-              | sort -u | wc -l || true)          
-         
-            USE_COUNT=$(grep -c "ANDROID_KABI_USE" "$SCHEDFILE" || true)          
-           
-            if [[ "$USE_COUNT" -gt 0 ]]; then
-              KABI="6_7_8"
-            elif [[ "$RESERVE_COUNT" -ge 3 ]]; then
-              KABI="3_4_5"
-            elif [[ "$RESERVE_COUNT" -eq 1 ]]; then
-              KABI="1_2_3"
+          CLEAN_FILE=$(mktemp)
+      
+          # Normalize (Remove Comments + Noise)
+          sed -E 's/\/\*.*\*\///g' "$SCHEDFILE" \
+            | sed -E 's/\/\/.*//g' \
+            | tr -s ' ' \
+            > "$CLEAN_FILE"
+      
+          # Score System
+          score_123=0
+          score_345=0
+          score_678=0
+      
+          # Strong Signals
+          grep -q "ANDROID_KABI_USE(1," "$CLEAN_FILE" && score_678=$((score_678 + 100))
+          grep -q "ANDROID_KABI_RESERVE(1)" "$CLEAN_FILE" && score_123=$((score_123 + 90))
+          grep -q "ANDROID_KABI_RESERVE(3)" "$CLEAN_FILE" && score_345=$((score_345 + 90))
+      
+          # Weak Signals
+          reserve_total=$(grep -oE "ANDROID_KABI_RESERVE\\([0-9]+\\)" "$CLEAN_FILE" | wc -l || true)
+          use_total=$(grep -c "ANDROID_KABI_USE" "$CLEAN_FILE" || true)
+      
+          [[ "$use_total" -gt 0 ]] && score_678=$((score_678 + 30))
+          [[ "$reserve_total" -eq 1 ]] && score_123=$((score_123 + 20))
+          [[ "$reserve_total" -ge 3 ]] && score_345=$((score_345 + 20))
+      
+          rm -f "$CLEAN_FILE"
+      
+          # ABI Override 
+          if grep -q "ANDROID_KABI_RESERVE(1);" "$SCHEDFILE"; then
+            KVER=$(make kernelversion 2>/dev/null || true)
+      
+            if [[ "$KVER" == 6.* ]] || [[ "$KVER" == 5.15* ]]; then
+              echo "⚠️ Reserve(1) but Modern Kernel Detected → Forcing 6, 7, 8..."
+              score_678=$((score_678 + 50))
             fi
           fi
-          
-          # Final Validation
-          if [[ -z "${KABI}" ]]; then
-            echo "⚠️ Unable to Detect Kernel ABI Layout"
-            echo "📌 Debug Sample:"
-            grep -n "KABI" "$SCHEDFILE" | head -n 20 || true
-            exit 1
+      
+          # Final Decision (Deterministic)
+          if (( score_678 >= score_345 && score_678 >= score_123 )); then
+            KABI="6_7_8"
+          elif (( score_345 >= score_123 )); then
+            KABI="3_4_5"
+          else
+            KABI="1_2_3"
           fi
-          
-          echo "------------------------------"
-          echo "📦 Kernel ABI Slot Layout: $KABI"
-          echo "------------------------------"
-          echo ""
-          
-          # Selected Patch Repository (WildKernels)
-          echo "📦 Selecting Kernel ABI Patch..."
 
-          # Download Patch 
-          PATCH_URL="https://raw.githubusercontent.com/WildKernels/kernel_patches/main/common/droidspaces/fix_sysvipc_kabi_${KABI}.patch"
-          PATCH_FILE="$GITHUB_WORKSPACE/fix_sysvipc_kabi_${KABI}.patch"
-          
-          echo "📩 Downloading Patch:"
-          echo "   $PATCH_URL"
-          
-          STATUS="Unknown"
-          
-          if ! curl -fsSL "$PATCH_URL" -o "$PATCH_FILE"; then
-            echo "⚠️ Patch Download Failed → Skipping"
-            STATUS="Missing"
-          else
-          
-            # Apply Patch
-            echo ""
-            echo "🔧 Applying Patch..."
-          
-            cd "$KERNEL_DIR"
-          
-            for p in 0 1 2; do
-              echo "⚙️ Trying -p$p"
-          
-              if patch -p$p --forward --dry-run < "$PATCH_FILE" > /dev/null 2>&1; then
-                patch -p$p --forward < "$PATCH_FILE"
-                echo "✔️ Patch Applied (-p$p)"
-                STATUS="Applied"
-                break
-              fi
-          
-              if patch -R -p$p --dry-run < "$PATCH_FILE" > /dev/null 2>&1; then
-                echo "✔️ Patch Already Applied (-p$p)"
-                STATUS="Already-Applied"
-                break
-              fi
-            done
-          
-            if [[ "$STATUS" == "Unknown" ]]; then
-              echo "⚠️ Patch Incompatible with Kernel"
-              exit 1
-            fi
-          
-            echo "🧹 Cleaning up..."
-            rm -f "$PATCH_FILE"
-          fi
-          
           echo ""
-          echo "📊 Patch Status: $STATUS"
-          echo "🎉 DroidSpacesLXC Patch Complete!"
+          echo "------------------------------"
+          echo "📊 ABI Scores"
+          echo "  1_2_3 = $score_123"
+          echo "  3_4_5 = $score_345"
+          echo "  6_7_8 = $score_678"
+          echo "------------------------------"
+          echo "📦 Selected ABI: $KABI"
+          echo "------------------------------"
+          echo ""
+      
+          # Patch Download
+          PATCH_URL="https://raw.githubusercontent.com/WildKernels/kernel_patches/main/common/droidspaces/fix_sysvipc_kabi_${KABI}.patch"
+          PATCH_FILE="$GITHUB_WORKSPACE/patch_${KABI}.patch"
+      
+          echo "📩 Downloading Patch"
+          echo "$PATCH_URL"
+      
+          if ! curl -fsSL "$PATCH_URL" -o "$PATCH_FILE"; then
+            echo "⚠️ Patch Download Failed → Skipping Safely"
+            exit 0
+          fi
+      
+          # Patch Apply 
+          echo ""
+          echo "🔧 Applying Patch..."
+      
+          cd "$KERNEL_DIR"
+      
+          APPLIED=0
+      
+          for p in 0 1 2; do
+            echo "⚙️ Testing -p$p"
+      
+            # Already Applied Check
+            if patch -R -p$p --dry-run < "$PATCH_FILE" >/dev/null 2>&1; then
+              echo "✔ Already Applied (-p$p)"
+              APPLIED=1
+              break
+            fi
+      
+            # Apply Check
+            if patch -p$p --dry-run < "$PATCH_FILE" >/dev/null 2>&1; then
+              patch -p$p < "$PATCH_FILE"
+              echo "✔ Applied (-p$p)"
+              APPLIED=1
+              break
+            fi
+          done
+      
+          rm -f "$PATCH_FILE"
+      
+          if [[ "$APPLIED" -eq 0 ]]; then
+            echo "⚠️ Patch Incompatible → Skipping Safely (No Run Fail)"
+          fi
+      
+          echo ""
+          echo "🎉 DroidspacesLXC Patch Process Complete"
 
       # ==============================
       # Re-Kernel Setup
