@@ -1,0 +1,35 @@
+- name: Apply DROID_SPACES
+  if: ${{ github.event.inputs.DROID_SPACES == 'true' }}
+  run: |
+    set -euo pipefail  # Ensure script stops on errors, undefined variables, and pipe failures
+
+    cd kernel_workspace/kernel_platform/common
+
+    # Modify the original sysv structure definitions to comment them out
+    echo "🔧 Modifying sysv structure definitions..."
+    # Comment out sysv_sem and sysvshm to avoid conflicts with kernel ABI
+    sed -i 's/struct sysv_sem\s*sysvsem;/\/\/ struct sysv_sem sysvsem;/g' include/linux/sched.h
+    sed -i 's/struct sysv_shm\s*sysvshm;/\/\/ struct sysv_shm sysvshm;/g' include/linux/sched.h
+    echo "✅ Sysv structures modified (sysvsem, sysvshm) for kernel ABI compatibility."
+
+    # Check available KABI slots and modify accordingly based on the detected slot
+    if grep -q "ANDROID_KABI_USE(1," include/linux/sched.h; then
+      echo "✅ Detected USE(1), modifying slots 6, 7, and 8"
+      # Modify the KABI slots 6, 7, 8 if USE(1) is found in sched.h
+      sed -i -e '/ANDROID_KABI_RESERVE(6);/{N;N;s|ANDROID_KABI_RESERVE(6);\n\s*ANDROID_KABI_RESERVE(7);\n\s*ANDROID_KABI_RESERVE(8);|#ifdef CONFIG_SYSVIPC\n\tANDROID_KABI_USE(6, struct sysv_sem sysvsem);\n\t_ANDROID_KABI_REPLACE(ANDROID_KABI_RESERVE(7); ANDROID_KABI_RESERVE(8), struct sysv_shm sysvshm);\n#else\n\tANDROID_KABI_RESERVE(6);\n\tANDROID_KABI_RESERVE(7);\n\tANDROID_KABI_RESERVE(8);\n#endif|;}' include/linux/sched.h
+      echo "✅ Slots 6, 7, and 8 modified for USE(1)."
+    elif grep -q "ANDROID_KABI_RESERVE(1);" include/linux/sched.h; then
+      echo "✅ Detected RESERVE(1), modifying slots 1, 2, and 3"
+      # Modify the KABI slots 1, 2, 3 if RESERVE(1) is found in sched.h
+      sed -i -e '/ANDROID_KABI_RESERVE(1);/{N;N;s|ANDROID_KABI_RESERVE(1);\n\s*ANDROID_KABI_RESERVE(2);\n\s*ANDROID_KABI_RESERVE(3);|#ifdef CONFIG_SYSVIPC\n\tANDROID_KABI_USE(1, struct sysv_sem sysvsem);\n\t_ANDROID_KABI_REPLACE(ANDROID_KABI_RESERVE(2); ANDROID_KABI_RESERVE(3), struct sysv_shm sysvshm);\n#else\n\tANDROID_KABI_RESERVE(1);\n\tANDROID_KABI_RESERVE(2);\n\tANDROID_KABI_RESERVE(3);\n#endif|;}' include/linux/sched.h
+      echo "✅ Slots 1, 2, and 3 modified for RESERVE(1)."
+    elif grep -q "ANDROID_KABI_RESERVE(3);" include/linux/sched.h; then
+      echo "✅ Fallback: Detected RESERVE(3), modifying slots 3, 4, and 5"
+      # Modify the KABI slots 3, 4, 5 if RESERVE(3) is found in sched.h
+      sed -i -e '/ANDROID_KABI_RESERVE(3);/{N;N;s|ANDROID_KABI_RESERVE(3);\n\s*ANDROID_KABI_RESERVE(4);\n\s*ANDROID_KABI_RESERVE(5);|#ifdef CONFIG_SYSVIPC\n\tANDROID_KABI_USE(3, struct sysv_sem sysvsem);\n\t_ANDROID_KABI_REPLACE(ANDROID_KABI_RESERVE(4); ANDROID_KABI_RESERVE(5), struct sysv_shm sysvshm);\n#else\n\tANDROID_KABI_RESERVE(3);\n\tANDROID_KABI_RESERVE(4);\n\tANDROID_KABI_RESERVE(5);\n#endif|;}' include/linux/sched.h
+      echo "✅ Slots 3, 4, and 5 modified for RESERVE(3)."
+    else
+      echo "❌ Unable to match KABI slots accurately, exiting"
+      # Exit if no matching slot configuration is found
+      exit 1
+    fi
