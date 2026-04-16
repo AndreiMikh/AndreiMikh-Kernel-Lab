@@ -2998,12 +2998,12 @@ jobs:
           set -euo pipefail
       
           echo "------------------------------"
-          echo "🚀 DroidSpacesLXC Patch System Initializing..."
+          echo "🚀 DroidSpacesLXC Self-Healing ABI Engine v2"
           echo "------------------------------"
           echo ""
       
           # Kernel Root Detection
-          echo "🔍 Step 1: Detecting Kernel Root Directory..."
+          echo "🔍 Detecting Kernel Root..."
       
           possible_kernel_dirs=(
             "${GITHUB_WORKSPACE}/kernel_workspace/kernel_platform/common"
@@ -3014,111 +3014,121 @@ jobs:
           KERNEL_DIR=""
       
           for dir in "${possible_kernel_dirs[@]}"; do
-            echo "➜ Checking: $dir"
-      
-            if [[ -d "$dir" ]] && [[ -f "$dir/Makefile" ]] && [[ -f "$dir/scripts/Makefile.build" ]]; then
+            if [[ -d "$dir" && -f "$dir/Makefile" ]]; then
               KERNEL_DIR="$dir"
-              echo "📂 Kernel Root Found: $KERNEL_DIR"
+              echo "📂 Kernel Root: $KERNEL_DIR"
               break
             fi
           done
       
           if [[ -z "$KERNEL_DIR" ]]; then
-            echo "⚠️ ERROR: No Valid Kernel Root Detected"
+            echo "⚠️ Kernel Root Not Found"
             exit 1
           fi
       
           cd "$KERNEL_DIR"
       
-          # Validate Required Files 
+          # ABI Source Files 
           echo ""
-          echo "📂 Step 2: Validating Kernel ABI Source Files..."
+          echo "📂 Collecting ABI Sources..."
       
-          SCHEDFILE="$KERNEL_DIR/include/linux/sched.h"
-          BINDERFILE="$KERNEL_DIR/include/linux/android/binder.h"
-          SELINUXFILE="$KERNEL_DIR/security/selinux/hooks.c"
+          FILES=(
+            "$KERNEL_DIR/include/linux/sched.h"
+            "$KERNEL_DIR/include/linux/android/binder.h"
+            "$KERNEL_DIR/security/selinux/hooks.c"
+          )
       
-          for f in "$SCHEDFILE" "$BINDERFILE" "$SELINUXFILE"; do
-            if [[ ! -f "$f" ]]; then
-              echo "⚠️ Missing Kernel ABI Source: $f"
+          ABI_INPUTS=()
+      
+          for f in "${FILES[@]}"; do
+            if [[ -f "$f" ]]; then
+              ABI_INPUTS+=("$f")
+            else
+              echo "⚠️ Missing (Ignored): $f"
             fi
           done
       
-          echo "✔ Kernel ABI Source Validation Complete"
-      
           # Kernel Version
           echo ""
-          echo "🧠 Step 3: Detecting Kernel Version..."
-      
-          KVER=$(make -s kernelversion 2>/dev/null || echo "Unknown")
+          KVER=$(make -s kernelversion 2>/dev/null || echo "unknown")
           echo "📌 Kernel Version: $KVER"
       
-          # Kernel ABI Marker Extraction
+          # ABI Marker Extraction
           echo ""
-          echo "🧹 Step 4: Extracting Kernel ABI-Relevant Markers..."
+          echo "🧹 Extracting ABI Markers..."
       
           CLEAN_FILE=$(mktemp)
       
-          {
-            grep -hE 'ANDROID_KABI_|KABI_' "$SCHEDFILE" 2>/dev/null || true
-            grep -hE 'ANDROID_KABI_|KABI_' "$BINDERFILE" 2>/dev/null || true
-            grep -hE 'ANDROID_KABI_|KABI_' "$SELINUXFILE" 2>/dev/null || true
-          } > "$CLEAN_FILE"
+          for f in "${ABI_INPUTS[@]}"; do
+            grep -hE 'ANDROID_KABI_|KABI_' "$f" 2>/dev/null || true
+          done > "$CLEAN_FILE"
       
-          echo "🏁 Kernel ABI Marker Extraction Complete"
+          # fallback if empty
+          if [[ ! -s "$CLEAN_FILE" ]]; then
+            echo "⚠️ No ABI Markers Found → Using Fallback Heuristic Mode"
+            echo "FALLBACK_MODE" > "$CLEAN_FILE"
+          fi
       
-          # Kernel ABI Scoring Engine
+          # ABI Scoring Engine
           echo ""
-          echo "🧮 Step 5: Running Kernel ABI Scoring Engine..."
+          echo "🧮 Running ABI Scoring Engine..."
       
           score_123=0
           score_345=0
           score_678=0
       
-          # Strong Signals
-          grep -q "ANDROID_KABI_USE(1," "$CLEAN_FILE" && score_678=$((score_678 + 120))
-          grep -q "ANDROID_KABI_RESERVE(1)" "$CLEAN_FILE" && score_123=$((score_123 + 90))
-          grep -q "ANDROID_KABI_RESERVE(3)" "$CLEAN_FILE" && score_345=$((score_345 + 90))
+          if grep -q "ANDROID_KABI_USE" "$CLEAN_FILE"; then
+            score_678=$((score_678 + 120))
+          fi
       
-          # Density Signals
+          if grep -q "ANDROID_KABI_RESERVE(1)" "$CLEAN_FILE"; then
+            score_123=$((score_123 + 90))
+          fi
+      
+          if grep -q "ANDROID_KABI_RESERVE(3)" "$CLEAN_FILE"; then
+            score_345=$((score_345 + 90))
+          fi
+      
           reserve_total=$(grep -oE "ANDROID_KABI_RESERVE\([0-9]+\)" "$CLEAN_FILE" | wc -l || true)
           use_total=$(grep -c "ANDROID_KABI_USE" "$CLEAN_FILE" || true)
       
           [[ "$use_total" -gt 0 ]] && score_678=$((score_678 + 40))
-          [[ "$reserve_total" -eq 1 ]] && score_123=$((score_123 + 20))
           [[ "$reserve_total" -ge 3 ]] && score_345=$((score_345 + 20))
       
           rm -f "$CLEAN_FILE"
       
-          # Kernel Bias Rules
+          # Hard Kernel Override 
           echo ""
-          echo "⚖️ Step 6: Applying Kernel Version Bias Rules..."
+          echo "⚖️ Kernel Bias Rules..."
       
           if [[ "$KVER" == 6.* ]]; then
-            score_678=$((score_678 + 100))
+            echo "🚨 Linux 6.x detected → forcing 6_7_8"
+            KABI="6_7_8"
           elif [[ "$KVER" == 5.15* ]]; then
             score_678=$((score_678 + 60))
           elif [[ "$KVER" == 5.10* ]]; then
             score_345=$((score_345 + 40))
           fi
       
-          # Final Kernel ABI Decision
+          # Final Decision
           echo ""
-          echo "📊 Step 7: Selecting Best Kernel ABI Match..."
+          echo "📊 Selecting ABI..."
       
-          if (( score_678 >= score_345 && score_678 >= score_123 )); then
-            KABI="6_7_8"
-          elif (( score_345 >= score_123 )); then
-            KABI="3_4_5"
-          else
-            KABI="1_2_3"
+          if [[ -z "${KABI:-}" ]]; then
+            if (( score_678 >= score_345 && score_678 >= score_123 )); then
+              KABI="6_7_8"
+            elif (( score_345 >= score_123 )); then
+              KABI="3_4_5"
+            else
+              KABI="1_2_3"
+            fi
           fi
       
-          echo "🎯 Final Kernel ABI: $KABI"
+          echo "🎯 Selected ABI: $KABI"
       
           # Patch Download
           echo ""
-          echo "📥 Step 8: Downloading Patch..."
+          echo "📥 Downloading Patch..."
       
           PATCH_URL="https://raw.githubusercontent.com/WildKernels/kernel_patches/main/common/droidspaces/fix_sysvipc_kabi_${KABI}.patch"
           PATCH_FILE="$GITHUB_WORKSPACE/patch_${KABI}.patch"
@@ -3130,60 +3140,73 @@ jobs:
       
           # Patch Validation
           echo ""
-          echo "🔎 Validating Patch..."
+          echo "🔎 Pre-Flight Patch Check..."
       
           set +e
-          git apply --check --ignore-space-change --ignore-whitespace "$PATCH_FILE"
+          git apply --check --3way --ignore-whitespace "$PATCH_FILE"
           STATUS=$?
           set -euo pipefail
       
           if [[ "$STATUS" -ne 0 ]]; then
-            echo "⚠️ Patch Incompatible or Already Applied"
+            echo "⚠️ Patch Not Compatible → Stopping Safely"
             exit 15
           fi
       
-          # Apply Patch Safely
+          # Backup System 
           echo ""
-          echo "🔧 Step 9: Applying Patch..."
+          echo "💾 Creating Backups..."
       
-          APPLIED=0
+          BACKUP_FILES=()
       
-          # Backup All Kernel ABI Critical Files
-          for f in "$SCHEDFILE" "$BINDERFILE" "$SELINUXFILE"; do
-            [[ -f "$f" ]] && cp "$f" "$f.bak"
+          for f in "${ABI_INPUTS[@]}"; do
+            if [[ -f "$f" ]]; then
+              cp "$f" "$f.bak"
+              BACKUP_FILES+=("$f")
+            fi
           done
       
           git diff > patch_debug_backup.diff || true
+      
+          # Patch Apply Engine
+          echo ""
+          echo "🔧 Applying Patch..."
+      
+          APPLIED=0
       
           for p in 0 1 2; do
             echo "⚙️ Trying -p$p..."
       
             if patch -R -p$p --dry-run < "$PATCH_FILE" >/dev/null 2>&1; then
+              echo "✔ Already Applied"
               APPLIED=1
               break
             fi
       
             if patch -p$p --dry-run < "$PATCH_FILE" >/dev/null 2>&1; then
-              patch -p$p < "$PATCH_FILE" && APPLIED=1 && break
+              if patch -p$p < "$PATCH_FILE"; then
+                echo "✔ Patch Applied"
+                APPLIED=1
+                break
+              fi
             fi
           done
       
           rm -f "$PATCH_FILE"
       
-          # Final Handling
+          # Final Handler
           echo ""
       
           if [[ "$APPLIED" -eq 1 ]]; then
-            echo "🏁 Patch Success"
+            echo "🏁 Success"
       
-            for f in "$SCHEDFILE" "$BINDERFILE" "$SELINUXFILE"; do
+            for f in "${BACKUP_FILES[@]}"; do
               rm -f "$f.bak" || true
             done
       
           else
-            echo "⚠️ Patch Skipped"
+            echo "⚠️ Failed → Restoring Original State"
       
-            for f in "$SCHEDFILE" "$BINDERFILE" "$SELINUXFILE"; do
+            for f in "${BACKUP_FILES[@]}"; do
               if [[ -f "$f.bak" ]]; then
                 mv "$f.bak" "$f"
               fi
@@ -3191,7 +3214,7 @@ jobs:
           fi
       
           echo ""
-          echo "🎉 DroidSpacesLXC Finished"
+          echo "🎉 Self-Healing ABI Engine Complete"
           
       # ==============================
       # Re-Kernel Setup
