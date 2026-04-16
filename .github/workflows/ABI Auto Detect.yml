@@ -2989,174 +2989,66 @@ jobs:
           echo "🎉 ADIOS Scheduler Patch Process Complete!"
 
       # ==============================
-      # DroidSpacesLXC Auto Patch Recovery
+      # DroidSpacesLXC Auto-Patch
       # ==============================
-      - name: 🔧 DroidSpacesLXC Auto Patch Recovery
-        if: ${{ github.event.inputs.LXCDOCKERSUPPORT == 'DroidSpacesLXC' }}
+      - name: DroidSpacesLXC Auto-Patch
+        if: ${{ github.event.inputs.LXCDOCKERSUPPORT == 'true' }}
         shell: bash
         run: |
           set -euo pipefail
-          
-          echo "=================================="
-          echo "🚀 WildKernels AI Patch Autopilot v5"
-          echo "=================================="
-          
-          cd "$KERNEL_DIR"
-          
-          # ==============================
-          # Step 1: ABI INPUT (must exist)
-          # ==============================
-          echo ""
-          echo "🧠 Step 1: Kernel ABI Selected → $KABI"
-          
-          # ==============================
-          # Step 2: Fetch WildKernels Patch
-          # ==============================
-          echo ""
-          echo "📥 Step 2: Downloading Patch"
-          
-          PATCH_URL="https://raw.githubusercontent.com/WildKernels/kernel_patches/main/common/droidspaces/fix_sysvipc_kabi_${KABI}.patch"
-          PATCH_FILE="$GITHUB_WORKSPACE/wk_patch_${KABI}.patch"
-          
-          echo "🔗 $PATCH_URL"
-          
-          if ! curl -fsSL "$PATCH_URL" -o "$PATCH_FILE"; then
-            echo "❌ Patch download failed"
-            exit 0
-          fi
-          
-          echo "✔ Patch downloaded successfully"
-          
-          # ==============================
-          # Step 3: Validate Patch
-          # ==============================
-          echo ""
-          echo "🔎 Step 3: Patch Validation"
-          
-          set +e
-          git apply --check --ignore-space-change --ignore-whitespace "$PATCH_FILE"
-          VALID=$?
-          set -euo pipefail
-          
-          if [[ "$VALID" -ne 0 ]]; then
-            echo "⚠️ Patch validation failed (continuing with recovery mode)"
-          fi
-          
-          # ==============================
-          # Step 4: Create Safety Snapshot
-          # ==============================
-          echo ""
-          echo "💾 Step 4: Creating Snapshot"
-          
-          SNAPSHOT_DIR="$GITHUB_WORKSPACE/wk_snapshot_v5"
-          mkdir -p "$SNAPSHOT_DIR"
-          
-          FILES=(
-            "include/linux/sched.h"
-            "include/linux/android/binder.h"
-            "security/selinux/hooks.c"
-          )
-          
-          for f in "${FILES[@]}"; do
-            if [[ -f "$KERNEL_DIR/$f" ]]; then
-              cp "$KERNEL_DIR/$f" "$SNAPSHOT_DIR/$(basename "$f").bak"
-            fi
-          done
-          
-          git diff > "$SNAPSHOT_DIR/before_patch.diff" || true
-          
-          # ==============================
-          # Step 5: Auto Patch Engine
-          # ==============================
-          echo ""
-          echo "⚙️ Step 5: Applying Patch"
-          
-          APPLIED=0
-          
-          apply_patch() {
-            local mode=$1
-            local level=$2
-          
-            case "$mode" in
-              direct)
-                patch -p"$level" < "$PATCH_FILE"
-                ;;
-              reverse)
-                patch -R -p"$level" --dry-run < "$PATCH_FILE" >/dev/null 2>&1
-                ;;
-              git3way)
-                git apply --3way -p"$level" "$PATCH_FILE"
-                ;;
-              fuzz)
-                git apply --reject --whitespace=fix -p"$level" "$PATCH_FILE"
-                ;;
-            esac
+
+          # Directories
+          KERNELDIRECTORY="kernel_workspace/kernel_platform/common"
+          SCHEDH="$KERNELDIRECTORY/include/linux/sched.h"
+      
+          cd "$KERNELDIRECTORY"
+      
+          echo "🔧 Starting DroidSpacesLXC Auto-Patch..."
+          echo "📄 Target: $SCHEDH"
+      
+          # SYSVIPC Structure Patch
+          echo "🔧 Commenting SYSVIPC Structures..."
+      
+          sed -i \
+            -e 's/struct sysv_sem[[:space:]]\+sysvsem;/\/\/ struct sysv_sem sysvsem;/g' \
+            -e 's/struct sysv_shm[[:space:]]\+sysvshm;/\/\/ struct sysv_shm sysvshm;/g' \
+            "$SCHEDH"
+      
+          echo "♻️ SYSVIPC Structures Disabled for ABI Compatibility"
+      
+          # Helper Function for ABI Patching
+          patch_kabi_slots() {
+            local base="$1"
+            local mode="$2"
+      
+            echo "♻️ Patching Kernel ABI Slots Starting at $base ($mode mode)"
+      
+            sed -i -e "/ANDROID_KABI_RESERVE(${base});/{N;N;s|\
+              ANDROID_KABI_RESERVE(${base});\n\s*ANDROID_KABI_RESERVE($((base+1)));\\n\s*ANDROID_KABI_RESERVE($((base+2)));|\
+              #ifdef CONFIG_SYSVIPC\n\tANDROID_KABI_USE(${base}, struct sysv_sem sysvsem);\n\tANDROID_KABI_REPLACE(${base+1}, ${base+2}, struct sysv_shm sysvshm);\n#else\n\tANDROID_KABI_RESERVE(${base});\n\tANDROID_KABI_RESERVE($((base+1)));\n\tANDROID_KABI_RESERVE($((base+2)));\n#endif|;}" \
+                    "$SCHEDH"
           }
-          
-          for p in 0 1 2; do
-          
-            echo ""
-            echo "🔧 Trying patch level -p$p"
-          
-            # Already applied check
-            if apply_patch reverse "$p"; then
-              echo "✔ Patch already applied"
-              APPLIED=1
-              break
-            fi
-          
-            # Direct apply
-            if apply_patch direct "$p"; then
-              echo "✔ Direct apply success"
-              APPLIED=1
-              break
-            fi
-          
-            # 3-way merge
-            if apply_patch git3way "$p"; then
-              echo "✔ 3-way merge success"
-              APPLIED=1
-              break
-            fi
-          
-            # Fallback recovery
-            if apply_patch fuzz "$p"; then
-              echo "⚠️ Fuzz recovery applied"
-              APPLIED=1
-              break
-            fi
-          
-          done
-          
-          # ==============================
-          # Step 6: Final Decision Engine
-          # ==============================
-          echo ""
-          echo "📊 Step 6: Final Result"
-          
-          if [[ "$APPLIED" -eq 1 ]]; then
-          
-            echo "🏁 SUCCESS: Patch applied"
-          
-            rm -f "$PATCH_FILE"
-            rm -rf "$SNAPSHOT_DIR" || true
-          
+      
+          # Detect ABI layout
+          if grep -q "ANDROID_KABI_USE(1," "$SCHEDH"; then
+            echo "🔍 Detected: Kernel ABI Use(1)"
+            patch_kabi_slots 6 "use"
+      
+          elif grep -q "ANDROID_KABI_RESERVE(1);" "$SCHEDH"; then
+            echo "🔍 Detected: Kernel ABI Reserve(1)"
+            patch_kabi_slots 1 "reserve"
+      
+          elif grep -q "ANDROID_KABI_RESERVE(3);" "$SCHEDH"; then
+            echo "🔍 Fallback: Kernel ABI Reserve(3)"
+            patch_kabi_slots 3 "fallback"
+      
           else
-          
-            echo "💀 FAILURE: Restoring snapshot"
-          
-            for f in "$SNAPSHOT_DIR"/*.bak; do
-              [[ -f "$f" ]] || continue
-              target="$KERNEL_DIR/include/linux/$(basename "$f" .bak)"
-              [[ -f "$target" ]] && cp "$f" "$target"
-            done
-          
-            cp "$PATCH_FILE" "$GITHUB_WORKSPACE/failed_patch_debug.patch" || true
-          
+            echo "⚠️ Unable to Detect Compatible Kernel ABI Slots Layout..."
+            exit 1
           fi
-          
+      
           echo ""
-          echo "🎉 WildKernels AI Patch Autopilot v5 Complete"
+          echo "🎉 DroidSpacesLXC Auto-Patch Complete"
           
       # ==============================
       # Re-Kernel Setup
