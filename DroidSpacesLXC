@@ -1,0 +1,190 @@
+      # ==============================
+      # DroidSpaces Linux Container
+      # ==============================
+      - name: 🔧 DroidSpaces Linux Container
+        if: ${{ github.event.inputs.LXCDOCKERSUPPORT == 'DroidSpacesLXC' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          
+          echo "------------------------------"
+          echo "🚀 DroidSpacesLXC Patch Setup..."
+          echo "------------------------------"
+          echo ""
+          
+          # Detect Kernel Root
+          echo "🔍 Detecting Kernel Root..."
+          
+          PKDIR=(
+            "${GITHUB_WORKSPACE}/kernel_workspace/kernel_platform/common"
+            "${GITHUB_WORKSPACE}/kernel_workspace/kernel_platform"
+            "${GITHUB_WORKSPACE}/kernel_workspace"
+          )
+          
+          KDIR=""
+          
+          for DIR in "${PKDIR[@]}"; do
+            echo "🔎 Checking: $DIR"
+          
+            if [[ -d "$DIR" ]] && [[ -f "$DIR/Makefile" ]]; then
+              KDIR="$DIR"
+              echo "📌 Kernel Root Detected: $KDIR"
+              break
+            fi
+          done
+          
+          if [[ -z "${KDIR:-}" ]]; then
+            echo "⚠️ No Valid Kernel Root Found"
+            exit 1
+          fi
+
+          echo "------------------------------"
+          echo "🚀 Kernel ABI Slot Layout Detection..."
+          echo "------------------------------"
+          echo ""
+          
+          # Kernel ABI Detector
+          echo "🧠 Detecting Kernel ABI Slot Layout..."          
+          echo "🔍 Locating SCHEDH..."
+          
+          SCHED=$(find "$KDIR" -path "*/include/linux/sched.h" | head -n 1 || true)
+          
+          if [[ -z "$SCHED" ]] || [[ ! -f "$SCHED" ]]; then
+            echo "⚠️ SCHEDH Not Found in Kernel Tree..."
+            exit 1
+          fi
+          
+          echo "📌 Using SCHEDH: $SCHED"
+
+          # Normalize Whitespace for Consistent Matching
+          CLEANSCHED=$(mktemp)          
+          
+          tr -s '[:space:]' ' ' < "$SCHED" > "$CLEANSCHED"
+          USE=$(grep -c "ANDROID_KABI_USE(" "$CLEANSCHED" || true)
+          RESERVE=$(grep -c "ANDROID_KABI_RESERVE(" "$CLEANSCHED" || true)
+
+          if [[ "$USE" -eq 0 && "$RESERVE" -eq 0 ]]; then
+            echo "⚠️ No Kernel ABI Layout Markers Found"
+            exit 1
+          fi
+
+          echo "------------------------------"
+          echo "🧠 Kernel ABI Layout Detection Debug Info"
+          echo "------------------------------"
+          
+          echo "USE=$USE"
+          echo "RESERVE=$RESERVE"
+          
+          # Cached Pattern Flags
+          USE1=$(grep -q "ANDROID_KABI_RESERVE(7)" "$CLEANSCHED" && echo 1 || echo 0)
+          RES3=$(grep -q "ANDROID_KABI_RESERVE(3)" "$CLEANSCHED" && echo 1 || echo 0)
+          RES1=$(grep -q "ANDROID_KABI_RESERVE(1)" "$CLEANSCHED" && echo 1 || echo 0)
+          
+          echo "🔎 Pattern Checks:"
+          [[ "$USE1" == 1 ]] && echo "✔ Matched: Android Kernel ABI Reserve(7)" || echo "✖ No Match: Android Kernel ABI Reserve(7)"
+          [[ "$RES3" == 1 ]] && echo "✔ Matched: Android Kernel ABI Reserve(3)" || echo "✖ No Match: Android Kernel ABI Reserve(3)"
+          [[ "$RES1" == 1 ]] && echo "✔ Matched: Android Kernel ABI Reserve(1)" || echo "✖ No Match: Android Kernel ABI Reserve(1)"
+
+          # Kernel ABI Auto-Detection
+          KABI=""
+          
+          # Primary Kernel ABI Detection Signals
+          if [[ "$USE1" == 1 ]]; then
+            echo "📌 Kernel ABI Slot Layout Detected — 6 & 7 & 8"
+            KABI="6_7_8"
+          elif [[ "$USE" -gt 0 ]]; then
+            echo "📌 Kernel ABI Slot Layout Detected — 6 & 7 & 8"
+            KABI="6_7_8"
+          elif [[ "$RES3" == 1 ]]; then
+            echo "📌 Kernel ABI Slot Layout Detected — 3 & 4 & 5"            
+            KABI="3_4_5" 
+          elif [[ "$RES1" == 1 ]]; then
+            echo "📌 Kernel ABI Slot Layout Detected — 1 & 2 & 3"   
+            KABI="1_2_3"          
+          # Fallback
+          else  
+            if [[ "$RESERVE" -ge 3 ]]; then
+              echo "📌 Kernel ABI Slot Layout Detected — 3 & 4 & 5"
+              KABI="3_4_5"
+            elif [[ "$RESERVE" -eq 1 ]]; then
+              echo "📌 Kernel ABI Slot Layout Detected — 1 & 2 & 3"
+              KABI="1_2_3"                        
+            else
+              echo "⚠️ Unknown ABI Layout — Defaulting Safe Mode — 3 & 4 & 5"
+              KABI="3_4_5"
+            fi
+          fi
+          
+          # Final Validation
+          if [[ -z "${KABI}" ]]; then
+            echo "⚠️ Unable to Detect Kernel ABI Layout..."
+            echo "📌 Debug Sample:"
+            grep -n "KABI" "$SCHED" | head -n 20 || true
+          
+            echo "📄 SCHED Headers Preview:"
+            head -n 40 "$SCHED" || true
+          
+            exit 1
+          fi
+
+          # Cleanup Temporary File
+          rm -f "$CLEANSCHED"          
+          
+          # Selected Patch (WildKernels Kernel Patches Repository)
+          echo "📦 Selecting Kernel ABI Patch..."
+
+          # Download Patch 
+          URL="https://raw.githubusercontent.com/WildKernels/kernel_patches/main/common/droidspaces/fix_sysvipc_kabi_${KABI}.patch"
+          PATCHF="$GITHUB_WORKSPACE/fix_sysvipc_kabi_${KABI}.patch"
+          
+          echo "📩 Downloading Patch:"
+          echo "   $URL"
+          
+          STATUS="Unknown"
+          
+          if ! curl -fsSL --retry 3 --retry-delay 2 --connect-timeout 10 "$URL" -o "$PATCHF"; then
+            echo "⚠️ Patch Download Failed → Skipping..."
+            STATUS="Missing"
+          else
+          
+            # Apply Patch
+            echo ""
+            echo "🔧 Applying Patch..."
+          
+            cd "$KDIR"
+          
+            for plvl in 0 1 2; do
+              echo "🔍 Trying Path-${plvl}"
+          
+              if patch -p$plvl --forward --dry-run < "$PATCHF" > /dev/null 2>&1; then
+                patch -p$plvl --forward < "$PATCHF"
+                echo "📌 Patch Applied"
+              
+                # Verify After Apply
+                if ! patch -p$plvl --forward --dry-run < "$PATCHF" > /dev/null 2>&1; then
+                  echo "✔️ Patch State Verified"
+                fi
+              
+                STATUS="Applied"
+                break
+              fi
+          
+              if patch -R -p$plvl --dry-run < "$PATCHF" > /dev/null 2>&1; then
+                echo "📊 Patch Already Applied"
+                STATUS="Already-Applied"
+                break
+              fi
+            done
+          
+            if [[ "$STATUS" == "Unknown" ]]; then
+              echo "⚠️ Patch Incompatible with Kernel..."
+              exit 1
+            fi
+          
+            echo "🧹 Cleanup Kernel ABI Patch File(s)..."
+            rm -f "$PATCHF"
+          fi
+          
+          echo ""
+          echo "📊 Patch Status: $STATUS"
+          echo "🎉 DroidSpacesLXC Patch Complete!"
