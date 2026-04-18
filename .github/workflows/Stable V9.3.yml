@@ -868,11 +868,11 @@ jobs:
           mkdir -p "${{ env.CCACHE_DIR }}"  # Ensure the Directory is Created
           chmod -R 775 "${{ env.CCACHE_DIR }}"  # Ensure the Directory is Writable
 
-          # Check if Cache Directory is Empty Before Extraction
-          if [ -z "$(ls -A ${{ env.CCACHE_DIR }})" ]; then
-            echo "⚠️ Cache Directory is Empty, Proceeding with Cache Extraction..."
+          # Check if Cache Directory is Empty or Invalid Before Extraction
+          if [ -z "$(ls -A ${{ env.CCACHE_DIR }})" ] || ! ls -A ${{ env.CCACHE_DIR }} > /dev/null; then
+            echo "⚠️ Cache Directory is Empty or Invalid, Proceeding with Cache Extraction..."
           else
-            echo "☘️ Cache Directory Already Contains Files, Skipping Extraction..."
+            echo "☘️ Cache Directory Already Contains Valid Files, Skipping Extraction..."
             exit 0  # Exit the Extraction Step if Cache Already Exists
           fi
 
@@ -888,11 +888,17 @@ jobs:
             echo "🔥 Cache Found, Extracting to ${{ env.CCACHE_DIR }}..."
 
             # Extract into Cache
+            if [ ! -f "$TAR" ]; then
+              echo "⚠️ The tar file was not downloaded. Skipping extraction."
+              exit 1
+            fi
+            
             tar -I zstd -xvf "$TAR" -C "${{ env.CCACHE_DIR }}"
 
             # Check if Extraction Was Successful
             if [ -d "${{ env.CCACHE_DIR }}" ] && [ "$(ls -A ${{ env.CCACHE_DIR }})" ]; then
               echo "👾 Cache Successfully Extracted..."
+           
               ls -la "${{ env.CCACHE_DIR }}"
 
               # Show the Cache Key Used for Debugging
@@ -903,22 +909,33 @@ jobs:
           fi
 
       # ==============================
-      # Restore Compiler Cache (Local)
+      # Restore Compiler Cache (Local or Release)
       # ==============================
-      - name: 🔧 Restore Compiler Cache (Local)
+      - name: 🔧 Restore Compiler Cache (Local or Release)
         id: restore-cache 
         if: ${{ env.BUILDCCACHE != 'Disabled' }}
         uses: actions/cache@v5
         with:
           path: ${{ env.CCACHE_DIR }}
-
           key: CCache-${{ runner.os }}-${{ env.FILE_BASE }}-${{ env.CPUD }}-${{ github.ref_name }}
-
           restore-keys: |
             CCache-${{ runner.os }}-${{ env.FILE_BASE }}-${{ env.CPUD }}-${{ github.ref_name }}
-            CCache-${{ runner.os }}-${{ env.FILE_BASE }}-${{ env.CPUD }}-           
+            CCache-${{ runner.os }}-${{ env.FILE_BASE }}-${{ env.CPUD }}-
             CCache-${{ runner.os }}-${{ env.FILE_BASE }}-
             CCache-${{ runner.os }}-
+
+          # Add the check for whether the cache was restored from the release
+          run: |
+            echo "🚀 Cache Debug Information..."
+            echo "Key: CCache-${{ runner.os }}-${{ env.FILE_BASE }}-${{ env.CPUD }}-${{ github.ref_name }}"
+
+            # Check if Cache was Restored from GitHub Release
+            if [ -z "$(ls -A ${{ env.CCACHE_DIR }})" ]; then
+              echo "⚠️ Cache Directory is Empty, Trying to Restore from GitHub Release..."
+              curl -fsSL -o "$TAR" "$URL" && tar -I zstd -xvf "$TAR" -C "${{ env.CCACHE_DIR }}"
+            else
+              echo "🎉 Cache Restored Successfully"
+            fi
   
       # ==============================
       # Configure and Setup Compiler Cache
@@ -928,6 +945,13 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail 
+
+          # Set Default Values for Environment Variables if Not Already Defined
+          CCACHE_DIR="${CCACHE_DIR:-$HOME/.ccache}"
+          CCACHE_MAXSIZE="${CCACHE_MAXSIZE:-8G}"
+
+          echo "📂 Using Cache Directory : $CCACHE_DIR"
+          echo "📊 Setting Cache Size    : $CCACHE_MAXSIZE"
 
           echo "------------------------------"
           echo "🚀 Initializing Compiler Cache..."
@@ -943,13 +967,13 @@ jobs:
             exit 0
           fi
 
-          echo "🚀 Using Compiler Cache at $CCACHE_DIR..."
-
+          echo "🚀 Using Compiler Cache at ${{ env.CCACHE_DIR }}"
+         
           # Force Correct Path
           export PATH="/usr/lib/ccache:$PATH"
           
           # Set Cache Size 
-          ccache -M "${CCACHE_MAXSIZE:-8G}"
+          ccache -M "${CCACHE_MAXSIZE}"
 
           # Core Optimizations 
           ccache --set-config=base_dir="$GITHUB_WORKSPACE"
