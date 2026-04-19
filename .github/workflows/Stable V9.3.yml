@@ -853,9 +853,9 @@ jobs:
       # Local Cache Restoration
       # ==============================
       - name: 🔧 Local Cache Restoration
-        id: restore-cache 
+        id: ccache-restore
         if: ${{ env.BUILDCCACHE != 'Disabled' }}
-        uses: actions/cache/restore@v5
+        uses: actions/cache@v5
         with:
           path: ${{ env.CCACHE_DIR }}
           key: CCache-${{ runner.os }}-${{ env.FILE_BASE }}-${{ env.CPUD }}-${{ github.ref_name }}-${{ env.VANDROID }}         
@@ -870,7 +870,7 @@ jobs:
       # Release Cache Restoration
       # ==============================
       - name: 🔧 Release Cache Restoration
-        if: ${{ env.BUILDCCACHE != 'Disabled' && steps.restore-cache.outputs.cache-hit != 'true' }}      
+        if: ${{ env.BUILDCCACHE != 'Disabled' && steps.ccache-restore.outputs.cache-hit != 'true' }}      
         run: |
           echo "🚀 Cache Not Found Locally, Attempting to Restore from GitHub Release..."
 
@@ -925,6 +925,14 @@ jobs:
           echo "📂 Using Cache Directory : ${{ env.CCACHE_DIR }}"
           echo "📊 Setting Cache Size    : ${{ env.CCACHE_MAXSIZE }}"
 
+          # Set Compiler Cache Environment Variables
+          export CCACHE_COMPILERCHECK="${{ env.CCACHE_COMPILERCHECK }}"
+          export CCACHE_BASEDIR="${{ env.CCACHE_BASEDIR }}"
+          export CCACHE_NOHASHDIR="${{ env.CCACHE_NOHASHDIR }}"
+          export CCACHE_HARDLINK="${{ env.CCACHE_HARDLINK }}"
+          export CCACHE_DIR="${{ env.CCACHE_DIR }}"
+          export CCACHE_MAXSIZE="${{ env.CCACHE_MAXSIZE }}"
+          
           # Ensure Cache Directory Exists (Global Cache Directory)
           mkdir -p "${{ env.CCACHE_DIR }}"
 
@@ -942,17 +950,8 @@ jobs:
           # Set Cache Size 
           ccache -M "${{ env.CCACHE_MAXSIZE }}"
 
-          # Core Optimizations 
-          ccache --set-config=base_dir="$GITHUB_WORKSPACE"
-          ccache --set-config=hash_dir=false
-          ccache --set-config=compiler_check=content
-
           # Performance Boost
-          ccache --set-config=compression=true
-          ccache --set-config=direct_mode=true
-
-          # Improve Hit Rate (Safe Looseness)
-          ccache --set-config=sloppiness=file_macro,time_macros
+          ccache -o compression=true
         
           # Make Compiler Cache Global
           echo "/usr/lib/ccache" >> $GITHUB_PATH
@@ -967,6 +966,12 @@ jobs:
           echo ""
           echo "📊 Compiler Cache Statistics (Before Build):"
           ccache -s
+
+          # If Cache Restored is a Hit, Display Detailed Information
+          if [ "${{ steps.ccache-restore.outputs.cache-hit }}" == 'true' ]; then
+            echo "📊 Cache Hit Details:"
+            ccache -sv
+          fi
            
       # ==============================
       # Debug - Cache Key and Status
@@ -978,10 +983,10 @@ jobs:
           echo "Key: CCache-${{ runner.os }}-${{ env.FILE_BASE }}-${{ env.CPUD }}-${{ github.ref_name }}-${{ env.VANDROID }}"        
 
           echo ""
-          echo "🎯 Cache Hit: ${{ steps.restore-cache.outputs.cache-hit }}"
+          echo "🎯 Cache Hit: ${{ steps.ccache-restore.outputs.cache-hit }}"
 
           # Check if Cache was Restored from GitHub Release
-          if [[ -d "${{ env.CCACHE_DIR }}" && "$(ls -A "${{ env.CCACHE_DIR }}")" ]]; then          
+          if [[ "${{ steps.ccache-restore.outputs.cache-hit }}" == 'false' ]]; then                    
             echo "♻️ Compiler Cache Restored from GitHub Release"
             echo "♻️ Compiler Cache File: $CCACHE_DIR/CCache-${{ runner.os }}-${{ env.FILE_BASE }}-${{ env.CPUD }}-${{ github.ref_name }}"
           else
@@ -989,7 +994,7 @@ jobs:
           fi
 
           # Check if Cache was Restored from Local Cache Restoration
-          if [[ "${{ steps.restore-cache.outputs.cache-hit }}" == 'true' ]]; then
+          if [[ "${{ steps.ccache-restore.outputs.cache-hit }}" == 'true' ]]; then          
             echo "♻️ Compiler Cache Restored from Local Cache"
           else
             echo "☘️ Cache was Not Restored from Local Cache"
@@ -1013,22 +1018,20 @@ jobs:
             ccache -sv           
     
           # Check if Cache was Restored from GitHub Release
-          elif [[ -d "${{ env.CCACHE_DIR }}" && "$(ls -A "${{ env.CCACHE_DIR }}")" ]]; then          
+          elif [[ "${{ steps.ccache-restore.outputs.cache-hit }}" != 'true' ]]; then                   
             STATUS="♻️ Cache Restored from GitHub Release"
             echo "♻️ Cache Restored from GitHub Release"
             echo "| Cache | Cache Restored from GitHub Release (${{ env.CCACHE_DIR }}) |" >> $GITHUB_STEP_SUMMARY
-
           elif [[ -d "${{ env.CCACHE_DIR }}" && "$(ls -A "${{ env.CCACHE_DIR }}")" ]]; then
             STATUS="♻️ Partial Cache Restored (Fallback Cache Retrieved via Restore Keys — May Result in Lower but Still Effective Cache Hit Rate)"
             echo "♻️ Partial Cache Found via Restore Keys"
-
           else
             STATUS="☘️ No Cache Available (Cold Build — All Compilation Requests Will Be Processed Without Any Cached Objects)"
             echo "☘️ No Cache Found — Cold Build"
           fi
 
           # Additional Cache Debug - Check if Cache was Restored from Local Cache
-          if [[ "${{ steps.restore-cache.outputs.cache-hit }}" == 'true' ]]; then
+          if [[ "${{ steps.ccache-restore.outputs.cache-hit }}" != 'false' ]]; then           
             echo "♻️ Compiler Cache Restored from Local Cache"
             echo "| Cache | Cache Restored from Local Cache |" >> $GITHUB_STEP_SUMMARY
           else
@@ -4304,8 +4307,8 @@ jobs:
       # Save Compiler Cache
       # ==============================
       - name: 🔧 Save Compiler Cache
-        if: ${{ env.BUILDCCACHE != 'Disabled' && steps.restore-cache.outputs.cache-hit != 'true' }}      
-        uses: actions/cache/save@v5
+        if: ${{ env.BUILDCCACHE != 'Disabled' && steps.ccache-restore.outputs.cache-hit != 'true' }}      
+        uses: actions/cache@v5
         with:
           path: ${{ env.CCACHE_DIR }}
           key: CCache-${{ runner.os }}-${{ env.FILE_BASE }}-${{ env.CPUD }}-${{ github.ref_name }}-${{ env.VANDROID }}
@@ -4314,7 +4317,7 @@ jobs:
       # Cleanup Old Compiler Cache
       # ==============================
       - name: 🔧 Cleanup Old Compiler Cache
-        if: ${{ env.BUILDCCACHE != 'Disabled' && steps.restore-cache.outputs.cache-hit != 'true' }}      
+        if: ${{ env.BUILDCCACHE != 'Disabled' && steps.ccache-restore.outputs.cache-hit != 'true' }}      
         shell: bash
         run: |
           set -euo pipefail
@@ -5232,7 +5235,7 @@ jobs:
           SIZE=${SIZE:-0}
 
           # Check if Cache was Restored from GitHub Release
-          if [[ -d "${{ env.CCACHE_DIR }}" && "$(ls -A "${{ env.CCACHE_DIR }}")" ]]; then
+          if [[ "${{ steps.ccache-restore.outputs.cache-hit }}" != 'true' ]]; then         
             FROMRELEASE="Yes"
             CCPATH="${{ env.CCACHE_DIR }}/CCache-${{ runner.os }}-${{ env.FILE_BASE }}-${{ env.CPUD }}-${{ github.ref_name }}"
           else
@@ -5365,7 +5368,7 @@ jobs:
         uses: actions/download-artifact@v8
         with:
           name: "${{ env.FILE_BASE }}-${{ steps.suffix.outputs.suffix }}-${{ env.TKERNEL_VERSION }}-(${{ env.KSUVER }})"
-          path: ./AnyKernel3/*
+          path: ./AnyKernel3
           skip-decompress: true
 
       # ===========================
