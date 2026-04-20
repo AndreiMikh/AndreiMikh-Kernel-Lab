@@ -1,0 +1,242 @@
+name: 🌏 Auto-Pilot
+
+on:
+  release:
+    types: [published]
+
+  workflow_run:
+    workflows: ["☘️ Stable V9.3"]
+    types: [completed]
+
+concurrency:
+  group: kernel-control-panel
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+  pages: write
+  id-token: write
+  actions: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    outputs:
+      changelog: ${{ steps.changelog.outputs.msg }}
+      run_id: ${{ github.event.workflow_run.id || github.run_id }}
+      
+    steps:
+
+      - name: 🔧 Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: 📜 Changelog Engine
+        id: changelog
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          PREV="${{ github.event.before }}"
+          PREV="${PREV:-}"
+
+          if [[ -z "$PREV" || "$PREV" == "0000000000000000000000000000000000000000" ]]; then
+            PREV=$(git rev-list --max-parents=0 HEAD)
+          fi
+
+          LOG=$(git log --no-merges --pretty=format:"%s" "$PREV..HEAD" || true)
+          [[ -z "$LOG" ]] && LOG="🔥 Automated Kernel Build"
+
+          echo "msg<<EOF" >> $GITHUB_OUTPUT
+          echo "$LOG" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+
+      - name: 📦 Upload Kernel Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: Kernel-Build
+          path: |
+            AnyKernel3/*.zip
+            AnyKernel3/*.img
+            flat_apk/*.apk
+            ZRAM-Module/*.ko
+          retention-days: 7
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+
+    steps:
+
+      - name: 🔧 Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: 📦 Download Kernel Artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: Kernel-Build
+          path: artifacts
+          merge-multiple: true
+
+      - name: 📦 Prepare Release Assets
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo "🔍 Preparing Release Assets..."
+
+          ASSETS=()
+          
+          while IFS= read -r file; do
+            [[ -n "$file" ]] && ASSETS+=("$file")
+          done < <(
+            find artifacts -type f \( \
+              -name "*.zip" -o \
+              -name "*.img" -o \
+              -name "*.apk" -o \
+              -name "*.ko" \
+            \) -print | sort
+          )
+
+          if [[ ${#ASSETS[@]} -eq 0 ]]; then
+            echo "🔥 No Artifacts Found"
+            exit 1
+          fi
+
+          echo "📦 Final Assets:"
+          printf '%s\n' "${ASSETS[@]}"
+
+          {
+            echo "ASSETS<<EOF"
+            printf '%s\n' "${ASSETS[@]}"
+            echo "EOF"
+          } >> $GITHUB_ENV
+
+      - name: 🚀 Create Release
+        uses: ncipollo/release-action@v1
+        with:
+          tag: "${{ github.run_number }}"
+          name: "🔥 Kernel Build #${{ github.run_number }}"
+
+          body: |
+            ## 📦 Kernel Release
+
+            ### 📜 Changelog
+            <details>
+            <summary>View</summary>
+
+            ${{ needs.build.outputs.changelog }}
+
+            </details>
+
+            ### 🧠 Run Info
+            Run ID: `${{ needs.build.outputs.run_id }}`
+
+            ### 📋 Installation Guide:
+            #### **Download the Zip File**:
+               - Navigate to the Release Page and Download the Correct Zip File for your Device and Kernel Version
+               - Ensure that you Select the File that Matches your Device's Model and the Kernel Version you're Installing
+            ───────────────────────────────────────────────  
+            #### **Prepare Your Device**:
+               - Make sure your Device has an **Unlocked Bootloader** and a Compatible Custom Recovery (TWRP or OrangeFox)
+               - It's Recommended to **Backup your Data** Before Proceeding with the Installation to Avoid any Loss
+            ───────────────────────────────────────────────
+            #### **Install through Recovery Tool**:
+               - Reboot your device into **Recovery Mode** (TWRP/OrangeFox/etc.).
+               - In the Recovery Menu, Select **Install** and Navigate to the Downloaded Zip File
+               - Select the Zip File and Swipe to Confirm Installation
+               - After the Installation Completes, Reboot your Device into the System
+            #### **Installation via KernelFlasher App**:
+               - **Download KernelFlasher**: Get the **KernelFlasher** App from [KernelFlasher GitHub](https://github.com/fatalcoder524/KernelFlasher)
+               - **Launch KernelFlasher**: Open the App and Make Sure your **Device is Rooted**
+               - **Select Kernel**: Choose the Downloaded **Kernel Zip** File within the App
+               - **Flash the Kernel**: Follow the Prompts to Flash the Kernel Directly onto your Device
+               - **Reboot**: After Flashing, the App will Reboot the Device into the System
+            #### **Installation via Horizon Flasher App**:
+               - **Download Horizon Flasher**: Download the **Horizon Flasher App** from [HorizonKernelFlasher GitHub](https://github.com/libxzr/HorizonKernelFlasher/releases) 
+               - **Install the App**: Once the App is Installed, Launch it and Select the **Downloaded Kernel Zip** File
+               - **Flash**: App will Automatically Flash the Kernel for you... It may Take some Time, Depending on the Size of the Kernel File
+               - **Reboot the System**: After Flashing, App will Prompt you to Reboot... Follow the On-Screen Instructions to Reboot into the System   
+            ───────────────────────────────────────────────       
+            #### **For Troubleshooting**:
+               - If you Encounter any Issues with the Installation or Booting, Here are some Common Fixes:
+                  - **Bootloops**: If your Device is Stuck in a Bootloop after Installation, Try Clearing the Cache and Dalvik Cache from the Recovery Menu
+                  - **Kernel Panic**: This may occur if your device is incompatible with the Kernel, Try Reverting to a Different Kernel Version or Check for Device-Specific Patches
+                  - **Stuck on Recovery**: If you can’t Boot into the System after Installation, Reflash the Recovery and Reattempt the Installation
+            ───────────────────────────────────────────────
+            #### **Additional Tips**:
+               - **Root Access**: If you Need Root Access, Ensure that the Corresponding Root Manager (`SukiSU-Ultra`, `ReSukiSU`, Etc) is Installed after Flashing the Kernel, Follow the Specific Instructions Provided by the Root Manager's Documentation
+            ───────────────────────────────────────────────         
+            #### **Common Issues and Fixes**:
+               - **Issue - Kernel Does Not Boot**:
+                  - Fix: Make Sure you are Using a Kernel Compatible with your Device, Review the Device-Specific Kernel Settings or Check if there are any Custom Patches Required for your Device Model  
+            ───────────────────────────────────────────────
+            #### **After Installation**:
+               - Once Installed, you can Verify the Kernel Version and Root Access by Using a Kernel Checker App or a Root Checker App from the Play Store
+               - Enjoy the New Kernel Features and Enhancements Designed to Improve your Device's Performance         
+            ───────────────────────────────────────────────
+
+          artifacts: ${{ env.ASSETS }}
+          allowUpdates: true
+
+  dashboard:
+    needs: [build, release]
+    runs-on: ubuntu-latest
+
+    steps:
+
+      - name: 📥 Checkout
+        uses: actions/checkout@v4
+
+      - name: 📊 Dashboard Generator
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          mkdir -p public
+          RUN_ID="${{ needs.build.outputs.run_id }}"
+
+          cat > public/index.html <<EOF
+          <!DOCTYPE html>
+          <html>
+          <head>
+          <meta charset="UTF-8">
+          <title>Kernel Control Panel</title>
+          <style>
+          body { background:#0d1117; color:#c9d1d9; font-family:Arial; padding:30px; }
+          .card { background:#161b22; padding:20px; border-radius:12px; margin:20px auto; max-width:900px; }
+          pre { white-space:pre-wrap; }
+          </style>
+          </head>
+          <body>
+          
+          <h1>Kernel Control Panel</h1>
+          
+          <div class="card">
+          <h2>Run ID</h2>
+          <pre>${RUN_ID}</pre>
+          </div>
+          
+          <div class="card">
+          <h2>📦 Artifact System</h2>
+          <pre>
+          ✔ Built using actions/upload-artifact@v4  
+          ✔ Retrieved using actions/download-artifact@v4  
+          ✔ Packaged into GitHub Release automatically  
+          ✔ OTA-ready structure supported
+          </pre>
+          </div>
+          
+          </body>
+          </html>
+          EOF
+
+      - name: 📦 Upload Pages Artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: public
+
+      - name: 🚀 Deploy Pages
+        uses: actions/deploy-pages@v4
