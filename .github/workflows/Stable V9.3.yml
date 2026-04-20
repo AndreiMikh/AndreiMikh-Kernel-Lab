@@ -869,42 +869,53 @@ jobs:
       # Release Cache Restoration
       # ==============================
       - name: 🔧 Release Cache Restoration
-        if: ${{ env.BUILDCCACHE != 'Disabled' && steps.ccache-restore.outputs.cache-hit != 'true' }}      
+        id: cache-restoration
+        if: ${{ env.BUILDCCACHE != 'Disabled' && steps.ccache-restore.outputs.cache-hit != 'true' }}
         run: |
-          echo "🚀 Cache Not Found Locally, Attempting to Restore from GitHub Release..."
+          set -e
 
+          echo "------------------------------"  
+          echo "🚀 Cache Not Found Locally, Attempting to Restore from GitHub Release..."
+          echo "------------------------------"
+          echo ""
+      
           # Define the Release Asset
           TAR="CCache-${{ runner.os }}-${{ env.FILE_BASE }}-${{ env.CPUD }}-${{ github.ref_name }}.tar.zst"
-
+      
           # Build the Download URL
           URL="https://github.com/AndreiMikh/CCache/releases/download/001/${TAR}"
-          echo "📩 Downloading from: 🌐 $URL"
-
-          # Ensure Cache Directory Exists and Fix Permissions
-          mkdir -p "${{ env.CCACHE_DIR }}"  # Ensure the Directory is Created
-          chmod -R 775 "${{ env.CCACHE_DIR }}"  # Ensure the Directory is Writable
-
-          # Download Cache and Check if Found
+          echo "📩 Downloading from: $URL"
+      
+          # Ensure Cache Directory Exists
+          mkdir -p "${{ env.CCACHE_DIR }}"
+          chmod -R 775 "${{ env.CCACHE_DIR }}"
+      
+          # Download Cache
           if ! curl -fsSL -o "$TAR" "$URL"; then
-            echo "⚠️ Cache Not Found at $URL, Continuing Without Restoring..."
-            echo "💡 Proceeding with a Full Build Without Cache..."
+            echo "⚠️ Cache Not Found, Skipping Restore..."
+            echo "cache-restored=false" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+      
+          echo "🔥 Cache Found, Extracting..."
+      
+          # Extract
+          if [ -f "$TAR" ]; then
+            tar -I zstd -xvf "$TAR" -C "${{ env.CCACHE_DIR }}"
           else
-            echo "🔥 Cache Found, Extracting to ${{ env.CCACHE_DIR }}..."
-
-            # Extract into Cache
-            if [ -f "$TAR" ]; then
-              tar -I zstd -xvf "$TAR" -C "${{ env.CCACHE_DIR }}"
-
-              # Check if Extraction Was Successful
-              if [ -d "${{ env.CCACHE_DIR }}" ] && [ "$(ls -A ${{ env.CCACHE_DIR }})" ]; then
-                echo "👾 Cache Successfully Extracted..."
-                ls -la "${{ env.CCACHE_DIR }}"
-              else
-                echo "⚠️ Compiler Cache Extraction Failed..."
-              fi
-            else
-              echo "⚠️ Compiler Cache File does Not Exist at $TAR."
-            fi
+            echo "⚠️ Archive Missing after Download"
+            echo "cache-restored=false" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+      
+          # Validate Extraction
+          if [ -d "${{ env.CCACHE_DIR }}" ] && [ "$(ls -A ${{ env.CCACHE_DIR }})" ]; then
+            echo "👾 Cache Successfully Restored"
+            ls -la "${{ env.CCACHE_DIR }}"
+            echo "cache-restored=true" >> $GITHUB_OUTPUT
+          else
+            echo "⚠️ Cache Extraction Failed"
+            echo "cache-restored=false" >> $GITHUB_OUTPUT
           fi
   
       # ==============================
@@ -985,7 +996,7 @@ jobs:
           echo "🎯 Cache Hit: ${{ steps.ccache-restore.outputs.cache-hit }}"
 
           # Check if Cache was Restored from GitHub Release
-          if [[ -d "${{ env.CCACHE_DIR }}" && "$(ls -A "${{ env.CCACHE_DIR }}")" ]]; then
+          if [[ "${{ steps.cache-restoration.outputs.cache-restored }}" != "false" ]]; then
             echo "♻️ Compiler Cache Restored from GitHub Release"
             echo "♻️ Compiler Cache File: $CCACHE_DIR/CCache-${{ runner.os }}-${{ env.FILE_BASE }}-${{ env.CPUD }}-${{ github.ref_name }}"
           else
@@ -1010,14 +1021,14 @@ jobs:
           echo "| Status | Reported Value |" >> $GITHUB_STEP_SUMMARY
           echo "|--------|----------------|" >> $GITHUB_STEP_SUMMARY
 
-          if [[ "${{ steps.restore-cache.outputs.cache-hit }}" == 'true' ]]; then          
+          if [[ "${{ steps.restore-cache.outputs.cache-hit }}" == "true" || "${{ steps.cache-restoration.outputs.cache-restored }}" == "true" ]]; then
             STATUS="✔️ Exact Cache Match Restored (Fully Matched Cache Key with Identical Build Signature for Maximum Reuse Efficiency)"
             echo "🎉 Exact Cache Hit!"
             echo "📈 Compiler Cache Hit Details:"
             ccache -sv           
     
           # Check if Cache was Restored from GitHub Release
-          elif [[ -d "${{ env.CCACHE_DIR }}" && "$(ls -A "${{ env.CCACHE_DIR }}")" && "${{ steps.ccache-restore.outputs.cache-hit }}" != 'true' ]]; then         
+          elif [[ -d "${{ env.CCACHE_DIR }}" && "$(ls -A "${{ env.CCACHE_DIR }}")" && "${{ steps.ccache-restoration.outputs.cache-restore }}" != 'false' ]]; then         
             STATUS="♻️ Cache Restored from GitHub Release"
             echo "♻️ Cache Restored from GitHub Release"
             echo "| Cache | Cache Restored from GitHub Release (${{ env.CCACHE_DIR }}) |" >> $GITHUB_STEP_SUMMARY
@@ -4308,8 +4319,8 @@ jobs:
       # Save Compiler Cache
       # ==============================
       - name: 🔧 Save Compiler Cache
-        if: ${{ env.BUILDCCACHE != 'Disabled' && steps.ccache-restore.outputs.cache-hit != 'true' }}      
-        uses: actions/cache@v5
+        if: ${{ env.BUILDCCACHE != 'Disabled' && steps.ccache-restore.outputs.cache-hit != 'true' && steps.cache-restoration.outputs.cache-restored != 'true' }}
+        uses: actions/cache/save@v5
         with:
           path: ${{ env.CCACHE_DIR }}
           key: CCache-${{ runner.os }}-${{ env.FILE_BASE }}-${{ env.CPUD }}-${{ github.ref_name }}
@@ -4318,7 +4329,7 @@ jobs:
       # Cleanup Old Compiler Cache
       # ==============================
       - name: 🔧 Cleanup Old Compiler Cache
-        if: ${{ env.BUILDCCACHE != 'Disabled' && steps.ccache-restore.outputs.cache-hit != 'true' }}      
+        if: ${{ env.BUILDCCACHE != 'Disabled' && steps.ccache-restore.outputs.cache-hit != 'true' && steps.cache-restoration.outputs.cache-restored != 'true' }}
         shell: bash
         run: |
           set -euo pipefail
@@ -5235,29 +5246,53 @@ jobs:
           RATE=${RATE:-0%}
           SIZE=${SIZE:-0}
 
-          # Check if Cache was Restored from GitHub Release
-          if [[ "${{ steps.ccache-restore.outputs.cache-hit }}" != 'true' ]]; then         
-            FROMRELEASE="Yes"
-            CCPATH="${{ env.CCACHE_DIR }}/CCache-${{ runner.os }}-${{ env.FILE_BASE }}-${{ env.CPUD }}-${{ github.ref_name }}"
+          # Cache Source Detection          
+          # Default Values
+          FROMRELEASE="✘ No"
+          FROMLOCAL="✘ No"
+          
+          # Define Cache Path
+          CCPATH="${{ env.CCACHE_DIR }}/CCache-${{ runner.os }}-${{ env.FILE_BASE }}-${{ env.CPUD }}-${{ github.ref_name }}"
+          
+          # Check GitHub Release Cache
+          if [[ "${{ steps.cache-restoration.outputs.cache-restored }}" == "true" ]]; then
+            FROMRELEASE="✔ Yes"
+          fi
+          
+          # Check Local Cache (Actions/Cache)
+          if [[ "${{ steps.ccache-restore.outputs.cache-hit }}" == "true" ]]; then
+            FROMLOCAL="✔ Yes"
+          fi
+          
+          # Optional: Unified Cache Flag
+          if [[ "$FROMLOCAL" == "✔ Yes" || "$FROMRELEASE" == "✔ Yes" ]]; then
+            CACHEAVAIL="✔ Yes"
           else
-            FROMRELEASE="No"
-            CCPATH="N/A"
+            CACHEAVAIL="✘ No"
           fi
 
-          # Generate Summary Table with printf for cleaner formatting
+          # Generate Summary Table with PRINTF for Cleaner Formatting
+          # Summary Table          
           {
             echo "### ⚡ Compiler Cache Performance Summary"
             echo ""
+          
             printf "| %-64s | %-22s |\n" "Metric Description" "Reported Value"
             printf "|-----------------------------------------------------------------|------------------------|\n"
+          
             printf "| %-64s | %-22s |\n" "Total Number of Compilation Requests Processed by the Compiler" "$TOTAL"
             printf "| %-64s | %-22s |\n" "Direct Cache Hits (Immediate Object Reuse Without Reprocessing)" "$HIT_DIRECT"
             printf "| %-64s | %-22s |\n" "Preprocessed Cache Hits (Reused After Full Preprocessing Match)" "$HIT_PRE"
             printf "| %-64s | %-22s |\n" "Cache Misses (Files That Required Complete Recompilation)" "$MISS"
             printf "| %-64s | %-22s |\n" "Overall Cache Hit Rate Across All Compilation Requests" "$RATE"
             printf "| %-64s | %-22s |\n" "Current Compiler Cache Storage Utilization on Disk" "$SIZE"
+          
+            printf "| %-64s | %-22s |\n" "Restored From Local Cache (actions/cache)" "$FROMLOCAL"
             printf "| %-64s | %-22s |\n" "Restored From GitHub Release" "$FROMRELEASE"
+            printf "| %-64s | %-22s |\n" "Any Cache Available" "$CACHEAVAIL"
+          
             printf "| %-64s | %-22s |\n" "Restored Cache Path" "$CCPATH"
+          
           } >> "$GITHUB_STEP_SUMMARY"
     
       # ==============================
