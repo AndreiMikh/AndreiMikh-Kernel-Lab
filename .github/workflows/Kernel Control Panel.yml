@@ -1,4 +1,4 @@
-name: 🌐 Kernel Control Panel v2
+name: 🌐 Kernel Control Panel 🌐
 
 on:
   release:
@@ -6,8 +6,7 @@ on:
 
   workflow_run:
     workflows: ["Stable V9.3"]
-    types:
-      - completed
+    types: [completed]
 
 permissions:
   contents: read
@@ -15,20 +14,21 @@ permissions:
   id-token: write
 
 concurrency:
-  group: "pages"
+  group: kernel-control-panel
   cancel-in-progress: true
 
 jobs:
   dashboard:
-    if: github.event.workflow_run.conclusion == 'success' || github.event_name == 'release'
+    if: github.event_name == 'release' || github.event.workflow_run.conclusion == 'success'
     runs-on: ubuntu-latest
 
     steps:
+
       # ==============================
-      # 📥 Checkout Repository
+      # 📥 Checkout
       # ==============================
       - name: 📥 Checkout Repository
-        uses: actions/checkout@v5
+        uses: actions/checkout@v4
 
       # ==============================
       # 📊 Generate Dashboard
@@ -39,7 +39,6 @@ jobs:
           set -euo pipefail
 
           mkdir -p public
-
           REPO="${{ github.repository }}"
 
           cat > public/index.html <<'EOF'
@@ -75,6 +74,13 @@ jobs:
             border-radius: 6px;
             text-decoration: none;
           }
+          pre {
+            white-space: pre-wrap;
+            background: #0d1117;
+            padding: 10px;
+            border-radius: 6px;
+            border: 1px solid #30363d;
+          }
           </style>
           </head>
           
@@ -82,100 +88,147 @@ jobs:
           
           <h1>🔥 Kernel Control Panel </h1>
           
-          <div class="card" id="latest">
-            <h2>⚡ Loading Latest Build...</h2>
+          <div id="app" class="card">
+            <h2>⚡ Loading Builds...</h2>
           </div>
           
           <script>
           const repo = "${REPO}";
+
+          /* ==============================
+             Fetch Workflow Runs
+             ============================== */
+          async function getRuns() {
+            const res = await fetch(
+              `https://api.github.com/repos/${repo}/actions/runs?per_page=20`
+            );
+            const data = await res.json();
+            return data.workflow_runs || [];
+          }
           
-          async function loadDashboard() {
+          /* ==============================
+             Artifact Resolver
+             ============================== */
+          async function getArtifact(run) {
             try {
+              const res = await fetch(run.artifacts_url);
+              const data = await res.json();
           
-              // ==============================
-              // 1. Fetch Recent Workflow Runs
-              // ==============================
-              const runsRes = await fetch(
-                `https://api.github.com/repos/${repo}/actions/runs?per_page=20`
+              return (
+                data.artifacts?.find(a => a.name.includes("AnyKernel3")) ||
+                data.artifacts?.find(a => a.name.includes("Kernel")) ||
+                data.artifacts?.[0] ||
+                null
               );
+            } catch {
+              return null;
+            }
+          }
           
-              const runsData = await runsRes.json();
-              const runs = runsData.workflow_runs || [];
+          /* ==============================
+             Feature Detector
+             ============================== */
+          function detectFeatures(text) {
+            const t = (text || "").toLowerCase();
           
-              if (!runs.length) {
-                document.getElementById("latest").innerHTML =
-                  "<h3>No Builds Found</h3>";
-                return;
-              }
+            const f = [];
+            if (t.includes("sched")) f.push("🧠 Scheduler");
+            if (t.includes("zram")) f.push("🧩 ZRAM");
+            if (t.includes("lz4")) f.push("⚡ LZ4");
+            if (t.includes("tcp") || t.includes("bbr")) f.push("📡 TCP");
+            if (t.includes("lxc") || t.includes("docker")) f.push("📦 Containers");
+            if (t.includes("ksu")) f.push("🧬 KernelSU");
           
-              // ==============================
-              // 2. Classify Builds
-              // ==============================
-              const stableRuns = runs.filter(r =>
+            return f.length ? f.join(" • ") : "🧩 Standard Kernel";
+          }
+          
+          /* ==============================
+             Git Diff Engine (Real)
+             ============================== */
+          async function getDiff(base, head) {
+            try {
+              const res = await fetch(
+                `https://api.github.com/repos/${repo}/compare/${base}...${head}`
+              );
+              const data = await res.json();
+          
+              return (data.commits || [])
+                .slice(0, 8)
+                .map(c => `• ${c.sha.slice(0,7)}: ${c.commit.message.split("\\n")[0]}`)
+                .join("\\n");
+            } catch {
+              return "Diff Unavailable";
+            }
+          }
+          
+          /* ==============================
+             Card UI
+             ============================== */
+          function card(title, run, artifact) {
+            if (!run || !artifact) {
+              return `<div class="card"><h3>${title}</h3><p>No Build Found</p></div>`;
+            }
+          
+            return `
+              <div class="card">
+                <h3>${title}</h3>
+                <p><b>Workflow:</b> ${run.name}</p>
+                <p><b>Features:</b> ${detectFeatures(run.head_commit?.message)}</p>
+          
+                <a class="btn" href="${artifact.archive_download_url}">
+                  ⬇️ Download Build
+                </a>
+              </div>
+            `;
+          }
+          
+          /* ==============================
+             Main Loader
+             ============================== */
+          async function load() {
+            try {
+              const runs = await getRuns();
+          
+              const stable = runs.find(r =>
                 r.conclusion === "success" &&
                 !r.name.toLowerCase().includes("test")
               );
           
-              const experimentalRuns = runs.filter(r =>
+              const exp = runs.find(r =>
                 r.conclusion === "success" &&
                 r.name.toLowerCase().includes("test")
               );
           
-              const latestStable = stableRuns[0];
-              const latestExp = experimentalRuns[0];
+              const stableArt = await getArtifact(stable);
+              const expArt = await getArtifact(exp);
           
-              // ==============================
-              // 3. Smart Artifact Resolver
-              // ==============================
-              async function getArtifact(run) {
-                if (!run) return null;
+              let diffText = "No diff available";
           
-                const res = await fetch(run.artifacts_url);
-                const data = await res.json();
+              if (runs.length > 1) {
+                const latest = runs[0];
+                const prev = runs[1];
           
-                return (
-                  data.artifacts?.find(a => a.name.includes("AnyKernel3")) ||
-                  data.artifacts?.find(a => a.name.includes("Kernel")) ||
-                  data.artifacts?.[0] ||
-                  null
-                );
+                diffText = await getDiff(prev.head_sha, latest.head_sha);
               }
           
-              const stableArtifact = await getArtifact(latestStable);
-              const expArtifact = await getArtifact(latestExp);
+              document.getElementById("app").innerHTML = `
+                ${card("⚡ Latest Stable Build", stable, stableArt)}
+                ${card("🧪 Experimental Build", exp, expArt)}
           
-              // ==============================
-              // 4. Render UI
-              // ==============================
-          
-              function renderBuild(title, run, artifact) {
-                if (!run || !artifact) return `<p>No ${title} Build</p>`;
-          
-                return `
-                  <div class="card">
-                    <h2>${title}</h2>
-                    <p><b>Run:</b> ${run.name}</p>
-                    <p><b>ID:</b> ${run.id}</p>
-                    <a class="btn" href="${artifact.archive_download_url}">
-                      ⬇️ Download
-                    </a>
-                  </div>
-                `;
-              }
-          
-              document.getElementById("latest").innerHTML = `
-                ${renderBuild("⚡ Latest Stable Build", latestStable, stableArtifact)}
-                ${renderBuild("🧪 Latest Experimental Build", latestExp, expArtifact)}
+                <div class="card">
+                  <h3>📜 OEM Kernel Diff Changelog</h3>
+                  <pre>${diffText}</pre>
+                </div>
               `;
           
             } catch (e) {
               console.error(e);
-              document.getElementById("latest").innerHTML =
-                "<h3>Dashboard Failed to Load</h3>";
+              document.getElementById("app").innerHTML =
+                "<h3>❌ Dashboard Failed</h3>";
             }
           }
           
-          loadDashboard();
+          load();
           </script>
           
           </body>
@@ -193,5 +246,5 @@ jobs:
       # ==============================
       # 🚀 Deploy Pages
       # ==============================
-      - name: 🚀 Deploy Pages
+      - name: 🚀 Deploy to GitHub Pages
         uses: actions/deploy-pages@v4
