@@ -236,6 +236,12 @@ on:
           - Performance
           - Disable 
 
+permissions:
+  contents: write
+  packages: write
+  actions: read
+  id-token: write
+
 jobs:
   build:
     name: >
@@ -5195,28 +5201,157 @@ jobs:
           if-no-files-found: warn
 
       # ==============================
-      # Normalize Changelog
+      # Changelog Engine (Kernel Intelligence)
       # ==============================
-      - name: Normalize Changelog
+      - name: 🔧 Changelog Engine (Kernel Intelligence)
         shell: bash
         run: |
           set -euo pipefail
       
-          MSG="${{ github.event.head_commit.message || github.event.release.body || 'Automated Kernel Build' }}"
+          echo "🚀 Changelog Engine (Kernel Intelligence)..."
       
-          echo "COMMITMSG<<EOF" >> $GITHUB_ENV
-          echo "$MSG" >> $GITHUB_ENV
-          echo "EOF" >> $GITHUB_ENV
+          # Git History Unlock
+          git fetch --tags --prune --no-recurse-submodules 2>/dev/null || true
+      
+          PREV="${{ github.event.before || '' }}"
+          PREV="${PREV:-}"
+      
+          if [[ -z "$PREV" || "$PREV" == "0000000000000000000000000000000000000000" ]]; then
+            PREV=$(git rev-list --max-parents=0 HEAD)
+          fi
+      
+          LOG=$(git log --no-merges --pretty=format:"%s" "$PREV..HEAD" 2>/dev/null || echo "")
+      
+          if [[ -z "$LOG" ]]; then
+            LOG="Automated Kernel Build"
+          fi
+      
+          # Sub-System Buckets
+          SCHED=""; ZRAM=""; LXC=""; NET=""; ROOT=""; OTHER=""
+      
+          while IFS= read -r line || [[ -n "$line" ]]; do
+            [[ -z "$line" ]] && continue
+      
+            # Noise Filter
+            echo "$line" | grep -qiE "merge|ci|chore|typo|readme" && continue
+      
+            case "$line" in
+              *sched*|*scheduler*|*eas*|*adios*|*bore*|*ssg*)
+                SCHED+="- $line"$'\n'
+                ;;
+              *zram*|*lz4*|*zstd*|*swap*)
+                ZRAM+="- $line"$'\n'
+                ;;
+              *lxc*|*container*|*docker*|*termux*)
+                LXC+="- $line"$'\n'
+                ;;
+              *net*|*tcp*|*bbr*|*ecn*|*netfilter*)
+                NET+="- $line"$'\n'
+                ;;
+              *ksu*|*kernelsu*|*root*|*suki*)
+                ROOT+="- $line"$'\n'
+                ;;
+              *)
+                OTHER+="- $line"$'\n'
+                ;;
+            esac
+      
+          done <<< "$LOG"
+      
+          # Build Output Safely
+          FINAL=""
+      
+          add_section() {
+            [[ -n "$2" ]] && FINAL+=$'\n'"### $1"$'\n'"$2"
+          }
+      
+          add_section "🧠 Scheduler" "$SCHED"
+          add_section "🧩 Memory / ZRAM" "$ZRAM"
+          add_section "📦 Containers / LXC" "$LXC"
+          add_section "🌐 Network Stack" "$NET"
+          add_section "🔐 Root / KernelSU" "$ROOT"
+          add_section "📌 Other Changes" "$OTHER"
+      
+          [[ -z "$FINAL" ]] && FINAL="Automated Kernel Build"
+      
+          {
+            echo "COMMITMSG<<EOF"
+            echo "$FINAL"
+            echo "EOF"
+          } >> $GITHUB_ENV
 
+      # ==============================
+      # Ensure Output Directories
+      # ==============================
+      - name: 🔧 Ensure Output Directories
+        run: |
+          mkdir -p AnyKernel3 flat_apk ZRAM-Module
+          
+      # ==============================
+      # Auto Artifact Scanner
+      # ==============================
+      - name: 🔧 Auto Artifact Scanner
+        id: scanner
+        shell: bash
+        run: |
+          set -euo pipefail
+      
+          echo "Scanning Build Outputs..."
+      
+          PATHS=""
+      
+          for d in AnyKernel3 flat_apk; do
+            [[ -d "$d" ]] || continue
+          
+            if [[ -n "$(find "$d" -type f -print -quit 2>/dev/null)" ]]; then
+              PATHS+="$d/**/* "
+            fi
+          done
+      
+          if [[ "${{ github.event.inputs.ZRAMALGORITHM }}" != "0" ]]; then
+            if [[ -d "ZRAM-Module" ]] && [[ -n "$(find "ZRAM-Module" -type f -print -quit 2>/dev/null)" ]]; then
+              PATHS+="ZRAM-Module/**/* "
+            fi
+          fi
+      
+          PATHS="$(echo "$PATHS" | xargs)"
+      
+          if [[ -z "$PATHS" ]]; then
+            echo "⚠️ No Artifacts Found → Fallback Check"
+          
+            if [[ -d "AnyKernel3" ]] && [[ "$(find AnyKernel3 -type f -print -quit)" ]]; then
+              PATHS="AnyKernel3/**/*"
+            else
+              echo "⚠️ No Valid Build Artifacts Exist, Build Likely Failed"
+              echo "paths=" >> $GITHUB_OUTPUT
+              exit 0
+            fi
+          fi
+      
+          echo "📦 Final Artifact Paths: $PATHS"
+      
+          echo "paths<<EOF" >> $GITHUB_OUTPUT
+          printf '%s\n' "$PATHS" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+
+      # ==============================
+      # Validate Artifacts
+      # ==============================
+      - name: 🔧 Validate Artifacts
+        if: ${{ steps.scanner.outputs.paths == null || steps.scanner.outputs.paths == '' }}
+        run: |
+          echo "⚠️ No Valid Artifacts Found → Skipping Release"
+          exit 0
+      
       # ==============================
       # Create GitHub Release
       # ==============================
-      - name: Create GitHub Release
-        if: success()
-        uses: softprops/action-gh-release@v2
+      - name: 🔧 Create GitHub Release
+        if: github.event_name == 'release' || github.event_name == 'workflow_dispatch'
+        uses: ncipollo/release-action@v1
         with:
-          tag_name: "${{ env.FILE_BASE }}-${{ steps.suffix.outputs.suffix }}-${{ env.TKERNEL_VERSION }}"
-          name: "🔥 ${{ env.FILE_BASE }} Kernel • ${{ steps.suffix.outputs.suffix }}"
+          tag: "${{ env.FILE_BASE }}-${{ env.TKERNEL_VERSION }}-${{ github.run_number }}"
+          name: "🔥 ${{ env.FILE_BASE }} Kernel • ${{ github.run_number }}"
       
           body: |
             ## 📦 Kernel Release
@@ -5226,46 +5361,35 @@ jobs:
             - 🔧 Kernel: ${{ env.ANDROIDVERSION }}-${{ env.TKERNEL_VERSION }}
             - 🌏 ROM Base: ${{ env.ROM_BASE }}
             - 🎯 Confidence: ${{ env.ROM_CONFIDENCE }}
-            - 🔐 Root Variant: ${{ github.event.inputs.ROOTENGINE }}
+            - 🔐 Root Variant: ${{ github.event.inputs.ROOTENGINE || 'Auto' }}
       
             ---
       
             ### ⚙️ Features
-            - 🧠 Scheduler: ${{ github.event.inputs.SCHEDULERS }}
-            - 🧩 Linux Containers: ${{ github.event.inputs.LXCDOCKERSUPPORT }}
-            - 📡 Netfilter: ${{ github.event.inputs.NETFILTER }}
-            - ⚡ TCP Algorithm: ${{ github.event.inputs.TCPALGORITHM }}
-            - 🧠 ZRAM: ${{ github.event.inputs.ZRAMALGORITHM }}
-            - 🔐 LSM BBG: ${{ github.event.inputs.LSMBBG }}
-            - 🔤 Unicode: ${{ github.event.inputs.UNICODE }}
+            - 🧠 Scheduler: ${{ github.event.inputs.SCHEDULERS || 'Auto' }}
+            - 🧩 Containers: ${{ github.event.inputs.LXCDOCKERSUPPORT || 'None' }}
+            - 📡 Netfilter: ${{ github.event.inputs.NETFILTER || 'Auto' }}
+            - ⚡ TCP: ${{ github.event.inputs.TCPALGORITHM || 'Auto' }}
+            - 🧠 ZRAM: ${{ github.event.inputs.ZRAMALGORITHM || 'Auto' }}
+            - 🔐 LSM BBG: ${{ github.event.inputs.LSMBBG || 'Auto' }}
+            - 🔤 Unicode: ${{ github.event.inputs.UNICODE || 'Auto' }}
       
             ---
       
-            ## 📋 Installation Guide
-            (kept unchanged for clarity)
-      
-            ---
-    
             ## 📜 Auto Changelog
             ${{ env.COMMITMSG }}
       
             ---
       
             ## 🔗 Compare Changes
-            https://github.com/${{ github.repository }}/compare/${{ github.event.before }}...${{ github.sha }}
+            https://github.com/${{ github.repository }}/compare/${{ github.event.before || github.sha }}...${{ github.sha }}
       
-          files: |
-            AnyKernel3/**
-            flat_apk/**
-            ZRAM-Module/**
+          artifacts: ${{ steps.scanner.outputs.paths }}
       
           draft: false
           prerelease: false
-          fail_on_unmatched_files: false
-      
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
+          allowUpdates: true
+          
       # ==============================
       # Post Build Disk Check
       # ==============================
