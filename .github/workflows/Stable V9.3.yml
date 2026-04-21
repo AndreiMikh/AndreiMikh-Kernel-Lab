@@ -401,7 +401,7 @@ jobs:
         id: extract_info
         env:
           FILE: ${{ github.event.inputs.FILE }}
-          GITREPOSITORYINPUT: ${{ github.event.inputs.GITHUBREPOSITORY }}
+          GITHUB_REPOSITORY_INPUT: ${{ github.event.inputs.GITHUBREPOSITORY }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
@@ -417,12 +417,12 @@ jobs:
 
           # Normalize File Name
           if [[ "$FILE" =~ ^(.+)_([a-zA-Z])$ ]]; then
-            BASEFILECONFIG="${BASH_REMATCH[1]}"
+            FILE_CONF="${BASH_REMATCH[1]}"
           else
-            BASEFILECONFIG="$FILE"
+            FILE_CONF="$FILE"
           fi
 
-          BASEFILENAME=$(echo "$BASEFILECONFIG" | sed -E '
+          FILE_BASE=$(echo "$FILE_CONF" | sed -E '
             s/_aosp/(AOSP)/g;
             s/_([a-zA-Z0-9])/\U\1/g;
             s/^oneplus/OnePlus/;
@@ -431,16 +431,16 @@ jobs:
           ')
 
           mkdir -p ".repo/manifests_fallback"
-          XMLPATH=".repo/manifests_fallback/${FILE}.xml"
-          READMEPATH=".repo/manifests_fallback/README.md"
+          XML_PATH=".repo/manifests_fallback/${FILE}.xml"
+          README_PATH=".repo/manifests_fallback/README.md"
 
           echo "FILE=$FILE"
-          echo "BASEFILECONFIG=$BASEFILECONFIG"
-          echo "BASEFILENAME=$BASEFILENAME"
+          echo "FILE_CONF=$FILE_CONF"
+          echo "FILE_BASE=$FILE_BASE"
 
           {
-            echo "BASEFILECONFIG=$BASEFILECONFIG"
-            echo "BASEFILENAME=$BASEFILENAME"
+            echo "FILE_CONF=$FILE_CONF"
+            echo "FILE_BASE=$FILE_BASE"
           } >> "$GITHUB_ENV"
 
             # Repository Priority:
@@ -454,32 +454,32 @@ jobs:
             REPOS["Appendix"]="AndreiMikh|Kernel_Manifest_Appendix"
 
             # Only Register the Dynamic Repository if Input is Not Empty
-            if [[ -n "$GITREPOSITORYINPUT" ]]; then
+            if [[ -n "$GITHUB_REPOSITORY_INPUT" ]]; then
             
               # Remove https://github.com/ if User Pasted full URL
-              GITREPOSITORYINPUT="${GITREPOSITORYINPUT#https://github.com/}"
-              GITREPOSITORYINPUT="${GITREPOSITORYINPUT%/}"
+              GITHUB_REPOSITORY_INPUT="${GITHUB_REPOSITORY_INPUT#https://github.com/}"
+              GITHUB_REPOSITORY_INPUT="${GITHUB_REPOSITORY_INPUT%/}"
               
-              if [[ "$GITREPOSITORYINPUT" =~ ^[^/]+/[^/]+$ ]]; then
-                echo "🚀 Dynamic Repository Detected: $GITREPOSITORYINPUT"
-                OWNER="${GITREPOSITORYINPUT%%/*}"
-                REPO="${GITREPOSITORYINPUT##*/}"
+              if [[ "$GITHUB_REPOSITORY_INPUT" =~ ^[^/]+/[^/]+$ ]]; then
+                echo "🚀 Dynamic Repository Detected: $GITHUB_REPOSITORY_INPUT"
+                OWNER="${GITHUB_REPOSITORY_INPUT%%/*}"
+                REPO="${GITHUB_REPOSITORY_INPUT##*/}"
                 REPOS["Dynamic"]="$OWNER|$REPO"
               else
                 echo "Information  : ⚠️ Invalid Dynamic Repository Format - Skipping..."
                 echo "Expected     : ✔️ Dynamic Owner / Repository"
-                echo "Provided     : 🔎 $GITREPOSITORYINPUT"
+                echo "Provided     : 🔎 $GITHUB_REPOSITORY_INPUT"
                 echo "⚠️ Skipping Dynamic Repository Instead of Failing..."
               fi
             fi
 
             # Export Keys and Values for Parallel Jobs
-            export TARGETKEYS="${!REPOS[@]}"
-            export TARGETVALUES="${REPOS[@]}"
+            export REPOS_KEYS="${!REPOS[@]}"
+            export REPOS_VALUES="${REPOS[@]}"
 
-          REPOSITORYTARGET=""
-          TARGETREPOSITORYNAME=""
-          TARGETBRANCH=""
+          FOUND_REPO=""
+          FOUND_REPO_NAME=""
+          FOUND_BRANCH=""
 
           # Function: Check Repository for XML
           check_repo() {
@@ -487,10 +487,10 @@ jobs:
             [[ -z "$ENTRY" ]] && return 1
 
             local OWNER="${ENTRY%%|*}"
-            local TARGETREPOSITORYNAME="${ENTRY##*|}"
+            local REPO_NAME="${ENTRY##*|}"
 
             echo ""
-            echo "🔎 Checking ${OWNER}/${TARGETREPOSITORYNAME}"
+            echo "🔎 Checking ${OWNER}/${REPO_NAME}"
 
             local BRANCHES=""
       
@@ -499,79 +499,79 @@ jobs:
             BRANCHES=$(curl --connect-timeout 10 --max-time 20 -fsSL \
                         -H "Authorization: token $GITHUB_TOKEN" \
                         -H "Accept: application/vnd.github.v3+json" \
-                        "https://api.github.com/repos/${OWNER}/${TARGETREPOSITORYNAME}/branches?per_page=100" \
+                        "https://api.github.com/repos/${OWNER}/${REPO_NAME}/branches?per_page=100" \
                         | jq -r '.[].name? // empty' 2>/dev/null || true)
                         fi
 
             # 2️⃣ Fallback to Unauthenticated API if Empty
             if [[ -z "$BRANCHES" ]]; then
               BRANCHES=$(curl --connect-timeout 10 --max-time 20 -fsSL \
-                          "https://api.github.com/repos/${OWNER}/${TARGETREPOSITORYNAME}/branches?per_page=100" \
+                          "https://api.github.com/repos/${OWNER}/${REPO_NAME}/branches?per_page=100" \
                           | jq -r '.[].name? // empty' 2>/dev/null || true)
             fi
 
             # 3️⃣ Fallback to Git LS-Remote
             if [[ -z "$BRANCHES" ]]; then
               echo "⚠️ API Failed, Falling Back to Git LS-Remote..."
-              BRANCHES=$(git ls-remote --heads https://github.com/${OWNER}/${TARGETREPOSITORYNAME}.git 2>/dev/null | sed 's|.*refs/heads/||' || true)      
+              BRANCHES=$(git ls-remote --heads https://github.com/${OWNER}/${REPO_NAME}.git 2>/dev/null | sed 's|.*refs/heads/||' || true)      
             fi
 
-            [[ -z "$BRANCHES" ]] && { echo "No Branches Found for ${OWNER}/${TARGETREPOSITORYNAME}, Skipping..."; return 1; }
+            [[ -z "$BRANCHES" ]] && { echo "No Branches Found for ${OWNER}/${REPO_NAME}, Skipping..."; return 1; }
 
             # Try Each Branch Until XML File is Found
             for BRANCH in $BRANCHES; do
               echo "  → 📃 Trying Branch: $BRANCH"
-              XMLURL="https://raw.githubusercontent.com/${OWNER}/${TARGETREPOSITORYNAME}/${BRANCH}/${FILE}.xml"
-              READMEURL="https://raw.githubusercontent.com/${OWNER}/${TARGETREPOSITORYNAME}/${BRANCH}/README.md"
+              XML_URL="https://raw.githubusercontent.com/${OWNER}/${REPO_NAME}/${BRANCH}/${FILE}.xml"
+              README_URL="https://raw.githubusercontent.com/${OWNER}/${REPO_NAME}/${BRANCH}/README.md"
 
-              if curl -sf --head "$XMLURL" >/dev/null; then
-                echo "🔎 Found ${FILE}.xml in ${OWNER}/${TARGETREPOSITORYNAME} (Branch: $BRANCH)"
-                curl -fsSL -o "$XMLPATH" "$XMLURL"
-                curl -fsSL -o "$READMEPATH" "$READMEURL" || true
+              if curl -sf --head "$XML_URL" >/dev/null; then
+                echo "🔎 Found ${FILE}.xml in ${OWNER}/${REPO_NAME} (Branch: $BRANCH)"
+                curl -fsSL -o "$XML_PATH" "$XML_URL"
+                curl -fsSL -o "$README_PATH" "$README_URL" || true
 
-                REPOSITORYTARGET="$OWNER"
-                TARGETREPOSITORYNAME="$TARGETREPOSITORYNAME"
-                TARGETBRANCH="$BRANCH"
+                FOUND_REPO="$OWNER"
+                FOUND_REPO_NAME="$REPO_NAME"
+                FOUND_BRANCH="$BRANCH"
                 return 0
               fi
             done
 
-            echo "⚠️ No Branch Contains ${FILE}.xml in ${OWNER}/${TARGETREPOSITORYNAME}, Skipping..."
+            echo "⚠️ No Branch Contains ${FILE}.xml in ${OWNER}/${REPO_NAME}, Skipping..."
             return 1
           }
 
           # Parallel Repository Check
-          TMPTARGET="/tmp/manifest_found.lock"
-          TMPTARGETINFO="/tmp/manifest_info.txt"
+          TMP_FOUND="/tmp/manifest_found.lock"
+          TMP_INFO="/tmp/manifest_info.txt"
 
           # Remove Old Markers
-          rm -f "$TMPTARGET" "$TMPTARGETINFO"
+          rm -f "$TMP_FOUND" "$TMP_INFO"
 
           pids=()
 
-          for key in $TARGETKEYS; do
+          for key in $REPOS_KEYS; do
               value="${REPOS[$key]}" || true
               if [[ -n "$value" ]]; then
                   (
                       OWNER="${value%%|*}"
-                      TARGETREPOSITORYNAME="${value##*|}"
+                      REPO_NAME="${value##*|}"
 
-                      echo "🔎 Checking $OWNER/$TARGETREPOSITORYNAME"
+                      echo "🔎 Checking $OWNER/$REPO_NAME"
 
                       # Try Branches as Before
-                      BRANCHES=$(curl -s "https://api.github.com/repos/$OWNER/$TARGETREPOSITORYNAME/branches?per_page=100" | jq -r '.[].name? // empty' 2>/dev/null || true)
-                      [[ -z "$BRANCHES" ]] && BRANCHES=$(git ls-remote --heads https://github.com/$OWNER/$TARGETREPOSITORYNAME.git 2>/dev/null | sed 's|.*refs/heads/||' || true)
+                      BRANCHES=$(curl -s "https://api.github.com/repos/$OWNER/$REPO_NAME/branches?per_page=100" | jq -r '.[].name? // empty' 2>/dev/null || true)
+                      [[ -z "$BRANCHES" ]] && BRANCHES=$(git ls-remote --heads https://github.com/$OWNER/$REPO_NAME.git 2>/dev/null | sed 's|.*refs/heads/||' || true)
 
                       for BRANCH in $BRANCHES; do
-                          XMLURL="https://raw.githubusercontent.com/$OWNER/$TARGETREPOSITORYNAME/$BRANCH/${FILE}.xml"
-                          READMEURL="https://raw.githubusercontent.com/$OWNER/$TARGETREPOSITORYNAME/$BRANCH/README.md"
-                          if curl -sf --head "$XMLURL" >/dev/null; then
-                              curl -fsSL -o "$XMLPATH" "$XMLURL"
-                              curl -fsSL -o "$READMEPATH" "$READMEURL" || true
+                          XML_URL="https://raw.githubusercontent.com/$OWNER/$REPO_NAME/$BRANCH/${FILE}.xml"
+                          README_URL="https://raw.githubusercontent.com/$OWNER/$REPO_NAME/$BRANCH/README.md"
+                          if curl -sf --head "$XML_URL" >/dev/null; then
+                              curl -fsSL -o "$XML_PATH" "$XML_URL"
+                              curl -fsSL -o "$README_PATH" "$README_URL" || true
                               
                               # Write Success Information to a Temporary File (Parent Shell will Read this)
-                              echo "$OWNER|$TARGETREPOSITORYNAME|$BRANCH" > "$TMPTARGETINFO"
-                              touch "$TMPTARGET"
+                              echo "$OWNER|$REPO_NAME|$BRANCH" > "$TMP_INFO"
+                              touch "$TMP_FOUND"
                               exit 0
                           fi
                       done
@@ -586,31 +586,31 @@ jobs:
           done
 
           # Read Results from Temporary File
-          if [[ -f "$TMPTARGET" && -s "$TMPTARGETINFO" ]]; then
-              IFS='|' read -r REPOSITORYTARGET TARGETREPOSITORYNAME TARGETBRANCH < "$TMPTARGETINFO"
-              echo "✔️ Manifest Successfully Found: $REPOSITORYTARGET/$TARGETREPOSITORYNAME (Branch: $TARGETBRANCH)"
+          if [[ -f "$TMP_FOUND" && -s "$TMP_INFO" ]]; then
+              IFS='|' read -r FOUND_REPO FOUND_REPO_NAME FOUND_BRANCH < "$TMP_INFO"
+              echo "✔️ Manifest Successfully Found: $FOUND_REPO/$FOUND_REPO_NAME (Branch: $FOUND_BRANCH)"
           else
               echo "⚠️ WARNING: ${FILE}.xml Not Found in Any Repository"
               exit 1
           fi
 
           # Final Safe Validation
-          if [[ -z "$REPOSITORYTARGET" || ! -s "$XMLPATH" ]]; then
+          if [[ -z "$FOUND_REPO" || ! -s "$XML_PATH" ]]; then
             echo "⚠️ WARNING: ${FILE}.xml Not Found in Any Repository"
             exit 1  # Safe, Workflow Continues
           fi
 
           echo ""
           echo "------ Manifest Located ------"
-          echo "📂 Repository  : ${REPOSITORYTARGET}/${TARGETREPOSITORYNAME}"
-          echo "📂 Branch      : ${TARGETBRANCH}"
+          echo "📂 Repository  : ${FOUND_REPO}/${FOUND_REPO_NAME}"
+          echo "📂 Branch      : ${FOUND_BRANCH}"
           echo "------------------------------"
           echo ""
 
           {
-            echo "MANIFESTREPOSITORY=$REPOSITORYTARGET"
-            echo "MANIFESTNAME=$TARGETREPOSITORYNAME"
-            echo "MANIFESTBRANCH=$TARGETBRANCH"
+            echo "MANIFEST_REPO=$FOUND_REPO"
+            echo "MANIFEST_REPO_NAME=$FOUND_REPO_NAME"
+            echo "MANIFEST_BRANCH=$FOUND_BRANCH"
           } >> "$GITHUB_ENV"
 
           # Parse Revision String
@@ -618,37 +618,37 @@ jobs:
           
           if command -v xmllint >/dev/null; then
             echo "[Info] Using XMLLint for XML Parsing"
-            REVISION=$(xmllint --xpath 'string(//project/@revision)' "$XMLPATH" 2>/dev/null || true)
+            REVISION=$(xmllint --xpath 'string(//project/@revision)' "$XML_PATH" 2>/dev/null || true)
           else
             echo "⚠️ XMLLint Not Found, Using Grep Fallback"
-            REVISION=$(grep -oP '<project[^>]+revision="\K[^"]+' "$XMLPATH" | head -n1 || true)
+            REVISION=$(grep -oP '<project[^>]+revision="\K[^"]+' "$XML_PATH" | head -n1 || true)
           fi
           
           CPU=$(echo "$REVISION" | cut -d'/' -f2 | cut -d'_' -f1)
           VANDROID=$(echo "$REVISION" | grep -oE '[0-9]{1,2}\.[0-9]{1,2}(\.[0-9]{1,2})?' | head -n1 || true)
-          ANDROIDSHORTVER="${VANDROID%%.*}"
+          ANDROID_SHORT_VERSION="${VANDROID%%.*}"
 
           {
             echo "CPU=$CPU"
             echo "VANDROID=$VANDROID"
-            echo "ANDROIDSHORTVER=$ANDROIDSHORTVER"
+            echo "ANDROID_SHORT_VERSION=$ANDROID_SHORT_VERSION"
           } >> "$GITHUB_ENV"
 
           # Parse README for CPUD and Build Method
-          if [[ -s "$READMEPATH" ]]; then
-            BUILDLINE=$(grep -m1 'oplus_build_kernel.sh' "$READMEPATH" || true)
-            if [[ -n "$BUILDLINE" ]]; then
-              CPUD=$(awk '{print $(NF-1)}' <<< "$BUILDLINE")
-              BUILDMETHOD=$(awk '{print $NF}' <<< "$BUILDLINE")
+          if [[ -s "$README_PATH" ]]; then
+            BUILD_LINE=$(grep -m1 'oplus_build_kernel.sh' "$README_PATH" || true)
+            if [[ -n "$BUILD_LINE" ]]; then
+              CPUD=$(awk '{print $(NF-1)}' <<< "$BUILD_LINE")
+              BUILD_METHOD=$(awk '{print $NF}' <<< "$BUILD_LINE")
               {
                 echo "CPUD=$CPUD"
-                echo "BUILDMETHOD=$BUILDMETHOD"
+                echo "BUILD_METHOD=$BUILD_METHOD"
               } >> "$GITHUB_ENV"
             fi
           fi
 
           # Output Combined Value
-          echo "value=${BASEFILENAME}_Android${VANDROID:-unknown}" >> "$GITHUB_OUTPUT"
+          echo "value=${FILE_BASE}_Android${VANDROID:-unknown}" >> "$GITHUB_OUTPUT"
 
           echo ""
           echo "🎉 Manifest Parsing Complete"
@@ -694,7 +694,7 @@ jobs:
               echo "CPU               : ${CPU:-<empty>}"
               echo "CPUD              : ${CPUD:-<empty>}"
               echo "VANDROID          : ${VANDROID:-<empty>}"
-              echo "BUILDMETHOD       : ${BUILDMETHOD:-<empty>}"
+              echo "BUILD_METHOD      : ${BUILD_METHOD:-<empty>}"
               echo "------------------------------"
               echo ""
 
@@ -773,11 +773,11 @@ jobs:
           set -euo pipefail
 
           # Dynamic ZRAM Size Based on RAM
-          RAMKB=$(grep MemTotal /proc/meminfo | awk '{print $2}')        # in KB
-          ZRAMSIZEKB=$(( RAMKB * 75 / 100 ))                             # 75% of total RAM
-          ZRAMSIZEMB=$(( ZRAMSIZEKB / 1024 ))                            # convert to MB
-          echo "🚀 Total RAM: $((RAMKB/1024)) MB"
-          echo "💾 Setting ZRAM Size to 75% → ${ZRAMSIZEMB} MB"
+          RAM_KB=$(grep MemTotal /proc/meminfo | awk '{print $2}')        # in KB
+          ZRAM_SIZE_KB=$(( RAM_KB * 75 / 100 ))                           # 75% of total RAM
+          ZRAM_SIZE_MB=$(( ZRAM_SIZE_KB / 1024 ))                         # convert to MB
+          echo "🚀 Total RAM: $((RAM_KB/1024)) MB"
+          echo "💾 Setting ZRAM Size to 75% → ${ZRAM_SIZE_MB} MB"
 
           # Enable ZRAM if Module Exists
           if lsmod | grep -q "^zram"; then
@@ -785,7 +785,7 @@ jobs:
           elif sudo modprobe -n zram >/dev/null 2>&1; then
             echo "🚀 Loading ZRAM Module..."
             sudo modprobe zram
-            echo $((ZRAMSIZEMB * 1024 * 1024)) | sudo tee /sys/block/zram0/disksize
+            echo $((ZRAM_SIZE_MB * 1024 * 1024)) | sudo tee /sys/block/zram0/disksize
             sudo mkswap /dev/zram0
             sudo swapon /dev/zram0
             echo "🎉 ZRAM Enabled"
@@ -858,11 +858,11 @@ jobs:
         uses: actions/cache@v5
         with:
           path: ${{ env.CCACHE_DIR }}
-          key: CCache-${{ runner.os }}-${{ env.BASEFILENAME }}-${{ env.CPUD }}-${{ github.ref_name }}        
+          key: CCache-${{ runner.os }}-${{ env.FILE_BASE }}-${{ env.CPUD }}-${{ github.ref_name }}        
           restore-keys: |
-            CCache-${{ runner.os }}-${{ env.BASEFILENAME }}-${{ env.CPUD }}-${{ github.ref_name }}-
-            CCache-${{ runner.os }}-${{ env.BASEFILENAME }}-${{ env.CPUD }}-
-            CCache-${{ runner.os }}-${{ env.BASEFILENAME }}-
+            CCache-${{ runner.os }}-${{ env.FILE_BASE }}-${{ env.CPUD }}-${{ github.ref_name }}-
+            CCache-${{ runner.os }}-${{ env.FILE_BASE }}-${{ env.CPUD }}-
+            CCache-${{ runner.os }}-${{ env.FILE_BASE }}-
             CCache-${{ runner.os }}-
 
       # ==============================
@@ -880,7 +880,7 @@ jobs:
           echo ""
       
           # Define the Release Asset
-          TAR="CCache-${{ runner.os }}-${{ env.BASEFILENAME }}-${{ env.CPUD }}-${{ github.ref_name }}.tar.zst"
+          TAR="CCache-${{ runner.os }}-${{ env.FILE_BASE }}-${{ env.CPUD }}-${{ github.ref_name }}.tar.zst"
       
           # Build the Download URL
           URL="https://github.com/AndreiMikh/CCache/releases/download/001/${TAR}"
@@ -990,7 +990,7 @@ jobs:
         if: ${{ env.BUILDCCACHE != 'Disabled' }}
         run: |
           echo "🚀 Cache Debug Information..."
-          echo "Key: CCache-${{ runner.os }}-${{ env.BASEFILENAME }}-${{ env.CPUD }}-${{ github.ref_name }}"        
+          echo "Key: CCache-${{ runner.os }}-${{ env.FILE_BASE }}-${{ env.CPUD }}-${{ github.ref_name }}"        
 
           echo ""
           echo "🎯 Cache Hit: ${{ steps.ccache-restore.outputs.cache-hit }}"
@@ -998,7 +998,7 @@ jobs:
           # Check if Cache was Restored from GitHub Release
           if [[ "${{ steps.cache-restoration.outputs.cache-restored }}" != "false" ]]; then
             echo "♻️ Compiler Cache Restored from GitHub Release"
-            echo "♻️ Compiler Cache File: $CCACHE_DIR/CCache-${{ runner.os }}-${{ env.BASEFILENAME }}-${{ env.CPUD }}-${{ github.ref_name }}"
+            echo "♻️ Compiler Cache File: $CCACHE_DIR/CCache-${{ runner.os }}-${{ env.FILE_BASE }}-${{ env.CPUD }}-${{ github.ref_name }}"
           else
             echo "☘️ Cache was Not Restored from GitHub Release"
           fi
@@ -1125,11 +1125,11 @@ jobs:
           mkdir -p .repo/manifests
           cp "$GITHUB_WORKSPACE/.repo/manifests_fallback/${FILE}.xml" ".repo/manifests/${FILE}.xml"
       
-          MANIFESTURL="https://github.com/${MANIFESTREPOSITORY}/${MANIFESTNAME}.git"
+          BASE_URL="https://github.com/${MANIFEST_REPO}/${MANIFEST_REPO_NAME}.git"
       
           echo "🚀 Initializing Repository..."
       
-          repo init -u "$MANIFESTURL" -b "$MANIFESTBRANCH" -m "${FILE}.xml" \
+          repo init -u "$BASE_URL" -b "$MANIFEST_BRANCH" -m "${FILE}.xml" \
             --depth=1 \
             --no-clone-bundle \
             --no-tags
@@ -1139,7 +1139,7 @@ jobs:
       
           echo "📁 Syncing Repository..."
           
-          SYNCFLAGS="-c --force-sync --no-clone-bundle --no-tags \
+          SYNC_FLAGS="-c --force-sync --no-clone-bundle --no-tags \
           --optimized-fetch --prune --retry-fetches=3 --verbose \
           -j$(nproc)"
           
@@ -1151,50 +1151,50 @@ jobs:
               sleep 60
             done
           ) &
-          PROGRESSPID=$!
+          PROGRESS_PID=$!
           
-          timeout 25m repo sync $SYNCFLAGS
-          SYNCSTATUS=$?
+          timeout 25m repo sync $SYNC_FLAGS
+          SYNC_STATUS=$?
           
-          kill $PROGRESSPID >/dev/null 2>&1 || true
-          wait $PROGRESSPID 2>/dev/null || true
+          kill $PROGRESS_PID >/dev/null 2>&1 || true
+          wait $PROGRESS_PID 2>/dev/null || true
           
-          if [[ $SYNCSTATUS -ne 0 ]]; then
+          if [[ $SYNC_STATUS -ne 0 ]]; then
             echo "⚠️ Repository Sync Failed"
             exit 1
           fi
       
           echo "🔎 Detecting Kernel Repository..."
-          KERNELREPOSITORYPATH=$(find . -type f -name "build.config*" \
+          KERNEL_REPOS_PATH=$(find . -type f -name "build.config*" \
             -not -path "*/.repo/*" \
             -print -quit)
       
-          if [[ -z "$KERNELREPOSITORYPATH" ]]; then
+          if [[ -z "$KERNEL_REPOS_PATH" ]]; then
             echo "⚠️ ERROR: No Build Configuration Found"
             exit 1
           fi
       
-          echo "📌 Build Configuration Found: $KERNELREPOSITORYPATH"
+          echo "📌 Build Configuration Found: $KERNEL_REPOS_PATH"
       
-          KERNELREPOSITORY=$(dirname "${KERNELREPOSITORYPATH#./}")
+          KERNEL_REPOS=$(dirname "${KERNEL_REPOS_PATH#./}")
       
-          echo "🔎 Detected Kernel Repository: $KERNELREPOSITORY"
+          echo "🔎 Detected Kernel Repository: $KERNEL_REPOS"
       
-          echo "KERNELREPOSITORY=$KERNELREPOSITORY" >> $GITHUB_ENV
+          echo "KERNEL_REPOS=$KERNEL_REPOS" >> $GITHUB_ENV
       
           echo "🧹 Cleaning ABI Protected Exports..."
           
-          for DIRECTORYPATH in kernel_platform/common kernel_platform/msm-kernel; do
-            [[ -d "$DIRECTORYPATH" ]] || continue
+          for dir in kernel_platform/common kernel_platform/msm-kernel; do
+            [[ -d "$dir" ]] || continue
           
-            file="$DIRECTORYPATH/BUILD.bazel"
+            file="$dir/BUILD.bazel"
           
             if [[ -f "$file" ]]; then
               grep -q "protected_exports_list" "$file" && \
                 sed -i '/protected_exports_list/d' "$file"
             fi
           
-            rm -f "$DIRECTORYPATH/android/abi_gki_protected_exports_"* || true
+            rm -f "$dir/android/abi_gki_protected_exports_"* || true
           done
       
           echo ""
@@ -1223,8 +1223,8 @@ jobs:
           done
 
           # Fallback: Use ACK SHA from Kernel Repositories if Kernel Repositories Defined
-          if [[ -z "$BRANCH" && -n "${KERNELREPOSITORY:-}" && -f "./$KERNELREPOSITORY/android/ACK_SHA" ]]; then
-            BRANCH=$(sed -n '2p' "./$KERNELREPOSITORY/android/ACK_SHA" | awk -F'-' '{print $1"-"$2}')
+          if [[ -z "$BRANCH" && -n "${KERNEL_REPOS:-}" && -f "./$KERNEL_REPOS/android/ACK_SHA" ]]; then
+            BRANCH=$(sed -n '2p' "./$KERNEL_REPOS/android/ACK_SHA" | awk -F'-' '{print $1"-"$2}')
           fi
 
           if [[ -n "$BRANCH" ]]; then
@@ -1243,37 +1243,37 @@ jobs:
 
           # Read Original Kernel Version from Makefile
           echo "🧾 Reading Original Kernel Version..."
-          KERNELORIGINALVER=$(awk '/^VERSION =/ {v=$3} /^PATCHLEVEL =/ {p=$3} /^SUBLEVEL =/ {s=$3} END {print v"."p"."s}' ./common/Makefile)
-          echo "📌 Original Kernel Version: $KERNELORIGINALVER"
+          ORIG_VERSION=$(awk '/^VERSION =/ {v=$3} /^PATCHLEVEL =/ {p=$3} /^SUBLEVEL =/ {s=$3} END {print v"."p"."s}' ./common/Makefile)
+          echo "📌 Original Kernel Version: $ORIG_VERSION"
 
           # Update SubLevel if Input Provided
-          INPUTSUBLEVEL="${{ github.event.inputs.SUBLEVEL }}"
-          if [[ -n "$INPUTSUBLEVEL" ]]; then
-            echo "🧾 Updating SubLevel to: $INPUTSUBLEVEL"
-            sed -i "s/^\(SUBLEVEL[[:space:]]*=[[:space:]]*\).*/\1$INPUTSUBLEVEL/" ./common/Makefile
+          SUBLEVEL_INPUT="${{ github.event.inputs.SUBLEVEL }}"
+          if [[ -n "$SUBLEVEL_INPUT" ]]; then
+            echo "🧾 Updating SubLevel to: $SUBLEVEL_INPUT"
+            sed -i "s/^\(SUBLEVEL[[:space:]]*=[[:space:]]*\).*/\1$SUBLEVEL_INPUT/" ./common/Makefile
           else
             echo "📌 No SubLevel Input Provided ⚙️ Keeping Default"
           fi
 
           # Determine New Kernel Version
-          NEWVER=$(awk '/^VERSION =/ {v=$3} /^PATCHLEVEL =/ {p=$3} /^SUBLEVEL =/ {s=$3} END {print v"."p"."s}' ./common/Makefile)
-          echo "📊 New Kernel Version: $NEWVER"
+          NEW_VERSION=$(awk '/^VERSION =/ {v=$3} /^PATCHLEVEL =/ {p=$3} /^SUBLEVEL =/ {s=$3} END {print v"."p"."s}' ./common/Makefile)
+          echo "📊 New Kernel Version: $NEW_VERSION"
 
-          if [[ "$KERNELORIGINALVER" != "$NEWVER" ]]; then
-            echo "⚙️ Kernel Version Changed: $KERNELORIGINALVER -> $NEWVER"
-            echo "FULLKERNELVERSION=$NEWVER" >> $GITHUB_ENV
+          if [[ "$ORIG_VERSION" != "$NEW_VERSION" ]]; then
+            echo "⚙️ Kernel Version Changed: $ORIG_VERSION -> $NEW_VERSION"
+            echo "TKERNEL_VERSION=$NEW_VERSION" >> $GITHUB_ENV
           else
-            echo "✔️ Kernel Version Unchanged: $KERNELORIGINALVER"
-            echo "FULLKERNELVERSION=$KERNELORIGINALVER" >> $GITHUB_ENV
+            echo "✔️ Kernel Version Unchanged: $ORIG_VERSION"
+            echo "TKERNEL_VERSION=$ORIG_VERSION" >> $GITHUB_ENV
           fi
 
-          # Export KERNELVERSION1, KERNELVERSION2, KERNELVERSION3 for Further Use
-          TMPKERNELVERSION="${KERNELVERSION}"
-          echo "KERNELVERSION1=$(echo "$TMPKERNELVERSION" | cut -d. -f1)" >> $GITHUB_ENV
-          echo "KERNELVERSION2=$(echo "$TMPKERNELVERSION" | tr -d '.')" >> $GITHUB_ENV
-          echo "KERNELVERSION3=$(echo "$NEWVER" | tr -d '.')" >> $GITHUB_ENV
-          echo "KERNEL_SHORT_VERSION=$(echo $NEWVER | cut -d. -f1,2)" >> $GITHUB_ENV
-          echo "SHORTPATCHKVER=$(echo $NEWVER | cut -d. -f1,2 | tr '.' '_')" >> $GITHUB_ENV
+          # Export KV1, KV2, KV3 for Further Use
+          KV_TMP="${KERNELVERSION}"
+          echo "KV1=$(echo "$KV_TMP" | cut -d. -f1)" >> $GITHUB_ENV
+          echo "KV2=$(echo "$KV_TMP" | tr -d '.')" >> $GITHUB_ENV
+          echo "KV3=$(echo "$NEW_VERSION" | tr -d '.')" >> $GITHUB_ENV
+          echo "KERNEL_SHORT_VERSION=$(echo $NEW_VERSION | cut -d. -f1,2)" >> $GITHUB_ENV
+          echo "KERNEL_SHORT_PATCH_VERSION=$(echo $NEW_VERSION | cut -d. -f1,2 | tr '.' '_')" >> $GITHUB_ENV
 
           echo ""
           echo "🎉 Kernel Version Setup Complete"
@@ -1291,10 +1291,10 @@ jobs:
           echo "------------------------------"
           echo ""
 
-          KERNELPATH="kernel_workspace/kernel_platform"
-          CONFIG_FILE="$KERNELPATH/common/build.config.constants"
+          KERNEL_DIR="kernel_workspace/kernel_platform"
+          CONFIG_FILE="$KERNEL_DIR/common/build.config.constants"
 
-          cd "$KERNELPATH"
+          cd "$KERNEL_DIR"
 
           RUST_ENABLED="false"
           RUSTC_VERSION=""
@@ -1417,18 +1417,18 @@ jobs:
           SUFFIX="${{ github.event.inputs.SUFFIX }}"
           ANDROIDVERSION="${{ env.ANDROIDVERSION }}"
 
-          OUTPUTSUFFIX="-${ANDROIDVERSION}-${SUFFIX}"
+          FINAL_SUFFIX="-${ANDROIDVERSION}-${SUFFIX}"
 
-          echo "⚠️ Fallback Triggered → Using Local Version: $OUTPUTSUFFIX"
+          echo "⚠️ Fallback Triggered → Using Local Version: $FINAL_SUFFIX"
           echo ""
 
           # Persist to Next Steps
-          echo "LOCALVERSION=$OUTPUTSUFFIX" >> $GITHUB_ENV
-          echo "KBUILDVER=$OUTPUTSUFFIX" >> $GITHUB_ENV
+          echo "LOCALVERSION=$FINAL_SUFFIX" >> $GITHUB_ENV
+          echo "KBUILD_BUILD_VERSION=$FINAL_SUFFIX" >> $GITHUB_ENV
 
           # Also for Current Shell
-          export LOCALVERSION="$OUTPUTSUFFIX"
-          export KBUILDVER="$OUTPUTSUFFIX"
+          export LOCALVERSION="$FINAL_SUFFIX"
+          export KBUILD_BUILD_VERSION="$FINAL_SUFFIX"
 
           echo ""
           echo "🎉 Local Version is Set to: $LOCALVERSION"
@@ -1445,11 +1445,11 @@ jobs:
           FASTBUILD="${{ github.event.inputs.FASTBUILD }}"
 
           echo "🚀 Generating Random Kernel Suffix..."
-          RANDOMDIGIT=$(od -An -N1 -tu1 < /dev/urandom | tr -d '[:space:]' | awk '{print $1 % 11}')
-          RANDOMHASH=$(od -An -N7 -tx1 /dev/urandom | tr -d ' \n')
-          AUTOSUFFIXOUTPUT="${RANDOMDIGIT}-o-g${RANDOMHASH}"
+          RANDOM_DIGIT=$(od -An -N1 -tu1 < /dev/urandom | tr -d '[:space:]' | awk '{print $1 % 11}')
+          RANDOM_HASH=$(od -An -N7 -tx1 /dev/urandom | tr -d ' \n')
+          AUTO_SUFFIX="${RANDOM_DIGIT}-o-g${RANDOM_HASH}"
 
-          echo "🧾 Random Suffix Generated: $AUTOSUFFIXOUTPUT"
+          echo "🧾 Random Suffix Generated: $AUTO_SUFFIX"
 
           for path in \
             kernel_platform/common/scripts/setlocalversion \
@@ -1465,23 +1465,23 @@ jobs:
 
             if grep -q 'KERNELVERSION.*scm_version' "$path"; then
               echo "🔎 New SetLocalVersion Format Detected"
-              sed -i "s|echo \"\${KERNELVERSION}.*scm_version}\"|echo \"\${KERNELVERSION}-${ANDROIDVERSION}-${AUTOSUFFIXOUTPUT}\"|" "$path"
+              sed -i "s|echo \"\${KERNELVERSION}.*scm_version}\"|echo \"\${KERNELVERSION}-${ANDROIDVERSION}-${AUTO_SUFFIX}\"|" "$path"
 
             elif grep -q 'echo "\$res"' "$path"; then
               echo "🔎 Old SetLocalVersion Format Detected"
 
               if [ "$FASTBUILD" = "true" ]; then
                 echo "🛠️ Fast Build: Using Static Res with Random Suffix"
-                sed -i "s/^res=.*/res=\"-${ANDROIDVERSION}-${AUTOSUFFIXOUTPUT}\"/" "$path"
+                sed -i "s/^res=.*/res=\"-${ANDROIDVERSION}-${AUTO_SUFFIX}\"/" "$path"
               else
                 echo "🛠️ Standard Build: Injecting Random Suffix Dynamically"
-                tac "$path" | sed "0,/echo \"\\\$res\"/s//res=\\\$(echo \\\$res | cut -d- -f1-2)-${AUTOSUFFIXOUTPUT}; echo \"\\\$res\";/" | tac > "$path.tmp"
+                tac "$path" | sed "0,/echo \"\\\$res\"/s//res=\\\$(echo \\\$res | cut -d- -f1-2)-${AUTO_SUFFIX}; echo \"\\\$res\";/" | tac > "$path.tmp"
                 mv "$path.tmp" "$path"
               fi
 
             else
               echo "⚠️ Unknown Format: Appending Random Suffix Manually"
-              echo "echo \"\$res-${AUTOSUFFIXOUTPUT}\"" >> "$path"
+              echo "echo \"\$res-${AUTO_SUFFIX}\"" >> "$path"
             fi
 
             chmod +x "$path"
@@ -1608,8 +1608,8 @@ jobs:
           SUSFS="${{ github.event.inputs.SUSFSREPOSITORY }}"    
 
           # Kernel and Patch Directories
-          KERNELPATH="${GITHUB_WORKSPACE}/kernel_workspace/kernel_platform/common"
-          DEFCONFIG="${KERNELPATH}/arch/arm64/configs/gki_defconfig"   
+          KDIR="${GITHUB_WORKSPACE}/kernel_workspace/kernel_platform/common"
+          DEFCONFIG="${KDIR}/arch/arm64/configs/gki_defconfig"   
           
           # Helper Functions      
           # Get Commit-Count-Based Version
@@ -1626,7 +1626,7 @@ jobs:
           }
       
           # Get Latest Git Tag
-          TAGLATEST() {
+          get_latest_tag() {
             local repo="$1"
             curl -sL "https://api.github.com/repos/${repo}/tags" \
               | grep -o '"name": *"[^"]*"' \
@@ -1752,8 +1752,8 @@ jobs:
       
             sed -i "s/KSU_VERSION_FALLBACK := 1/KSU_VERSION_FALLBACK := $KSU_VERSION/" kernel/Kbuild
       
-            GITHUBTAG=$(TAGLATEST "$REPO")
-            sed -i "s/KSU_VERSION_TAG_FALLBACK := v0.0.1/KSU_VERSION_TAG_FALLBACK := $GITHUBTAG/" kernel/Kbuild
+            KSU_GIT_TAG=$(get_latest_tag "$REPO")
+            sed -i "s/KSU_VERSION_TAG_FALLBACK := v0.0.1/KSU_VERSION_TAG_FALLBACK := $KSU_GIT_TAG/" kernel/Kbuild
       
             # Apply KSU Toolkit Support Patch to KernelSU-Next, Safely Skip if Not Compatible
             # Patch Directory
@@ -1830,8 +1830,8 @@ jobs:
       
             sed -i "s/KSU_VERSION_FALLBACK := 1/KSU_VERSION_FALLBACK := $KSU_VERSION/" kernel/Kbuild
       
-            GITHUBTAG=$(TAGLATEST "$REPO")
-            sed -i "s/KSU_VERSION_TAG_FALLBACK := v0.0.1/KSU_VERSION_TAG_FALLBACK := $GITHUBTAG/" kernel/Kbuild
+            KSU_GIT_TAG=$(get_latest_tag "$REPO")
+            sed -i "s/KSU_VERSION_TAG_FALLBACK := v0.0.1/KSU_VERSION_TAG_FALLBACK := $KSU_GIT_TAG/" kernel/Kbuild
       
           # Official KernelSU Setup
           elif [[ "$ROOTENGINE" == "KernelSU" ]]; then
@@ -1901,15 +1901,15 @@ jobs:
       
           # Detect Kernel Common Directory
           if [[ -d "./kernel_platform/common" ]]; then
-              KERNELPATH="./kernel_platform/common"
+              KDIR="./kernel_platform/common"
           elif [[ -d "./common" ]]; then
-              KERNELPATH="./common"
+              KDIR="./common"
           else
               echo "⚠️ ERROR: Kernel Common Directory Not Found!"
               exit 1
           fi
       
-          echo "📁 Kernel Directory: $KERNELPATH"
+          echo "📁 Kernel Directory: $KDIR"
           echo
       
           # Clone SUSFS Meta Repository
@@ -1966,31 +1966,31 @@ jobs:
           echo "🔎 Searching SUSFS Meta Patch..."
       
           shopt -s nullglob
-          PATCHLIST=(./susfs4ksu/kernel_patches/50_add_susfs_in_gki-${{ env.ANDROIDVERSION }}-${{ env.KERNELVERSION }}*.patch)
+          PATCH_LIST=(./susfs4ksu/kernel_patches/50_add_susfs_in_gki-${{ env.ANDROIDVERSION }}-${{ env.KERNELVERSION }}*.patch)
       
-          if [[ ${#PATCHLIST[@]} -eq 0 ]]; then
+          if [[ ${#PATCH_LIST[@]} -eq 0 ]]; then
               echo "⚠️ SUSFS Meta Patch Not Found for $GKIVERSION"
               echo "📃 Available Patches:"
               ls ./susfs4ksu/kernel_patches/ || true
               exit 1
           fi
       
-          SUSPATCH=$(printf "%s\n" "${PATCHLIST[@]}" | sort -V | tail -n1)
+          SUS_PATCH=$(printf "%s\n" "${PATCH_LIST[@]}" | sort -V | tail -n1)
       
-          echo "🧾 Selected Patch: $SUSPATCH"
+          echo "🧾 Selected Patch: $SUS_PATCH"
           echo
       
           # Copy Source Files
-          cp "$SUSPATCH" "$KERNELPATH/"
-          cp -r ./susfs4ksu/kernel_patches/fs/* "$KERNELPATH/fs/"
-          cp -r ./susfs4ksu/kernel_patches/include/linux/* "$KERNELPATH/include/linux/"
+          cp "$SUS_PATCH" "$KDIR/"
+          cp -r ./susfs4ksu/kernel_patches/fs/* "$KDIR/fs/"
+          cp -r ./susfs4ksu/kernel_patches/include/linux/* "$KDIR/include/linux/"
       
-          cd "$KERNELPATH"
+          cd "$KDIR"
       
           # Apply SUSFS Meta Core Patch
           echo "⚙️ Applying SUSFS Meta Core Patch..."
       
-          patch -p1 < "$(basename "$SUSPATCH")" || true
+          patch -p1 < "$(basename "$SUS_PATCH")" || true
       
           echo "✔️ SUSFS Meta Core Patch Applied"
           echo
@@ -2026,12 +2026,12 @@ jobs:
               echo "⚙️ Applying SUSFS Meta 10-Enable Patch to $ROOTENGINE..."
       
               if [[ "${{ github.event.inputs.SUSFSVARIANT }}" == "OGKI" ]]; then
-                  PATCHURL="https://raw.githubusercontent.com/cctv18/susfs4oki/oki-${{ env.ANDROIDVERSION }}-${{ env.KERNELVERSION }}/kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch"
+                  PATCH_URL="https://raw.githubusercontent.com/cctv18/susfs4oki/oki-${{ env.ANDROIDVERSION }}-${{ env.KERNELVERSION }}/kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch"
               else
-                  PATCHURL="https://gitlab.com/simonpunk/susfs4ksu/-/raw/gki-${{ env.ANDROIDVERSION }}-${{ env.KERNELVERSION }}/kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch"
+                  PATCH_URL="https://gitlab.com/simonpunk/susfs4ksu/-/raw/gki-${{ env.ANDROIDVERSION }}-${{ env.KERNELVERSION }}/kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch"
               fi
       
-              wget -q "$PATCHURL" -O enable.patch || true
+              wget -q "$PATCH_URL" -O enable.patch || true
       
               # Apply Patch Using Levels
               if [[ -f enable.patch ]]; then
@@ -2060,14 +2060,14 @@ jobs:
           
           # Workspace and Kernel Paths
           WORKSPACE="${GITHUB_WORKSPACE}/kernel_workspace"
-          KERNELPATH="${WORKSPACE}/kernel_platform"
-          PATCHBASE="${WORKSPACE}/AndreiMikh-Kernel-Lab/patches"
+          KERNEL_DIR="${WORKSPACE}/kernel_platform"
+          PATCH_BASE="${WORKSPACE}/AndreiMikh-Kernel-Lab/patches"
           
           # Helper Functions          
           check_rejects() {
               local rej_files
           
-              rej_files=$(find "$KERNELPATH" -type f -name "*.rej" 2>/dev/null)
+              rej_files=$(find "$KERNEL_DIR" -type f -name "*.rej" 2>/dev/null)
           
               if [[ -n "$rej_files" ]]; then
                   echo "⚠️ Reject Files Detected:"
@@ -2079,29 +2079,29 @@ jobs:
           }
           
           # Validate Kernel Directory
-          if [[ ! -d "$KERNELPATH" ]]; then
+          if [[ ! -d "$KERNEL_DIR" ]]; then
               echo "⚠️ Kernel Platform Directory Not Found:"
-              echo "   $KERNELPATH"
+              echo "   $KERNEL_DIR"
               exit 1
           fi
           
-          cd "$KERNELPATH" || exit 1
+          cd "$KERNEL_DIR" || exit 1
           
           # SukiSU ZRAM Patches          
           apply_sukisu_zram() {
               echo "🚀 Applying SukiSU ZRAM Patches..."
           
-              local SRC="${WORKSPACE}/SukiSU_patch/other/zram"
-              local DST="./common"
+              local src="${WORKSPACE}/SukiSU_patch/other/zram"
+              local dst="./common"
           
-              echo "📂 Source : $SRC"
-              echo "📂 Target : $DST"
+              echo "📂 Source : $src"
+              echo "📂 Target : $dst"
           
               mkdir -p \
-                  "$DST/include/linux" \
-                  "$DST/lib" \
-                  "$DST/crypto" \
-                  "$DST/lib/lz4k_oplus"
+                  "$dst/include/linux" \
+                  "$dst/lib" \
+                  "$dst/crypto" \
+                  "$dst/lib/lz4k_oplus"
           
               copy_dir() {
                   local from="$1"
@@ -2118,12 +2118,12 @@ jobs:
                   fi
               }
           
-              copy_dir "$SRC/lz4k/include/linux" "$DST/include/linux"
-              copy_dir "$SRC/lz4k/lib" "$DST/lib"
-              copy_dir "$SRC/lz4k/crypto" "$DST/crypto"
-              copy_dir "$SRC/lz4k_oplus" "$DST/lib/lz4k_oplus"
+              copy_dir "$src/lz4k/include/linux" "$dst/include/linux"
+              copy_dir "$src/lz4k/lib" "$dst/lib"
+              copy_dir "$src/lz4k/crypto" "$dst/crypto"
+              copy_dir "$src/lz4k_oplus" "$dst/lib/lz4k_oplus"
           
-              local kconfig="$DST/lib/Kconfig"
+              local kconfig="$dst/lib/Kconfig"
               if [[ -f "$kconfig" ]] && ! grep -q 'lib/lz4k_oplus/Kconfig' "$kconfig"; then
                   echo 'source "lib/lz4k_oplus/Kconfig"' >> "$kconfig"
               fi
@@ -2163,7 +2163,7 @@ jobs:
           
               if ! check_rejects; then
                   echo "⚠️ Reject Files Detected During: $(basename "$patch")"
-                  find "$KERNELPATH" -name "*.rej" -print
+                  find "$KERNEL_DIR" -name "*.rej" -print
               fi
           
               echo "⚠️ Patch skipped safely (CI Continues)"
@@ -2201,13 +2201,13 @@ jobs:
               echo "⚙️ Mode: LZ4 from Xiao Repository + ZRAM (LZ4KD)"
               mkdir -p "$KCOMMON/lib"
           
-              [[ -f "$PATCHBASE/001-lz4.patch" ]] || {
+              [[ -f "$PATCH_BASE/001-lz4.patch" ]] || {
                   echo "⚠️ Missing 001 LZ4 Patch"
                   exit 1
               }
           
-              cp "$PATCHBASE/001-lz4.patch" "$KCOMMON/"
-              [[ -f "$PATCHBASE/002-zstd.patch" ]] && cp "$PATCHBASE/002-zstd.patch" "$KCOMMON/"
+              cp "$PATCH_BASE/001-lz4.patch" "$KCOMMON/"
+              [[ -f "$PATCH_BASE/002-zstd.patch" ]] && cp "$PATCH_BASE/002-zstd.patch" "$KCOMMON/"
           
               cd "$KCOMMON" || exit 1
           
@@ -2243,20 +2243,20 @@ jobs:
               echo "⚙️ Mode: LZ4 from CCTV18 Repository for Custom Builds"
               mkdir -p "$KCOMMON/lib"
           
-              [[ -f "$PATCHBASE/001-lz4.patch" ]] || {
+              [[ -f "$PATCH_BASE/001-lz4.patch" ]] || {
                   echo "⚠️ Missing 001 LZ4 Patch"
                   exit 1
               }
           
-              cp "$PATCHBASE/001-lz4.patch" "$KCOMMON/"
+              cp "$PATCH_BASE/001-lz4.patch" "$KCOMMON/"
               cd "$KCOMMON" || exit 1
           
               case "$KERNELVERSION" in
                   6.1*)
                       echo "🧩 Kernel 6.1 Detected"
                       apply_patch "001-lz4.patch"
-                      [[ -f "$PATCHBASE/002-zstd.patch" ]] && {
-                          cp "$PATCHBASE/002-zstd.patch" .
+                      [[ -f "$PATCH_BASE/002-zstd.patch" ]] && {
+                          cp "$PATCH_BASE/002-zstd.patch" .
                           apply_patch "002-zstd.patch"
                       }
                       ;;
@@ -2275,13 +2275,13 @@ jobs:
           
               echo "⚙️ Mode: LZ4 Patch from Xiao Repository"
           
-              EXTREPOSITORY="https://github.com/Xiaomichael/kernel_patches.git"
-              EXTBRANCH="patches"
-              LZ4DESTDIR="$WORKSPACE/kernel_patches"
+              EXTERNAL_REPO="https://github.com/Xiaomichael/kernel_patches.git"
+              EXTERNAL_BRANCH="patches"
+              DEST_DIR="$WORKSPACE/kernel_patches"
           
-              rm -rf "$LZ4DESTDIR"
+              rm -rf "$DEST_DIR"
           
-              git clone --depth 1 --branch "$EXTBRANCH" "$EXTREPOSITORY" "$LZ4DESTDIR" || {
+              git clone --depth 1 --branch "$EXTERNAL_BRANCH" "$EXTERNAL_REPO" "$DEST_DIR" || {
                   echo "⚠️ Repository Clone Failed"
                   exit 1
               }
@@ -2289,11 +2289,11 @@ jobs:
               echo "✔️ Repository Cloned"
               mkdir -p "$KCOMMON/lib"
           
-              LZ4PATCHDIR="$LZ4DESTDIR/zram"
+              ZRAM_PATCH_DIR="$DEST_DIR/zram"
           
-              [[ -f "$LZ4PATCHDIR/001-lz4.patch" ]] && cp "$LZ4PATCHDIR/001-lz4.patch" "$KCOMMON/"
-              [[ -f "$LZ4PATCHDIR/002-zstd.patch" ]] && cp "$LZ4PATCHDIR/002-zstd.patch" "$KCOMMON/"
-              [[ -f "$LZ4PATCHDIR/lz4armv8.S" ]] && cp "$LZ4PATCHDIR/lz4armv8.S" "$KCOMMON/lib/"
+              [[ -f "$ZRAM_PATCH_DIR/001-lz4.patch" ]] && cp "$ZRAM_PATCH_DIR/001-lz4.patch" "$KCOMMON/"
+              [[ -f "$ZRAM_PATCH_DIR/002-zstd.patch" ]] && cp "$ZRAM_PATCH_DIR/002-zstd.patch" "$KCOMMON/"
+              [[ -f "$ZRAM_PATCH_DIR/lz4armv8.S" ]] && cp "$ZRAM_PATCH_DIR/lz4armv8.S" "$KCOMMON/lib/"
           
               cd "$KCOMMON" || exit 1
           
@@ -2323,7 +2323,7 @@ jobs:
           
           if ! check_rejects; then
               echo "⚠️ Reject Files Found in Final Scan"
-              find "$KERNELPATH" -name "*.rej" -print
+              find "$KERNEL_DIR" -name "*.rej" -print
               exit 1
           fi
           
@@ -2343,14 +2343,14 @@ jobs:
           
             echo "🚀 Applying Legacy Fix (Kernel 5.15.0–5.15.123)"
           
-            cp "$CURRENTPATH/AndreiMikh-Kernel-Lab/patches/Legacy-5.15-Fix.patch" ./Legacy-5.15-Fix.patch
+            cp "$CURRENT_DIR/AndreiMikh-Kernel-Lab/patches/Legacy-5.15-Fix.patch" ./Legacy-5.15-Fix.patch
             patch -p1 < Legacy-5.15-Fix.patch
           
             echo "✔️ Legacy 5.15 Fix Applied"
           fi
                     
           # TrustyOS Missing Fix (6.6.0–6.6.30)
-          if [[ "${{ env.KERNELVERSION2 }}" == "66" && "${{ env.KERNELVERSION3 }}" -le 6630 && "$SUSFSREPOSITORY" != "-1" ]]; then
+          if [[ "${{ env.KV2 }}" == "66" && "${{ env.KV3 }}" -le 6630 && "$SUSFSREPOSITORY" != "-1" ]]; then
           
             TRUSTY_EXISTS=false
           
@@ -2363,10 +2363,10 @@ jobs:
             if [[ "$TRUSTY_EXISTS" == false ]]; then
               echo "🛠️ Fixing Missing TrustyOS (Kernel 6.6.0–6.6.30)"
           
-              PATCHNAME=$(basename "$SUSPATCH")
+              PATCH_NAME=$(basename "$SUS_PATCH")
           
-              sed -i 's/-32,12 +32,38/-32,11 +32,37/g' "$PATCHNAME"
-              sed -i '/#include <trace\/hooks\/fs.h>/d' "$PATCHNAME"
+              sed -i 's/-32,12 +32,38/-32,11 +32,37/g' "$PATCH_NAME"
+              sed -i '/#include <trace\/hooks\/fs.h>/d' "$PATCH_NAME"
             fi
           fi
                     
@@ -2480,56 +2480,56 @@ jobs:
               echo "🔄 Looking for NTSync Patches for Kernel: $GKIVERSION"
 
               # Define Patch Files and Source Directory
-              COMPATPATCHPATH="ntsync_compat_${GKIVERSION}.patch"
-              BASEPATCHPATH="ntsync_base.patch"
-              SRCDIR="$GITHUB_WORKSPACE/kernel_workspace/WildKernels/common/ntsync"
+              COMPAT_PATCH="ntsync_compat_${GKIVERSION}.patch"
+              BASE_PATCH="ntsync_base.patch"
+              SRC_DIR="$GITHUB_WORKSPACE/kernel_workspace/WildKernels/common/ntsync"
 
               # Debug Directory Path
               echo "Github Workspace is: $GITHUB_WORKSPACE"
-              echo "Looking for NTSync Patches in: $SRCDIR"
+              echo "Looking for NTSync Patches in: $SRC_DIR"
 
               # Ensure the Directory Exists
-              if [[ ! -d "$SRCDIR" ]]; then
-                echo "⚠️ Directory Not Found: $SRCDIR"
+              if [[ ! -d "$SRC_DIR" ]]; then
+                echo "⚠️ Directory Not Found: $SRC_DIR"
     
                 # Attempt to Clone the Repository Again if Not Found
                 echo "📥 Cloning WildKernels Repository Again..."
                 git clone --depth=1 https://github.com/WildKernels/kernel_patches.git "$GITHUB_WORKSPACE/kernel_workspace/WildKernels"
 
                 # Re-check if directory exists after cloning
-                if [[ ! -d "$SRCDIR" ]]; then
-                  echo "⚠️ Directory Still Not Found: $SRCDIR"
+                if [[ ! -d "$SRC_DIR" ]]; then
+                  echo "⚠️ Directory Still Not Found: $SRC_DIR"
                   exit 1
                 fi
               fi
 
               # Log Available Patches in Source Directory
-              echo "🔍 Available NTSync Patches in $SRCDIR:"
-              ls "$SRCDIR" || {
-                echo "⚠️ Failed to Fetch List of Patches in $SRCDIR"
+              echo "🔍 Available NTSync Patches in $SRC_DIR:"
+              ls "$SRC_DIR" || {
+                echo "⚠️ Failed to Fetch List of Patches in $SRC_DIR"
                 exit 1
               }
 
               # Check Compat Patch File Existence and Apply
-              if [[ ! -f "$SRCDIR/$COMPATPATCHPATH" ]]; then
-                echo "⚠️ Compat Patch Not Found for $GKIVERSION — Skipped: $COMPATPATCHPATH"
+              if [[ ! -f "$SRC_DIR/$COMPAT_PATCH" ]]; then
+                echo "⚠️ Compat Patch Not Found for $GKIVERSION — Skipped: $COMPAT_PATCH"
               else
-                cp "$SRCDIR/$COMPATPATCHPATH" ./
-                echo "➡️ Applying $COMPATPATCHPATH"
-                patch -p1 < "$COMPATPATCHPATH" || true
+                cp "$SRC_DIR/$COMPAT_PATCH" ./
+                echo "➡️ Applying $COMPAT_PATCH"
+                patch -p1 < "$COMPAT_PATCH" || true
                 echo "🧹 Cleaning Up Patched NTSync Compat File..."
-                rm -f "$COMPATPATCHPATH"
+                rm -f "$COMPAT_PATCH"
               fi
 
               # Check Base Patch File Existence and Apply
-              if [[ ! -f "$SRCDIR/$BASEPATCHPATH" ]]; then
-                echo "⚠️ Base Patch Missing: $BASEPATCHPATH"
+              if [[ ! -f "$SRC_DIR/$BASE_PATCH" ]]; then
+                echo "⚠️ Base Patch Missing: $BASE_PATCH"
               else
-                cp "$SRCDIR/$BASEPATCHPATH" ./
-                echo "➡️ Applying $BASEPATCHPATH"
-                patch -p1 < "$BASEPATCHPATH" || true
+                cp "$SRC_DIR/$BASE_PATCH" ./
+                echo "➡️ Applying $BASE_PATCH"
+                patch -p1 < "$BASE_PATCH" || true
                 echo "🧹 Cleaning Up Patched NTSync Base File..."
-                rm -f "$BASEPATCHPATH"
+                rm -f "$BASE_PATCH"
               fi
 
               echo "✔️ NTSync Patch Step Completed"
@@ -2549,8 +2549,8 @@ jobs:
           set -euo pipefail
 
           # Paths
-          PATCHPATH="${GITHUB_WORKSPACE}/kernel_workspace/AndreiMikh-Kernel-Lab/patches"
-          KERNELPATH="${GITHUB_WORKSPACE}/kernel_workspace/kernel_platform/common"
+          PATCH_DIR="${GITHUB_WORKSPACE}/kernel_workspace/AndreiMikh-Kernel-Lab/patches"
+          KERNEL_DIR="${GITHUB_WORKSPACE}/kernel_workspace/kernel_platform/common"
       
           echo "------------------------------"
           echo "Scheduler Conversion Stage..."
@@ -2559,13 +2559,13 @@ jobs:
           echo ""
       
           # Validate Kernel Directory
-          if [[ ! -d "$KERNELPATH" ]]; then
+          if [[ ! -d "$KERNEL_DIR" ]]; then
             echo "⚠️ Kernel Directory Not Found:"
-            echo "$KERNELPATH"
+            echo "$KERNEL_DIR"
             exit 1
           fi
       
-          cd "$KERNELPATH"
+          cd "$KERNEL_DIR"
       
           # Detect Existing Hmbird / Windspeed
           if [[ -d "kernel/sched/hmbird" ]] || \
@@ -2591,18 +2591,18 @@ jobs:
           fi
       
           # Apply Conversion Patch
-          PATCHFILE="$PATCHPATH/HMBIRD.patch"
+          PATCH_FILE="$PATCH_DIR/HMBIRD.patch"
       
-          if [[ ! -f "$PATCHFILE" ]]; then
+          if [[ ! -f "$PATCH_FILE" ]]; then
             echo "⚠️ Patch File Not Found:"
-            echo "$PATCHFILE"
+            echo "$PATCH_FILE"
             echo "⏭️ Conversion Skipped"
             exit 0
           fi
       
           echo "🚀 Applying Hmbird Conversion Patch"
       
-          if patch -p1 -F3 --forward < "$PATCHFILE"; then
+          if patch -p1 -F3 --forward < "$PATCH_FILE"; then
             echo "✔️ Scheduler Conversion Applied Successfully"
           else
             echo "⚠️ Patch may Already be Applied or Partially Failed"
@@ -2621,43 +2621,43 @@ jobs:
           set -euo pipefail
 
           # Paths
-          PATCHPATH="${GITHUB_WORKSPACE}/kernel_workspace/AndreiMikh-Kernel-Lab/patches"
-          KERNELPATH="${GITHUB_WORKSPACE}/kernel_workspace/kernel_platform/common"
+          PATCH_DIR="${GITHUB_WORKSPACE}/kernel_workspace/AndreiMikh-Kernel-Lab/patches"
+          KERNEL_DIR="${GITHUB_WORKSPACE}/kernel_workspace/kernel_platform/common"
       
           echo "------------------------------"
           echo "Unicode Bypass Patch Stage..."
-          echo "Kernel Version Major : ${KERNELVERSION1:-unknown}"
+          echo "Kernel Version Major : ${KV1:-unknown}"
           echo "------------------------------"
           echo ""
       
           # Validate Kernel Directory
-          if [[ ! -d "$KERNELPATH" ]]; then
+          if [[ ! -d "$KERNEL_DIR" ]]; then
               echo "⚠️ Kernel Directory Not Found:"
-              echo "$KERNELPATH"
+              echo "$KERNEL_DIR"
               exit 1
           fi
       
-          cd "$KERNELPATH"
+          cd "$KERNEL_DIR"
       
           # Validate Kernel Version Variable
-          if [[ -z "${KERNELVERSION1:-}" ]]; then
-              echo "⚠️ KERNELVERSION1 (Kernel Major Version) Not Set"
+          if [[ -z "${KV1:-}" ]]; then
+              echo "⚠️ KV1 (Kernel Major Version) Not Set"
               exit 1
           fi
       
           # Select Patch Based on Kernel Version
-          if (( KERNELVERSION1 < 6 )); then
-              PATCHFILE="$PATCHPATH/Unicode-Bypass-Fix-6.1-.patch"
+          if (( KV1 < 6 )); then
+              PATCH_FILE="$PATCH_DIR/Unicode-Bypass-Fix-6.1-.patch"
               echo "📊 Using Unicode Bypass Patch for Kernel < 6.1"
           else
-              PATCHFILE="$PATCHPATH/Unicode-Bypass-Fix-6.1+.patch"
+              PATCH_FILE="$PATCH_DIR/Unicode-Bypass-Fix-6.1+.patch"
               echo "📊 Using Unicode Bypass Patch for Kernel ≥ 6.1"
           fi
       
           # Validate Patch File
-          if [[ ! -f "$PATCHFILE" ]]; then
+          if [[ ! -f "$PATCH_FILE" ]]; then
               echo "⚠️ Patch File Not Found:"
-              echo "$PATCHFILE"
+              echo "$PATCH_FILE"
               echo "⏭️ Skipping Unicode Bypass"
               exit 0
           fi
@@ -2665,8 +2665,8 @@ jobs:
           # Apply Patch Safely
           echo "Applying Unicode Bypass Patch..."
       
-          if patch -p1 --dry-run < "$PATCHFILE" >/dev/null 2>&1; then
-              patch -p1 --forward < "$PATCHFILE"
+          if patch -p1 --dry-run < "$PATCH_FILE" >/dev/null 2>&1; then
+              patch -p1 --forward < "$PATCH_FILE"
               echo "✔️ Unicode Bypass Patch Applied Successfully"
           else
               echo "✔️ Patch Already Applied or Not Required"
@@ -2704,75 +2704,75 @@ jobs:
           fi
 
           # Parse Fields
-          IFS='/' read -r SWITCHCOMPRESS COMPRESSALGORITHM SIZECOMPRESS <<< "$ZRAM"
+          IFS='/' read -r ZRAM_SWSTA ZRAM_ALGO ZRAM_SIZE <<< "$ZRAM"
           
           # Normalize Casing
-          COMPRESSALGORITHM=$(echo "$COMPRESSALGORITHM" | tr '[:upper:]' '[:lower:]')
-          COMPRESSALGORITHM=$(echo "$COMPRESSALGORITHM" | tr '[:lower:]' '[:upper:]')
+          ZRAM_ALGO=$(echo "$ZRAM_ALGO" | tr '[:upper:]' '[:lower:]')
+          ZRAM_ALGO_U=$(echo "$ZRAM_ALGO" | tr '[:lower:]' '[:upper:]')
 
           # Export to Github Environment
-          echo "COMPRESSALGORITHM=$COMPRESSALGORITHM" >> "$GITHUB_ENV"
-          echo "UNIFIEDALGORITHM=$UNIFIEDALGORITHM" >> "$GITHUB_ENV"
-          echo "SIZECOMPRESS=$SIZECOMPRESS" >> "$GITHUB_ENV"
+          echo "ZRAM_ALGO=$ZRAM_ALGO" >> "$GITHUB_ENV"
+          echo "ZRAM_ALGO_U=$ZRAM_ALGO_U" >> "$GITHUB_ENV"
+          echo "ZRAM_SIZE=$ZRAM_SIZE" >> "$GITHUB_ENV"
       
           echo "------------------------------"
-          echo "📂 ZRAM Switch    : $SWITCHCOMPRESS"
-          echo "📂 ZRAM Algorithm : $COMPRESSALGORITHM"
-          echo "📂 ZRAM Size      : $SIZECOMPRESS"
+          echo "📂 ZRAM Switch    : $ZRAM_SWSTA"
+          echo "📂 ZRAM Algorithm : $ZRAM_ALGO"
+          echo "📂 ZRAM Size      : $ZRAM_SIZE"
           echo "------------------------------"
 
           # Kernel and Patch Directories
-          KERNELPATH="${GITHUB_WORKSPACE}/kernel_workspace/kernel_platform/common"
-          DEFCONFIG="${KERNELPATH}/arch/arm64/configs/gki_defconfig"
+          KERNEL_DIR="${GITHUB_WORKSPACE}/kernel_workspace/kernel_platform/common"
+          DEFCONFIG="${KERNEL_DIR}/arch/arm64/configs/gki_defconfig"
       
-          BASEPATCHPATH="${GITHUB_WORKSPACE}/kernel_workspace/SukiSU_patch/other/zram/zram_patch"
-          PATCHPATH=$(find "$BASEPATCHPATH" -maxdepth 1 -type d -name "${KERNELVERSION}*" | sort -V | tail -n 1 || true)
+          BASE_PATCH_DIR="${GITHUB_WORKSPACE}/kernel_workspace/SukiSU_patch/other/zram/zram_patch"
+          PATCH_DIR=$(find "$BASE_PATCH_DIR" -maxdepth 1 -type d -name "${KERNELVERSION}*" | sort -V | tail -n 1 || true)
       
-          if [[ -z "$PATCHPATH" || ! -d "$PATCHPATH" ]]; then
+          if [[ -z "$PATCH_DIR" || ! -d "$PATCH_DIR" ]]; then
               echo "⚠️ ZRAM Patch Directory Not Found for Kernel Version $KERNELVERSION"
-              echo "🔎 Searched Under: $BASEPATCHPATH"
+              echo "🔎 Searched Under: $BASE_PATCH_DIR"
               exit 1
           fi
       
-          echo "📂 Using ZRAM Patch Directory: $PATCHPATH"
+          echo "📂 Using ZRAM Patch Directory: $PATCH_DIR"
 
-          if [[ ! -d "$KERNELPATH" ]]; then
-              echo "⚠️ Kernel Directory Not Found: $KERNELPATH"
+          if [[ ! -d "$KERNEL_DIR" ]]; then
+              echo "⚠️ Kernel Directory Not Found: $KERNEL_DIR"
               exit 1
           fi
       
-          cd "$KERNELPATH"
+          cd "$KERNEL_DIR"
 
           # Function: Apply Patch
           apply_patch() {
-              local PATCHFILE="$1"
-              local PATCHNAME
-              PATCHNAME=$(basename "$PATCHFILE")
+              local PATCH_FILE="$1"
+              local PATCH_NAME
+              PATCH_NAME=$(basename "$PATCH_FILE")
       
-              if [[ ! -f "$PATCHFILE" ]]; then
-                  echo "⚠️ $PATCHNAME Not Found, Skipping..."
+              if [[ ! -f "$PATCH_FILE" ]]; then
+                  echo "⚠️ $PATCH_NAME Not Found, Skipping..."
                   return
               fi
       
-              echo "⚙️ Applying $PATCHNAME"
+              echo "⚙️ Applying $PATCH_NAME"
 
-              if patch -p1 --dry-run < "$PATCHFILE" >/dev/null 2>&1; then
-                  patch -p1 -F3 --forward < "$PATCHFILE"
-                  echo "✔️ $PATCHNAME Applied"
+              if patch -p1 --dry-run < "$PATCH_FILE" >/dev/null 2>&1; then
+                  patch -p1 -F3 --forward < "$PATCH_FILE"
+                  echo "✔️ $PATCH_NAME Applied"
               else
-                  echo "🎉 $PATCHNAME Already Applied or Not Needed"
+                  echo "🎉 $PATCH_NAME Already Applied or Not Needed"
               fi
           }
 
           # Apply ZRAM Patches
-          apply_patch "${PATCHPATH}/lz4kd.patch"
-          apply_patch "${PATCHPATH}/lz4k_oplus.patch"
+          apply_patch "${PATCH_DIR}/lz4kd.patch"
+          apply_patch "${PATCH_DIR}/lz4k_oplus.patch"
       
           # Kernel Config: ZRAM Options
-          if [[ "$SWITCHCOMPRESS" == "1" ]]; then
+          if [[ "$ZRAM_SWSTA" == "1" ]]; then
               echo "🚀 Enabling ZRAM-Related Kernel Options..."
       
-              if [[ "$COMPRESSALGORITHM" != "lz4" ]]; then
+              if [[ "$ZRAM_ALGO" != "lz4" ]]; then
 
                   # Non-LZ4 Base ZRAM Options
                   cat >> "$DEFCONFIG" << EOF
@@ -2823,16 +2823,16 @@ jobs:
           echo "------------------------------"
           echo ""
       
-          KERNELPATH="${GITHUB_WORKSPACE}/kernel_workspace/kernel_platform/common"
+          KERNEL_DIR="${GITHUB_WORKSPACE}/kernel_workspace/kernel_platform/common"
       
           # Validate Kernel Directory
-          if [[ ! -d "$KERNELPATH" ]]; then
+          if [[ ! -d "$KERNEL_DIR" ]]; then
               echo "⚠️ Kernel Directory Not Found:"
-              echo "$KERNELPATH"
+              echo "$KERNEL_DIR"
               exit 1
           fi
       
-          cd "$KERNELPATH"
+          cd "$KERNEL_DIR"
       
           # Detect Existing Scheduler
           echo "🔎 Checking for Existing Fengchi / Windspeed Scheduler..."
@@ -2860,44 +2860,44 @@ jobs:
           echo "📂 Patch File : $FILE"
       
           # Clone Patch Repository
-          PATCHREPOSITORYURL="https://github.com/AndreiMikh/Kernel-Hmbird-Patch.git"
-          PATCHREPOSITORY="Kernel-Hmbird-Patch"
+          REPO_URL="https://github.com/AndreiMikh/Kernel-Hmbird-Patch.git"
+          PATCH_REPO="Kernel-Hmbird-Patch"
       
           echo "📥 Cloning Fengchi / Windspeed Patch Repository..."
       
-          if ! git clone --depth=1 -b "$CPU" "$PATCHREPOSITORYURL" "$PATCHREPOSITORY"; then
+          if ! git clone --depth=1 -b "$CPU" "$REPO_URL" "$PATCH_REPO"; then
               echo "⚠️ CPU Branch '$CPU' Not Found in Patch Repository"
               exit 13
           fi
       
           # Resolve Patch File
-          WINDPATCHFILE="${FILE//_bak/}"
-          PATCHFILE="fengchi_${WINDPATCHFILE}.patch"
-          PATCHPATH="${PATCHREPOSITORY}/${PATCHFILE}"
+          FENGCHI_FILE="${FILE//_bak/}"
+          PATCH_FILE="fengchi_${FENGCHI_FILE}.patch"
+          PATCH_PATH="${PATCH_REPO}/${PATCH_FILE}"
       
-          if [[ ! -f "$PATCHPATH" ]]; then
+          if [[ ! -f "$PATCH_PATH" ]]; then
               echo "⚠️ Patch File Not Found:"
-              echo "$PATCHPATH"
+              echo "$PATCH_PATH"
               exit 14
           fi
       
-          cp "$PATCHPATH" .
+          cp "$PATCH_PATH" .
       
           # Cleanup Handler
           cleanup() {
-              rm -f "$PATCHFILE" || true
-              rm -rf "$PATCHREPOSITORY" || true
+              rm -f "$PATCH_FILE" || true
+              rm -rf "$PATCH_REPO" || true
           }
           trap cleanup EXIT
       
           # Normalize Patch Format
           echo "🔧 Normalizing Patch Format..."
-          dos2unix "$PATCHFILE" 2>/dev/null || true
+          dos2unix "$PATCH_FILE" 2>/dev/null || true
       
           # Verify Patch Compatibility
           echo "🔎 Checking Patch Compatibility..."
 
-          if ! git apply --check "$PATCHFILE"; then
+          if ! git apply --check "$PATCH_FILE"; then
               echo "⚠️ Patch Check Failed (Kernel Mismatch or Already Applied)"
               exit 15
           fi
@@ -2905,7 +2905,7 @@ jobs:
           # Apply Patch
           echo "🚀 Applying Fengchi / Windspeed Scheduler Patch..."
       
-          git apply "$PATCHFILE"
+          git apply "$PATCH_FILE"
       
           echo "✔️ Scheduler Patch Applied Successfully"
 
@@ -2927,32 +2927,32 @@ jobs:
           echo ""
       
           # Navigate to Kernel Common Directory
-          CKERNELPATH="kernel_workspace/kernel_platform/common"
-          MAXRETRIES=3
+          COMMON_DIR="kernel_workspace/kernel_platform/common"
+          MAX_RETRIES=3
       
-          if [[ ! -d "$CKERNELPATH" ]]; then
-            echo "⚠️ ERROR: Directory Not Found -> $CKERNELPATH"
+          if [[ ! -d "$COMMON_DIR" ]]; then
+            echo "⚠️ ERROR: Directory Not Found -> $COMMON_DIR"
             exit 1
           fi
       
-          cd "$CKERNELPATH"
+          cd "$COMMON_DIR"
           echo "➡️  Working Directory: $(pwd)"
           echo "🔧 Enabling Kernel-Level Baseband Guard Support..."
       
           # Download and Execute Setup Script
-          BBGURL="https://raw.githubusercontent.com/vc-teahouse/Baseband-guard/main/setup.sh"
+          BBG_URL="https://raw.githubusercontent.com/vc-teahouse/Baseband-guard/main/setup.sh"
           echo "🌐 Fetching Baseband Guard Setup Script..."
-          for i in $(seq 1 $MAXRETRIES); do
-              curl -fsSL "$BBGURL" | bash -s -- main && break
-              echo "⚠️ Download / Setup Failed, Retry $i/$MAXRETRIES..."
+          for i in $(seq 1 $MAX_RETRIES); do
+              curl -fsSL "$BBG_URL" | bash -s -- main && break
+              echo "⚠️ Download / Setup Failed, Retry $i/$MAX_RETRIES..."
               sleep 2
           done
           echo "✔️ Baseband Guard Patch Script Applied"
       
           # Ensure Baseband Guard is Added to Linux Security Defaults
-          KCONFIGPATH="./security/Kconfig"
-          if [[ ! -f "$KCONFIGPATH" ]]; then
-            echo "⚠️ ERROR: Kernel Configuration File Not Found -> $KCONFIGPATH"
+          KCONFIG_FILE="./security/Kconfig"
+          if [[ ! -f "$KCONFIG_FILE" ]]; then
+            echo "⚠️ ERROR: Kernel Configuration File Not Found -> $KCONFIG_FILE"
             exit 1
           fi
       
@@ -2967,27 +2967,27 @@ jobs:
             }
             /^help$/ { in_block=0 }
             { print }
-          ' "$KCONFIGPATH" > "${KCONFIGPATH}.tmp"
-          mv "${KCONFIGPATH}.tmp" "$KCONFIGPATH"
+          ' "$KCONFIG_FILE" > "${KCONFIG_FILE}.tmp"
+          mv "${KCONFIG_FILE}.tmp" "$KCONFIG_FILE"
           echo "⚙️ Linux Security Configuration Updated Successfully"
       
           # Dynamically Detect Baseband Guard Directory (Clone or SymLink)
-          BBGPATH="$(find . -maxdepth 2 -type d -name "Baseband-guard" | head -n1 || true)"
+          BASEBAND_DIR="$(find . -maxdepth 2 -type d -name "Baseband-guard" | head -n1 || true)"
           if [[ -L "./Baseband-guard" ]]; then
-              BBGPATH="$(readlink -f ./Baseband-guard)"
+              BASEBAND_DIR="$(readlink -f ./Baseband-guard)"
           fi
 
           echo "🔎 Checking Baseband Guard source..."
 
           # Ensure the Baseband Guard Directory Exists
-          if [[ -d "$BBGPATH" ]]; then
-              echo "🔎 Baseband Guard Directory Found: $BBGPATH"
+          if [[ -d "$BASEBAND_DIR" ]]; then
+              echo "🔎 Baseband Guard Directory Found: $BASEBAND_DIR"
           
-              if [[ -f "$BBGPATH/baseband_guard.c" ]]; then
+              if [[ -f "$BASEBAND_DIR/baseband_guard.c" ]]; then
                   echo "🧾 Source File Detected"
               else
                   echo "⚠️ Baseband Guard Sources Not Found Inside Baseband Guard"
-                  ls -la "$BBGPATH" || true
+                  ls -la "$BASEBAND_DIR" || true
               fi
           
           else
@@ -3014,20 +3014,20 @@ jobs:
           echo ""
 
           # Clone Patch Repository (Branch 'NEW')
-          PATCHREPOSITORY="https://github.com/cyanmint/GKI_KernelSU_SUSFS.git"
-          LOCALPATCHDIR="$GITHUB_WORKSPACE/REPO_LXC"
+          PATCH_REPO="https://github.com/cyanmint/GKI_KernelSU_SUSFS.git"
+          PATCH_DIR_LOCAL="$GITHUB_WORKSPACE/REPO_LXC"
 
           echo "📥 Cloning Patch Repository (Branch 'NEW')..."
-          rm -rf "$LOCALPATCHDIR" || true
-          git clone --depth=1 -b new "$PATCHREPOSITORY" "$LOCALPATCHDIR" || echo "⚠️ Clone Failed, Continuing..."
+          rm -rf "$PATCH_DIR_LOCAL" || true
+          git clone --depth=1 -b new "$PATCH_REPO" "$PATCH_DIR_LOCAL" || echo "⚠️ Clone Failed, Continuing..."
 
           # Navigate to Kernel Common Directory
-          COMMONPATH="kernel_workspace/kernel_platform/common"
-          if [ ! -d "$COMMONPATH" ]; then
+          KERNEL_COMMON_DIR="kernel_workspace/kernel_platform/common"
+          if [ ! -d "$KERNEL_COMMON_DIR" ]; then
             echo "⚠️ Kernel Common Directory Not Found, Skipping Patch Step"
             exit 0
           fi
-          cd "$COMMONPATH"
+          cd "$KERNEL_COMMON_DIR"
 
           # Detect Kernel Version
           KERNELVERSION=$(make kernelversion 2>/dev/null || echo "6.6.0")
@@ -3038,38 +3038,38 @@ jobs:
 
           # Detect Android Version (From Environment)
           if [ -n "${ANDROIDVERSION:-}" ]; then
-            ANDROIDV="$ANDROIDVERSION"
+            ANDROID_VER="$ANDROIDVERSION"
             
           else
 
             # Fallback Default
-            ANDROIDV="android16"
+            ANDROID_VER="android16"
           fi
 
           # Ensure it Matches Android 0-9+
-          if [[ ! "$ANDROIDV" =~ ^android[0-9]+$ ]]; then
+          if [[ ! "$ANDROID_VER" =~ ^android[0-9]+$ ]]; then
             echo "⚠️ Invalid Android Version → Forcing Android16"
-            ANDROIDV="android16"
+            ANDROID_VER="android16"
           fi
 
-          ANDROID_NUM="${ANDROIDV#android}"
-          echo "📊 Android Version: $ANDROIDV"
+          ANDROID_NUM="${ANDROID_VER#android}"
+          echo "📊 Android Version: $ANDROID_VER"
 
           # Export for Downstream Steps
           echo "VANDROID=${ANDROID_NUM}.0.0" >> $GITHUB_ENV
-          echo "ANDROIDSHORTVER=${ANDROID_NUM}" >> $GITHUB_ENV
-          echo "ANDROIDVERSION=$ANDROIDV" >> $GITHUB_ENV
+          echo "ANDROID_SHORT_VERSION=${ANDROID_NUM}" >> $GITHUB_ENV
+          echo "ANDROIDVERSION=$ANDROID_VER" >> $GITHUB_ENV
 
           # Determine Patch Directory (Smart Matching)
-          PATCHBASE="$LOCALPATCHDIR/lxc_docker_patches"
+          PATCH_BASE="$PATCH_DIR_LOCAL/lxc_docker_patches"
 
           # Gather All Candidate Patches for the Android Version
-          CANDIDATES=$(find "$PATCHBASE" -maxdepth 1 -type d -name "a${ANDROID_NUM}-*" | sort -V)
+          CANDIDATES=$(find "$PATCH_BASE" -maxdepth 1 -type d -name "a${ANDROID_NUM}-*" | sort -V)
 
           TARGET_PATCH_DIR=""
 
-          for DIRECTORYPATH in $CANDIDATES; do
-            PATCH_KERNEL=$(basename "$DIRECTORYPATH" | cut -d- -f2)
+          for dir in $CANDIDATES; do
+            PATCH_KERNEL=$(basename "$dir" | cut -d- -f2)
             PATCH_MAJOR=$(echo "$PATCH_KERNEL" | cut -d. -f1)
             PATCH_MINOR=$(echo "$PATCH_KERNEL" | cut -d. -f2)
             KERN_MAJOR=$(echo "$KERNEL_MAJOR_MINOR" | cut -d. -f1)
@@ -3077,7 +3077,7 @@ jobs:
 
             # Select Patch if Patch Kernel ≤ Current Kernel
             if (( PATCH_MAJOR < KERN_MAJOR )) || { (( PATCH_MAJOR == KERN_MAJOR )) && (( PATCH_MINOR <= KERN_MINOR )); }; then
-              TARGET_PATCH_DIR="$DIRECTORYPATH"
+              TARGET_PATCH_DIR="$dir"
             fi
           done
 
@@ -3094,41 +3094,41 @@ jobs:
           echo "📂 Using Patch Directory: $TARGET_PATCH_DIR"
 
           # Apply Patches
-          APPLIEDPATCHES=0
-          SKIPPEDPATCHES=0
-          FAILEDPATCHES=0
+          PATCHES_APPLIED=0
+          PATCHES_SKIPPED=0
+          PATCHES_FAILED=0
 
-          for PATCHFILE in "$TARGET_PATCH_DIR"/*.patch; do
-            [ -f "$PATCHFILE" ] || continue
+          for patch_file in "$TARGET_PATCH_DIR"/*.patch; do
+            [ -f "$patch_file" ] || continue
 
-            PATCHNAME=$(basename "$PATCHFILE")
-            echo "➡️ Applying: $PATCHNAME"
+            patch_name=$(basename "$patch_file")
+            echo "➡️ Applying: $patch_name"
 
             # Skip if Already Applied
-            if patch -R -p1 -s -f --dry-run < "$PATCHFILE" >/dev/null 2>&1; then
+            if patch -R -p1 -s -f --dry-run < "$patch_file" >/dev/null 2>&1; then
               echo "⏭️ Already Applied → Skipping..."
-              SKIPPEDPATCHES=$((SKIPPEDPATCHES+1))
+              PATCHES_SKIPPED=$((PATCHES_SKIPPED+1))
               continue
             fi
 
             # Apply Patch
-            if patch -p1 -F3 --forward < "$PATCHFILE"; then
+            if patch -p1 -F3 --forward < "$patch_file"; then
               echo "✔️ Applied Successfully"
-              APPLIEDPATCHES=$((APPLIEDPATCHES+1))
+              PATCHES_APPLIED=$((PATCHES_APPLIED+1))
             else
               echo "⚠️ Patch Failed"
-              FAILEDPATCHES=$((FAILEDPATCHES+1))
+              PATCHES_FAILED=$((PATCHES_FAILED+1))
             fi
           done
 
           echo "------------------------------"
           echo "Patch Summary"
           echo "------------------------------"
-          echo "✔️ Applied : $APPLIEDPATCHES"
-          echo "⚠️ Skipped : $SKIPPEDPATCHES"
-          echo "🚩 Failed  : $FAILEDPATCHES"
+          echo "✔️ Applied : $PATCHES_APPLIED"
+          echo "⚠️ Skipped : $PATCHES_SKIPPED"
+          echo "🚩 Failed  : $PATCHES_FAILED"
 
-          if [ "$FAILEDPATCHES" -gt 0 ]; then
+          if [ "$PATCHES_FAILED" -gt 0 ]; then
             echo "⚠️ Some Patches Failed → Continuing Build"
           else
             echo "🎉 Linux Container / Docker Patch Done"
@@ -3151,25 +3151,25 @@ jobs:
           echo "🔍 Attempting to Auto-Detect the Kernel Directory..."
 
           # Define Possible Kernel Directory Paths
-          POSSIBLEKERNELPATH=(
+          possible_kernel_dirs=(
             "${GITHUB_WORKSPACE}/kernel_workspace/kernel_platform/common"
             "${GITHUB_WORKSPACE}/kernel_workspace/kernel_platform"
             "${GITHUB_WORKSPACE}/kernel_workspace"
           )
 
-          KERNELPATH=""
+          KERNEL_DIR=""
 
           # Check Each Directory to Find the Correct One
-          for DIRECTORYPATH in "${POSSIBLEKERNELPATH[@]}"; do
-            echo "🔎 Checking Directory: $DIRECTORYPATH"
-            if [ -d "$DIRECTORYPATH" ] && { [ -f "$DIRECTORYPATH/Makefile" ] || [ -d "$DIRECTORYPATH/arch/arm64/configs" ]; }; then
-              KERNELPATH="$DIRECTORYPATH"
-              echo "📌 Kernel Directory Detected: $KERNELPATH"
+          for dir in "${possible_kernel_dirs[@]}"; do
+            echo "🔎 Checking Directory: $dir"
+            if [ -d "$dir" ] && { [ -f "$dir/Makefile" ] || [ -d "$dir/arch/arm64/configs" ]; }; then
+              KERNEL_DIR="$dir"
+              echo "📌 Kernel Directory Detected: $KERNEL_DIR"
               break
             fi
           done
 
-          if [ -z "$KERNELPATH" ]; then
+          if [ -z "$KERNEL_DIR" ]; then
             echo "⚠️ No Valid Kernel Directory Found, Exiting..."
             exit 1
           fi
@@ -3190,26 +3190,26 @@ jobs:
 
           # Select Patch URL Based on the Kernel Version
           if [[ "$GKIVERSION" == "android15-6.6" ]]; then
-            PATCHURL="https://raw.githubusercontent.com/AndreiMikh/Build_Oneplus_Realme_Action/main/.github/workflows/tools/adios_ioscheduler_6.6.patch"
+            PATCH_URL="https://raw.githubusercontent.com/AndreiMikh/Build_Oneplus_Realme_Action/main/.github/workflows/tools/adios_ioscheduler_6.6.patch"
           elif [[ "$GKIVERSION" == "android14-6.1" ]]; then
-            PATCHURL="https://raw.githubusercontent.com/AndreiMikh/Build_Oneplus_Realme_Action/main/.github/workflows/tools/adios_ioscheduler_6.1.patch"
+            PATCH_URL="https://raw.githubusercontent.com/AndreiMikh/Build_Oneplus_Realme_Action/main/.github/workflows/tools/adios_ioscheduler_6.1.patch"
           else
             echo "⚠️ Unsupported Kernel Version: $GKIVERSION, Exiting..."
             exit 1
           fi
 
-          PATCHFILE="$GITHUB_WORKSPACE/adios.patch"
-          CONFIG_FILE="$KERNELPATH/arch/arm64/configs/gki_defconfig"
+          PATCH_FILE="$GITHUB_WORKSPACE/adios.patch"
+          CONFIG_FILE="$KERNEL_DIR/arch/arm64/configs/gki_defconfig"
 
-          echo "📩 Downloading Patch from: $PATCHURL"
-          curl -fsSL "$PATCHURL" -o "$PATCHFILE" || {
+          echo "📩 Downloading Patch from: $PATCH_URL"
+          curl -fsSL "$PATCH_URL" -o "$PATCH_FILE" || {
             echo "⚠️ Failed to Download Patch, Skipping..."
             exit 1
           }
 
           echo "🔧 Applying ADIOS Scheduler Patch..."
 
-          if [ ! -f "$PATCHFILE" ]; then
+          if [ ! -f "$PATCH_FILE" ]; then
             echo "⚠️ Patch File Missing, Skipping Patch Application..."
           else
             # Check if the Patch has Already been Applied
@@ -3217,13 +3217,13 @@ jobs:
               echo "✔️ Patch Already Applied, Skipping..."
             else
               echo "⚙️ Applying Patch..."
-              cd "$KERNELPATH"
-              patch -p1 -F3 --forward < "$PATCHFILE" || true
+              cd "$KERNEL_DIR"
+              patch -p1 -F3 --forward < "$PATCH_FILE" || true
             fi
 
             # Clean Up by Removing the Patch File
             echo "🧹 Cleaning Up the Downloaded Patch..."
-            rm -f "$PATCHFILE"
+            rm -f "$PATCH_FILE"
           fi
 
           echo ""
@@ -3246,25 +3246,25 @@ jobs:
           # Detect Correct Kernel Root Directory
           echo "🔍 Detecting Kernel Root..."
           
-          POSSIBLEKERNELPATH=(
+          PKDIR=(
             "${GITHUB_WORKSPACE}/kernel_workspace/kernel_platform/common"
             "${GITHUB_WORKSPACE}/kernel_workspace/kernel_platform"
             "${GITHUB_WORKSPACE}/kernel_workspace"
           )
           
-          KERNELPATH=""
+          KDIR=""
           
-          for DIRECTORYPATH in "${POSSIBLEKERNELPATH[@]}"; do
-            echo "🔎 Checking: $DIRECTORYPATH"
+          for DIR in "${PKDIR[@]}"; do
+            echo "🔎 Checking: $DIR"
           
-            if [[ -d "$DIRECTORYPATH" ]] && [[ -f "$DIRECTORYPATH/Makefile" ]]; then
-              KERNELPATH="$DIRECTORYPATH"
-              echo "📌 Kernel Root Detected: $KERNELPATH"
+            if [[ -d "$DIR" ]] && [[ -f "$DIR/Makefile" ]]; then
+              KDIR="$DIR"
+              echo "📌 Kernel Root Detected: $KDIR"
               break
             fi
           done
           
-          if [[ -z "${KERNELPATH:-}" ]]; then
+          if [[ -z "${KDIR:-}" ]]; then
             echo "⚠️ No Valid Kernel Root Found"
             exit 1
           fi
@@ -3278,7 +3278,7 @@ jobs:
           echo "🧠 Detecting Kernel ABI Slot Layout..."          
           echo "🔍 Locating SCHEDH..."
           
-          SCHED=$(find "$KERNELPATH" -path "*/include/linux/sched.h" | head -n 1 || true)
+          SCHED=$(find "$KDIR" -path "*/include/linux/sched.h" | head -n 1 || true)
           
           if [[ -z "$SCHED" ]] || [[ ! -f "$SCHED" ]]; then
             echo "⚠️ SCHEDH Not Found in Kernel Tree..."
@@ -3382,7 +3382,7 @@ jobs:
             echo ""
             echo "🔧 Applying Patch..."
           
-            cd "$KERNELPATH"
+            cd "$KDIR"
           
             for plvl in 0 1 2; do
               echo "🔍 Trying Path-${plvl}"
@@ -3435,35 +3435,35 @@ jobs:
           
           # Paths
           WS="${GITHUB_WORKSPACE}/kernel_workspace"
-          REPOSITORYPATH="${WS}/Re-Kernel"
-          DRIVERSPATH="${WS}/kernel_platform/common/drivers"
-          TARGETPATH="${DRIVERSPATH}/rekernel"
-          KCONFIGPATH="${DRIVERSPATH}/Kconfig"
-          MAKEFILE="${DRIVERSPATH}/Makefile"
+          REPO_DIR="${WS}/Re-Kernel"
+          DRIVERS_DIR="${WS}/kernel_platform/common/drivers"
+          TARGET_DIR="${DRIVERS_DIR}/rekernel"
+          KCONFIG_FILE="${DRIVERS_DIR}/Kconfig"
+          MAKEFILE="${DRIVERS_DIR}/Makefile"
 
           # Basic Sanity Checks
-          [[ -d "$DRIVERSPATH" ]] || { echo "⚠️ Missing Drivers Directory"; exit 1; }
-          [[ -f "$KCONFIGPATH" ]] || { echo "⚠️ Missing Kernel Configuration"; exit 1; }
+          [[ -d "$DRIVERS_DIR" ]] || { echo "⚠️ Missing Drivers Directory"; exit 1; }
+          [[ -f "$KCONFIG_FILE" ]] || { echo "⚠️ Missing Kernel Configuration"; exit 1; }
           [[ -f "$MAKEFILE" ]] || { echo "⚠️ Missing Makefile"; exit 1; }
 
           # Clone Repository (Shallow)
-          if [[ ! -d "$REPOSITORYPATH/.git" ]]; then
+          if [[ ! -d "$REPO_DIR/.git" ]]; then
             echo "📩 Cloning ReKernel Repository..."
-            git clone --depth=1 https://github.com/Sakion-Team/Re-Kernel.git "$REPOSITORYPATH"
+            git clone --depth=1 https://github.com/Sakion-Team/Re-Kernel.git "$REPO_DIR"
             echo "✔️ Repository Cloned"
           else
             echo "⚠️ Repository Already Exists"
           fi
 
           # Re-Solve Source Directory
-          SRCDIR="$REPOSITORYPATH"
-          [[ -d "$REPOSITORYPATH/LKM-Source" ]] && SRCDIR="$REPOSITORYPATH/LKM-Source"
-          echo "📂 Source: $SRCDIR"
+          SRC_DIR="$REPO_DIR"
+          [[ -d "$REPO_DIR/LKM-Source" ]] && SRC_DIR="$REPO_DIR/LKM-Source"
+          echo "📂 Source: $SRC_DIR"
 
           # Skip if Already Applied (Stronger Check)
-          if grep -q "drivers/rekernel/Kconfig" "$KCONFIGPATH" && \
+          if grep -q "drivers/rekernel/Kconfig" "$KCONFIG_FILE" && \
             grep -q "CONFIG_REKERNEL" "$MAKEFILE" && \
-            [[ -f "$TARGETPATH/rekernel.c" ]]; then
+            [[ -f "$TARGET_DIR/rekernel.c" ]]; then
             echo "⚠️ Re-Kernel Already Applied"
             exit 0
           fi
@@ -3471,11 +3471,11 @@ jobs:
           echo "⚙️ Applying Re-Kernel..."
 
           # Prepare Target Directory
-          mkdir -p "$TARGETPATH"
+          mkdir -p "$TARGET_DIR"
 
           # Inject Kernel Configuration Entry (Idempotent)
-          if ! grep -q 'drivers/rekernel/Kconfig' "$KCONFIGPATH"; then
-            sed -i '/endmenu/i source "drivers/rekernel/Kconfig"' "$KCONFIGPATH"
+          if ! grep -q 'drivers/rekernel/Kconfig' "$KCONFIG_FILE"; then
+            sed -i '/endmenu/i source "drivers/rekernel/Kconfig"' "$KCONFIG_FILE"
             echo "✔️ Kernel Configuration Entry Added"
           else
             echo "⚠️ Kernel Configuration Already Present"
@@ -3491,19 +3491,19 @@ jobs:
 
           # Validate Required Files
           for f in rekernel.c rekernel.h Makefile Kconfig; do
-            [[ -f "$SRCDIR/$f" ]] || { echo "⚠️ Missing $f in $SRCDIR"; exit 1; }
+            [[ -f "$SRC_DIR/$f" ]] || { echo "⚠️ Missing $f in $SRC_DIR"; exit 1; }
           done
           echo "✔️ Source Files Verified"
 
           # Sync Source Files (Safe Patch Update)
-          cp -u "$SRCDIR"/{rekernel.c,rekernel.h,Makefile,Kconfig} "$TARGETPATH/"
+          cp -u "$SRC_DIR"/{rekernel.c,rekernel.h,Makefile,Kconfig} "$TARGET_DIR/"
           echo "♻️ Files Synced"
 
           # Apply Kernel Define Patch
-          if [[ -n "${SHORTPATCHKVER:-}" ]]; then
+          if [[ -n "${KERNEL_SHORT_PATCH_VERSION:-}" ]]; then
             sed -i \
-              "s|^[[:space:]]*//[[:space:]]*#define KERNEL_${SHORTPATCHKVER}|#define KERNEL_${SHORTPATCHKVER}|" \
-              "$TARGETPATH/rekernel.h"
+              "s|^[[:space:]]*//[[:space:]]*#define KERNEL_${KERNEL_SHORT_PATCH_VERSION}|#define KERNEL_${KERNEL_SHORT_PATCH_VERSION}|" \
+              "$TARGET_DIR/rekernel.h"
             echo "✔️ Kernel Define Enabled"
           else
             echo "⚠️ Kernel Short Patch Version Not Set"
@@ -3859,25 +3859,25 @@ jobs:
           echo ""
 
           # Paths
-          PATCHPATH="${GITHUB_WORKSPACE}/kernel_workspace/AndreiMikh-Kernel-Lab/patches"
-          TARGETPATH="${GITHUB_WORKSPACE}/kernel_workspace/kernel_platform/common"
-          PATCHFILE="${PATCHPATH}/IPv6.patch"
+          PATCH_DIR="${GITHUB_WORKSPACE}/kernel_workspace/AndreiMikh-Kernel-Lab/patches"
+          TARGET_DIR="${GITHUB_WORKSPACE}/kernel_workspace/kernel_platform/common"
+          PATCH_FILE="${PATCH_DIR}/IPv6.patch"
       
           echo "✔ NetFilter Enabled — 🔎 Checking IPv6 NAT Compatibility..."
       
           # Validate Target Directory
-          if [[ ! -d "$TARGETPATH" ]]; then
+          if [[ ! -d "$TARGET_DIR" ]]; then
               echo "⚠️ Target Directory Not Found:"
-              echo "$TARGETPATH"
+              echo "$TARGET_DIR"
               exit 1
           fi
       
-          cd "$TARGETPATH"
+          cd "$TARGET_DIR"
       
           # Validate Patch File
-          if [[ ! -f "$PATCHFILE" ]]; then
+          if [[ ! -f "$PATCH_FILE" ]]; then
               echo "⚠️ Patch File Not Found:"
-              echo "$PATCHFILE"
+              echo "$PATCH_FILE"
               exit 1
           fi
       
@@ -3890,9 +3890,9 @@ jobs:
           echo "📊 Device CPU Supports IPv6 NAT Fix"
 
           # Check if Patch Already Applied
-          if patch --dry-run -p1 < "$PATCHFILE" >/dev/null 2>&1; then
+          if patch --dry-run -p1 < "$PATCH_FILE" >/dev/null 2>&1; then
               echo "🚀 Applying IPv6 NAT Compatibility Patch..."
-              patch -p1 -F3 < "$PATCHFILE"
+              patch -p1 -F3 < "$PATCH_FILE"
               echo "✔ IPv6 NAT Fix Applied Successfully"
           else
               echo "⚙️ IPv6 NAT Patch Already Applied or Not Needed"
@@ -3915,10 +3915,10 @@ jobs:
           echo ""
       
           # Determine Build Timestamp
-          INPUTTIME="${{ github.event.inputs.BUILDTIME }}"
+          INPUT_TIME="${{ github.event.inputs.BUILDTIME }}"
       
-          if [[ -n "$INPUTTIME" && "$INPUTTIME" != [Ff] ]]; then
-              DATESTR="$INPUTTIME"
+          if [[ -n "$INPUT_TIME" && "$INPUT_TIME" != [Ff] ]]; then
+              DATESTR="$INPUT_TIME"
               echo "🔎 Using Input Build Time: $DATESTR"
           else
               DATESTR="$(TZ='UTC' date +'%a %b %d %T %Z %Y')"
@@ -3926,11 +3926,11 @@ jobs:
           fi
       
           # Export Environment Variables
-          echo "BUILDTIMESTAMP=${DATESTR}" >> "$GITHUB_ENV"
-          echo "KBUILDVER=1" >> "$GITHUB_ENV"
+          echo "KBUILD_BUILD_TIMESTAMP=${DATESTR}" >> "$GITHUB_ENV"
+          echo "KBUILD_BUILD_VERSION=1" >> "$GITHUB_ENV"
       
-          KERNELPATH="${GITHUB_WORKSPACE}/kernel_workspace/kernel_platform"
-          cd "$KERNELPATH" || { echo "⚠️ Kernel Directory Not Found: $KERNELPATH"; exit 1; }
+          KERNEL_DIR="${GITHUB_WORKSPACE}/kernel_workspace/kernel_platform"
+          cd "$KERNEL_DIR" || { echo "⚠️ Kernel Directory Not Found: $KERNEL_DIR"; exit 1; }
       
           # Patch MKCompile Scripts
           SCRIPTS=(
@@ -3943,14 +3943,14 @@ jobs:
                   echo "🚀 Patching MKCompile Script: $SCRIPT"
       
                   # Replace Existing UTS Version
-                  if grep -q '^UTSVER=' "$SCRIPT"; then
-                      perl -pi -e "s{^UTSVER=.*}{UTSVER=\"#1 SMP PREEMPT $DATESTR\"}" "$SCRIPT"
+                  if grep -q '^UTS_VERSION=' "$SCRIPT"; then
+                      perl -pi -e "s{^UTS_VERSION=.*}{UTS_VERSION=\"#1 SMP PREEMPT $DATESTR\"}" "$SCRIPT"
                       echo "✔ Replaced Existing UTS Version"
                   else
                       # Inject UTS Version if Missing
                       # Add After First 'CAT <<EOF'
                       perl -0777 -pi -e "
-                        s{(cat <<EOF)}{\$1\n#undef UTSVER\n#define UTSVER \"#1 SMP PREEMPT $DATESTR\"}ms
+                        s{(cat <<EOF)}{\$1\n#undef UTS_VERSION\n#define UTS_VERSION \"#1 SMP PREEMPT $DATESTR\"}ms
                       " "$SCRIPT"
                       echo "✔ Injected UTS Version Definition"
                   fi
@@ -3978,21 +3978,21 @@ jobs:
           echo "------------------------------"
           echo ""
       
-          GPUEBMAKEFILE="${GITHUB_WORKSPACE}/kernel_workspace/kernel-5.10/drivers/gpu/mediatek/Makefile"
+          GPUEB_MAKEFILE="${GITHUB_WORKSPACE}/kernel_workspace/kernel-5.10/drivers/gpu/mediatek/Makefile"
       
           # Verify Makefile Exists
-          if [[ ! -f "$GPUEBMAKEFILE" ]]; then
-              echo "⚠️ Makefile Not Found: $GPUEBMAKEFILE — skipping GPUEB disable"
+          if [[ ! -f "$GPUEB_MAKEFILE" ]]; then
+              echo "⚠️ Makefile Not Found: $GPUEB_MAKEFILE — skipping GPUEB disable"
               exit 0
           fi
       
-          echo "🛠️ Disabling GPUEB in $GPUEBMAKEFILE..."
+          echo "🛠️ Disabling GPUEB in $GPUEB_MAKEFILE..."
       
           # Check if GPUEB Already Disabled
-          if grep -q 'obj-y.*gpueb' "$GPUEBMAKEFILE"; then
+          if grep -q 'obj-y.*gpueb' "$GPUEB_MAKEFILE"; then
           
               # Remove Lines Containing GPUEB from OBJ-Y Assignments
-              sed -i '/obj-y.*gpueb/d' "$GPUEBMAKEFILE"
+              sed -i '/obj-y.*gpueb/d' "$GPUEB_MAKEFILE"
               echo "🎉 GPUEB Entries Removed Successfully"
           else
               echo "✔ GPUEB Already Disabled — Nothing to Do"
@@ -4032,10 +4032,10 @@ jobs:
           echo ""
 
           # Environment Variables
-          FILEBASE="${{ env.BASEFILENAME }}"
-          BRANCH="${{ env.TARGETBRANCH }}"
+          FILEBASE="${{ env.FILE_BASE }}"
+          BRANCH="${{ env.FOUND_BRANCH }}"
           CPU="${{ env.CPUD }}"
-          METHOD="${{ env.BUILDMETHOD }}"
+          METHOD="${{ env.BUILD_METHOD }}"
           GKIVER="${{ env.ANDROIDVERSION }}-${{ env.KERNELVERSION }}"
           KERNELVERSION="${{ env.KERNELVERSION }}"
 
@@ -4059,15 +4059,15 @@ jobs:
           fi
 
           # Locate Clang Prebuilt Binary
-          CLANGPREBUILTBIN="${CLANGPREBUILTBIN:-$(
+          CLANG_PREBUILT_BIN="${CLANG_PREBUILT_BIN:-$(
             grep -h '^CLANG_PREBUILT_BIN=' \
               ./common/build.config.common \
-              ./"$KERNELREPOSITORY"/build.config.common 2>/dev/null \
+              ./"$KERNEL_REPOS"/build.config.common 2>/dev/null \
             | cut -d'=' -f2 \
             | head -n1 || true
           )}"
 
-          if [[ -z "$CLANGPREBUILTBIN" ]]; then
+          if [[ -z "$CLANG_PREBUILT_BIN" ]]; then
             echo "⚠️ Clang Prebuilt Bin Not Found. Falling Back to Official Build Script"
             echo "fallback_reason=missing_clang_prebuilt_bin" >> "$GITHUB_OUTPUT"
             echo "fallback=true" >> "$GITHUB_OUTPUT"
@@ -4079,30 +4079,30 @@ jobs:
           echo "🔍 Attempting to Detect Clang Version..."
 
           # Initialize Clang Version as Empty
-          CLANGVERSION=""
+          CLANG_VERSION=""
 
           # Try to Detect Clang Version Using the Binary Name First
-          if [[ -n "$CLANGPREBUILTBIN" && "$CLANGPREBUILTBIN" =~ clang-([0-9]+(\.[0-9]+)+) ]]; then
-            CLANGVERSION="${BASH_REMATCH[1]}"
-            echo "📌 Detected Clang Version from Binary Name: $CLANGVERSION"
+          if [[ -n "$CLANG_PREBUILT_BIN" && "$CLANG_PREBUILT_BIN" =~ clang-([0-9]+(\.[0-9]+)+) ]]; then
+            CLANG_VERSION="${BASH_REMATCH[1]}"
+            echo "📌 Detected Clang Version from Binary Name: $CLANG_VERSION"
 
           # If Clang Binary Name Doesn't Help, Try Finding it in the Build Configuration
           elif [[ -f ./common/build.config.constants ]]; then
-            CLANGVERSION=$(grep -m1 '^CLANGVERSION=' ./common/build.config.constants 2>/dev/null | cut -d= -f2 || true)
-            if [[ -n "$CLANGVERSION" ]]; then
-              echo "📌 Detected Clang Version from Build Configuration: $CLANGVERSION"
+            CLANG_VERSION=$(grep -m1 '^CLANG_VERSION=' ./common/build.config.constants 2>/dev/null | cut -d= -f2 || true)
+            if [[ -n "$CLANG_VERSION" ]]; then
+              echo "📌 Detected Clang Version from Build Configuration: $CLANG_VERSION"
             fi
 
           # If Still Couldn't Determine the Version, Try Running Clang --Version and Parsing the Output
-          elif [[ -z "$CLANGVERSION" && -x "$CLANGFULLPATH" ]]; then
-            CLANGVERSION=$("$CLANGFULLPATH" --version 2>/dev/null | grep -oP 'clang version \K([0-9]+\.[0-9]+\.[0-9]+)' || true)
-            if [[ -n "$CLANGVERSION" ]]; then
-              echo "📌 Detected Clang Version from Clang --Version: $CLANGVERSION"
+          elif [[ -z "$CLANG_VERSION" && -x "$CLANG_FULL_PATH" ]]; then
+            CLANG_VERSION=$("$CLANG_FULL_PATH" --version 2>/dev/null | grep -oP 'clang version \K([0-9]+\.[0-9]+\.[0-9]+)' || true)
+            if [[ -n "$CLANG_VERSION" ]]; then
+              echo "📌 Detected Clang Version from Clang --Version: $CLANG_VERSION"
             fi
           fi
 
           # If No Version could be Determined, Log the Error and Fallback
-          if [[ -z "$CLANGVERSION" ]]; then
+          if [[ -z "$CLANG_VERSION" ]]; then
             echo "⚠️ Unable to Determine Clang Version"
             echo "fallback_reason=missing_clang_version" >> "$GITHUB_OUTPUT"
             echo "fallback=true" >> "$GITHUB_OUTPUT"
@@ -4115,21 +4115,21 @@ jobs:
 
           # Final Clang Version Confirmation
           echo "------------------------------"
-          echo "📂 Clang Version: $CLANGVERSION"
+          echo "📂 Clang Version: $CLANG_VERSION"
           echo "------------------------------"
           echo ""
 
           # Replace Placeholder with Actual Clang Version
-          CLANGPREBUILTBIN=${CLANGPREBUILTBIN/\$\{CLANGVERSION\}/$CLANGVERSION}
+          CLANG_PREBUILT_BIN=${CLANG_PREBUILT_BIN/\$\{CLANG_VERSION\}/$CLANG_VERSION}
 
           # Verify Clang Binary Exists
           # Info: Ensures the Resolved Clang Prebuilt Bin Path Contains a Valid Clang Executable
           # Info: Prevents Build from Continuing if Clang is Missing or Cache / Setup Failed
           # Info: Avoids "Clang: Command Not Found" Errors Later in Compilation
-          CLANGFULLPATH="$GITHUB_WORKSPACE/kernel_workspace/kernel_platform/$CLANGPREBUILTBIN/clang"
-          if [[ ! -x "$CLANGFULLPATH" ]]; then
+          CLANG_FULL_PATH="$GITHUB_WORKSPACE/kernel_workspace/kernel_platform/$CLANG_PREBUILT_BIN/clang"
+          if [[ ! -x "$CLANG_FULL_PATH" ]]; then
             echo "⚠️ Clang Binary Not Found!"
-            echo "📍 Expected Path: $CLANGFULLPATH"
+            echo "📍 Expected Path: $CLANG_FULL_PATH"
             echo "💡 Possible Causes:"
             echo "   - Clang was Not Downloaded"
             echo "   - Cache was Not Restored Properly"
@@ -4137,7 +4137,7 @@ jobs:
 
             echo ""
             echo "🔍 Debug: Listing Directory Contents..."
-            ls -lah "$(dirname "$CLANGFULLPATH")" || true
+            ls -lah "$(dirname "$CLANG_FULL_PATH")" || true
             
             echo "fallback_reason=missing_clang" >> "$GITHUB_OUTPUT"
             echo "fallback=true" >> "$GITHUB_OUTPUT"
@@ -4146,14 +4146,14 @@ jobs:
           fi
 
           # Extract Directory Information
-          CLANGDIRECTORY=${CLANGPREBUILTBIN%%/*}
-          CLANGPATH=${CLANGPREBUILTBIN%/*}
-          CLANGPATH=${CLANGPATH##*/}
+          CLANG_DIR=${CLANG_PREBUILT_BIN%%/*}
+          CLANG_PATH=${CLANG_PREBUILT_BIN%/*}
+          CLANG_PATH=${CLANG_PATH##*/}
 
           echo "------------------------------"
-          echo "📂 Clang Version     :$CLANGVERSION"
-          echo "📂 Clang Directory   :$CLANGDIRECTORY"
-          echo "📂 Clang Path        :$CLANGPATH"
+          echo "📂 Clang Version     :$CLANG_VERSION"
+          echo "📂 Clang Directory   :$CLANG_DIR"
+          echo "📂 Clang Path        :$CLANG_PATH"
           echo "📂 Detected LLVM IAS :$USE_LLVM_IAS"
           echo "------------------------------"
           echo ""
@@ -4164,7 +4164,7 @@ jobs:
           set -u
 
           # Export Paths
-          export PATH="/usr/lib/ccache:$GITHUB_WORKSPACE/kernel_workspace/kernel_platform/$CLANGPREBUILTBIN:$PATH"
+          export PATH="/usr/lib/ccache:$GITHUB_WORKSPACE/kernel_workspace/kernel_platform/$CLANG_PREBUILT_BIN:$PATH"
 
           # Setup: Enables Compiler Caching to Speed Up Re-Builds
           export CCACHE_LOGFILE="${{ github.workspace }}/kernel_workspace/ccache.log" || echo "⚠️ Cache Log Not Available"
@@ -4189,7 +4189,7 @@ jobs:
             fi
           
             export BINDGEN="bindgen"
-            export LIBCLANG_PATH="$GITHUB_WORKSPACE/kernel_workspace/kernel_platform/$(dirname "$CLANGPREBUILTBIN")/lib"
+            export LIBCLANG_PATH="$GITHUB_WORKSPACE/kernel_workspace/kernel_platform/$(dirname "$CLANG_PREBUILT_BIN")/lib"
           fi
          
           # Enter Kernel Source Directory
@@ -4315,15 +4315,15 @@ jobs:
         run: |
           set -Eeuo pipefail
 
-          FALLBACKSTART=$(date +%s)
+          FALLBACK_START=$(date +%s)
 
           # Navigate
           cd kernel_workspace
 
           # Environment Variables
-          FILEBASE="${{ env.BASEFILENAME }}"
+          FILEBASE="${{ env.FILE_BASE }}"
           CPU="${{ env.CPUD }}"
-          METHOD="${{ env.BUILDMETHOD }}"
+          METHOD="${{ env.BUILD_METHOD }}"
           GKIV="${{ env.ANDROIDVERSION }}-${{ env.KERNELVERSION }}"
 
           echo "-------- Kernel Build --------"
@@ -4357,15 +4357,15 @@ jobs:
           export KMI_SYMBOL_LIST_STRICT_MODE=${KMI_SYMBOL_LIST_STRICT_MODE:-0}
 
           # Detect Build System
-          if [[ -f "$BAZELSCRIPT" ]]; then
+          if [[ -f "$BAZEL_SCRIPT" ]]; then
             echo "🔎 Detected Bazel / KLeaf Build System"
             ./kernel_platform/oplus/bazel/oplus_modules_variant.sh "$CPU" "$METHOD"
-            python3 "$BAZELSCRIPT" \
+            python3 "$BAZEL_SCRIPT" \
               -t "$CPU" \
               "$METHOD"
-          elif [[ -f "$OPLUSSCRIPT" ]]; then
+          elif [[ -f "$OPLUS_SCRIPT" ]]; then
             echo "🔎 Detected Legacy OPlus Build System"
-            "$OPLUSSCRIPT" \
+            "$OPLUS_SCRIPT" \
               "$CPU" \
               "$METHOD"
           else
@@ -4373,10 +4373,10 @@ jobs:
             exit 1
           fi
 
-          FALLBACKEND=$(date +%s)
-          FALLBACKTIME=$((FALLBACKEND - FALLBACKSTART))
+          FALLBACK_END=$(date +%s)
+          FALLBACK_TIME=$((FALLBACK_END - FALLBACK_START))
 
-          echo "⏱️ Fallback Build Time: ${FALLBACKTIME}s"
+          echo "⏱️ Fallback Build Time: ${FALLBACK_TIME}s"
 
           echo "🎉 Build Done"
 
@@ -4393,7 +4393,7 @@ jobs:
           fi
 
           echo ""
-          echo "🐢 Fallback Build : ${FALLBACKTIME}s"
+          echo "🐢 Fallback Build : ${FALLBACK_TIME}s"
 
       # ==============================
       # Save Compiler Cache
@@ -4403,7 +4403,7 @@ jobs:
         uses: actions/cache/save@v5
         with:
           path: ${{ env.CCACHE_DIR }}
-          key: CCache-${{ runner.os }}-${{ env.BASEFILENAME }}-${{ env.CPUD }}-${{ github.ref_name }}
+          key: CCache-${{ runner.os }}-${{ env.FILE_BASE }}-${{ env.CPUD }}-${{ github.ref_name }}
          
       # ==============================
       # Cleanup Old Compiler Cache
@@ -4476,33 +4476,33 @@ jobs:
           echo "🛠️ Preparing Output Directories..."
           mkdir -p kernel_workspace/kernel_platform/out/Final-Image-Find
 
-          IMAGEPATH=""
+          IMAGE_PATH=""
 
           echo "🔎 Searching for Compiled Kernel Image..."
 
           # Check Unified Build Output
           if [[ -d "./kernel_workspace/kernel_platform/common/out/" ]]; then
-            IMAGEPATH=$(find ./kernel_workspace/kernel_platform/common/out/ -name "Image" -print -quit)
-            [[ -n "$IMAGEPATH" ]] && echo "📌 Image Found in Unified Build Output"
+            IMAGE_PATH=$(find ./kernel_workspace/kernel_platform/common/out/ -name "Image" -print -quit)
+            [[ -n "$IMAGE_PATH" ]] && echo "📌 Image Found in Unified Build Output"
           fi
 
           # Check Official OPlus Script Output
-          if [[ -z "$IMAGEPATH" && -d "./kernel_workspace/kernel_platform/out/" ]]; then
-            IMAGEPATH=$(find ./kernel_workspace/kernel_platform/out/ -name "Image" -print -quit)
-            [[ -n "$IMAGEPATH" ]] && echo "📌 Image Found in Official Build Output"
+          if [[ -z "$IMAGE_PATH" && -d "./kernel_workspace/kernel_platform/out/" ]]; then
+            IMAGE_PATH=$(find ./kernel_workspace/kernel_platform/out/ -name "Image" -print -quit)
+            [[ -n "$IMAGE_PATH" ]] && echo "📌 Image Found in Official Build Output"
           fi
 
           # Fail if No Image was Found
-          if [[ -z "$IMAGEPATH" ]]; then
+          if [[ -z "$IMAGE_PATH" ]]; then
             echo "⚠️ ERROR: Kernel Image Not Found. Build Likely Failed" >&2
             exit 1
           fi
 
-          echo "🔎 Kernel Image Located at: $IMAGEPATH"
+          echo "🔎 Kernel Image Located at: $IMAGE_PATH"
 
           # Copy Image to AnyKernel3 and Backup
-          cp "$IMAGEPATH" ./AnyKernel3/Image
-          cp "$IMAGEPATH" kernel_workspace/kernel_platform/out/Final-Image-Find/Image
+          cp "$IMAGE_PATH" ./AnyKernel3/Image
+          cp "$IMAGE_PATH" kernel_workspace/kernel_platform/out/Final-Image-Find/Image
 
           echo ""
           echo "🎉 Image Copied Successfully to AnyKernel3 and Backup"
@@ -4519,22 +4519,22 @@ jobs:
           echo "------------------------------"
           echo ""
 
-          IMAGEPATH="AnyKernel3/Image"
+          IMAGE_PATH="AnyKernel3/Image"
 
-          if [[ ! -f "$IMAGEPATH" ]]; then
-            echo "⚠️ Kernel Image Not Found at $IMAGEPATH"
-            echo "ROMBASE=Unknown" >> $GITHUB_ENV
-            echo "ROMCONFIDENCE=Low" >> $GITHUB_ENV
+          if [[ ! -f "$IMAGE_PATH" ]]; then
+            echo "⚠️ Kernel Image Not Found at $IMAGE_PATH"
+            echo "ROM_BASE=Unknown" >> $GITHUB_ENV
+            echo "ROM_CONFIDENCE=Low" >> $GITHUB_ENV
             exit 0
           fi
 
-          echo "✔ Found Kernel Image: $IMAGEPATH"
+          echo "✔ Found Kernel Image: $IMAGE_PATH"
 
-          OUTPUTSTRINGS=$(strings "$IMAGEPATH" 2>/dev/null || true)
-          LOWERSTRINGS=$(printf "%s" "$OUTPUTSTRINGS" | tr '[:upper:]' '[:lower:]')
+          STRINGS_OUTPUT=$(strings "$IMAGE_PATH" 2>/dev/null || true)
+          LOWER_STRINGS=$(printf "%s" "$STRINGS_OUTPUT" | tr '[:upper:]' '[:lower:]')
 
           echo "🔎 Debug Matches (Top 15 Relevant Lines):"
-          printf "%s\n" "$OUTPUTSTRINGS" \
+          printf "%s\n" "$STRINGS_OUTPUT" \
             | grep -iE "androidboot|fingerprint|oplus|coloros|oxygen|hwc|build" \
             | head -n 15 || true
 
@@ -4543,66 +4543,66 @@ jobs:
           echo "------------------------------"
           echo ""
 
-          SCORECOLOROS=0
-          SCOREOXYGENOS=0
+          SCORE_COLOROS=0
+          SCORE_OXYGEN=0
 
           # ColorOS Detection
-          [[ "$LOWERSTRINGS" =~ coloros ]] && ((SCORECOLOROS+=4))
-          [[ "$LOWERSTRINGS" =~ oplus.*cn|cn.*oplus ]] && ((SCORECOLOROS+=2))
-          [[ "$LOWERSTRINGS" =~ "\.cn" ]] && ((SCORECOLOROS+=1))
-          [[ "$LOWERSTRINGS" =~ hwc=cn ]] && ((SCORECOLOROS+=5))
+          [[ "$LOWER_STRINGS" =~ coloros ]] && ((SCORE_COLOROS+=4))
+          [[ "$LOWER_STRINGS" =~ oplus.*cn|cn.*oplus ]] && ((SCORE_COLOROS+=2))
+          [[ "$LOWER_STRINGS" =~ "\.cn" ]] && ((SCORE_COLOROS+=1))
+          [[ "$LOWER_STRINGS" =~ hwc=cn ]] && ((SCORE_COLOROS+=5))
 
           # OxygenOS Detection 
-          [[ "$LOWERSTRINGS" =~ oxygen ]] && ((SCOREOXYGENOS+=4))
-          [[ "$LOWERSTRINGS" =~ global ]] && ((SCOREOXYGENOS+=2))
-          [[ "$LOWERSTRINGS" =~ "\.eu"|europe ]] && ((SCOREOXYGENOS+=2))
-          [[ "$LOWERSTRINGS" =~ "\.in"|india ]] && ((SCOREOXYGENOS+=2))
-          [[ "$LOWERSTRINGS" =~ hwc=global|hwc=eu|hwc=india ]] && ((SCOREOXYGENOS+=5))
+          [[ "$LOWER_STRINGS" =~ oxygen ]] && ((SCORE_OXYGEN+=4))
+          [[ "$LOWER_STRINGS" =~ global ]] && ((SCORE_OXYGEN+=2))
+          [[ "$LOWER_STRINGS" =~ "\.eu"|europe ]] && ((SCORE_OXYGEN+=2))
+          [[ "$LOWER_STRINGS" =~ "\.in"|india ]] && ((SCORE_OXYGEN+=2))
+          [[ "$LOWER_STRINGS" =~ hwc=global|hwc=eu|hwc=india ]] && ((SCORE_OXYGEN+=5))
 
           # Fingerprint Hints
-          if echo "$LOWERSTRINGS" | grep -q "fingerprint"; then
+          if echo "$LOWER_STRINGS" | grep -q "fingerprint"; then
             echo "🔍 Found Build Fingerprint Hints..."
 
-            [[ "$LOWERSTRINGS" =~ user/release-keys ]] && ((SCOREOXYGENOS+=1))
-            [[ "$LOWERSTRINGS" =~ oppo|oplus ]] && ((SCORECOLOROS+=1))
+            [[ "$LOWER_STRINGS" =~ user/release-keys ]] && ((SCORE_OXYGEN+=1))
+            [[ "$LOWER_STRINGS" =~ oppo|oplus ]] && ((SCORE_COLOROS+=1))
           fi
 
           # Manifest Fallback
-          if [[ $SCORECOLOROS -eq 0 && $SCOREOXYGENOS -eq 0 ]]; then
+          if [[ $SCORE_COLOROS -eq 0 && $SCORE_OXYGEN -eq 0 ]]; then
             echo "⚠️ No Strong Kernel Indicators → Checking Manifest..."
 
-            TARGETINFOMANIFEST="$(printf "%s %s %s" "$MANIFESTBRANCH" "$MANIFESTREPOSITORY" "$BASEFILECONFIG" | tr '[:upper:]' '[:lower:]')"
+            MANIFEST_INFO="$(printf "%s %s %s" "$MANIFEST_BRANCH" "$MANIFEST_REPO" "$FILE_CONF" | tr '[:upper:]' '[:lower:]')"
 
-            echo "🔎 Manifest Information: $TARGETINFOMANIFEST"
+            echo "🔎 Manifest Information: $MANIFEST_INFO"
 
-            [[ "$TARGETINFOMANIFEST" =~ coloros|cn|china ]] && ((SCORECOLOROS+=2))
-            [[ "$TARGETINFOMANIFEST" =~ oxygen|global|eu|india ]] && ((SCOREOXYGENOS+=2))
+            [[ "$MANIFEST_INFO" =~ coloros|cn|china ]] && ((SCORE_COLOROS+=2))
+            [[ "$MANIFEST_INFO" =~ oxygen|global|eu|india ]] && ((SCORE_OXYGEN+=2))
           fi
 
           # Final Decision
-          if (( SCORECOLOROS > SCOREOXYGENOS )); then
-            ROMBASE="🇨🇳 ColorOS"
-            MAXSCORE=$SCORECOLOROS
+          if (( SCORE_COLOROS > SCORE_OXYGEN )); then
+            ROM_BASE="🇨🇳 ColorOS"
+            MAX_SCORE=$SCORE_COLOROS
 
-          elif (( SCOREOXYGENOS > SCORECOLOROS )); then
-            ROMBASE="🇺🇸 OxygenOS"
-            MAXSCORE=$SCOREOXYGENOS
+          elif (( SCORE_OXYGEN > SCORE_COLOROS )); then
+            ROM_BASE="🇺🇸 OxygenOS"
+            MAX_SCORE=$SCORE_OXYGEN
 
-          elif (( SCORECOLOROS > 0 )); then
+          elif (( SCORE_COLOROS > 0 )); then
             # Real Tie with Actual Signals
-            ROMBASE="🇨🇳 ColorOS / 🇺🇸 OxygenOS"
-            MAXSCORE=$SCORECOLOROS
+            ROM_BASE="🇨🇳 ColorOS / 🇺🇸 OxygenOS"
+            MAX_SCORE=$SCORE_COLOROS
 
           else
             # No Detection at All
-            ROMBASE="Unknown"
-            MAXSCORE=0
+            ROM_BASE="Unknown"
+            MAX_SCORE=0
           fi
 
           # Confidence
-          if (( MAXSCORE >= 5 )); then
+          if (( MAX_SCORE >= 5 )); then
             CONFIDENCE="High"
-          elif (( MAXSCORE >= 3 )); then
+          elif (( MAX_SCORE >= 3 )); then
             CONFIDENCE="Medium"
           else
             CONFIDENCE="Low"
@@ -4610,16 +4610,16 @@ jobs:
 
           echo "------------------------------"
           echo "📊 Score Breakdown:"
-          echo "🇨🇳 ColorOS : $SCORECOLOROS"
-          echo "🇺🇸 OxygenOS: $SCOREOXYGENOS"
+          echo "🇨🇳 ColorOS : $SCORE_COLOROS"
+          echo "🇺🇸 OxygenOS: $SCORE_OXYGEN"
           echo "------------------------------"
 
-          echo "📌 Final ROM Base: $ROMBASE"
+          echo "📌 Final ROM Base: $ROM_BASE"
           echo "🎯 Confidence Level: $CONFIDENCE"
           echo "------------------------------"
 
-          echo "ROMBASE=$ROMBASE" >> $GITHUB_ENV
-          echo "ROMCONFIDENCE=$CONFIDENCE" >> $GITHUB_ENV
+          echo "ROM_BASE=$ROM_BASE" >> $GITHUB_ENV
+          echo "ROM_CONFIDENCE=$CONFIDENCE" >> $GITHUB_ENV
 
           echo ""
           echo "🎉 Done!"
@@ -4637,30 +4637,30 @@ jobs:
           echo "------------------------------"
           echo ""
 
-          PATCHPATH="${GITHUB_WORKSPACE}/kernel_workspace/SukiSU_patch/kpm"
-          OUTDIRECTORYPATH="${GITHUB_WORKSPACE}/kernel_workspace/kernel_platform/out/Final-Image-Find"
+          PATCH_DIR="${GITHUB_WORKSPACE}/kernel_workspace/SukiSU_patch/kpm"
+          OUT_DIR="${GITHUB_WORKSPACE}/kernel_workspace/kernel_platform/out/Final-Image-Find"
 
           # Check Directories Existence
-          if [[ ! -d "$PATCHPATH" ]]; then
-            echo "⚠️ Patch Directory Not Found: $PATCHPATH"
+          if [[ ! -d "$PATCH_DIR" ]]; then
+            echo "⚠️ Patch Directory Not Found: $PATCH_DIR"
             exit 1
           fi
 
-          if [[ ! -d "$OUTDIRECTORYPATH" ]]; then
-            echo "⚠️ Output Directory Not Found: $OUTDIRECTORYPATH"
+          if [[ ! -d "$OUT_DIR" ]]; then
+            echo "⚠️ Output Directory Not Found: $OUT_DIR"
             exit 1
           fi
 
-          cd "$OUTDIRECTORYPATH"
+          cd "$OUT_DIR"
 
           # Copy and Prepare Patch Tool
-          if [[ ! -f "$PATCHPATH/patch_linux" ]]; then
-            echo "⚠️ Patch Tool Not Found in $PATCHPATH"
+          if [[ ! -f "$PATCH_DIR/patch_linux" ]]; then
+            echo "⚠️ Patch Tool Not Found in $PATCH_DIR"
             exit 1
           fi
 
           echo "📋 Copying Linux Patch Tool..."
-          cp "$PATCHPATH/patch_linux" .
+          cp "$PATCH_DIR/patch_linux" .
           chmod +x patch_linux
 
           # Apply Linux Patch
@@ -4702,14 +4702,14 @@ jobs:
           echo ""
 
           # Locate Kernel Image
-          IMAGEPATH=$(find "${GITHUB_WORKSPACE}/kernel_workspace" -type f -name Image | head -n 1)
+          IMAGE_PATH=$(find "${GITHUB_WORKSPACE}/kernel_workspace" -type f -name Image | head -n 1)
 
-          [[ -z "${IMAGEPATH:-}" ]] && { echo "⚠️ Kernel Image Not Found"; exit 1; }
+          [[ -z "${IMAGE_PATH:-}" ]] && { echo "⚠️ Kernel Image Not Found"; exit 1; }
 
-          OUTDIRECTORYPATH=$(dirname "$IMAGEPATH")
+          OUT_DIR=$(dirname "$IMAGE_PATH")
 
-          echo "📌 Found Kernel Image in: $OUTDIRECTORYPATH"
-          cd "$OUTDIRECTORYPATH"
+          echo "📌 Found Kernel Image in: $OUT_DIR"
+          cd "$OUT_DIR"
 
           [[ ! -f Image ]] && { echo "⚠️ Image Missing"; exit 1; }
 
@@ -4926,44 +4926,44 @@ jobs:
           echo "------------------------------"
           echo ""
       
-          ZRAMNAME="${GITHUB_WORKSPACE}/kernel_workspace/AndreiMikh-Kernel-Lab/patches/ZRAM.zip"
-          ZRAMPATH="ZRAM-Module"
-          ZRAMTARGETMODULE="${ZRAMPATH}/zram/zram.ko"
+          ZRAM_ZIP="${GITHUB_WORKSPACE}/kernel_workspace/AndreiMikh-Kernel-Lab/patches/ZRAM.zip"
+          ZRAM_DIR="ZRAM-Module"
+          TARGET_MODULE="${ZRAM_DIR}/zram/zram.ko"
 
           # Parse and Normalize ZRAM Algorithm Input, Normalize Casing (Safety, in Case Environment wasn't Normalized)
-          IFS='/' read -r _ COMPRESSALGORITHM SIZECOMPRESS <<< "${{ github.event.inputs.ZRAMALGORITHM }}"
-          COMPRESSALGORITHM=$(echo "$COMPRESSALGORITHM" | tr '[:upper:]' '[:lower:]')
+          IFS='/' read -r _ ZRAM_ALGO ZRAM_SIZE <<< "${{ github.event.inputs.ZRAMALGORITHM }}"
+          ZRAM_ALGO=$(echo "$ZRAM_ALGO" | tr '[:upper:]' '[:lower:]')
 
           # Validate Algorithm
-          case "$COMPRESSALGORITHM" in
+          case "$ZRAM_ALGO" in
             lz4|lz4k|lz4kd) ;;
             *)
-              echo "⚠️ Invalid ZRAM Algorithm: $COMPRESSALGORITHM"
+              echo "⚠️ Invalid ZRAM Algorithm: $ZRAM_ALGO"
               exit 1
               ;;
           esac
 
           # Check if ZRAM Module Zip Package Exists
-          if [ ! -f "$ZRAMNAME" ]; then
-            echo "⚠️ ZRAM.zip Not Found: $ZRAMNAME"
+          if [ ! -f "$ZRAM_ZIP" ]; then
+            echo "⚠️ ZRAM.zip Not Found: $ZRAM_ZIP"
             echo "upload=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
       
           echo "🚀 Extracting ZRAM Addon Module Package..."
-          unzip "$ZRAMNAME" -d "$ZRAMPATH"
+          unzip "$ZRAM_ZIP" -d "$ZRAM_DIR"
       
-          CONFIGPROP="${ZRAMPATH}/config.prop"
+          CONFIG_PROP="${ZRAM_DIR}/config.prop"
       
-          if [ -f "$CONFIGPROP" ]; then
+          if [ -f "$CONFIG_PROP" ]; then
             echo "📌 Updating Configuration Prop"
           
-            sed -i "s/^COMPRESSALGORITHM=.*/COMPRESSALGORITHM=${COMPRESSALGORITHM}/" "$CONFIGPROP"
-            sed -i "s/^SIZECOMPRESS=.*/SIZECOMPRESS=${SIZECOMPRESS}/" "$CONFIGPROP"
+            sed -i "s/^ZRAM_ALGO=.*/ZRAM_ALGO=${ZRAM_ALGO}/" "$CONFIG_PROP"
+            sed -i "s/^ZRAM_SIZE=.*/ZRAM_SIZE=${ZRAM_SIZE}/" "$CONFIG_PROP"
           
             echo "📌 Configured Values:"
-            echo "COMPRESSALGORITHM=${COMPRESSALGORITHM}"
-            echo "SIZECOMPRESS=${SIZECOMPRESS}"
+            echo "ZRAM_ALGO=${ZRAM_ALGO}"
+            echo "ZRAM_SIZE=${ZRAM_SIZE}"
           else
             echo "⚠️ Configuration Prop Not Found"
             echo "upload=false" >> "$GITHUB_OUTPUT"
@@ -4977,25 +4977,25 @@ jobs:
             "./kernel_workspace/device/qcom"
           )
       
-          ZRAMKOPATH=""
+          zram_path=""
       
           for path in "${search_paths[@]}"; do
             if [ -d "$path" ]; then
-              ZRAMKOPATH=$(find "$path" -type f -name "zram.ko" | head -n 1)
-              if [ -n "$ZRAMKOPATH" ]; then
+              zram_path=$(find "$path" -type f -name "zram.ko" | head -n 1)
+              if [ -n "$zram_path" ]; then
                 break
               fi
             fi
           done
 
           # Final Fallback Search
-          if [ -z "$ZRAMKOPATH" ]; then
-            ZRAMKOPATH=$(find "./kernel_workspace" -type f -name "zram.ko" | head -n 1)
+          if [ -z "$zram_path" ]; then
+            zram_path=$(find "./kernel_workspace" -type f -name "zram.ko" | head -n 1)
           fi
       
-          if [ -n "$ZRAMKOPATH" ] && [ -f "$ZRAMKOPATH" ]; then
-            echo "✔️ ZRAM.ko Located at: $ZRAMKOPATH"
-            install -D "$ZRAMKOPATH" "$ZRAMTARGETMODULE"
+          if [ -n "$zram_path" ] && [ -f "$zram_path" ]; then
+            echo "✔️ ZRAM.ko Located at: $zram_path"
+            install -D "$zram_path" "$TARGET_MODULE"
           else
             echo "⚠️ ZRAM.ko Not Found, Possible Reasons:"
             echo "🚩 Unsupported Kernel Version"
@@ -5028,14 +5028,14 @@ jobs:
           REPO="${{ steps.manager.outputs.KSU_REPO }}"
           BRANCH="${{ steps.manager.outputs.MANAGER_BRANCH }}"
       
-          APKPATH="${GITHUB_WORKSPACE}/ManagerAPK"
-          mkdir -p "$APKPATH"
+          APK_DIR="${GITHUB_WORKSPACE}/ManagerAPK"
+          mkdir -p "$APK_DIR"
           
           echo ""
           echo "------------------------------"
           echo "ℹ️ [Info] Repository       : $REPO"
           echo "ℹ️ [Info] Branch           : $BRANCH"
-          echo "ℹ️ [Info] Output Directory : $APKPATH"
+          echo "ℹ️ [Info] Output Directory : $APK_DIR"
           echo "------------------------------"
           echo ""
       
@@ -5059,18 +5059,18 @@ jobs:
           echo "ℹ️ [Info] Found ${#runs[@]} Workflow Runs..."
           echo "🔍 [Check] Scanning Runs for APK Artifacts..."
       
-          SELECTEDRUN=""
-          BESTSCORE=0
+          selected_run=""
+          best_score=0
       
           for run_id in "${runs[@]}"; do
             echo "------------------------------"
             echo "🔍 [Check] Run ID: $run_id"
       
-            ARTIFACTNAME=$(gh api \
+            artifact_names=$(gh api \
               "repos/$REPO/actions/runs/$run_id/artifacts" \
               --jq '.artifacts[].name' 2>/dev/null || true)
       
-            if [[ -z "$ARTIFACTNAME" ]] || ! echo "$ARTIFACTNAME" | grep -qiE 'apk|manager|release|build'; then
+            if [[ -z "$artifact_names" ]] || ! echo "$artifact_names" | grep -qiE 'apk|manager|release|build'; then
               echo "⚠️ [Skip] No Relevant Artifacts"
               continue
             fi
@@ -5078,42 +5078,42 @@ jobs:
             score=0
       
             # AI Scoring Engine
-            if echo "$ARTIFACTNAME" | grep -Eqi '\.apk($|[^a-zA-Z])'; then
+            if echo "$artifact_names" | grep -Eqi '\.apk($|[^a-zA-Z])'; then
               score=$((score + 50))
             fi
       
-            if echo "$ARTIFACTNAME" | grep -qi "manager"; then
+            if echo "$artifact_names" | grep -qi "manager"; then
               score=$((score + 20))
             fi
       
-            if echo "$ARTIFACTNAME" | grep -qi "release\|build"; then
+            if echo "$artifact_names" | grep -qi "release\|build"; then
               score=$((score + 10))
             fi
       
             echo "📊 [Info] Score for Run $run_id = $score"
       
-            if [[ "$score" -gt "$BESTSCORE" ]]; then
-              BESTSCORE="$score"
-              SELECTEDRUN="$run_id"
+            if [[ "$score" -gt "$best_score" ]]; then
+              best_score="$score"
+              selected_run="$run_id"
               echo "🏆 [New Best] Selected Run Updated → $run_id"
             fi
           done
       
-          if [[ -z "$SELECTEDRUN" ]]; then
+          if [[ -z "$selected_run" ]]; then
             echo "⚠️ [Error] No Valid APK Workflow Found"
             exit 0
           fi
 
           echo ""
           echo "------------------------------"
-          echo "🏁 [Result] Selected Run: $SELECTEDRUN"
-          echo "🏁 [Result] Best Score  : $BESTSCORE"
+          echo "🏁 [Result] Selected Run: $selected_run"
+          echo "🏁 [Result] Best Score  : $best_score"
           echo "------------------------------"
           echo ""
 
           echo "🔍 [Verify] Checking Artifacts Inside Selected Run Before Download..."
 
-          gh api repos/$REPO/actions/runs/$SELECTEDRUN/artifacts \
+          gh api repos/$REPO/actions/runs/$selected_run/artifacts \
             --jq '.artifacts[].name' || true
           
           echo "------------------------------"
@@ -5122,22 +5122,22 @@ jobs:
 
           set +e    # Disable Strict Mode
           
-          ARTIFACTURL=$(gh api \
-            "repos/$REPO/actions/runs/$SELECTEDRUN/artifacts" \
+          artifact_urls=$(gh api \
+            "repos/$REPO/actions/runs/$selected_run/artifacts" \
             --jq '.artifacts[]
               | select(.name | test("manager"; "i"))
               | .archive_download_url' 2>/dev/null || true)
           
           echo "------------------------------"
           echo "🔍 Manager Artifact URLs:"
-          echo "$ARTIFACTURL"
+          echo "$artifact_urls"
           echo "------------------------------"
           
-          ARTIFACTCOUNT=$(echo "$ARTIFACTURL" | grep -c "api.github.com" || true)
+          artifact_count=$(echo "$artifact_urls" | grep -c "api.github.com" || true)
           
-          echo "📦 Manager Artifact Count: $ARTIFACTCOUNT"
+          echo "📦 Manager Artifact Count: $artifact_count"
           
-          if [[ "$ARTIFACTCOUNT" -eq 0 ]]; then
+          if [[ "$artifact_count" -eq 0 ]]; then
             echo "⚠️ No Manager APK Artifacts Found"
             exit 0
           fi
@@ -5151,7 +5151,7 @@ jobs:
             ((i++))
             echo "⬇️ Downloading Artifact #$i"
           
-            APKZIPFILE="$APKPATH/artifact_$i.zip"
+            zip_file="$APK_DIR/artifact_$i.zip"
           
             # Curl Safely (Never Fail Pipeline)
             curl -L \
@@ -5160,41 +5160,41 @@ jobs:
               --fail \
               --silent \
               --show-error \
-              -o "$APKZIPFILE" \
+              -o "$zip_file" \
               "$url" || {
                 echo "⚠️ Download Failed, Skipping..."
-                rm -f "$APKZIPFILE"
+                rm -f "$zip_file"
                 continue
               }
           
             # Verify Zip
-            unzip -t "$APKZIPFILE" >/dev/null 2>&1 || {
+            unzip -t "$zip_file" >/dev/null 2>&1 || {
               echo "⚠️ Corrupted Artifact, Skipping..."
-              rm -f "$APKZIPFILE"
+              rm -f "$zip_file"
               continue
             }
           
-            unzip -o "$APKZIPFILE" -d "$APKPATH" >/dev/null 2>&1 || true
-            rm -f "$APKZIPFILE"
+            unzip -o "$zip_file" -d "$APK_DIR" >/dev/null 2>&1 || true
+            rm -f "$zip_file"
           
-          done <<< "$ARTIFACTURL"
+          done <<< "$artifact_urls"
 
           set -e    # Re-Enable Strict Mode
       
           echo "🧹 [Step 4] Cleaning Non-APK Files..."
           
-          find "$APKPATH" -type f ! -name "*.apk" -delete || true
+          find "$APK_DIR" -type f ! -name "*.apk" -delete || true
           
           echo "🔍 [Step 5] Verifying Output..."
           
-          APKCOUNT=$(find "$APKPATH" -type f -name "*.apk" | wc -l || true)
+          APK_COUNT=$(find "$APK_DIR" -type f -name "*.apk" | wc -l || true)
           
-          echo "📦 APK Count: $APKCOUNT"
+          echo "📦 APK Count: $APK_COUNT"
           
-          if [[ "$APKCOUNT" -gt 0 ]]; then
+          if [[ "$APK_COUNT" -gt 0 ]]; then
             echo "------------------------------"
-            echo "📦 [Success] APKs Found: $APKCOUNT"
-            ls -lh "$APKPATH"
+            echo "📦 [Success] APKs Found: $APK_COUNT"
+            ls -lh "$APK_DIR"
             echo "------------------------------"
           else
             echo "⚠️ [Warning] No APK Files Found (Manager Build Likely Missing)"
@@ -5213,36 +5213,36 @@ jobs:
       
           echo "🔍 Checking Manager APK Directory..."
       
-          APKSOURCE="ManagerAPK"
-          PLATAPKPATH="PlatAPKPath"
+          APK_SOURCE="ManagerAPK"
+          FLAT_DIR="flat_apk"
       
           # Count APKs safely
-          APKCOUNT=$(find "$APKSOURCE" -type f -name "*.apk" 2>/dev/null | wc -l || true)
+          APK_COUNT=$(find "$APK_SOURCE" -type f -name "*.apk" 2>/dev/null | wc -l || true)
       
           echo "------------------------------"
-          echo "📦 APK Count: $APKCOUNT"
+          echo "📦 APK Count: $APK_COUNT"
           echo "------------------------------"
       
-          if [[ "$APKCOUNT" -gt 0 ]]; then
+          if [[ "$APK_COUNT" -gt 0 ]]; then
             echo "APKMANAGER=true" >> "$GITHUB_ENV"
-            echo "APKCOUNT=$APKCOUNT" >> "$GITHUB_ENV"
+            echo "APK_COUNT=$APK_COUNT" >> "$GITHUB_ENV"
       
             echo "📦 Flattening APKs..."
       
-            mkdir -p "$PLATAPKPATH"
-            find "$APKSOURCE" -type f -name "*.apk" -exec cp {} "$PLATAPKPATH/" \;
+            mkdir -p "$FLAT_DIR"
+            find "$APK_SOURCE" -type f -name "*.apk" -exec cp {} "$FLAT_DIR/" \;
       
-            FLATAPKCOUNT=$(find "$PLATAPKPATH" -type f -name "*.apk" | wc -l || true)
+            FLAT_COUNT=$(find "$FLAT_DIR" -type f -name "*.apk" | wc -l || true)
       
             echo "------------------------------"
-            echo "📦 Flat APK Count: $FLATAPKCOUNT"
+            echo "📦 Flat APK Count: $FLAT_COUNT"
             echo "------------------------------"
       
             echo "✔ APK Ready for Upload"
       
           else
             echo "APKMANAGER=false" >> "$GITHUB_ENV"
-            echo "APKCOUNT=0" >> "$GITHUB_ENV"
+            echo "APK_COUNT=0" >> "$GITHUB_ENV"
             echo "⚠️ No APK Found"
           fi
           
@@ -5253,7 +5253,7 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           # Artifact Name Composed of the Generated Suffix, Kernel Version, and KSU Meta Version
-          name: "${{ env.BASEFILENAME }}-${{ steps.suffix.outputs.suffix }}-${{ env.FULLKERNELVERSION }}-(${{ env.KSUVER }})"
+          name: "${{ env.FILE_BASE }}-${{ steps.suffix.outputs.suffix }}-${{ env.TKERNEL_VERSION }}-(${{ env.KSUVER }})"
 
           # Path to the Directory Containing the Flashable Kernel Files
           path: ./AnyKernel3/*
@@ -5269,7 +5269,7 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           # Artifact Name Includes Kernel Version, ZRAM Algorithm, and ZRAM Size
-          name: "ZRAM-Addon-Module-${{ env.FULLKERNELVERSION }}-${{ env.COMPRESSALGORITHM }}-${{ env.SIZECOMPRESS }}"
+          name: "ZRAM-Addon-Module-${{ env.TKERNEL_VERSION }}-${{ env.ZRAM_ALGO }}-${{ env.ZRAM_SIZE }}"
 
           # Path to the Extracted ZRAM Module Files
           path: ZRAM-Module/*
@@ -5282,7 +5282,7 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: ManagerAPK
-          path: PlatAPKPath/*.apk
+          path: flat_apk/*.apk
           if-no-files-found: warn
 
       # ==============================
@@ -5294,19 +5294,19 @@ jobs:
       
           echo "---- 📋 Build Information ----"
           echo "🧠 Kernel Packaging Stage"
-          echo "Base       : ${{ env.BASEFILENAME }}"
-          echo "Kernel     : ${{ env.FULLKERNELVERSION }}"
+          echo "Base       : ${{ env.FILE_BASE }}"
+          echo "Kernel     : ${{ env.TKERNEL_VERSION }}"
           echo "Root       : ${{ env.KSUVER }}"
           echo "------------------------------"
           echo ""
       
           # 📦 AnyKernel3 (Required)
-          ANYKERNEL3ZIP="AnyKernel3-${{ env.BASEFILENAME }}-${{ steps.suffix.outputs.suffix }}-${{ env.FULLKERNELVERSION }}-(${{ env.KSUVER }}).zip"
+          ANYKERNEL3ZIP="AnyKernel3-${{ env.FILE_BASE }}-${{ steps.suffix.outputs.suffix }}-${{ env.TKERNEL_VERSION }}-(${{ env.KSUVER }}).zip"
       
           if [ -d "AnyKernel3" ] && [ "$(ls -A AnyKernel3 2>/dev/null)" ]; then
             echo "📦 Creating AnyKernel3 Zip..."
           
-            ANYKERNEL3ZIP="AnyKernel3-${{ env.BASEFILENAME }}-${{ steps.suffix.outputs.suffix }}-${{ env.FULLKERNELVERSION }}-(${{ env.KSUVER }}).zip"
+            ANYKERNEL3ZIP="AnyKernel3-${{ env.FILE_BASE }}-${{ steps.suffix.outputs.suffix }}-${{ env.TKERNEL_VERSION }}-(${{ env.KSUVER }}).zip"
           
             cd AnyKernel3
             zip -r "../$ANYKERNEL3ZIP" .
@@ -5320,7 +5320,7 @@ jobs:
 
       
           # ZRAM Module (Optional)
-          MODULEZRAMZIP="ZRAM-Module-${{ env.BASEFILENAME }}-${{ env.COMPRESSALGORITHM }}-${{ env.SIZECOMPRESS }}.zip"
+          MODULEZRAMZIP="ZRAM-Module-${{ env.FILE_BASE }}-${{ env.ZRAM_ALGO }}-${{ env.ZRAM_SIZE }}.zip"
       
           if [ -d "ZRAM-Module" ] && [ "$(ls -A ZRAM-Module 2>/dev/null)" ]; then
             echo "📦 Creating ZRAM Module Zip..."
@@ -5342,8 +5342,8 @@ jobs:
         continue-on-error: true
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ env.BASEFILENAME }}
-          name: ${{ env.BASEFILENAME }}-${{ steps.suffix.outputs.suffix }}-${{ env.FULLKERNELVERSION }}
+          tag_name: ${{ env.FILE_BASE }}
+          name: ${{ env.FILE_BASE }}-${{ steps.suffix.outputs.suffix }}-${{ env.TKERNEL_VERSION }}
           body: |
             <div align="center">
             #### 📋 **Installation Guide**:
@@ -5423,7 +5423,7 @@ jobs:
           files: |
             ${{ env.ANYKERNEL3ZIP }}
             ${{ env.MODULEZRAMZIP != '' && env.MODULEZRAMZIP || '' }}
-            PlatAPKPath/*.apk
+            flat_apk/*.apk
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           
@@ -5474,7 +5474,7 @@ jobs:
           FROMLOCAL="✘ No"
           
           # Define Cache Path
-          CCPATH="${{ env.CCACHE_DIR }}/CCache-${{ runner.os }}-${{ env.BASEFILENAME }}-${{ env.CPUD }}-${{ github.ref_name }}"
+          CCPATH="${{ env.CCACHE_DIR }}/CCache-${{ runner.os }}-${{ env.FILE_BASE }}-${{ env.CPUD }}-${{ github.ref_name }}"
           
           # Check GitHub Release Cache
           if [[ "${{ steps.cache-restoration.outputs.cache-restored }}" == "true" ]]; then
@@ -5532,14 +5532,14 @@ jobs:
             # Core Information
             echo "#### 🧩 Core Information"
             echo ""
-            echo "| Category                      | Reported Value                                             |"
-            echo "|-------------------------------|------------------------------------------------------------|"
-            echo "| 🌏 ROM Base Variant           | \`${{ env.ROMBASE || 'Unknown' }}\`                       |"
-            echo "| 🔐 Root / KSU Manager Variant | \`${{ github.event.inputs.ROOTENGINE }}\`                  |"
-            echo "| 📱 Device Model               | \`${{ env.BASEFILENAME }}\`                                   |"
-            echo "| 🔧 Kernel Version             | \`${{ env.ANDROIDVERSION }}-${{ env.FULLKERNELVERSION }}\` |"
-            echo "| 🏷️ Kernel Suffix              | \`${{ github.event.inputs.SUFFIX || 'Auto' }}\`            |"
-            echo "| 🕒 Kernel Build Time          | \`${{ github.event.inputs.BUILDTIME || 'Auto' }}\`         |"
+            echo "| Category                      | Reported Value                                           |"
+            echo "|-------------------------------|----------------------------------------------------------|"
+            echo "| 🌏 ROM Base Variant           | \`${{ env.ROM_BASE || 'Unknown' }}\`                     |"
+            echo "| 🔐 Root / KSU Manager Variant | \`${{ github.event.inputs.ROOTENGINE }}\`                |"
+            echo "| 📱 Device Model               | \`${{ env.FILE_BASE }}\`                                 |"
+            echo "| 🔧 Kernel Version             | \`${{ env.ANDROIDVERSION }}-${{ env.TKERNEL_VERSION }}\` |"
+            echo "| 🏷️ Kernel Suffix              | \`${{ github.event.inputs.SUFFIX || 'Auto' }}\`          |"
+            echo "| 🕒 Kernel Build Time          | \`${{ github.event.inputs.BUILDTIME || 'Auto' }}\`       |"
             echo ""
 
             # Build Configuration
@@ -5576,10 +5576,10 @@ jobs:
             # ZRAM Formatting
             ZRAM_STATUS="✘ No"
             if [[ "${{ github.event.inputs.ZRAMALGORITHM }}" != "0" ]]; then
-              SIZECOMPRESS="${{ github.event.inputs.ZRAMALGORITHM }}"
-              COMPRESSALGORITHM="lz4kd"
-              COMPRESSALGORITHM="${COMPRESSALGORITHM^^}"   # Capitalize → LZ4KD, LZ4, and/or Etc
-              ZRAM_STATUS="${SIZECOMPRESS}GB ZRAM (${COMPRESSALGORITHM})"
+              ZRAM_SIZE="${{ github.event.inputs.ZRAMALGORITHM }}"
+              ZRAM_ALGO="lz4kd"
+              ZRAM_ALGO="${ZRAM_ALGO^^}"   # Capitalize → LZ4KD, LZ4, and/or Etc
+              ZRAM_STATUS="${ZRAM_SIZE}GB ZRAM (${ZRAM_ALGO})"
             fi
 
             # Output
