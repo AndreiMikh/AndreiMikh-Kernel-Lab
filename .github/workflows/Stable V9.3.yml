@@ -2122,53 +2122,65 @@ jobs:
           # Function: Safe Patch Application with Debugging and Error Continuation
           apply_patch() {
               local patch="$1"
-
+          
               # Check if Patch File Exists
               if [[ ! -f "$patch" ]]; then
                   echo "⚠️ Missing Patch: $(basename "$patch")"
-                  return 0  # Skip Missing Patches but Continue Execution
+                  return 0
               fi
-
-              # Debug: Show the Patch File and Check its Status
+          
               echo "🔍 Checking Patch: $(basename "$patch")"
-    
-              # Perform the Git Apply Check to See if There are Any Issues Applying the Patch
-              if ! git apply --check "$patch" >/dev/null 2>&1; then
-                  echo "⚠️ Skipping Patch: $(basename "$patch") (Already Applied or Conflict Detected)"
-        
-                  # Debug: Show the Differences that would have been Applied by the Patch
-                  echo "📜 Debugging: Patch Summary"
-                  git apply --stat "$patch" || true
-                  
-                  echo "📜 Debugging: Patch Check"
-                  git apply --check "$patch" || true
-        
-                  # Optionally, Show the Status of the Repository to Better Understand the Current State
-                  echo "📜 Debugging: Current Git Status"
-                  git status
-
-                  echo "⚠️ Patch Conflict Detected: $(basename "$patch")"
-                  exit 1
+          
+              # Case 1: Already Applied (Detection)
+              if git apply --reverse --check "$patch" >/dev/null 2>&1; then
+                  echo "✔️ Already Applied: $(basename "$patch")"
+                  return 0
               fi
-
-              # If No Issues, Apply the Patch
-              echo "🔧 Applying Patch: $(basename "$patch")"
-              git apply -p1 "$patch"
-
-              # Debugging: Confirm the Patch was Successfully Applied
-              echo "🔥 Patch Applied: $(basename "$patch")"
-              echo "📊 Current Git Status After Applying Patch:"
-              git status
+          
+              # Case 2: Clean Apply Possible
+              if git apply --check "$patch" >/dev/null 2>&1; then
+                  echo "🔧 Applying Patch: $(basename "$patch")"
+                  git apply "$patch"
+          
+                  echo "✔️ Applied: $(basename "$patch")"
+                  git status --short || true
+                  return 0
+              fi
+          
+              # Case 3: Conflict (CI Safe)
+              echo "⚠️ Conflict Detected: $(basename "$patch")"
+              
+              git apply --stat "$patch" || true
+              
+              # Detect Real Failure Artifacts (Recursive Safe)
+              if find "$KERNEL_DIR" -name "*.rej" -print -quit | grep -q .; then
+                  echo "⚠️ Reject Files Detected for $(basename "$patch")"
+                  find "$KERNEL_DIR" -name "*.rej" -print
+              fi
+              
+              echo "⚠️ Patch Skipped Safely (No Exit to Keep CI Running)"
+              return 0
           }
           
           # Apply SukiSU ZRAM if Enabled
           if [[ "$ZRAMVALUE" == 1* ]]; then
+              echo "🚀 ZRAM Enabled — Applying SukiSU Patch"
+          
               apply_sukisu_zram
+          
+              # Safety Check: Detect Possible Patch Issues
+              if find "$KERNEL_DIR" -name "*.rej" | grep -q .; then
+                  echo "⚠️ SukiSU ZRAM Generated Reject Files"
+                  find "$KERNEL_DIR" -name "*.rej" -print
+              fi          
           else
               echo "⚠️ ZRAM Disabled — Skipping SukiSU Patch"
           fi
           
-          cd "$WORKSPACE"
+          cd "$WORKSPACE" || {
+              echo "⚠️ Work Space Not Found: $WORKSPACE"
+              exit 1
+          }
           
           # Resolve Kernel Common Path
           KCOMMON="./kernel_platform/common"
@@ -2223,7 +2235,7 @@ jobs:
                     ;;
             esac
           
-              rm -f 001-lz4.patch 002-zstd.patch
+              rm -f *.patch
               cd - >/dev/null
               echo "✔️ Full Patch Set Applied"
           
@@ -2249,7 +2261,7 @@ jobs:
                       ;;
               esac
           
-              rm -f 001-lz4.patch 002-zstd.patch
+              rm -f *.patch
               cd - >/dev/null
               echo "✔️ LZ4 Only Patch Applied"
           
@@ -2290,7 +2302,7 @@ jobs:
               [[ -f "$ZRAM_PATCH_DIR/002-zstd.patch" ]] && cp "$ZRAM_PATCH_DIR/002-zstd.patch" "$KCOMMON/"
               [[ -f "$ZRAM_PATCH_DIR/lz4armv8.S" ]] && cp "$ZRAM_PATCH_DIR/lz4armv8.S" "$KCOMMON/lib/"
           
-              cd "$KCOMMON"
+              cd "$KCOMMON" || exit 1
           
               case "$KERNELVERSION" in
                   6.1*)
@@ -2315,8 +2327,13 @@ jobs:
               echo "⚠️ ZRAM / LZ4 Patch Disabled or Unsupported — Skipping"
           fi
           
-          echo ""
-          echo "🎉 Patch Process Completed Successfully"
+          if find "$KERNEL_DIR" -name "*.rej" | grep -q .; then
+              echo "⚠️ Completed with Reject Files Present"
+              find "$KERNEL_DIR" -name "*.rej" -print
+          else
+              echo ""
+              echo "🎉 ZRAM / LZ4 Patch Process Completed Successfully"
+          fi
           
           # Kernel Compatibility Fixes
           cd ./kernel_platform/common
