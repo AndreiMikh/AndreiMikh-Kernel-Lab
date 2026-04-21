@@ -2090,10 +2090,25 @@ jobs:
                   "$dst/lib/lz4k_oplus"
           
               # Copy Patch Files Safely
-              cp -r "$src/lz4k/include/linux/." "$dst/include/linux/" 2>/dev/null || true
-              cp -r "$src/lz4k/lib/." "$dst/lib/" 2>/dev/null || true
-              cp -r "$src/lz4k/crypto/." "$dst/crypto/" 2>/dev/null || true
-              cp -r "$src/lz4k_oplus/." "$dst/lib/lz4k_oplus/" 2>/dev/null || true
+              copy_dir() {
+                  local from="$1"
+                  local to="$2"
+              
+                  if [[ -d "$from" ]]; then
+                      echo "📦 Copying $(basename "$from") → $to"
+                      cp -r "$from/." "$to/" || {
+                          echo "⚠️ Failed to Copy from $from"
+                          exit 1
+                      }
+                  else
+                      echo "⚠️ Missing Source: $from"
+                  fi
+              }
+              
+              copy_dir "$src/lz4k/include/linux" "$dst/include/linux"
+              copy_dir "$src/lz4k/lib" "$dst/lib"
+              copy_dir "$src/lz4k/crypto" "$dst/crypto"
+              copy_dir "$src/lz4k_oplus" "$dst/lib/lz4k_oplus"
           
               # Ensure Kernel Configuration Inclusion
               local kconfig="$dst/lib/Kconfig"
@@ -2122,14 +2137,18 @@ jobs:
                   echo "⚠️ Skipping Patch: $(basename "$patch") (Already Applied or Conflict Detected)"
         
                   # Debug: Show the Differences that would have been Applied by the Patch
-                  echo "🔧 Debugging: Showing Patch Differences"
-                  git diff "$patch"
+                  echo "📜 Debugging: Patch Summary"
+                  git apply --stat "$patch" || true
+                  
+                  echo "📜 Debugging: Patch Check"
+                  git apply --check "$patch" || true
         
                   # Optionally, Show the Status of the Repository to Better Understand the Current State
                   echo "📜 Debugging: Current Git Status"
                   git status
 
-                  return 0  # Continue Execution Even if Patch Can't be Applied
+                  echo "⚠️ Patch Conflict Detected: $(basename "$patch")"
+                  exit 1
               fi
 
               # If No Issues, Apply the Patch
@@ -2169,21 +2188,40 @@ jobs:
               [[ -f "$PATCH_BASE/002-zstd.patch" ]] && cp "$PATCH_BASE/002-zstd.patch" "$KCOMMON/"
           
               cd "$KCOMMON"
+              
+              GITROOT=$(git rev-parse --show-toplevel 2>/dev/null) || {
+                  echo "⚠️ Git Repository missing"
+                  exit 1
+              }
+              
+              echo "📦 Git Root: $GITROOT"
           
-              case "$KERNELVERSION" in
-                  6.1*) 
-                      echo "🧩 Kernel 6.1 Detected"
-                      apply_patch "001-lz4.patch"
-                      [[ -f 002-zstd.patch ]] && apply_patch "002-zstd.patch"
-                      ;;
-                  6.6*) 
-                      echo "🧩 Kernel 6.6 Detected"
-                      apply_patch "001-lz4.patch"
-                      ;;
-                  *) 
-                      echo "⚠️ Unsupported Kernel Version: $KERNELVERSION"
-                      ;;
-              esac
+            case "$KERNELVERSION" in
+                6.1*)
+                    echo "🧩 Kernel 6.1 Detected"
+            
+                    apply_patch "001-lz4.patch"
+                    [[ -f 002-zstd.patch ]] && apply_patch "002-zstd.patch"
+            
+                    # Strong Validation: Check Real Integration Points
+                    if ! grep -Rqi "lz4" lib/Makefile include/linux 2>/dev/null; then
+                        echo "⚠️ LZ4 Patch Did Not Apply Correctly (Missing Integration)"
+                        exit 1
+                    fi
+                    ;;
+            
+                6.6*)
+                    echo "🧩 Kernel 6.6 Detected"
+            
+                    apply_patch "001-lz4.patch"
+            
+                    # Strong Validation: Check Real Integration Points
+                    if ! grep -Rqi "lz4" lib/Makefile include/linux 2>/dev/null; then
+                        echo "⚠️ LZ4 Patch Did Not Apply Correctly (Missing Integration)"
+                        exit 1
+                    fi
+                    ;;
+            esac
           
               rm -f 001-lz4.patch 002-zstd.patch
               cd - >/dev/null
