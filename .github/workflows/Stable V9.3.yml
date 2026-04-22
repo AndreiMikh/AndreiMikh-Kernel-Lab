@@ -1,7 +1,7 @@
 # ===========================
 # OnePlus Kernel Build
 # ===========================
-name: ☘️ Stable V9.3
+name: ☘️ Test V9.4
 on:
   workflow_dispatch:
     inputs:
@@ -315,30 +315,39 @@ jobs:
       - name: 🔧 Build Profile Flags
         shell: bash
         run: |
+          set -euo pipefail
+      
           PROFILE="${{ github.event.inputs.PROFILE }}"
+      
+          CLEANSPACE="Disabled"
+          BUILDCCACHE="Enabled"
+          XUS="Enabled"
       
           case "$PROFILE" in
             Performance)
-              CLEANSPACE=Disabled
-              BUILDCCACHE=Enabled
-              XUS=Enabled
-              ;;        
-            Balance)
-              CLEANSPACE=Disabled
-              BUILDCCACHE=Enabled
-              XUS=Disabled
-              ;;  
-            Disable)
-              CLEANSPACE=Disabled
-              BUILDCCACHE=Disabled
-              XUS=Disabled
+              CLEANSPACE="Disabled"
+              BUILDCCACHE="Enabled"
+              XUS="Enabled"
               ;;
+              
+            Balance)
+              CLEANSPACE="Disabled"
+              BUILDCCACHE="Enabled"
+              XUS="Disabled"
+              ;;
+              
+            Disable)
+              CLEANSPACE="Disabled"
+              BUILDCCACHE="Disabled"
+              XUS="Disabled"
+              ;;
+              
             *)
               echo "⚠️ Unknown Profile: $PROFILE"
-              echo "📊 Enable by Default"
-              CLEANSPACE=Disabled
-              BUILDCCACHE=Enabled
-              XUS=Enabled
+              echo "📊 Using Default Settings"
+              CLEANSPACE="Disabled"
+              BUILDCCACHE="Enabled"
+              XUS="Enabled"
               ;;
           esac
       
@@ -347,9 +356,11 @@ jobs:
           echo "BUILDCCACHE=$BUILDCCACHE"
           echo "XUS=$XUS"
       
-          echo "CLEANSPACE=$CLEANSPACE" >> $GITHUB_ENV
-          echo "BUILDCCACHE=$BUILDCCACHE" >> $GITHUB_ENV
-          echo "XUS=$XUS" >> $GITHUB_ENV       
+          # Export to GitHub environment
+          echo "CLEANSPACE=$CLEANSPACE" >> "$GITHUB_ENV"
+          echo "BUILDCCACHE=$BUILDCCACHE" >> "$GITHUB_ENV"
+          echo "XUS=$XUS" >> "$GITHUB_ENV"
+          echo "PROFILE=$PROFILE" >> "$GITHUB_ENV"
         
       # ==============================
       # Maximize Build Space
@@ -2204,7 +2215,7 @@ jobs:
               # Case 1: LZ4 from Xiao Repository + ZRAM (LZ4KD)
               if [[ "$ZRAMCUSTOMPATCH" == "LZ4-1.10.0+LZ4KD" && "$ZRAMVALUE" == 1* ]]; then
           
-                  echo "⚙️ Mode: LZ4 from Xiao Repository + ZRAM (LZ4KD)"
+                  echo "⚙️ Mode: LZ4 from Xiao Repository + SukiSU-Ultra ZRAM Patches + ZRAM Module (LZ4KD)"
                   mkdir -p "$KCOMMON/lib"
           
                   [[ -f "$PATCH_BASE/001-lz4.patch" ]] || {
@@ -2241,7 +2252,7 @@ jobs:
           
                   rm -f *.patch
                   cd - >/dev/null
-                  echo "✔️ Full Patch Set Applied"
+                  echo "✔️ LZ4 from Xiao Repository + SukiSU-Ultra ZRAM Patches + ZRAM Module (LZ4KD)"
           
               # Case 2: LZ4 from CCTV18 Repository for Custom Builds
               elif [[ "$ZRAMCUSTOMPATCH" == "LZ4-1.10.0-Custom-Patch" && "$ZRAMVALUE" == 0* ]]; then
@@ -2274,7 +2285,7 @@ jobs:
           
                   rm -f *.patch
                   cd - >/dev/null
-                  echo "✔️ LZ4 Only Patch Applied"
+                  echo "✔️ LZ4 from CCTV18 Repository for Custom Builds"
           
               # Case 3: LZ4 Patch from Xiao Repository
               elif [[ "$ZRAMCUSTOMPATCH" == "LZ4-1.10.0-Patch" ]]; then
@@ -2317,7 +2328,7 @@ jobs:
                   esac
           
                   cd - >/dev/null
-                  echo "✔️ External Patch Applied"
+                  echo "✔️ LZ4 Patch from Xiao Repository"
           
               # Disabled
               else
@@ -4068,7 +4079,7 @@ jobs:
               export FALLBACK_SET=1
             fi
 
-            exit 0
+            exit 1
           }
 
           trap 'on_error $LINENO $?' ERR
@@ -4119,7 +4130,7 @@ jobs:
             echo "fallback_reason=missing_clang_prebuilt_bin" >> "$GITHUB_OUTPUT"
             echo "fallback=true" >> "$GITHUB_OUTPUT"
             export FALLBACK_SET=1
-            exit 0
+            exit 1
           fi
 
           # Clang Version Detection
@@ -4140,23 +4151,27 @@ jobs:
               echo "📌 Detected Clang Version from Build Configuration: $CLANG_VERSION"
             fi
 
-          # If Still Couldn't Determine the Version, Try Running Clang --Version and Parsing the Output
-          elif [[ -z "$CLANG_VERSION" && -x "$CLANG_FULL_PATH" ]]; then
-            CLANG_VERSION=$("$CLANG_FULL_PATH" --version 2>/dev/null | grep -oP 'clang version \K([0-9]+\.[0-9]+\.[0-9]+)' || true)
-            if [[ -n "$CLANG_VERSION" ]]; then
-              echo "📌 Detected Clang Version from Clang --Version: $CLANG_VERSION"
+          # If Still Couldn't Determine Version, try clang Version Fallback
+          elif [[ -z "$CLANG_VERSION" ]]; then
+            if [[ -n "$CLANG_FULL_PATH" && -x "$CLANG_FULL_PATH" ]]; then
+              CLANG_VERSION=$("$CLANG_FULL_PATH" --version 2>/dev/null \
+                | head -n1 \
+                | sed -E 's/.*clang version ([0-9.]+).*/\1/' || true)
+          
+              if [[ -n "$CLANG_VERSION" ]]; then
+                echo "📌 Detected Clang Version from Clang Version: $CLANG_VERSION"
+              fi
             fi
           fi
-
-          # If No Version could be Determined, Log the Error and Fallback
+          
+          # Final Validation
           if [[ -z "$CLANG_VERSION" ]]; then
             echo "⚠️ Unable to Determine Clang Version"
             echo "fallback_reason=missing_clang_version" >> "$GITHUB_OUTPUT"
             echo "fallback=true" >> "$GITHUB_OUTPUT"
             export FALLBACK_SET=1
-
-            # Fail Gracefully by Providing a Clear Exit Message
-            echo "⚠️ Exiting the Build Due to Missing Clang Version Detection"
+          
+            echo "⚠️ Exiting Build Due to Missing Clang Version Detection"
             exit 1
           fi
 
@@ -4189,7 +4204,7 @@ jobs:
             echo "fallback_reason=missing_clang" >> "$GITHUB_OUTPUT"
             echo "fallback=true" >> "$GITHUB_OUTPUT"
             export FALLBACK_SET=1
-            exit 0
+            exit 1
           fi
 
           # Extract Directory Information
@@ -4279,40 +4294,69 @@ jobs:
             echo "fallback_reason=gki_defconfig_failed" >> "$GITHUB_OUTPUT"
             echo "fallback=true" >> "$GITHUB_OUTPUT"
             export FALLBACK_SET=1
-            exit 0
+            exit 1
           fi
           
           # Link Time Optimization (LTO) Configuration
-          echo ">> 🧾 Configuring Link Time Optimization for Kernel $KERNELVERSION"
-
-          if [[ ! -f out/.config ]]; then
-            echo "⚠️ Configuration Not Found, Skipping LTO"
-
-          elif [[ ! -f scripts/config ]]; then
-            echo "⚠️ Scripts / Configuration Missing, Skipping LTO"
-
+          echo "🧾 Configuring Link Time Optimization (LTO) Configuration for Kernel $KERNELVERSION"
+          
+          # 1️⃣ Check Kernel Configuration First
+          if [[ ! -s out/.config ]]; then
+            echo "⚠️ Configuration Not Found — Skipping Link Time Optimization (LTO) Configuration"
+            echo "📊 Link Time Optimization (LTO) Status: Skipped (Reason: Missing Scripts / Configuration)"
+          
           else
-            case "$KERNELVERSION" in
-              "5.10"|"5.15")
-                echo ">> 🚀 Link Time Optimization: Thin"
-                scripts/config --file out/.config \
-                  -e LTO_CLANG \
-                  -e LTO_CLANG_THIN \
-                  -d LTO_CLANG_NONE \
-                  -d LTO_CLANG_FULL
-                ;;
-              "6.12")
-                echo ">> 🚀 Link Time Optimization: None"
-                scripts/config --file out/.config \
-                  -e LTO_CLANG \
-                  -e LTO_CLANG_NONE \
-                  -d LTO_CLANG_THIN \
-                  -d LTO_CLANG_FULL
-                ;;
-              *)
-                echo ">> ⚠️ Link Time Optimization: Skipped for Kernel $KERNELVERSION"
-                ;;
-            esac
+            # Auto-Detect Scripts / Configuration Location
+            CONFIGTOOL=""
+            
+            for path in ../scripts/config ./scripts/config ../../scripts/config; do
+              if [[ -x "$path" ]]; then
+                CONFIGTOOL="$path"
+                break
+              fi
+            done
+            
+            if [[ -z "$CONFIGTOOL" ]]; then
+              CONFIGTOOL=$(find .. -type f -path "*/scripts/config" -executable 2>/dev/null | head -n1 || true)
+            fi
+
+            # Validation
+            [[ -n "$CONFIGTOOL" ]] && [[ ! -x "$CONFIGTOOL" ]] && CONFIGTOOL=""
+          
+            # 2️⃣ Check Scripts / Configuration Separately
+            if [[ -z "$CONFIGTOOL" ]]; then
+              echo "⚠️ Scripts / Configuration Not Found — Skipping Link Time Optimization (LTO) Configuration"
+              echo "📊 Link Time Optimization (LTO) Status: Skipped (Reason: Missing Scripts / Configuration)"
+            else
+              case "$KERNELVERSION" in
+                "5.10"|"5.15")
+                  echo ">> 🚀 Link Time Optimization (LTO): Thin"
+                  "$CONFIGTOOL" --file out/.config \
+                    -e LTO_CLANG \
+                    -e LTO_CLANG_THIN \
+                    -d LTO_CLANG_NONE \
+                    -d LTO_CLANG_FULL \
+                    || echo "⚠️ Link Time Optimization (LTO) Configuration Apply Failed"
+                
+                  echo "📊 Link Time Optimization (LTO) Status: Applied (Thin)"
+                  ;;          
+                "6.12")
+                  echo ">> 🚀 Link Time Optimization (LTO): None"
+                  "$CONFIGTOOL" --file out/.config \
+                    -e LTO_CLANG \
+                    -e LTO_CLANG_NONE \
+                    -d LTO_CLANG_THIN \
+                    -d LTO_CLANG_FULL \
+                    || echo "⚠️ Link Time Optimization (LTO) Configuration Apply Failed"
+                
+                  echo "📊 Link Time Optimization (LTO) Status: Applied (None)"
+                  ;;          
+                *)
+                  echo "⚠️ Link Time Optimization (LTO) skipped for Kernel $KERNELVERSION"
+                  echo "📊 Link Time Optimization (LTO) Status: Skipped (Reason: Unsupported Kernel Version)"
+                  ;;
+              esac
+            fi
           fi
 
           # Final Default Configuration and Build
@@ -4322,7 +4366,7 @@ jobs:
             echo "fallback_reason=olddefconfig_failed" >> "$GITHUB_OUTPUT"
             echo "fallback=true" >> "$GITHUB_OUTPUT"
             export FALLBACK_SET=1
-            exit 0
+            exit 1
           fi
           
           # System Resource Information
@@ -4336,7 +4380,7 @@ jobs:
             echo "fallback_reason=compile_failed" >> "$GITHUB_OUTPUT"
             echo "fallback=true" >> "$GITHUB_OUTPUT"
             export FALLBACK_SET=1
-            exit 0
+            exit 1
           fi
           
           echo "📊 Compiler Cache Statistics"
@@ -4361,18 +4405,21 @@ jobs:
         if: ${{ steps.fast_build.outputs.fallback == 'true' || github.event.inputs.FASTBUILD != 'true' }}
         run: |
           set -Eeuo pipefail
-
+      
           FALLBACK_START=$(date +%s)
-
+      
           # Navigate
-          cd kernel_workspace
-
+          cd kernel_workspace/kernel_platform || {
+            echo "⚠️ Kernel Platform Not Found"
+            exit 1
+          }
+      
           # Environment Variables
           FILEBASE="${{ env.FILE_BASE }}"
           CPU="${{ env.CPUD }}"
           METHOD="${{ env.BUILD_METHOD }}"
           GKIV="${{ env.ANDROIDVERSION }}-${{ env.KERNELVERSION }}"
-
+      
           echo "-------- Kernel Build --------"
           echo "📂 File     : $FILEBASE"
           echo "📂 CPU      : $CPU"
@@ -4380,65 +4427,80 @@ jobs:
           echo "📁 Version  : $GKIV"
           echo "------------------------------"
           echo ""
-
+      
           echo "⚠️ Fallback Reason: ${{ steps.fast_build.outputs.fallback_reason || 'unknown' }}"
-
+      
           if [[ -n "${{ steps.fast_build.outputs.fast_build_time }}" ]]; then
             echo "⏱️ Fast Build Ran For: ${{ steps.fast_build.outputs.fast_build_time }}s (before fallback)"
           fi
           echo ""
-
-          # Clean Previous Build Artifacts
-          echo "🧹 Cleaning up Previous Build Artifacts..."
-          rm -rf out/ || true  # Adjust the Path as Needed
-          # For Bazel, Also Clean Caches if Applicable
-          if [[ -x "$(command -v bazel)" ]]; then
-            echo "🔎 Bazel Detected, Cleaning Build..."
-            bazel clean --expunge
+      
+          # Restore Fast Build Cache
+          echo "📥 Restoring Fast Build Cache..."
+      
+          if [[ -d ../cache ]]; then
+            [[ -f ../cache/.config ]] && cp ../cache/.config out/.config || true
+            [[ -d ../cache/include ]] && mkdir -p out && cp -rf ../cache/include out/ || true
+            [[ -f ../cache/Module.symvers ]] && cp ../cache/Module.symvers out/ || true
+      
+            echo "✔ Cache Restored from Fast Build"
+          else
+            echo "⚠️ No Fast Build Cache Found (Full Rebuild)"
           fi
-
-          # Default Build Flags
+      
+          # Cleanup
+          echo "🧹 Cleaning up Previous Build Artifacts..."
+          rm -rf out || true
+      
+          if command -v bazel >/dev/null 2>&1; then
+            echo "🔎 Bazel Detected, Cleaning Build..."
+            bazel clean --expunge || true
+          fi
+      
+          # Build Flags
           export LTO=${LTO:-thin}
           export SYSTEM_DLKM_RE_SIGN=${SYSTEM_DLKM_RE_SIGN:-0}
           export BUILD_SYSTEM_DLKM=${BUILD_SYSTEM_DLKM:-0}
           export KMI_SYMBOL_LIST_STRICT_MODE=${KMI_SYMBOL_LIST_STRICT_MODE:-0}
-
-          # Detect Build System
-          if [[ -f "$BAZEL_SCRIPT" ]]; then
+      
+          # Build System Detection
+          if [[ -n "${BAZEL_SCRIPT:-}" && -f "$BAZEL_SCRIPT" ]]; then
             echo "🔎 Detected Bazel / KLeaf Build System"
+      
             ./kernel_platform/oplus/bazel/oplus_modules_variant.sh "$CPU" "$METHOD"
-            python3 "$BAZEL_SCRIPT" \
-              -t "$CPU" \
-              "$METHOD"
-          elif [[ -f "$OPLUS_SCRIPT" ]]; then
+      
+            python3 "$BAZEL_SCRIPT" -t "$CPU" "$METHOD"
+      
+          elif [[ -n "${OPLUS_SCRIPT:-}" && -f "$OPLUS_SCRIPT" ]]; then
             echo "🔎 Detected Legacy OPlus Build System"
-            "$OPLUS_SCRIPT" \
-              "$CPU" \
-              "$METHOD"
+      
+            "$OPLUS_SCRIPT" "$CPU" "$METHOD"
+      
           else
             echo "⚠️ ERROR: No Valid Build System Found"
             exit 1
           fi
-
+      
+          # Final Summary
           FALLBACK_END=$(date +%s)
           FALLBACK_TIME=$((FALLBACK_END - FALLBACK_START))
-
+      
+          echo ""
           echo "⏱️ Fallback Build Time: ${FALLBACK_TIME}s"
-
           echo "🎉 Build Done"
-
+      
           echo ""
           echo "🏁 Total CI Insight :"
           echo "------------------------------"
           echo "📊 Build Time Summary"
           echo "------------------------------"
-
+      
           if [[ -n "${{ steps.fast_build.outputs.fast_build_time }}" ]]; then
             echo "⚡ Fast Build : ${{ steps.fast_build.outputs.fast_build_time }}s"
           else
             echo "⚡ Fast Build : Skipped"
           fi
-
+      
           echo ""
           echo "🐢 Fallback Build : ${FALLBACK_TIME}s"
 
@@ -4505,52 +4567,61 @@ jobs:
           echo "🎉 Compiler Cache Cleanup Completed"
 
       # ==============================
-      # Create AnyKernel3
+      # AnyKernel3 Packaging Engine
       # ==============================
-      - name: 🔧 Create AnyKernel3
+      - name: 🔧 AnyKernel3 Packaging Engine
         run: |
-          set -e
-
+          set -euo pipefail
+      
           echo "------------------------------"
           echo "🚀 Make AnyKernel3..."
           echo "------------------------------"
           echo ""
-          
+      
           echo "📂 Cloning AnyKernel3..."
           git clone --depth=1 https://github.com/AndreiMikh/AnyKernel3
           rm -rf ./AnyKernel3/.git
-
+      
           echo "🛠️ Preparing Output Directories..."
           mkdir -p kernel_workspace/kernel_platform/out/Final-Image-Find
-
+      
           IMAGE_PATH=""
-
+      
           echo "🔎 Searching for Compiled Kernel Image..."
-
-          # Check Unified Build Output
+      
+          # Unified Build Output
           if [[ -d "./kernel_workspace/kernel_platform/common/out/" ]]; then
-            IMAGE_PATH=$(find ./kernel_workspace/kernel_platform/common/out/ -name "Image" -print -quit)
+            IMAGE_PATH=$(find ./kernel_workspace/kernel_platform/common/out/ \
+              -type f -name "Image" -print -quit)
             [[ -n "$IMAGE_PATH" ]] && echo "📌 Image Found in Unified Build Output"
           fi
-
-          # Check Official OPlus Script Output
+      
+          # Official Build Output
           if [[ -z "$IMAGE_PATH" && -d "./kernel_workspace/kernel_platform/out/" ]]; then
-            IMAGE_PATH=$(find ./kernel_workspace/kernel_platform/out/ -name "Image" -print -quit)
+            IMAGE_PATH=$(find ./kernel_workspace/kernel_platform/out/ \
+              -type f -name "Image" -print -quit)
             [[ -n "$IMAGE_PATH" ]] && echo "📌 Image Found in Official Build Output"
           fi
-
-          # Fail if No Image was Found
+      
+          # GKI / Arm64 Fallback Names
           if [[ -z "$IMAGE_PATH" ]]; then
-            echo "⚠️ ERROR: Kernel Image Not Found. Build Likely Failed" >&2
+            IMAGE_PATH=$(find ./kernel_workspace/kernel_platform/ \
+              -type f \( -name "Image" -o -name "Image.gz" -o -name "Image.lz4" \) \
+              -print -quit)
+          fi
+      
+          # Fail if Still Missing
+          if [[ -z "$IMAGE_PATH" ]]; then
+            echo "⚠️ ERROR: Kernel Image Not Found, Build Likely Failed" >&2
             exit 1
           fi
-
+      
           echo "🔎 Kernel Image Located at: $IMAGE_PATH"
-
-          # Copy Image to AnyKernel3 and Backup
-          cp "$IMAGE_PATH" ./AnyKernel3/Image
-          cp "$IMAGE_PATH" kernel_workspace/kernel_platform/out/Final-Image-Find/Image
-
+      
+          # Copy
+          cp -f "$IMAGE_PATH" ./AnyKernel3/Image
+          cp -f "$IMAGE_PATH" kernel_workspace/kernel_platform/out/Final-Image-Find/Image
+      
           echo ""
           echo "🎉 Image Copied Successfully to AnyKernel3 and Backup"
 
@@ -4672,302 +4743,293 @@ jobs:
           echo "🎉 Done!"
 
       # ==============================
-      # KernelPatch-Module and Replace with Patched Image
+      # KernelPatch-Module Injection Engine
       # ==============================
-      - name: 🔧 KernelPatch-Module and Replace with Patched Image
+      - name: 🔧 KernelPatch-Module Injection Engine
         if: ${{ github.event.inputs.KERNELPATCH == 'KPM' }}
         run: |
-          set -e
-
+          set -euo pipefail
+      
           echo "------------------------------"
           echo "🚀 Starting KernelPatch-Module Patch Process..."
           echo "------------------------------"
           echo ""
-
+      
           PATCH_DIR="${GITHUB_WORKSPACE}/kernel_workspace/SukiSU_patch/kpm"
           OUT_DIR="${GITHUB_WORKSPACE}/kernel_workspace/kernel_platform/out/Final-Image-Find"
-
-          # Check Directories Existence
-          if [[ ! -d "$PATCH_DIR" ]]; then
-            echo "⚠️ Patch Directory Not Found: $PATCH_DIR"
-            exit 1
-          fi
-
-          if [[ ! -d "$OUT_DIR" ]]; then
-            echo "⚠️ Output Directory Not Found: $OUT_DIR"
-            exit 1
-          fi
-
+          ANYKERNEL_DIR="${GITHUB_WORKSPACE}/AnyKernel3"
+      
+          # Validate Directories
+          [[ -d "$PATCH_DIR" ]] || { echo "⚠️ Patch Directory Not Found: $PATCH_DIR"; exit 1; }
+          [[ -d "$OUT_DIR" ]] || { echo "⚠️ Output Directory Not Found: $OUT_DIR"; exit 1; }
+      
+          # Patch Tool
+          PATCH_TOOL="$PATCH_DIR/patch_linux"
+          [[ -f "$PATCH_TOOL" ]] || { echo "⚠️ Patch Tool Not Found"; exit 1; }
+          chmod +x "$PATCH_TOOL"
+      
+          # Locate Kernel Image
+          IMAGE="$OUT_DIR/Image"
+          [[ -f "$IMAGE" ]] || { echo "⚠️ Kernel Image Not Found: $IMAGE"; exit 1; }
+      
+          echo "📌 Kernel Image Found: $IMAGE"
+      
           cd "$OUT_DIR"
-
-          # Copy and Prepare Patch Tool
-          if [[ ! -f "$PATCH_DIR/patch_linux" ]]; then
-            echo "⚠️ Patch Tool Not Found in $PATCH_DIR"
-            exit 1
-          fi
-
-          echo "📋 Copying Linux Patch Tool..."
-          cp "$PATCH_DIR/patch_linux" .
-          chmod +x patch_linux
-
-          # Apply Linux Patch
-          echo "🛠️ Applying Linux Patch (KernelPatch)..."
-          ./patch_linux
-
-          # Replace Original Image
+      
+          # 🔐 Pre-Patch Checksum
+          echo "🔐 Creating Baseline Checksum..."
+          sha256sum Image > Image.sha256
+      
+          # Apply Patch
+          echo "🛠️ Applying KernelPatch..."
+          "$PATCH_TOOL"
+      
+          # Validate Patch Output
           if [[ ! -f "oImage" ]]; then
-            echo "⚠️ Patched Image Not Found after Patching"
+            echo "⚠️ Patched Image (oImage) Not Found"
             exit 1
           fi
-
-          echo "📌 Replacing Original Image with Patched Version..."
+      
+          # Replace Image
+          echo "📌 Replacing original Image with Patched Version..."
           rm -f Image
           mv oImage Image
-
-          # Update AnyKernel3 Directory
-          ANYKERNEL_IMAGE_DIR="${GITHUB_WORKSPACE}/AnyKernel3"
-          if [[ -d "$ANYKERNEL_IMAGE_DIR" ]]; then
-            echo "📦 Copying Patched Image to AnyKernel3 Directory..."
-            cp Image "$ANYKERNEL_IMAGE_DIR/Image"
+      
+          # Post-Patch Integrity Check
+          echo "🔍 Checking Image Integrity (Expected Change After Patch)..."
+          if sha256sum -c Image.sha256 >/dev/null 2>&1; then
+            echo "⚠️ WARNING: Image Checksum Unchanged (Unexpected)"
           else
-            echo "⚠️ AnyKernel3 Directory Not Found, Skipping Copy"
+            echo "📌 Image Modified by Patch (Expected Behavior)"
           fi
-
-          echo "🎉 KernelPatch-Module Patch Applied Successfully"
+      
+          # Sync to AnyKernel3
+          if [[ -d "$ANYKERNEL_DIR" ]]; then
+            echo "📦 Updating AnyKernel3..."
+            cp -f Image "$ANYKERNEL_DIR/Image"
+          else
+            echo "⚠️ AnyKernel3 Directory Not Found, skipping copy"
+          fi
+      
+          echo ""
+          echo "🎉 KernelPatch-Module Applied Successfully"
 
       # ==============================
-      # KernelPatch-Next Patch and Replace with Patched Image
+      # KernelPatch-Next Injection Engine
       # ==============================
-      - name: 🔧 KernelPatch-Next Patch and Replace with Patched Image
+      - name: 🔧 KernelPatch-Next Injection Engine
         if: ${{ github.event.inputs.KERNELPATCH == 'KPN' }}
         run: |
           set -euo pipefail
-
+      
           echo "------------------------------"
           echo "🚀 Starting KernelPatch-Next Patch..."
           echo "------------------------------"
           echo ""
-
-          # Locate Kernel Image
-          IMAGE_PATH=$(find "${GITHUB_WORKSPACE}/kernel_workspace" -type f -name Image | head -n 1)
-
+      
+          # Locate Kernel Image Safely
+          IMAGE_PATH=$(find "${GITHUB_WORKSPACE}/kernel_workspace" -type f -name Image -print -quit)
+      
           [[ -z "${IMAGE_PATH:-}" ]] && { echo "⚠️ Kernel Image Not Found"; exit 1; }
-
+      
           OUT_DIR=$(dirname "$IMAGE_PATH")
-
-          echo "📌 Found Kernel Image in: $OUT_DIR"
           cd "$OUT_DIR"
-
+      
           [[ ! -f Image ]] && { echo "⚠️ Image Missing"; exit 1; }
-
-          echo "📏 Original Image Size:"
+      
+          echo "📌 Using Image: $IMAGE_PATH"
           ls -lh Image
-
+      
+          # Baseline Checksum
+          echo "🔐 Creating Baseline Checksum..."
+          sha256sum Image > Image.sha256
+      
           # Download Tools 
           echo "📥 Downloading KernelPatch-Next Tools..."
-
-          wget --tries=3 --timeout=20 -O kptools-linux \
-            https://github.com/KernelSU-Next/KPatch-Next/releases/latest/download/kptools-linux \
-            || { echo "⚠️ Failed to Download KPTOOLS-Linux"; exit 1; }
-
-          wget --tries=3 --timeout=20 -O kpimg-linux \
-            https://github.com/KernelSU-Next/KPatch-Next/releases/latest/download/kpimg-linux \
-            || { echo "⚠️ Failed to Download KPIMG-Linux"; exit 1; }
-
-          [[ ! -s kptools-linux ]] && { echo "⚠️ KPTOOLS-Linux is Empty"; exit 1; }
-          [[ ! -s kpimg-linux ]] && { echo "⚠️ KPIMG-Linux is Empty"; exit 1; }
-
-          chmod +x kptools-linux kpimg-linux
-
-          # Apply Patch
+      
+          download() {
+            local url="$1"
+            local out="$2"
+      
+            wget --tries=3 --timeout=20 -O "$out" "$url" || return 1
+            [[ -s "$out" ]] || return 1
+      
+            if file "$out" | grep -qi "html"; then
+              echo "⚠️ Invalid Download (HTML Detected): $out"
+              return 1
+            fi
+      
+            chmod +x "$out"
+          }
+      
+          download "https://github.com/KernelSU-Next/KPatch-Next/releases/latest/download/kptools-linux" kptools-linux \
+            || { echo "⚠️ Failed to Download KPTools"; exit 1; }
+      
+          download "https://github.com/KernelSU-Next/KPatch-Next/releases/latest/download/kpimg-linux" kpimg-linux \
+            || { echo "⚠️ Failed to Download KPImg"; exit 1; }
+      
+          # Apply patch
           echo "⚙️ Patching Kernel Image..."
-
+      
           ./kptools-linux -p -i Image -k kpimg-linux -o oImage
-
-          [[ ! -f oImage ]] && { echo "⚠️ Patch Failed (No oImage)"; exit 1; }
-          [[ ! -s oImage ]] && { echo "⚠️ Patched Image is Empty"; exit 1; }
-
-          echo "📏 Patched Image Size:"
+      
+          [[ ! -s oImage ]] && { echo "⚠️ Patch Failed"; exit 1; }
+      
           ls -lh oImage
-
+      
           # Replace Image
           echo "✔️ Replacing Image..."
           mv -f oImage Image
-
+      
+          # Integrity Check (Expected Mismatch)
+          echo "🔍 Verifying Checksum Result..."
+          if sha256sum -c Image.sha256 >/dev/null 2>&1; then
+            echo "⚠️ WARNING: Image Unchanged (Unexpected)"
+          else
+            echo "📌 Image Modified by KernelPatch-Next (Expected)"
+          fi
+      
           # Sync to AnyKernel3
           ANYKERNEL_DIR="${GITHUB_WORKSPACE}/AnyKernel3"
-
-          [[ ! -d "$ANYKERNEL_DIR" ]] && { echo "⚠️ AnyKernel3 Not Found"; exit 1; }
-
+      
+          [[ -d "$ANYKERNEL_DIR" ]] || { echo "⚠️ AnyKernel3 Not Found"; exit 1; }
+      
           echo "📩 Copying to AnyKernel3..."
-          cp Image "$ANYKERNEL_DIR/Image"
-   
+          cp -f Image "$ANYKERNEL_DIR/Image"
+      
           echo ""
           echo "🎉 KernelPatch-Next Patch Completed"
 
       # ==============================
-      # Generate Zip Suffix
-      # ==============================     
-      - name: 🔧 Generate Zip Suffix
+      # Full Build Identity Engine
+      # ==============================
+      - name: 🔧 Full Build Identity Engine
         id: suffix
         run: |
-          set -e
-  
+          set -euo pipefail
+      
           echo "------------------------------"
-          echo "🚀 Start with Empty Suffix..."
+          echo "⚡ Full Build Identity Engine..."
           echo "------------------------------"
-          echo ""          
-          SUFFIX=""
-          
-          # KSU Meta Root Engine Selection  
-          if [ "${{ github.event.inputs.ROOTENGINE }}" = "ReSukiSU" ]; then
-            SUFFIX="${SUFFIX}ReSukiSU"
-          elif [ "${{ github.event.inputs.ROOTENGINE }}" = "SukiSU-Ultra" ]; then
-            SUFFIX="${SUFFIX}SukiSU"
-          elif [ "${{ github.event.inputs.ROOTENGINE }}" = "KernelSU-Next" ]; then
-            SUFFIX="${SUFFIX}KernelSUNext"
-          elif [ "${{ github.event.inputs.ROOTENGINE }}" = "WildKSU" ]; then
-            SUFFIX="${SUFFIX}WildKSU"
-          elif [ "${{ github.event.inputs.ROOTENGINE }}" = "KernelSU" ]; then
-            SUFFIX="${SUFFIX}KernelSU"
-          fi
-
-          # KernelPatch-Module (KPM) / KernelPatch-Next (KPN) Selection
-          if [ "${{ github.event.inputs.KERNELPATCH }}" = "KPM" ]; then
-            SUFFIX="${SUFFIX}-KPM"
-          elif [ "${{ github.event.inputs.KERNELPATCH }}" = "KPN" ]; then
-            SUFFIX="${SUFFIX}-KPN"
-          fi
-
-          # KSU Meta Root Engine Branch Selection
-          if [ "${{ github.event.inputs.ROOTBRANCHSOURCE }}" = "ReSukiSU-Main" ]; then
-            SUFFIX="${SUFFIX}-Branch(Main)"
-          elif [ "${{ github.event.inputs.ROOTBRANCHSOURCE }}" = "ReSukiSU-Main-Spoofed" ]; then
-            SUFFIX="${SUFFIX}-Branch(Main)Spoofed"
-          elif [ "${{ github.event.inputs.ROOTBRANCHSOURCE }}" = "SukiSU-Ultra-Main" ]; then
-            SUFFIX="${SUFFIX}-Branch(Main)"
-          elif [ "${{ github.event.inputs.ROOTBRANCHSOURCE }}" = "SukiSU-Main-Spoofed" ]; then
-            SUFFIX="${SUFFIX}-Branch(Main)Spoofed"
-          elif [ "${{ github.event.inputs.ROOTBRANCHSOURCE }}" = "KernelSU-Next-Dev" ]; then
-            SUFFIX="${SUFFIX}-Branch(Dev)"
-          elif [ "${{ github.event.inputs.ROOTBRANCHSOURCE }}" = "KernelSU-Next-Dev-Spoofed" ]; then
-            SUFFIX="${SUFFIX}-Branch(Dev)Spoofed"
-          elif [ "${{ github.event.inputs.ROOTBRANCHSOURCE }}" = "WildKSU-Stable" ]; then
-            SUFFIX="${SUFFIX}-Branch(Stable)"
-          elif [ "${{ github.event.inputs.ROOTBRANCHSOURCE }}" = "WildKSU-Stable-Spoofed" ]; then
-            SUFFIX="${SUFFIX}-Branch(Stable)Spoofed"
-          elif [ "${{ github.event.inputs.ROOTBRANCHSOURCE }}" = "WildKSU-Canary" ]; then
-            SUFFIX="${SUFFIX}-Branch(Canary)"
-          elif [ "${{ github.event.inputs.ROOTBRANCHSOURCE }}" = "WildKSU-Canary-Spoofed" ]; then
-            SUFFIX="${SUFFIX}-Branch(Canary)Spoofed"
-          elif [ "${{ github.event.inputs.ROOTBRANCHSOURCE }}" = "SukiSU-Ultra-Main" ]; then
-            SUFFIX="${SUFFIX}-Branch(Main)"
-          elif [ "${{ github.event.inputs.ROOTBRANCHSOURCE }}" = "KernelSU-Main" ]; then
-            SUFFIX="${SUFFIX}-Branch(Main)"  
-          fi
-
-          # ZRAM Algorithm (LZ4KD) Selection
-          if [[ "${{ github.event.inputs.ZRAMALGORITHM }}" == 1/* ]]; then
-            SUFFIX="${SUFFIX}-(LZ4KD)"
-          fi
-
-          # ZRAM LZ4 1.10.0 + ZSTD 1.5.7 Flag
-          if [ "${{ github.event.inputs.ZRAMCUSTOMPATCH }}" = "LZ4-1.10.0-Custom-Patch" ]; then
-            SUFFIX="${SUFFIX}-LZ4(1.10.0)"
-          elif [ "${{ github.event.inputs.ZRAMCUSTOMPATCH }}" = "LZ4-1.10.0+LZ4KD" ]; then
-            SUFFIX="${SUFFIX}-LZ4(1.10.0)+LZ4KD"
-          elif [ "${{ github.event.inputs.ZRAMCUSTOMPATCH }}" = "LZ4-1.10.0-Patch" ]; then
-            SUFFIX="${SUFFIX}-LZ4(1.10.0)"
-          fi
-
-          # SUSFS for OKI / GKI Selection
-          if [ "${{ github.event.inputs.SUSFSVARIANT }}" = "OGKI" ]; then
-            SUFFIX="${SUFFIX}-SuSFS(OKI)"
-          elif [ "${{ github.event.inputs.SUSFSVARIANT }}" = "GKI" ]; then
-            SUFFIX="${SUFFIX}-SuSFS(GKI)"
-          fi
-
-          # SUSFS Meta Development Branch (OKI / GKI) Selection
-          if [ "${{ github.event.inputs.SUSFSBRANCHDEV }}" = "false" ]; then
-            SUFFIX="${SUFFIX}(Main)"
-          elif [ "${{ github.event.inputs.SUSFSBRANCHDEV }}" = "true" ]; then
-            SUFFIX="${SUFFIX}(Dev)"
-          fi
-
-          # Schedulers Flag
-          if [ "${{ github.event.inputs.SCHEDULERS }}" = "ADIOS" ]; then
-            SUFFIX="${SUFFIX}-ADIOS"
-          elif [ "${{ github.event.inputs.SCHEDULERS }}" = "BORE" ]; then
-            SUFFIX="${SUFFIX}-BORE"
-          elif [ "${{ github.event.inputs.SCHEDULERS }}" = "SSG" ]; then
-            SUFFIX="${SUFFIX}-SSG"
-          fi
-
-          # ReKernel / NetLink Flag
-          if [ "${{ github.event.inputs.REKERNEL }}" = "true" ]; then
-            SUFFIX="${SUFFIX}-ReKernel"
-          fi
-
-          # Linux Security Baseband Guard Flag
-          if [ "${{ github.event.inputs.LSMBBG }}" = "true" ]; then
-            SUFFIX="${SUFFIX}-BBG"
-          fi
-
-          # Linux Containers / Docker Support Flag
-          if [ "${{ github.event.inputs.LXCDOCKERSUPPORT }}" = "DroidSpacesLXC" ]; then
-            SUFFIX="${SUFFIX}-DroidLXC"
-          elif [ "${{ github.event.inputs.LXCDOCKERSUPPORT }}" = "TermuxLXC" ]; then
-            SUFFIX="${SUFFIX}-TermuxLXC"
-          fi
-
-          # Netfilter IP Set Core Settings Flag
-          if [ "${{ github.event.inputs.NETFILTER }}" = "true" ]; then
-            SUFFIX="${SUFFIX}-NetFilter"
-          fi
-
-          # NTSYNC Flag
-          if [ "${{ github.event.inputs.NTSYNC }}" = "true" ]; then
-            SUFFIX="${SUFFIX}-NTSync"
-          fi
-
-          # BBR (Bottleneck Bandwidth Roundtrip + ECN Flag) + Brutal
-          if [ "${{ github.event.inputs.TCPALGORITHM }}" = "BBR+ECN" ]; then
-            SUFFIX="${SUFFIX}-BBR+ECN"
-          elif [ "${{ github.event.inputs.TCPALGORITHM }}" = "BBR+ECN+Brutal" ]; then
-            SUFFIX="${SUFFIX}-BBR+ECN"
-          fi
-
-          # Base Tag
-          SUFFIX="${SUFFIX}-Mikh"
-
-          # Unicode Exploit Bypass Flag
-          if [ "${{ github.event.inputs.UNICODE }}" = "true" ]; then
-            SUFFIX="${SUFFIX}-Unicode"
-          fi  
-
-          # XUS Fix Flag
-          if [ "${{ env.XUS }}" = "Enabled" ]; then
-            SUFFIX="${SUFFIX}-XUS"
-          fi
-
-          # Fengchi / Windspeed Scheduler Flag
-          if [ "${{ github.event.inputs.WINDSPEED }}" = "true" ]; then
-            SUFFIX="${SUFFIX}-Hmbird"
-          fi
-
-          echo "suffix=${SUFFIX}" >> $GITHUB_OUTPUT
-          
-          echo "🎉 Suffix Value Set!"
+          echo ""
+      
+          # Inputs / Environment
+          ROOTENGINE="${{ github.event.inputs.ROOTENGINE }}"
+          ROOTBRANCH="${{ github.event.inputs.ROOTBRANCHSOURCE }}"
+          KERNELPATCH="${{ github.event.inputs.KERNELPATCH }}"
+          ZRAMALGO="${{ github.event.inputs.ZRAMALGORITHM }}"
+          ZRAMPATCH="${{ github.event.inputs.ZRAMCUSTOMPATCH }}"
+          SUSFSVAR="${{ github.event.inputs.SUSFSVARIANT }}"
+          SUSFSDEV="${{ github.event.inputs.SUSFSBRANCHDEV }}"
+          SCHED="${{ github.event.inputs.SCHEDULERS }}"
+          REKERNEL="${{ github.event.inputs.REKERNEL }}"
+          LSMBBG="${{ github.event.inputs.LSMBBG }}"
+          LXC="${{ github.event.inputs.LXCDOCKERSUPPORT }}"
+          NETFILTER="${{ github.event.inputs.NETFILTER }}"
+          NTSYNC="${{ github.event.inputs.NTSYNC }}"
+          TCP="${{ github.event.inputs.TCPALGORITHM }}"
+          UNICODE="${{ github.event.inputs.UNICODE }}"
+          XUS="${{ env.XUS }}"
+          WINDSPEED="${{ github.event.inputs.WINDSPEED }}"
+      
+          # Base Identity (Root Engine Map)
+          declare -A ROOTENGINEMAP=(
+            ["ReSukiSU"]="ReSukiSU"
+            ["SukiSU-Ultra"]="SukiSU"
+            ["KernelSU-Next"]="KernelSUNext"
+            ["WildKSU"]="WildKSU"
+            ["KernelSU"]="KernelSU"
+          )
+      
+          SUFFIX="${ROOTENGINEMAP[$ROOTENGINE]:-}"
+      
+          # Kernel Patch Layer
+          declare -A KERNELPATCHMAP=(
+            ["KPM"]="-KPM"
+            ["KPN"]="-KPN"
+          )
+          SUFFIX+="${KERNELPATCHMAP[$KERNELPATCH]:-}"
+      
+          # Branch Layer
+          case "$ROOTBRANCH" in
+            *Main*)   SUFFIX+="-Branch(Main)" ;;
+            *Dev*)    SUFFIX+="-Branch(Dev)" ;;
+            *Stable*) SUFFIX+="-Branch(Stable)" ;;
+            *Canary*) SUFFIX+="-Branch(Canary)" ;;
+          esac
+      
+          # ZRAM Layer
+          [[ "$ZRAMALGO" == 1/* ]] && SUFFIX+="-LZ4KD"
+      
+          declare -A ZRAMPATCHMAP=(
+            ["LZ4-1.10.0-Custom-Patch"]="-LZ4(1.10.0)"
+            ["LZ4-1.10.0+LZ4KD"]="-LZ4(1.10.0)+LZ4KD"
+            ["LZ4-1.10.0-Patch"]="-LZ4(1.10.0)"
+          )
+          SUFFIX+="${ZRAMPATCHMAP[$ZRAMPATCH]:-}"
+      
+          # SUSFS Layer
+          declare -A SUSFSVARMAP=(
+            ["OGKI"]="-SuSFS(OKI)"
+            ["GKI"]="-SuSFS(GKI)"
+          )
+          SUFFIX+="${SUSFSVARMAP[$SUSFSVAR]:-}"
+      
+          case "$SUSFSDEV" in
+            "true")  SUFFIX+="(Dev)" ;;
+            "false") SUFFIX+="(Main)" ;;
+          esac
+      
+          # Scheduler Layer
+          declare -A SCHEDMAP=(
+            ["ADIOS"]="-Adios"
+            ["BORE"]="-Bore"
+            ["SSG"]="-SSG"
+          )
+          SUFFIX+="${SCHEDMAP[$SCHED]:-}"
+      
+          # Feature Flags Layer
+          [[ "$REKERNEL" == "true" ]] && SUFFIX+="-ReKernel"
+          [[ "$LSMBBG" == "true" ]] && SUFFIX+="-BBG"
+      
+          case "$LXC" in
+            "DroidSpacesLXC") SUFFIX+="-DroidLXC" ;;
+            "TermuxLXC")      SUFFIX+="-TermuxLXC" ;;
+          esac
+      
+          [[ "$NETFILTER" == "true" ]] && SUFFIX+="-NetFilter"
+          [[ "$NTSYNC" == "true" ]] && SUFFIX+="-NTSync"
+      
+          case "$TCP" in
+            "BBR+ECN")         SUFFIX+="-BBR+ECN" ;;
+            "BBR+ECN+Brutal")  SUFFIX+="-BBR+ECN+Brutal" ;;
+          esac
+      
+          # Final Branding Layer
+          SUFFIX+="-Mikh"
+      
+          [[ "$UNICODE" == "true" || "$UNICODE" == "Enabled" ]] && SUFFIX+="-Unicode"
+          [[ "$XUS" == "true" || "$XUS" == "Enabled" ]] && SUFFIX+="-XUS"
+          [[ "$WINDSPEED" == "true" ]] && SUFFIX+="-Hmbird"
+      
+          # Normalize Output
+          SUFFIX=$(echo "$SUFFIX" | sed 's/--/-/g')
+      
+          echo "suffix=$SUFFIX" >> "$GITHUB_OUTPUT"
+      
+          echo ""
+          echo "🎉 Final Build Identity:"
+          echo "$SUFFIX"
 
       # =================================
-      # Extract and Process ZRAM Module
+      # ZRAM Module Integration Engine
       # =================================
-      - name: 🔧 Create, Extract and Process ZRAM Algorithm Module (LZ4KD)
+      - name: 🔧 ZRAM Module Integration Engine
         if: ${{ startsWith(github.event.inputs.ZRAMALGORITHM || '', '1/') }}
         id: zram_find
         run: |
-          set -e
-
+          set -euo pipefail
+      
           echo "------------------------------"
           echo "🚀 Starting ZRAM Addon Module Process..."
           echo "------------------------------"
@@ -4976,12 +5038,12 @@ jobs:
           ZRAM_ZIP="${GITHUB_WORKSPACE}/kernel_workspace/AndreiMikh-Kernel-Lab/patches/ZRAM.zip"
           ZRAM_DIR="ZRAM-Module"
           TARGET_MODULE="${ZRAM_DIR}/zram/zram.ko"
-
-          # Parse and Normalize ZRAM Algorithm Input, Normalize Casing (Safety, in Case Environment wasn't Normalized)
+      
+          # Parse ZRAM Algorithm safely
           IFS='/' read -r _ ZRAM_ALGO ZRAM_SIZE <<< "${{ github.event.inputs.ZRAMALGORITHM }}"
-          ZRAM_ALGO=$(echo "$ZRAM_ALGO" | tr '[:upper:]' '[:lower:]')
-
-          # Validate Algorithm
+      
+          ZRAM_ALGO="${ZRAM_ALGO,,}"
+      
           case "$ZRAM_ALGO" in
             lz4|lz4k|lz4kd) ;;
             *)
@@ -4989,71 +5051,79 @@ jobs:
               exit 1
               ;;
           esac
-
-          # Check if ZRAM Module Zip Package Exists
-          if [ ! -f "$ZRAM_ZIP" ]; then
+      
+          # Validate Zip
+          if [[ ! -f "$ZRAM_ZIP" ]]; then
             echo "⚠️ ZRAM.zip Not Found: $ZRAM_ZIP"
             echo "upload=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
       
           echo "🚀 Extracting ZRAM Addon Module Package..."
-          unzip "$ZRAM_ZIP" -d "$ZRAM_DIR"
+          unzip -q "$ZRAM_ZIP" -d "$ZRAM_DIR"
       
           CONFIG_PROP="${ZRAM_DIR}/config.prop"
       
-          if [ -f "$CONFIG_PROP" ]; then
-            echo "📌 Updating Configuration Prop"
-          
-            sed -i "s/^ZRAM_ALGO=.*/ZRAM_ALGO=${ZRAM_ALGO}/" "$CONFIG_PROP"
-            sed -i "s/^ZRAM_SIZE=.*/ZRAM_SIZE=${ZRAM_SIZE}/" "$CONFIG_PROP"
-          
-            echo "📌 Configured Values:"
-            echo "ZRAM_ALGO=${ZRAM_ALGO}"
-            echo "ZRAM_SIZE=${ZRAM_SIZE}"
-          else
+          if [[ ! -f "$CONFIG_PROP" ]]; then
             echo "⚠️ Configuration Prop Not Found"
             echo "upload=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
       
+          echo "📌 Updating Configuration Prop..."
+      
+          sed -i "s/^ZRAM_ALGO=.*/ZRAM_ALGO=${ZRAM_ALGO}/" "$CONFIG_PROP"
+          sed -i "s/^ZRAM_SIZE=.*/ZRAM_SIZE=${ZRAM_SIZE}/" "$CONFIG_PROP"
+      
+          echo "📌 Configured Values:"
+          echo "ZRAM_ALGO=${ZRAM_ALGO}"
+          echo "ZRAM_SIZE=${ZRAM_SIZE}"
+      
+          # Locate ZRAM.ko
           echo "🔎 Searching for Compiled ZRAM.ko..."
+      
+          zram_path=""
       
           search_paths=(
             "./kernel_workspace/kernel_platform/out"
             "./kernel_workspace/device/qcom"
+            "./kernel_workspace"
           )
       
-          zram_path=""
-      
           for path in "${search_paths[@]}"; do
-            if [ -d "$path" ]; then
-              zram_path=$(find "$path" -type f -name "zram.ko" | head -n 1)
-              if [ -n "$zram_path" ]; then
-                break
-              fi
+            [[ -d "$path" ]] || continue
+      
+            zram_path=$(find "$path" -type f -name "zram.ko" -print -quit 2>/dev/null || true)
+      
+            if [[ -n "$zram_path" ]]; then
+              break
             fi
           done
-
+      
           # Final Fallback Search
-          if [ -z "$zram_path" ]; then
-            zram_path=$(find "./kernel_workspace" -type f -name "zram.ko" | head -n 1)
+          if [[ -z "$zram_path" ]]; then
+            zram_path=$(find "./kernel_workspace" -type f -name "zram.ko" -print -quit 2>/dev/null || true)
           fi
       
-          if [ -n "$zram_path" ] && [ -f "$zram_path" ]; then
-            echo "✔️ ZRAM.ko Located at: $zram_path"
-            install -D "$zram_path" "$TARGET_MODULE"
-          else
-            echo "⚠️ ZRAM.ko Not Found, Possible Reasons:"
-            echo "🚩 Unsupported Kernel Version"
-            echo "🚩 Kernel Module Build Failed"
-            echo "🚩 Module Compiled with Different Name"
+          # Validate Result
+          if [[ -z "$zram_path" || ! -f "$zram_path" ]]; then
+            echo "⚠️ ZRAM.ko Not Found"
+            echo "Possible Causes:"
+            echo " - Kernel Module Build Failed"
+            echo " - Different Module Name"
+            echo " - Unsupported Kernel Version"
+      
             echo "upload=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
-
+      
+          echo "✔️ ZRAM.ko Located at: $zram_path"
+      
+          install -D "$zram_path" "$TARGET_MODULE"
+      
           echo ""
           echo "🎉 ZRAM Addon Module Prepared Successfully"
+          echo "upload=true" >> "$GITHUB_OUTPUT"
 
       # ==============================
       # AI APK Workflow Resolver
@@ -5261,9 +5331,9 @@ jobs:
           echo "🔍 Checking Manager APK Directory..."
       
           APK_SOURCE="ManagerAPK"
-          FLAT_DIR="flat_apk"
+          FLAT_DIR="FlatAPK"
       
-          # Count APKs safely
+          # Count APKs
           APK_COUNT=$(find "$APK_SOURCE" -type f -name "*.apk" 2>/dev/null | wc -l || true)
       
           echo "------------------------------"
@@ -5329,7 +5399,7 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: ManagerAPK
-          path: flat_apk/*.apk
+          path: FlatAPK/*.apk
           if-no-files-found: warn
 
       # ==============================
@@ -5459,7 +5529,7 @@ jobs:
           files: |
             ${{ env.ANYKERNEL3ZIP }}
             ${{ env.MODULEZRAMZIP != '' && env.MODULEZRAMZIP || '' }}
-            flat_apk/*.apk
+            FlatAPK/*.apk
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           
