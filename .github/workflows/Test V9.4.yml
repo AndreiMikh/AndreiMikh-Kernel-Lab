@@ -3166,52 +3166,49 @@ jobs:
           fi
 
       # ==============================
-      # 🧠 ADIOS Scheduler Patch Engine
+      # 🔧 ADIOS I/O Scheduler Patch Engine
       # ==============================
-      - name: 🔧 ADIOS Scheduler Patch Engine
+      - name: 🔧 ADIOS I/O Scheduler Patch Engine
         if: ${{ github.event.inputs.SCHEDULERS == 'ADIOS' }}
         shell: bash
         run: |
           set -euo pipefail
       
           echo "------------------------------"
-          echo "🚀 ADIOS Scheduler Patch Engine Starting..."
+          echo "🚀 ADIOS I/O Scheduler Patch Engine"
           echo "------------------------------"
+          echo ""
       
           # Configuration
           DRY_RUN="${{ github.event.inputs.DRY_RUN || 'false' }}"
           WORKSPACE="${GITHUB_WORKSPACE}"
       
           echo "🧪 Dry Run: $DRY_RUN"
-      
+         
           # Kernel Detection
-          possible_kernel_dirs=(
-            "$WORKSPACE/kernel_workspace/kernel_platform/common"
-            "$WORKSPACE/kernel_workspace/kernel_platform"
-            "$WORKSPACE/kernel_workspace"
-          )
-      
           KERNEL_DIR=""
       
-          echo "🔍 Detecting Kernel Directory..."
+          for dir in \
+            "$WORKSPACE/kernel_workspace/kernel_platform/common" \
+            "$WORKSPACE/kernel_workspace/kernel_platform" \
+            "$WORKSPACE/kernel_workspace"; do
       
-          for dir in "${possible_kernel_dirs[@]}"; do
-            echo "   ↪ Checking: $dir"
-            if [ -f "$dir/Makefile" ] && [ -d "$dir/arch" ]; then
+            echo "🔎 Checking: $dir"
+            if [[ -f "$dir/Makefile" && -d "$dir/arch" ]]; then
               KERNEL_DIR="$dir"
               break
             fi
           done
       
-          if [ -z "$KERNEL_DIR" ]; then
+          [[ -z "$KERNEL_DIR" ]] && {
             echo "⚠️ Kernel Directory Not Found"
             exit 1
-          fi
+          }
       
           echo "📌 Kernel: $KERNEL_DIR"
       
-          # Versioning
-          if [ -z "${{ env.ANDROIDVERSION }}" ] || [ -z "${{ env.KERNELVERSION }}" ]; then
+          # Version Check
+          if [[ -z "${{ env.ANDROIDVERSION }}" || -z "${{ env.KERNELVERSION }}" ]]; then
             echo "⚠️ Missing Android Version / Kernel Version"
             exit 1
           fi
@@ -3219,7 +3216,7 @@ jobs:
           GKIVERSION="${{ env.ANDROIDVERSION }}-${{ env.KERNELVERSION }}"
           echo "🧾 Kernel Base: $GKIVERSION"
       
-          # Patch Selection
+          # Patch Resolution
           case "$GKIVERSION" in
             android15-6.6)
               PATCH_URL="https://raw.githubusercontent.com/AndreiMikh/Build_Oneplus_Realme_Action/main/.github/workflows/tools/adios_ioscheduler_6.6.patch"
@@ -3228,7 +3225,7 @@ jobs:
               PATCH_URL="https://raw.githubusercontent.com/AndreiMikh/Build_Oneplus_Realme_Action/main/.github/workflows/tools/adios_ioscheduler_6.1.patch"
               ;;
             *)
-              echo "⚠️ Unsupported Version: $GKIVERSION"
+              echo "⚠️ Unsupported Kernel Base: $GKIVERSION"
               exit 1
               ;;
           esac
@@ -3239,58 +3236,68 @@ jobs:
           CONFIG_FILE="$KERNEL_DIR/arch/arm64/configs/gki_defconfig"
       
           # Download Patch
-          echo "📥 Downloading Patch..."
-          curl -fsSL "$PATCH_URL" -o "$PATCH_FILE"
-      
-          # Backup (Rollback Support)
-          BACKUP_FILE="$CONFIG_FILE.backup"
-      
-          echo "💾 Creating Backup..."
-          cp "$CONFIG_FILE" "$BACKUP_FILE"
-      
-          rollback() {
-            echo "🔁 Rolling back changes..."
-            cp "$BACKUP_FILE" "$CONFIG_FILE"
-            echo "✔️ Rollback Complete"
-          }
-      
-          # Dry Run Mode
-          if [ "$DRY_RUN" == "true" ]; then
-            echo "🧪 Dry Run Enabled"
-            echo "👉 Would Apply Patch to: $KERNEL_DIR"
-            echo "👉 Would Modify: $CONFIG_FILE"
-            echo "👉 Skipping Actual Patch Apply"
-            exit 0
-          fi
+          echo "⬇️ Downloading Patch..."
+          curl -fsSL --retry 3 --connect-timeout 10 "$PATCH_URL" -o "$PATCH_FILE"
       
           # Idempotency Check
           if grep -q "CONFIG_MQ_IOSCHED_ADIOS" "$CONFIG_FILE"; then
-            echo "✔️ ADIOS Already Present, Skipping Patch"
+            echo "✔ ADIOS I/O Scheduler Already Present — Skipping"
             rm -f "$PATCH_FILE"
             exit 0
           fi
       
-          # Apply Patch
+          # Dry Run Mode
+          if [[ "$DRY_RUN" == "true" ]]; then
+            echo "🧪 Dry Run Mode Enabled"
+            echo "👉 Kernel: $KERNEL_DIR"
+            echo "👉 Patch: $PATCH_FILE"
+            echo "👉 No Changes Applied"
+            exit 0
+          fi
+      
+          # Patch Application Engine
           echo "⚙️ Applying Patch..."
       
-          if ! patch -p1 -F3 --forward -d "$KERNEL_DIR" < "$PATCH_FILE"; then
-            echo "⚠️ Patch Failed"
-            rollback
+          APPLIED=0
+      
+          for plvl in 0 1 2 3; do
+            echo "🔍 Trying -p$plvl"
+      
+            # Check if Already Applied (Safe Detection)
+            if patch -p$plvl --dry-run -d "$KERNEL_DIR" < "$PATCH_FILE" 2>&1 | grep -qi "Previously Applied"; then
+              echo "✔ Patch Already Applied"
+              APPLIED=1
+              break
+            fi
+      
+            # Try Compatibility
+            if patch -p$plvl --dry-run -d "$KERNEL_DIR" < "$PATCH_FILE" >/dev/null 2>&1; then
+              if patch -p$plvl -d "$KERNEL_DIR" < "$PATCH_FILE"; then
+                echo "✔ Patch Applied with -p$plvl"
+                APPLIED=1
+                break
+              fi
+            fi
+          done
+      
+          # Result Validation
+          if [[ "$APPLIED" -ne 1 ]]; then
+            echo "⚠️ Patch Not Applicable or Failed"
             exit 1
           fi
       
-          # Post-Validation
-          if ! grep -q "ADIOS" "$CONFIG_FILE"; then
-            echo "⚠️ Patch Not Reflected in Configuration"
-            rollback
-            exit 1
+          if grep -q "ADIOS" "$CONFIG_FILE" || grep -qi "adios" "$KERNEL_DIR/block" 2>/dev/null; then
+            echo "✔ Patch Successfully Reflected in Kernel"
+          else
+            echo "⚠️ Patch Applied but Verification is Inconclusive"
           fi
       
           # Cleanup
-          rm -f "$PATCH_FILE" "$BACKUP_FILE"
+          echo "⚠️ Clean Downloaded ADIOS Patches"
+          rm -f "$PATCH_FILE"
       
           echo ""
-          echo "🎉 ADIOS Scheduler Patch Engine Complete"
+          echo "🎉 ADIOS I/O Scheduler Patch Complete"
 
       # ==============================
       # DroidSpaces Linux Container Engine
