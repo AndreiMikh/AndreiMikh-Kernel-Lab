@@ -1,0 +1,97 @@
+- name: 🔧 Fast Build
+  if: ${{ github.event.inputs.FASTBUILD == 'true' }}
+  id: fast_build
+  run: |
+    set -euo pipefail
+    on_error() {
+      local line="$1"
+      local code="$2"
+
+      echo "⚠️ Fast Build Failed at Line $line (Exit Code $code)"
+
+      if [[ -z "${FALLBACK_SET:-}" ]]; then
+        echo "fallback_reason=unexpected_error" >> "$GITHUB_OUTPUT"
+        echo "fallback=true" >> "$GITHUB_OUTPUT"
+        export FALLBACK_SET=1
+      fi
+
+      exit 0
+    }
+
+    trap 'on_error $LINENO $?' ERR
+
+    echo "------------------------------"
+    echo "🚀 Fast Kernel Build Processing..."
+    echo "------------------------------"
+    echo ""
+
+    # Environment Variables
+    FILEBASE="${{ env.FILE_BASE }}"
+    BRANCH="${{ env.FOUND_BRANCH }}"
+    CPU="${{ env.CPUD }}"
+    METHOD="${{ env.BUILD_METHOD }}"
+    GKIVER="${{ env.ANDROIDVERSION }}-${{ env.KERNELVERSION }}"
+    KERNELVERSION="${{ env.KERNELVERSION }}"
+
+    echo "-------- Kernel Build --------"
+    echo "📂 File     : $FILEBASE"
+    echo "📂 Branch   : $BRANCH"
+    echo "📂 CPU      : $CPU"
+    echo "📁 Method   : $METHOD"
+    echo "📁 Version  : $GKIVER"
+    echo "------------------------------"
+    echo ""
+
+    FAST_BUILD_START=$(date +%s)
+
+    # Clean Clang directory before using the default Clang or LLVM project Clang
+    echo "🧹 Cleaning up any existing Clang binaries in the Clang path..."
+    rm -rf "$GITHUB_WORKSPACE/kernel_workspace/kernel_platform/prebuilts/clang/host/linux-x86/*"
+
+    # Check if FILE ends with AOSP or aosp to use LLVM project Clang
+    if [[ "${{ github.event.inputs.FILE }}" =~ (AOSP|aosp)$ ]]; then
+      echo "⚠️ 'FILE' ends with 'AOSP' or 'aosp', using LLVM project Clang..."
+      
+      # Download and Unzip LLVM Project Clang
+      LLVM_VERSION=20  # specify the LLVM version you want to use
+      echo "🚀 Installing LLVM Clang Version ${LLVM_VERSION} from GitHub..."
+      curl -fsSL https://github.com/llvm/llvm-project/releases/download/llvmorg-${LLVM_VERSION}.0.0/clang+llvm-${LLVM_VERSION}-x86_64-linux-gnu-ubuntu-20.04.tar.xz -o clang.tar.xz
+      
+      # Extract the Clang to the correct path
+      tar -xf clang.tar.xz -C "$GITHUB_WORKSPACE/kernel_workspace/kernel_platform/prebuilts/clang/host/linux-x86" --strip-components=1
+      rm clang.tar.xz
+
+      export CC=clang
+      export CXX=clang++
+      echo "Clang ${LLVM_VERSION} installed successfully!"
+    else
+      echo "🧠 Using default Clang..."
+      # Initialize Clang Version Variable
+      CLANG_VERSION=""
+
+      # Check for available Clang versions (16 to 20)
+      for VERSION in 20 19 18 17 16; do
+        if command -v clang-${VERSION} &>/dev/null; then
+          CLANG_VERSION=${VERSION}
+          echo "Clang version ${VERSION} found, using it..."
+          break
+        fi
+      done
+
+      # If a Clang version was found, set the correct CC and CXX
+      if [[ -n "$CLANG_VERSION" ]]; then
+        export CC=clang-${CLANG_VERSION}
+        export CXX=clang++-${CLANG_VERSION}
+      else
+        echo "⚠️ No Clang found, falling back to LLVM project Clang..."
+        LLVM_VERSION=20  # specify the LLVM version
+        echo "🚀 Installing LLVM Clang Version ${LLVM_VERSION} from GitHub..."
+        curl -fsSL https://github.com/llvm/llvm-project/releases/download/llvmorg-${LLVM_VERSION}.0.0/clang+llvm-${LLVM_VERSION}-x86_64-linux-gnu-ubuntu-20.04.tar.xz -o clang.tar.xz
+        tar -xf clang.tar.xz -C "$GITHUB_WORKSPACE/kernel_workspace/kernel_platform/prebuilts/clang/host/linux-x86" --strip-components=1
+        rm clang.tar.xz
+        export CC=clang
+        export CXX=clang++
+        echo "Clang ${LLVM_VERSION} installed successfully!"
+      fi
+    fi
+
