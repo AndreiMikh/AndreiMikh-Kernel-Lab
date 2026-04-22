@@ -4933,102 +4933,94 @@ jobs:
         if: ${{ startsWith(github.event.inputs.ZRAMALGORITHM || '', '1/') }}
         id: zram_find
         run: |
-          set -euo pipefail
-      
+          set -e
+
           echo "------------------------------"
           echo "🚀 Starting ZRAM Addon Module Process..."
           echo "------------------------------"
           echo ""
       
-          ZRAMZIP="${GITHUB_WORKSPACE}/kernel_workspace/AndreiMikh-Kernel-Lab/patches/ZRAM.zip"
-          ZRAMDIRECTORY="ZRAM-Module"
-          ZRAMTARGETMODULE="${ZRAMDIRECTORY}/zram/zram.ko"
-      
-          # Parse ZRAM Algorithm safely
-          IFS='/' read -r _ ZRAMALGORITHM ZRAMSIZE <<< "${{ github.event.inputs.ZRAMALGORITHM }}"
-      
-          ZRAMALGORITHM="${ZRAMALGORITHM,,}"
-      
-          case "$ZRAMALGORITHM" in
+          ZRAM_ZIP="${GITHUB_WORKSPACE}/kernel_workspace/AndreiMikh-Kernel-Lab/patches/ZRAM.zip"
+          ZRAM_DIR="ZRAM-Module"
+          TARGET_MODULE="${ZRAM_DIR}/zram/zram.ko"
+
+          # Parse and Normalize ZRAM Algorithm Input, Normalize Casing (Safety, in Case Environment wasn't Normalized)
+          IFS='/' read -r _ ZRAM_ALGO ZRAM_SIZE <<< "${{ github.event.inputs.ZRAMALGORITHM }}"
+          ZRAM_ALGO=$(echo "$ZRAM_ALGO" | tr '[:upper:]' '[:lower:]')
+
+          # Validate Algorithm
+          case "$ZRAM_ALGO" in
             lz4|lz4k|lz4kd) ;;
             *)
-              echo "⚠️ Invalid ZRAM Algorithm: $ZRAMALGORITHM"
+              echo "⚠️ Invalid ZRAM Algorithm: $ZRAM_ALGO"
               exit 1
               ;;
           esac
-      
-          # Validate Zip
-          if [[ ! -f "$ZRAMZIP" ]]; then
-            echo "⚠️ ZRAM Zip Not Found: $ZRAMZIP"
+
+          # Check if ZRAM Module Zip Package Exists
+          if [ ! -f "$ZRAM_ZIP" ]; then
+            echo "⚠️ ZRAM Zip Not Found: $ZRAM_ZIP"
             echo "upload=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
       
           echo "🚀 Extracting ZRAM Addon Module Package..."
-          unzip -q "$ZRAMZIP" -d "$ZRAMDIRECTORY"
+          unzip "$ZRAM_ZIP" -d "$ZRAM_DIR"
       
-          ZRAMCONFIGPROP="${ZRAMDIRECTORY}/config.prop"
+          CONFIG_PROP="${ZRAM_DIR}/config.prop"
       
-          if [[ ! -f "$ZRAMCONFIGPROP" ]]; then
-            echo "⚠️ Configuration Properties Not Found"
+          if [ -f "$CONFIG_PROP" ]; then
+            echo "📌 Updating Configuration Prop"
+          
+            sed -i "s/^ZRAM_ALGO=.*/ZRAM_ALGO=${ZRAM_ALGO}/" "$CONFIG_PROP"
+            sed -i "s/^ZRAM_SIZE=.*/ZRAM_SIZE=${ZRAM_SIZE}/" "$CONFIG_PROP"
+          
+            echo "📌 Configured Values:"
+            echo "ZRAM_ALGO=${ZRAM_ALGO}"
+            echo "ZRAM_SIZE=${ZRAM_SIZE}"
+          else
+            echo "⚠️ Configuration Prop Not Found"
             echo "upload=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
       
-          echo "📌 Updating Configuration Properties..."
-      
-          sed -i "s/^ZRAMALGORITHM=.*/ZRAMALGORITHM=${ZRAMALGORITHM}/" "$ZRAMCONFIGPROP"
-          sed -i "s/^ZRAMSIZE=.*/ZRAMSIZE=${ZRAMSIZE}/" "$ZRAMCONFIGPROP"
-      
-          echo "📌 Configured Values:"
-          echo "ZRAMALGORITHM=${ZRAMALGORITHM}"
-          echo "ZRAMSIZE=${ZRAMSIZE}"
-      
-          # Locate ZRAM.ko
           echo "🔎 Searching for Compiled ZRAM.ko..."
-      
-          ZRAMPATH=""
       
           search_paths=(
             "./kernel_workspace/kernel_platform/out"
             "./kernel_workspace/device/qcom"
-            "./kernel_workspace"
           )
       
+          zram_path=""
+      
           for path in "${search_paths[@]}"; do
-            [[ -d "$path" ]] || continue
-      
-            ZRAMPATH=$(find "$path" -type f -name "zram.ko" -print -quit 2>/dev/null || true)
-      
-            if [[ -n "$ZRAMPATH" ]]; then
-              break
+            if [ -d "$path" ]; then
+              zram_path=$(find "$path" -type f -name "zram.ko" | head -n 1)
+              if [ -n "$zram_path" ]; then
+                break
+              fi
             fi
           done
-      
+
           # Final Fallback Search
-          if [[ -z "$ZRAMPATH" ]]; then
-            ZRAMPATH=$(find "./kernel_workspace" -type f -name "zram.ko" -print -quit 2>/dev/null || true)
+          if [ -z "$zram_path" ]; then
+            zram_path=$(find "./kernel_workspace" -type f -name "zram.ko" | head -n 1)
           fi
       
-          # Validate Result
-          if [[ -z "$ZRAMPATH" || ! -f "$ZRAMPATH" ]]; then
-            echo "⚠️ ZRAM.ko Not Found"
-            echo "Possible Causes:"
-            echo " - Kernel Module Build Failed"
-            echo " - Different Module Name"
-            echo " - Unsupported Kernel Version"
-      
+          if [ -n "$zram_path" ] && [ -f "$zram_path" ]; then
+            echo "✔️ ZRAM.ko Located at: $zram_path"
+            install -D "$zram_path" "$TARGET_MODULE"
+          else
+            echo "⚠️ ZRAM.ko Not Found, Possible Reasons:"
+            echo "🚩 Unsupported Kernel Version"
+            echo "🚩 Kernel Module Build Failed"
+            echo "🚩 Module Compiled with Different Name"
             echo "upload=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
-      
-          echo "✔️ ZRAM.ko Located at: $ZRAMPATH"
-      
-          install -D "$ZRAMPATH" "$ZRAMTARGETMODULE"
-      
+
           echo ""
           echo "🎉 ZRAM Addon Module Prepared Successfully"
-          echo "upload=true" >> "$GITHUB_OUTPUT"
 
       # ==============================
       # AI APK Workflow Resolver
