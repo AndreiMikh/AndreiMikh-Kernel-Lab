@@ -4068,7 +4068,7 @@ jobs:
               export FALLBACK_SET=1
             fi
 
-            exit 0
+            exit 1
           }
 
           trap 'on_error $LINENO $?' ERR
@@ -4119,7 +4119,7 @@ jobs:
             echo "fallback_reason=missing_clang_prebuilt_bin" >> "$GITHUB_OUTPUT"
             echo "fallback=true" >> "$GITHUB_OUTPUT"
             export FALLBACK_SET=1
-            exit 0
+            exit 1
           fi
 
           # Clang Version Detection
@@ -4140,23 +4140,27 @@ jobs:
               echo "📌 Detected Clang Version from Build Configuration: $CLANG_VERSION"
             fi
 
-          # If Still Couldn't Determine the Version, Try Running Clang --Version and Parsing the Output
-          elif [[ -z "$CLANG_VERSION" && -x "$CLANG_FULL_PATH" ]]; then
-            CLANG_VERSION=$("$CLANG_FULL_PATH" --version 2>/dev/null | grep -oP 'clang version \K([0-9]+\.[0-9]+\.[0-9]+)' || true)
-            if [[ -n "$CLANG_VERSION" ]]; then
-              echo "📌 Detected Clang Version from Clang --Version: $CLANG_VERSION"
+          # If Still Couldn't Determine Version, try clang Version Fallback
+          elif [[ -z "$CLANG_VERSION" ]]; then
+            if [[ -x "${CLANG_FULL_PATH:-}" ]]; then
+              CLANG_VERSION=$("$CLANG_FULL_PATH" --version 2>/dev/null \
+                | head -n1 \
+                | sed -E 's/.*clang version ([0-9.]+).*/\1/' || true)
+          
+              if [[ -n "$CLANG_VERSION" ]]; then
+                echo "📌 Detected Clang Version from Clang Version: $CLANG_VERSION"
+              fi
             fi
           fi
-
-          # If No Version could be Determined, Log the Error and Fallback
+          
+          # Final Validation
           if [[ -z "$CLANG_VERSION" ]]; then
             echo "⚠️ Unable to Determine Clang Version"
             echo "fallback_reason=missing_clang_version" >> "$GITHUB_OUTPUT"
             echo "fallback=true" >> "$GITHUB_OUTPUT"
             export FALLBACK_SET=1
-
-            # Fail Gracefully by Providing a Clear Exit Message
-            echo "⚠️ Exiting the Build Due to Missing Clang Version Detection"
+          
+            echo "⚠️ Exiting Build Due to Missing Clang Version Detection"
             exit 1
           fi
 
@@ -4189,7 +4193,7 @@ jobs:
             echo "fallback_reason=missing_clang" >> "$GITHUB_OUTPUT"
             echo "fallback=true" >> "$GITHUB_OUTPUT"
             export FALLBACK_SET=1
-            exit 0
+            exit 1
           fi
 
           # Extract Directory Information
@@ -4279,40 +4283,59 @@ jobs:
             echo "fallback_reason=gki_defconfig_failed" >> "$GITHUB_OUTPUT"
             echo "fallback=true" >> "$GITHUB_OUTPUT"
             export FALLBACK_SET=1
-            exit 0
+            exit 1
           fi
           
           # Link Time Optimization (LTO) Configuration
-          echo ">> 🧾 Configuring Link Time Optimization for Kernel $KERNELVERSION"
-
-          if [[ ! -f out/.config ]]; then
-            echo "⚠️ Configuration Not Found, Skipping LTO"
-
-          elif [[ ! -f scripts/config ]]; then
-            echo "⚠️ Scripts / Configuration Missing, Skipping LTO"
-
+          echo "🧾 Configuring Link Time Optimization (LTO) Configuration for Kernel $KERNELVERSION"
+          
+          # 1️⃣ Check Kernel Configuration First
+          if [[ ! -s out/.config ]]; then
+            echo "⚠️ Configuration Not Found — Skipping Link Time Optimization (LTO) Configuration"
+            echo "📊 Link Time Optimization (LTO) Status: Skipped (Reason: Missing Scripts / Configuration)"
+          
           else
-            case "$KERNELVERSION" in
-              "5.10"|"5.15")
-                echo ">> 🚀 Link Time Optimization: Thin"
-                scripts/config --file out/.config \
-                  -e LTO_CLANG \
-                  -e LTO_CLANG_THIN \
-                  -d LTO_CLANG_NONE \
-                  -d LTO_CLANG_FULL
-                ;;
-              "6.12")
-                echo ">> 🚀 Link Time Optimization: None"
-                scripts/config --file out/.config \
-                  -e LTO_CLANG \
-                  -e LTO_CLANG_NONE \
-                  -d LTO_CLANG_THIN \
-                  -d LTO_CLANG_FULL
-                ;;
-              *)
-                echo ">> ⚠️ Link Time Optimization: Skipped for Kernel $KERNELVERSION"
-                ;;
-            esac
+            # Auto-Detect scripts/config location
+            CONFIGTOOL=""
+          
+            if [[ -x ../scripts/config ]]; then
+              CONFIGTOOL="../scripts/config"
+            elif [[ -x ./scripts/config ]]; then
+              CONFIGTOOL="./scripts/config"
+            elif [[ -x ../../scripts/config ]]; then
+              CONFIGTOOL="../../scripts/config"
+            else
+              CONFIGTOOL=$(find .. -type f -name config -path "*/scripts/config" -executable 2>/dev/null | head -n1 || true)
+            fi
+          
+            # 2️⃣ Check Scripts / Configuration Separately
+            if [[ -z "$CONFIGTOOL" ]]; then
+              echo "⚠️ Scripts / Configuration Not Found — Skipping Link Time Optimization (LTO) Configuration"
+              echo "📊 Link Time Optimization (LTO) Status: Skipped (Reason: Missing Scripts / Configuration)"
+            else
+              case "$KERNELVERSION" in
+                "5.10"|"5.15")
+                  echo ">> 🚀 Link Time Optimization (LTO): Thin"
+                  "$CONFIGTOOL" --file out/.config \
+                    -e LTO_CLANG_THIN \
+                    -d LTO_CLANG_NONE \
+                    -d LTO_CLANG_FULL
+                  ;;
+          
+                "6.12")
+                  echo ">> 🚀 Link Time Optimization (LTO): None"
+                  "$CONFIGTOOL" --file out/.config \
+                    -e LTO_CLANG_NONE \
+                    -d LTO_CLANG_THIN \
+                    -d LTO_CLANG_FULL
+                  ;;
+          
+                *)
+                  echo "⚠️ Link Time Optimization (LTO) skipped for Kernel $KERNELVERSION"
+                  echo "📊 Link Time Optimization (LTO) Status: Skipped (Reason: Unsupported Kernel Version)"
+                  ;;
+              esac
+            fi
           fi
 
           # Final Default Configuration and Build
@@ -4322,7 +4345,7 @@ jobs:
             echo "fallback_reason=olddefconfig_failed" >> "$GITHUB_OUTPUT"
             echo "fallback=true" >> "$GITHUB_OUTPUT"
             export FALLBACK_SET=1
-            exit 0
+            exit 1
           fi
           
           # System Resource Information
@@ -4336,7 +4359,7 @@ jobs:
             echo "fallback_reason=compile_failed" >> "$GITHUB_OUTPUT"
             echo "fallback=true" >> "$GITHUB_OUTPUT"
             export FALLBACK_SET=1
-            exit 0
+            exit 1
           fi
           
           echo "📊 Compiler Cache Statistics"
