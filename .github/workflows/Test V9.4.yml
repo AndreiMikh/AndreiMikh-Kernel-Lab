@@ -4394,18 +4394,21 @@ jobs:
         if: ${{ steps.fast_build.outputs.fallback == 'true' || github.event.inputs.FASTBUILD != 'true' }}
         run: |
           set -Eeuo pipefail
-
+      
           FALLBACK_START=$(date +%s)
-
+      
           # Navigate
-          cd kernel_workspace
-
+          cd kernel_workspace/kernel_platform || {
+            echo "⚠️ Kernel Platform Not Found"
+            exit 1
+          }
+      
           # Environment Variables
           FILEBASE="${{ env.FILE_BASE }}"
           CPU="${{ env.CPUD }}"
           METHOD="${{ env.BUILD_METHOD }}"
           GKIV="${{ env.ANDROIDVERSION }}-${{ env.KERNELVERSION }}"
-
+      
           echo "-------- Kernel Build --------"
           echo "📂 File     : $FILEBASE"
           echo "📂 CPU      : $CPU"
@@ -4413,65 +4416,80 @@ jobs:
           echo "📁 Version  : $GKIV"
           echo "------------------------------"
           echo ""
-
+      
           echo "⚠️ Fallback Reason: ${{ steps.fast_build.outputs.fallback_reason || 'unknown' }}"
-
+      
           if [[ -n "${{ steps.fast_build.outputs.fast_build_time }}" ]]; then
             echo "⏱️ Fast Build Ran For: ${{ steps.fast_build.outputs.fast_build_time }}s (before fallback)"
           fi
           echo ""
-
-          # Clean Previous Build Artifacts
-          echo "🧹 Cleaning up Previous Build Artifacts..."
-          rm -rf out/ || true  # Adjust the Path as Needed
-          # For Bazel, Also Clean Caches if Applicable
-          if [[ -x "$(command -v bazel)" ]]; then
-            echo "🔎 Bazel Detected, Cleaning Build..."
-            bazel clean --expunge
+      
+          # Restore Fast Build Cache
+          echo "📥 Restoring Fast Build Cache..."
+      
+          if [[ -d ../cache ]]; then
+            [[ -f ../cache/.config ]] && cp ../cache/.config out/.config || true
+            [[ -d ../cache/include ]] && mkdir -p out && cp -rf ../cache/include out/ || true
+            [[ -f ../cache/Module.symvers ]] && cp ../cache/Module.symvers out/ || true
+      
+            echo "✔ Cache Restored from Fast Build"
+          else
+            echo "⚠️ No Fast Build Cache Found (Full Rebuild)"
           fi
-
-          # Default Build Flags
+      
+          # Cleanup
+          echo "🧹 Cleaning up Previous Build Artifacts..."
+          rm -rf out || true
+      
+          if command -v bazel >/dev/null 2>&1; then
+            echo "🔎 Bazel Detected, Cleaning Build..."
+            bazel clean --expunge || true
+          fi
+      
+          # Build Flags
           export LTO=${LTO:-thin}
           export SYSTEM_DLKM_RE_SIGN=${SYSTEM_DLKM_RE_SIGN:-0}
           export BUILD_SYSTEM_DLKM=${BUILD_SYSTEM_DLKM:-0}
           export KMI_SYMBOL_LIST_STRICT_MODE=${KMI_SYMBOL_LIST_STRICT_MODE:-0}
-
-          # Detect Build System
-          if [[ -f "$BAZEL_SCRIPT" ]]; then
+      
+          # Build System Detection
+          if [[ -n "${BAZEL_SCRIPT:-}" && -f "$BAZEL_SCRIPT" ]]; then
             echo "🔎 Detected Bazel / KLeaf Build System"
+      
             ./kernel_platform/oplus/bazel/oplus_modules_variant.sh "$CPU" "$METHOD"
-            python3 "$BAZEL_SCRIPT" \
-              -t "$CPU" \
-              "$METHOD"
-          elif [[ -f "$OPLUS_SCRIPT" ]]; then
+      
+            python3 "$BAZEL_SCRIPT" -t "$CPU" "$METHOD"
+      
+          elif [[ -n "${OPLUS_SCRIPT:-}" && -f "$OPLUS_SCRIPT" ]]; then
             echo "🔎 Detected Legacy OPlus Build System"
-            "$OPLUS_SCRIPT" \
-              "$CPU" \
-              "$METHOD"
+      
+            "$OPLUS_SCRIPT" "$CPU" "$METHOD"
+      
           else
             echo "⚠️ ERROR: No Valid Build System Found"
             exit 1
           fi
-
+      
+          # Final Summary
           FALLBACK_END=$(date +%s)
           FALLBACK_TIME=$((FALLBACK_END - FALLBACK_START))
-
+      
+          echo ""
           echo "⏱️ Fallback Build Time: ${FALLBACK_TIME}s"
-
           echo "🎉 Build Done"
-
+      
           echo ""
           echo "🏁 Total CI Insight :"
           echo "------------------------------"
           echo "📊 Build Time Summary"
           echo "------------------------------"
-
+      
           if [[ -n "${{ steps.fast_build.outputs.fast_build_time }}" ]]; then
             echo "⚡ Fast Build : ${{ steps.fast_build.outputs.fast_build_time }}s"
           else
             echo "⚡ Fast Build : Skipped"
           fi
-
+      
           echo ""
           echo "🐢 Fallback Build : ${FALLBACK_TIME}s"
 
