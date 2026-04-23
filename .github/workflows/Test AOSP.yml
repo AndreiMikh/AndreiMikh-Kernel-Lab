@@ -71,37 +71,85 @@ jobs:
 
       - name: 🔧 Install and Cache Build Dependencies
         run: |
-          sudo apt-get update
-          sudo apt-get install git dwarves libelf-dev ccache automake flex bison build-essential zlib1g-dev libncurses5-dev libc6-dev-i386 bc device-tree-compiler python3 make
-          mkdir -p $GITHUB_WORKSPACE/kernel_workspace
+          export DEBIAN_FRONTEND=noninteractive
+      
+          echo "📦 Updating package list..."
+          sudo apt-get update -y
+      
+          echo "📥 Installing dependencies..."
+          sudo apt-get install -y \
+            git \
+            dwarves \
+            libelf-dev \
+            ccache \
+            automake \
+            flex \
+            bison \
+            build-essential \
+            zlib1g-dev \
+            libncurses5-dev \
+            libc6-dev-i386 \
+            bc \
+            device-tree-compiler \
+            python3 \
+            make
+      
+          echo "📁 Preparing workspace..."
+          mkdir -p "$GITHUB_WORKSPACE/kernel_workspace"
 
       - name: Cache Clang Toolchain
         id: cache-clang
         uses: actions/cache@v4
         with:
           path: ${{ github.workspace }}/kernel_workspace/clang-aosp
-          key: ${{ env.CLANG_VERSION }}
+          key: clang-aosp-${{ env.CLANG_VERSION }}
+          restore-keys: |
+            clang-aosp-
 
       - name: Download and Extract Clang-AOSP
         if: steps.cache-clang.outputs.cache-hit != 'true'
-        run: |
+        run: |      
           cd $GITHUB_WORKSPACE/kernel_workspace
+      
+          echo "📥 Creating toolchain directory..."
           mkdir -p clang-aosp
-          wget -O ${CLANG_VERSION}.tar.gz \
+      
+          echo "⬇️ Downloading Clang toolchain..."
+          wget -q --show-progress --tries=5 --timeout=30 \
+            -O ${CLANG_VERSION}.tar.gz \
             https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/main/${CLANG_VERSION}.tar.gz
-          tar -C clang-aosp -zxvf ${CLANG_VERSION}.tar.gz
+      
+          echo "📦 Extracting..."
+          tar -xzf ${CLANG_VERSION}.tar.gz -C clang-aosp
+      
+          echo "🧹 Cleaning up..."
+          rm -f ${CLANG_VERSION}.tar.gz
 
-      - name: Download Kernel Source
+      - name: Download Kernel Source (Optimized)
         run: |
           cd $GITHUB_WORKSPACE/kernel_workspace
-          git clone --recursive https://github.com/LineageOS/android_kernel_oneplus_sm8750 -b lineage-23.2 common --depth=1
-          cd $GITHUB_WORKSPACE/kernel_workspace/common/scripts
+      
+          echo "📥 Cloning kernel (fast shallow + no blobs)"
+          git clone --depth=1 --recursive \
+            --filter=blob:none \
+            https://github.com/LineageOS/android_kernel_oneplus_sm8750 \
+            -b lineage-23.2 common
+      
+          cd common/scripts
           sed -i 's/ -dirty//g' setlocalversion
+      
           cd $GITHUB_WORKSPACE/kernel_workspace
-          git clone --recursive https://github.com/LineageOS/android_kernel_oneplus_sm8750-modules -b lineage-23.2 sm8750-modules --depth=1
-          sed -i '$a CONFIG_DODGE_DTB=y' $GITHUB_WORKSPACE/kernel_workspace/common/arch/arm64/configs/vendor/oplus/sun_perf.config
-          sed -i '$a CONFIG_KSU=y' $GITHUB_WORKSPACE/kernel_workspace/common/arch/arm64/configs/vendor/oplus/sun_perf.config
-          sed -i '$a CONFIG_KSU_SUSFS=y' $GITHUB_WORKSPACE/kernel_workspace/common/arch/arm64/configs/vendor/oplus/sun_perf.config
+      
+          echo "📥 Cloning modules"
+          git clone --depth=1 --recursive \
+            --filter=blob:none \
+            https://github.com/LineageOS/android_kernel_oneplus_sm8750-modules \
+            -b lineage-23.2 sm8750-modules
+      
+          echo "⚙️ Patching config"
+          sed -i '$a CONFIG_DODGE_DTB=y' common/arch/arm64/configs/vendor/oplus/sun_perf.config
+          sed -i '$a CONFIG_KSU=y' common/arch/arm64/configs/vendor/oplus/sun_perf.config
+          sed -i '$a CONFIG_KSU_SUSFS=y' common/arch/arm64/configs/vendor/oplus/sun_perf.config
           
       - name: 🔧 Configure Git Identity
         shell: bash
@@ -219,9 +267,7 @@ jobs:
           echo ""
 
       - name: 🔧 Configure Selected Root Engine
-        run: |
-          set -euo pipefail
-      
+        run: |      
           # Enter Kernel Workspace
           cd kernel_workspace/kernel_platform || exit 1
 
@@ -560,14 +606,7 @@ jobs:
       - name: 🔧 Linux Security Module Baseband Guard
         if: ${{ github.event.inputs.LSMBBG == 'true' }}
         shell: bash
-        run: |
-          set -euo pipefail
-      
-          echo "------------------------------"
-          echo "🚀 Linux Security Baseband Guard Setup..."
-          echo "------------------------------"
-          echo ""
-      
+        run: |      
           # Navigate to Kernel Common Directory
           KCDIR="kernel_workspace/kernel_platform/common"
           MAXRETRIES=3
@@ -641,14 +680,7 @@ jobs:
           echo "🎉 Baseband Guard Fully Applied and Configured"
 
       - name: 🔧 Kernel Configuration
-        run: |
-          set euo pipefail
-          
-          echo "------------------------------"
-          echo "🚀 Kernel Configuration Settings Setup..."
-          echo "------------------------------"
-          echo ""
-          
+        run: |          
           # Navigate to the Correct Directory
           cd kernel_workspace/kernel_platform/common
 
@@ -656,7 +688,6 @@ jobs:
           DEFCONFIG=./arch/arm64/configs/gki_defconfig
 
           # Get Github Environment Variables and GitHub Actions Inputs        
-          KERNEL="6.6"
           ROOT="${{ github.event.inputs.ROOTENGINE }}"
           TCP="${{ github.event.inputs.TCPALGORITHM }}"
           LSM="${{ github.event.inputs.LSMBBG }}"
@@ -673,18 +704,10 @@ jobs:
             echo "☘️ Multi-Manager Support Not Enabled, as KSU Meta Root Engine is Not ReSukiSU"
           fi
 
-          # Check if SukiSU-Ultra KernelPatch-Module Input is SukiSU-Ultra KernelPatch-Module (KPM), Enable SukiSU-Ultra KernelPatch-Module
-          if [[ "$KERNELPATCH" == "KPM" ]]; then
-            cat >> "$DEFCONFIG" << EOF
-          CONFIG_KPM=y
-          EOF
-            echo "🎉 SukiSU-Ultra KernelPatch-Module Enabled (Supported KSU Meta Root Engine: ReSukiSU and SukiSU-Ultra)"
-          fi
-
           # KSU Meta Root Engine Configuration
           cat >> "$DEFCONFIG" << EOF
-          CONFIG_KSU=y                    # Enable KSU Meta Root Engine Support
-          CONFIG_KSU_SUSFS=y              # Enable SUSFS Meta Support
+          CONFIG_KSU=y                    
+          CONFIG_KSU_SUSFS=y              
           EOF
 
           # Apply SUSFS Meta Core Configuration           
@@ -751,7 +774,7 @@ jobs:
           fi
           
           # IPSet and IPv6 NAT Configuration
-          if [[ "$CPU" == sm* && "$NET" == "true" ]]; then
+          if [[ "$NET" == "true" ]]; then
             # Netfilter and IPSet Core Configuration
             cat >> "$DEFCONFIG" << EOF
           CONFIG_NETFILTER_XT_MATCH_ADDRTYPE=y
@@ -785,14 +808,7 @@ jobs:
       - name: 🔧 IPv6 NAT Fix Stage
         if: ${{ github.event.inputs.NETFILTER == 'true' }}
         shell: bash
-        run: |
-          set -euo pipefail
-      
-          echo "------------------------------"
-          echo "🚀 IPv6 NAT Fix Stage..."
-          echo "------------------------------"
-          echo ""
-
+        run: |    
           # Paths
           PATCHDIRECTORY="${GITHUB_WORKSPACE}/kernel_workspace/AndreiMikh-Kernel-Lab/patches"
           KCDIR="${GITHUB_WORKSPACE}/kernel_workspace/kernel_platform/common"
@@ -837,48 +853,64 @@ jobs:
           echo "🎉 IPv6 NAT Fix Stage Completed"
 
       - name: Build Kernel
-        run: |
+        run: |      
           cd $GITHUB_WORKSPACE/kernel_workspace/common
-          LTO=thin
+      
           export ARCH=arm64
           export SUBARCH=arm64
           export HEADER_ARCH=arm64
+          export LTO=thin
+      
           export PATH=$GITHUB_WORKSPACE/kernel_workspace/clang-aosp/bin:$PATH
           export KBUILD_BUILD_HOST=Github-Action
-          export KBUILD_BUILD_USER=$(echo ${{ github.actor }} | tr A-Z a-z)
-          AR_CMD="ARCH=${ARCH} SUBARCH=${SUBARCH} HEADER_ARCH=${HEADER_ARCH}"
-          BA_CMD="CC=clang CXX=clang++"
-          EX_CMD="LD=ld.lld AR=llvm-ar NM=llvm-nm OBJCOPY=llvm-objcopy OBJDUMP=llvm-objdump READELF=llvm-readelf OBJSIZE=llvm-size STRIP=llvm-strip LLVM=1 LLVM_IAS=1"
-          DEFCONFIG="gki_defconfig vendor/sun_perf.config vendor/oplus/sun_perf.config"
-          make O=out $AR_CMD $BA_CMD $EX_CMD $DEFCONFIG
-          scripts/config --file out/.config -e LTO_CLANG -d LTO_NONE -e LTO_CLANG_THIN -d LTO_CLANG_FULL -e THINLTO
-          make -j$(nproc --all) O=out $AR_CMD $BA_CMD $EX_CMD
-
-      - name: Check kernel output files
-        run: |
-         cd $GITHUB_WORKSPACE/kernel_workspace
-         if [ -f common/out/arch/arm64/boot/Image ]; then
-             echo "CHECK_IMAGE=true" >> $GITHUB_ENV
-         else
-             echo "Kernel output file is empty"
-             exit 1
-         fi
+      
+          echo "⚙️ Starting config..."
+      
+          make O=out \
+            ARCH=$ARCH \
+            SUBARCH=$SUBARCH \
+            HEADER_ARCH=$HEADER_ARCH \
+            CC=clang CXX=clang++ \
+            LD=ld.lld AR=llvm-ar NM=llvm-nm OBJCOPY=llvm-objcopy \
+            OBJDUMP=llvm-objdump READELF=llvm-readelf OBJSIZE=llvm-size \
+            STRIP=llvm-strip LLVM=1 LLVM_IAS=1 \
+            gki_defconfig vendor/sun_perf.config vendor/oplus/sun_perf.config
+      
+          scripts/config --file out/.config \
+            -e LTO_CLANG \
+            -d LTO_NONE \
+            -e LTO_CLANG_THIN \
+            -d LTO_CLANG_FULL \
+            -e THINLTO
+      
+          echo "🚀 Building kernel..."
+          make -j"$(nproc)" O=out
+      
+            - name: Check kernel output files
+              run: |
+               cd $GITHUB_WORKSPACE/kernel_workspace
+               if [ -f common/out/arch/arm64/boot/Image ]; then
+                   echo "CHECK_IMAGE=true" >> $GITHUB_ENV
+               else
+                   echo "Kernel output file is empty"
+                   exit 1
+               fi
         
       - name: Make AnyKernel3
         run: |
           cd $GITHUB_WORKSPACE/kernel_workspace
-          git clone https://github.com/Kernel-SU/AnyKernel3 --depth=1
+          git clone --depth=1 https://github.com/AndreiMikh/AnyKernel3
           rm -rf AnyKernel3/.git
           cp common/out/arch/arm64/boot/Image AnyKernel3/
     
       - name: Upload Image
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: Image-Official-KSU
           path: kernel_workspace/common/out/arch/arm64/boot/Image
   
       - name: Upload AnyKernel3
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: AK3-LineageOS-23.2-Dodge-Official
           path: kernel_workspace/AnyKernel3/*
