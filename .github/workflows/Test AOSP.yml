@@ -32,20 +32,6 @@ on:
          - WildKSU-Canary
          - WildKSU-Canary-Spoofed
          - KernelSU-Main            
-      NETFILTER:
-        type: boolean
-        description: "Network Feature Extensions (NetFilter)"
-        required: true
-        default: true        
-      TCPALGORITHM:
-        type: choice
-        description: "Network Optimization Algorithm (BBR + ECN)"
-        required: true
-        default: BBR+ECN
-        options:
-          - BBR+ECN              # Base BBR + ECN Settings, Safe Default
-          - BBR+ECN+Brutal       # Apply Brutal as Default + Cubic Fallback
-          - None                 # Skip BBR + ECN Configuration
        
 jobs:
   build:
@@ -440,15 +426,7 @@ jobs:
             # Clean Old Entry and Add New Format
             sed -i '/KSU_VERSION_FULL/d' "$DEFCONFIG"
             printf 'CONFIG_KSU_VERSION_FULL="%s-%s-Andrei"\n' "$KSU_API_VERSION" "$GIT_COMMIT_HASH" >> "$DEFCONFIG"    
-             
-            # Temporarily Disable Manual Hook if SUSFS is Enabled
-            if [[ "$SUSFS" != "-1" ]]; then
-              echo "CONFIG_KSU_MANUAL_HOOK=n" >> "$DEFCONFIG"
-              echo "✔️ Manual Hook Disabled"
-            else
-              echo "⚠️ Failed to Disable Manual Hook"
-            fi
-            
+                        
             echo "🎉 SukiSU-Ultra Ready"
       
           # ReSukiSU Setup
@@ -617,8 +595,6 @@ jobs:
           # Get Github Environment Variables and GitHub Actions Inputs        
           ROOT="${{ github.event.inputs.ROOTENGINE }}"
           TCP="${{ github.event.inputs.TCPALGORITHM }}"
-          LSM="${{ github.event.inputs.LSMBBG }}"
-          NET="${{ github.event.inputs.NETFILTER }}"
 
           # Check if KSU Meta Root Engine is ReSukiSU
           if [[ "$ROOT" == "ReSukiSU" ]]; then
@@ -659,7 +635,6 @@ jobs:
           else
             echo "🧩 SUSFS Meta Core Configuration Skipped for $FILE"
           fi
-
           
           # TMPFS Configuration (Mountify)
           echo "🚀 Applying TMPFS Configuration..."
@@ -668,131 +643,21 @@ jobs:
           CONFIG_TMPFS_POSIX_ACL=y
           EOF
           echo "🎉 TMPFS Configuration Applied"
-
-          # BBR + ECN Kernel Configuration with Brutal Default and Cubic Fallback
-          if [[ "$TCP" == "BBR+ECN" || "$TCP" == "BBR+ECN+Brutal" ]]; then
-            echo "🚀 Applying BBR + ECN / Brutal Configurations..."          
-            # Base BBR + ECN Settings (Always Applied)
-            cat >> "$DEFCONFIG" << EOF
-          CONFIG_TCP_CONG_ADVANCED=y
-          CONFIG_TCP_CONG_BBR=y
-          CONFIG_NET_SCH_FQ=y
-          CONFIG_TCP_CONG_BIC=n
-          CONFIG_TCP_CONG_WESTWOOD=n
-          CONFIG_TCP_CONG_HTCP=n
-          CONFIG_IP_ECN=y
-          CONFIG_TCP_ECN=y
-          CONFIG_IPV6_ECN=y
-          CONFIG_IP_NF_TARGET_ECN=y
-          EOF          
-          else
-            echo "☘️ Congestion Control Disabled, Skipping BBR + ECN Configuration"
-            echo "🧩 Default Congestion Control Remains Unchanged"
-          fi
-
-          # Linux Security Module Baseband Guard Configuration
-          if [[ "$LSM" == "true" ]]; then
-            cat >> "$DEFCONFIG" << EOF
-          CONFIG_BBG=y
-          EOF
-            echo "🎉 Linux Security Module Baseband Guard Configuration Applied"
-          else
-            echo "☘️ Linux Security Module Baseband Guard Disabled, Skipping..."
-          fi
           
-          # IPSet and IPv6 NAT Configuration
-          if [[ "$NET" == "true" ]]; then
-            # Netfilter and IPSet Core Configuration
-            cat >> "$DEFCONFIG" << EOF
-          CONFIG_NETFILTER_XT_MATCH_ADDRTYPE=y
-          CONFIG_NETFILTER_XT_SET=y
-          CONFIG_IP_SET=y
-          CONFIG_IP_SET_MAX=65534
-          CONFIG_IP_SET_BITMAP_IP=y
-          CONFIG_IP_SET_BITMAP_IPMAC=y
-          CONFIG_IP_SET_BITMAP_PORT=y
-          CONFIG_IP_SET_HASH_IP=y
-          CONFIG_IP_SET_HASH_IPMARK=y
-          CONFIG_IP_SET_HASH_IPPORT=y
-          CONFIG_IP_SET_HASH_IPPORTIP=y
-          CONFIG_IP_SET_HASH_IPPORTNET=y
-          CONFIG_IP_SET_HASH_IPMAC=y
-          CONFIG_IP_SET_HASH_MAC=y
-          CONFIG_IP_SET_HASH_NETPORTNET=y
-          CONFIG_IP_SET_HASH_NET=y
-          CONFIG_IP_SET_HASH_NETNET=y
-          CONFIG_IP_SET_HASH_NETPORT=y
-          CONFIG_IP_SET_HASH_NETIFACE=y
-          CONFIG_IP_SET_LIST_SET=y
-          CONFIG_IP6_NF_NAT=y
-          CONFIG_IP6_NF_TARGET_MASQUERADE=y
-          EOF
-            echo "🎉 Netfilter and IPSet Core Configuration Applied"
-          else
-            echo "☘️ Netfilter and IPSet Core Configuration Disabled, Skipping..."
-          fi
-          
-      - name: 🔧 IPv6 NAT Fix Stage
-        if: ${{ github.event.inputs.NETFILTER == 'true' }}
-        shell: bash
-        run: |    
-          # Paths
-          PATCHDIRECTORY="${GITHUB_WORKSPACE}/kernel_workspace/AndreiMikh-Kernel-Lab/patches"
-          KCDIR="${GITHUB_WORKSPACE}/kernel_workspace/kernel_platform/common"
-          IPV6PATCHFILE="${PATCHDIRECTORY}/IPv6.patch"
-      
-          echo "✔ NetFilter Enabled — 🔎 Checking IPv6 NAT Compatibility..."
-      
-          # Validate Target Directory
-          if [[ ! -d "$KCDIR" ]]; then
-              echo "⚠️ Target Directory Not Found:"
-              echo "$KCDIR"
-              exit 1
-          fi
-      
-          cd "$KCDIR"
-      
-          # Validate Patch File
-          if [[ ! -f "$IPV6PATCHFILE" ]]; then
-              echo "⚠️ Patch File Not Found:"
-              echo "$IPV6PATCHFILE"
-              exit 1
-          fi
-      
-          # Check CPU Support
-          if [[ "${CPU:-}" != sm* ]]; then
-              echo "⚠️ Device CPU Not Supported for IPv6 NAT Fix — Skipping"
-              exit 0
-          fi
-      
-          echo "📊 Device CPU Supports IPv6 NAT Fix"
-
-          # Check if Patch Already Applied
-          if patch --dry-run -p1 < "$IPV6PATCHFILE" >/dev/null 2>&1; then
-              echo "🚀 Applying IPv6 NAT Compatibility Patch..."
-              patch -p1 -F3 < "$IPV6PATCHFILE"
-              echo "✔ IPv6 NAT Fix Applied Successfully"
-          else
-              echo "⚙️ IPv6 NAT Patch Already Applied or Not Needed"
-          fi
-
-          echo ""
-          echo "🎉 IPv6 NAT Fix Stage Completed"
-
       - name: Build Kernel
-        run: |      
+        run: |
           cd ${GITHUB_WORKSPACE}/kernel_workspace/common
-      
+
           export ARCH=arm64
           export SUBARCH=arm64
           export HEADER_ARCH=arm64
           export LTO=thin
-      
+
           export PATH=${GITHUB_WORKSPACE}/kernel_workspace/clang-aosp/bin:$PATH
           export KBUILD_BUILD_HOST=Github-Action
-      
+
           echo "⚙️ Starting config..."
-      
+
           make O=out \
             ARCH=$ARCH \
             SUBARCH=$SUBARCH \
@@ -802,26 +667,26 @@ jobs:
             OBJDUMP=llvm-objdump READELF=llvm-readelf OBJSIZE=llvm-size \
             STRIP=llvm-strip LLVM=1 LLVM_IAS=1 \
             gki_defconfig vendor/sun_perf.config vendor/oplus/sun_perf.config
-      
+
           scripts/config --file out/.config \
             -e LTO_CLANG \
             -d LTO_NONE \
             -e LTO_CLANG_THIN \
             -d LTO_CLANG_FULL \
             -e THINLTO
-      
+
           echo "🚀 Building kernel..."
           make -j"$(nproc)" O=out
       
-            - name: Check kernel output files
-              run: |
-               cd $GITHUB_WORKSPACE/kernel_workspace
-               if [ -f common/out/arch/arm64/boot/Image ]; then
-                   echo "CHECK_IMAGE=true" >> $GITHUB_ENV
-               else
-                   echo "Kernel output file is empty"
-                   exit 1
-               fi
+      - name: Check Kernel Output Files
+        run: |
+          cd $GITHUB_WORKSPACE/kernel_workspace
+          if [ -f common/out/arch/arm64/boot/Image ]; then
+              echo "CHECK_IMAGE=true" >> $GITHUB_ENV
+          else
+              echo "Kernel Output File is Empty"
+              exit 1
+          fi
         
       - name: Make AnyKernel3
         run: |
