@@ -1,3 +1,133 @@
+      - name: 🔧 ZRAM Algorithm Setup (LZ4KD)
+        if: ${{ startsWith(github.event.inputs.ZRAMALGORITHM, '1/') }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          # Environment Variables and Inputs
+          ZRAM="${{ github.event.inputs.ZRAMALGORITHM }}"
+          KERNELVERSION="${{ env.KERNELVERSION }}"
+      
+          echo "------------------------------"
+          echo "📌 ZRAM Setup Stage"
+          echo "📁 Input Parameter : $ZRAM"
+          echo "📁 Kernel Version  : $KERNELVERSION"
+          echo "------------------------------"
+          echo ""
+
+          # Validate Format
+          if [[ "$ZRAM" != */*/* ]]; then
+              echo "⚠️ Invalid ZRAM Parameter Format"
+              echo "🧾 Expected Format: Switch(0/1)/Algorithm/Size"
+              echo "📂 Example: 1/lz4kd/4096"
+              exit 10
+          fi
+
+          # Parse Fields
+          IFS='/' read -r ZRAM_SWSTA ZRAM_ALGO ZRAM_SIZE <<< "$ZRAM"
+          
+          # Normalize Casing
+          ZRAM_ALGO=$(echo "$ZRAM_ALGO" | tr '[:upper:]' '[:lower:]')
+          ZRAM_ALGO_U=$(echo "$ZRAM_ALGO" | tr '[:lower:]' '[:upper:]')
+
+          # Export to Github Environment
+          echo "ZRAM_ALGO=$ZRAM_ALGO" >> "$GITHUB_ENV"
+          echo "ZRAM_ALGO_U=$ZRAM_ALGO_U" >> "$GITHUB_ENV"
+          echo "ZRAM_SIZE=$ZRAM_SIZE" >> "$GITHUB_ENV"
+      
+          echo "------------------------------"
+          echo "📂 ZRAM Switch    : $ZRAM_SWSTA"
+          echo "📂 ZRAM Algorithm : $ZRAM_ALGO"
+          echo "📂 ZRAM Size      : $ZRAM_SIZE"
+          echo "------------------------------"
+
+          # Kernel and Patch Directories
+          KERNEL_DIR="${GITHUB_WORKSPACE}/kernel_workspace/kernel_platform/common"
+          DEFCONFIG="${KERNEL_DIR}/arch/arm64/configs/gki_defconfig"
+      
+          BASE_PATCH_DIR="${GITHUB_WORKSPACE}/kernel_workspace/SukiSU_patch/other/zram/zram_patch"
+          PATCH_DIR=$(find "$BASE_PATCH_DIR" -maxdepth 1 -type d -name "${KERNELVERSION}*" | sort -V | tail -n 1 || true)
+      
+          if [[ -z "$PATCH_DIR" || ! -d "$PATCH_DIR" ]]; then
+              echo "⚠️ ZRAM Patch Directory Not Found for Kernel Version $KERNELVERSION"
+              echo "🔎 Searched Under: $BASE_PATCH_DIR"
+              exit 1
+          fi
+      
+          echo "📂 Using ZRAM Patch Directory: $PATCH_DIR"
+
+          if [[ ! -d "$KERNEL_DIR" ]]; then
+              echo "⚠️ Kernel Directory Not Found: $KERNEL_DIR"
+              exit 1
+          fi
+      
+          cd "$KERNEL_DIR"
+
+          # Function: Apply Patch
+          apply_patch() {
+              local PATCH_FILE="$1"
+              local PATCH_NAME
+              PATCH_NAME=$(basename "$PATCH_FILE")
+      
+              if [[ ! -f "$PATCH_FILE" ]]; then
+                  echo "⚠️ $PATCH_NAME Not Found, Skipping..."
+                  return
+              fi
+      
+              echo "⚙️ Applying $PATCH_NAME"
+
+              if patch -p1 --dry-run < "$PATCH_FILE" >/dev/null 2>&1; then
+                  patch -p1 -F3 --forward < "$PATCH_FILE"
+                  echo "✔️ $PATCH_NAME Applied"
+              else
+                  echo "🎉 $PATCH_NAME Already Applied or Not Needed"
+              fi
+          }
+
+          # Apply ZRAM Patches
+          apply_patch "${PATCH_DIR}/lz4kd.patch"
+          apply_patch "${PATCH_DIR}/lz4k_oplus.patch"
+      
+          # Kernel Config: ZRAM Options
+          if [[ "$ZRAM_SWSTA" == "1" ]]; then
+              echo "🚀 Enabling ZRAM-Related Kernel Options..."
+      
+              if [[ "$ZRAM_ALGO" != "lz4" ]]; then
+
+                  # Non-LZ4 Base ZRAM Options
+                  cat >> "$DEFCONFIG" << EOF
+          CONFIG_CRYPTO_LZ4HC=y
+          CONFIG_CRYPTO_LZ4K=y
+          CONFIG_CRYPTO_LZ4KD=y
+          CONFIG_CRYPTO_842=y
+          CONFIG_CRYPTO_LZ4K_OPLUS=y
+          CONFIG_ZRAM_WRITEBACK=y
+          CONFIG_ZRAM_BACKEND_LZ4HC=y
+          CONFIG_ZRAM_BACKEND_LZ4K=y
+          CONFIG_ZRAM_BACKEND_LZ4KD=y
+          CONFIG_ZRAM_BACKEND_842=y
+          EOF
+              else
+
+                  # LZ4 ZRAM Options
+                  cat >> "$DEFCONFIG" << EOF
+          CONFIG_ZSMALLOC=y
+          CONFIG_CRYPTO_LZ4HC=y
+          CONFIG_CRYPTO_LZ4K=y
+          CONFIG_CRYPTO_LZ4KD=y
+          CONFIG_CRYPTO_842=y
+          EOF
+              fi
+
+              echo "✔️ ZRAM Configuration Applied"
+          else
+              echo "♻️ Skipping ZRAM Configuration"
+          fi
+
+          echo ""
+          echo "🎉 ZRAM Patch Process Completed"
+
+
           # ZRAM + LZ4 / ZSTD Patch Installer          
           echo ""
           echo "🔧 Starting ZRAM + LZ4 / ZSTD Patch Installation..."
