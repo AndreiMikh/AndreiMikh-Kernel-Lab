@@ -1,9 +1,21 @@
 name: AOSP
 on:
   workflow_dispatch:
+    inputs:
+      ksu_type:
+        description: 'KernelSU(ReSukiSU/SukiSU Ultra/KernelSU Next/KSU/ReSukiSU)'
+        required: true
+        type: choice
+        default: 'resukisu'
+        options:
+          - 'resukisu'
+          - 'sukisu'
+          - 'ksunext'
+          - 'ksu'
+          - 'none'
 
 env:
-  TZ: America/New_York
+  TZ: Asia/Shanghai
 
 jobs:
   build:
@@ -59,9 +71,100 @@ jobs:
     - name: Setup official KernelSU-Next
       run: |
         cd $GITHUB_WORKSPACE/kernel_workspace/sm8750
-        curl -LSs "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/next/kernel/setup.sh" | bash -s main
-        KSU_VERSION=$(cd KernelSU-Next && expr $(/usr/bin/git rev-list --count HEAD) + 20000)
-        echo "KSUVER=$KSU_VERSION" >> $GITHUB_ENV
+        if [[ ${{ github.event.inputs.ksu_type }} == "sukisu" ]]; then
+          echo "Configuring SukiSU Ultra..."
+          curl -LSs "https://raw.githubusercontent.com/ShirkNeko/SukiSU-Ultra/refs/heads/main/kernel/setup.sh" | bash -s builtin
+          cd ./KernelSU
+
+          # Get the current Git commit short hash (8 characters)
+          GIT_COMMIT_HASH=$(git rev-parse --short=8 HEAD)
+          echo "Current commit hash: $GIT_COMMIT_HASH"
+          export KSU_VERSION=$KSU_VERSION
+
+          # Try up to 3 times to get KernelSU API version
+          for i in {1..3}; do
+              # Extract KSU_API_VERSION from remote Makefile
+              KSU_API_VERSION=$(curl -s "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/builtin/kernel/Makefile" | 
+                  grep -m1 "KSU_VERSION_API :=" |  # Find the first line defining the version
+                  awk -F'= ' '{print $2}' |        # Get the value after the equals sign
+                  tr -d '[:space:]')               # Remove all whitespace
+
+              # If successfully retrieved, break; otherwise wait 1 second and retry
+              [ -n "$KSU_API_VERSION" ] && break || sleep 1
+          done
+
+          # If fetching fails, use default version 3.1.7
+          [ -z "$KSU_API_VERSION" ] && KSU_API_VERSION="3.1.7"
+
+          # Store API version in GitHub environment variables
+          echo "KSU_API_VERSION=$KSU_API_VERSION" >> $GITHUB_ENV
+
+          # Create version definition template & format function
+          # KSU_VERSION_API: API version
+          # KSU_VERSION_FULL: full version
+          VERSION_DEFINITIONS=$'define get_ksu_version_full\nv\\$1-'"$GIT_COMMIT_HASH"$'@cctv18\nendef\n\nKSU_VERSION_API := '"$KSU_API_VERSION"$'\nKSU_VERSION_FULL := v'"$KSU_API_VERSION"$'-'"$GIT_COMMIT_HASH"$'@cctv18'
+
+          # Clean old version definitions in kernel Makefile
+          sed -i '/define get_ksu_version_full/,/endef/d' kernel/Makefile
+          sed -i '/KSU_VERSION_API :=/d' kernel/Makefile
+          sed -i '/KSU_VERSION_FULL :=/d' kernel/Makefile
+
+          # Insert new version definitions after REPO_OWNER line
+          awk -v def="$VERSION_DEFINITIONS" '
+              /REPO_OWNER :=/ {print; print def; inserted=1; next}  # insert after REPO_OWNER
+              1
+              END {if (!inserted) print def}                        # if not found, append at end
+          ' kernel/Makefile > kernel/Makefile.tmp && mv kernel/Makefile.tmp kernel/Makefile
+
+          # Generate a custom version number (based on commit count), fallback to 114514 if failed
+          KSU_VERSION=$(expr $(git rev-list --count main) + 37185 2>/dev/null || echo 114514)
+          echo "KSUVER=$KSU_VERSION" >> $GITHUB_ENV
+          echo "ksuver=$KSU_VERSION" >> $GITHUB_OUTPUT
+
+          # Verify changes
+          grep -A10 "REPO_OWNER" kernel/Makefile  # check inserted content
+          grep "KSU_VERSION_FULL" kernel/Makefile # confirm version exists
+          echo "SukiSU version: v${KSU_API_VERSION}-${GIT_COMMIT_HASH}@cctv18"
+
+        elif [[ ${{ github.event.inputs.ksu_type }} == "resukisu" ]]; then
+          echo "Configuring ReSukiSU..."
+          curl -LSs "https://raw.githubusercontent.com/ReSukiSU/ReSukiSU/refs/heads/main/kernel/setup.sh" | bash -s main
+          echo 'CONFIG_KSU_FULL_NAME_FORMAT="%TAG_NAME%-%COMMIT_SHA%@cctv18"' >> ./common/arch/arm64/configs/gki_defconfig
+          cd ./KernelSU
+          KSU_VERSION=$(expr $(git rev-list --count main) + 30700 2>/dev/null || echo 114514)
+          echo "KSUVER=$KSU_VERSION" >> $GITHUB_ENV
+          echo "ksuver=$KSU_VERSION" >> $GITHUB_OUTPUT
+
+        elif [[ ${{ github.event.inputs.ksu_type }} == "ksunext" ]]; then
+          echo "Configuring KernelSU Next..."
+          curl -LSs "https://raw.githubusercontent.com/pershoot/KernelSU-Next/refs/heads/dev-susfs/kernel/setup.sh" | bash -s dev-susfs
+          cd KernelSU-Next
+          rm -rf .git
+          KSU_VERSION=$(expr $(curl -sI "https://api.github.com/repos/pershoot/KernelSU-Next/commits?sha=dev&per_page=1" | grep -i "link:" | sed -n 's/.*page=\([0-9]*\)>; rel="last".*/\1/p') "+" 30000)
+          echo "KSUVER=$KSU_VERSION" >> $GITHUB_ENV
+          echo "ksuver=$KSU_VERSION" >> $GITHUB_OUTPUT
+          sed -i "s/KSU_VERSION_FALLBACK := 1/KSU_VERSION_FALLBACK := $KSU_VERSION/g" kernel/Kbuild
+
+          KSU_GIT_TAG=$(curl -sL "https://api.github.com/repos/KernelSU-Next/KernelSU-Next/tags" | grep -o '"name": *"[^"]*"' | head -n 1 | sed 's/"name": "//;s/"//')
+          sed -i "s/KSU_VERSION_TAG_FALLBACK := v0.0.1/KSU_VERSION_TAG_FALLBACK := $KSU_GIT_TAG/g" kernel/Kbuild
+
+          # Add WildKSU manager support
+          cd ../common/drivers/kernelsu
+          wget https://github.com/$GITHUB_REPOSITORY/raw/refs/heads/$GITHUB_REF_NAME/other_patch/apk_sign.patch
+          patch -p2 -N -F 3 < apk_sign.patch || true
+
+        elif [[ ${{ github.event.inputs.ksu_type }} == "ksu" ]]; then
+          echo "Configuring original KernelSU (tiann/KernelSU)..."
+          curl -LSs "https://raw.githubusercontent.com/tiann/KernelSU/refs/heads/main/kernel/setup.sh" | bash -s main
+          cd ./KernelSU
+          KSU_VERSION=$(expr $(curl -sI "https://api.github.com/repos/tiann/KernelSU/commits?sha=main&per_page=1" | grep -i "link:" | sed -n 's/.*page=\([0-9]*\)>; rel="last".*/\1/p') "+" 30000)
+          echo "KSUVER=$KSU_VERSION" >> $GITHUB_ENV
+          echo "ksuver=$KSU_VERSION" >> $GITHUB_OUTPUT
+          sed -i "s/DKSU_VERSION=16/DKSU_VERSION=${KSU_VERSION}/" kernel/Kbuild
+
+        else
+          echo "No built-in KernelSU selected, skipping KernelSU configuration..."
+        fi
 
     - name: Setup susfs4ksu
       run: |
