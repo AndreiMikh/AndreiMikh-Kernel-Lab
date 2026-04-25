@@ -2042,7 +2042,8 @@ jobs:
           SUSFSBRANCHDEV: ${{ github.event.inputs.SUSFSBRANCHDEV }}
           FILE: ${{ github.event.inputs.FILE }}
           NTSYNC: ${{ github.event.inputs.NTSYNC }}
-          ZRAM: ${{ github.event.inputs.ZRAMALGORITHM }}
+          ZRAMSUKISU: ${{ github.event.inputs.ZRAMALGORITHM }}
+          ZRAMPATCH: ${{ github.event.inputs.ZRAMCUSTOMPATCH }}
           ANDROIDVERSION: ${{ env.ANDROIDVERSION }}
           KERNELVERSION: ${{ env.KERNELVERSION }}
           XUS: ${{ env.XUS }}
@@ -2064,11 +2065,12 @@ jobs:
           cd kernel_workspace
 
           # Clone Required Patch Repositories
-          echo "📥 Cloning Github Owner Patches and SukiSU Patches Dependencies for Later Steps..."
-      
+          echo "📥 Cloning Github Owner Patches, SukiSU Patches and LZ4 1.10.0 and ZSTD 1.5.7 Patches Dependencies..."      
           git clone --depth=1 https://github.com/SukiSU-Ultra/SukiSU_patch.git
           git clone --depth=1 https://github.com/AndreiMikh/AndreiMikh-Kernel-Lab.git
-         
+          git clone --depth=1 https://github.com/cctv18/oppo_oplus_realme_sm8750.git
+          git clone --depth=1 https://github.com/Xiaomichael/kernel_patches.git
+             
           echo "✔️ Patch Repositories Cloned"
           echo
 
@@ -2143,8 +2145,15 @@ jobs:
           fi
       
           SUSFSPATCH="${SUSFSPATCHLIST[-1]}"
-          
+
+          # SukiSU ZRAM Patches
           ZRAMSRC="${GITHUB_WORKSPACE}/kernel_workspace/SukiSU_patch/other/zram"
+
+          # CCTV18 LZ4 1.10.0 and ZSTD 1.5.7 Patches
+          CUSTOMPATCH="${GITHUB_WORKSPACE}/kernel_workspace/oppo_oplus_realme_sm8750/zram_patch"
+
+          # Xiao LZ4 1.10.0 and ZSTD 1.5.7 Patches
+          XMPATCH="${GITHUB_WORKSPACE}/kernel_workspace/kernel_patches/zram_patches"
       
           echo "🧾 SUSFS Patch Directory: $SUSFSPATCH"
           echo "🧾 ZRAM Patch Directory: $ZRAMSRC"
@@ -2160,8 +2169,8 @@ jobs:
               echo "⚠️ Failed to Copy SUSFS Patches"
           fi
 
-          if [[ "$ZRAM" == 1* ]]; then
-            echo "📥 Copying SukiSU Patches for Later Steps..."
+          if [[ "$ZRAMSUKISU" == 1* ]]; then
+            echo "📥 Copying SukiSU Patches..."
             cp -r "$ZRAMSRC/lz4k/include/linux/." "$KDIR/include/linux/" 2>/dev/null || \
               echo "⚠️ Failed to Copy Include/Linux"          
             cp -r "$ZRAMSRC/lz4k/lib/." "$KDIR/lib/" 2>/dev/null || \
@@ -2170,6 +2179,26 @@ jobs:
               echo "⚠️ Failed to Copy Crypto"          
             cp -r "$ZRAMSRC/lz4k_oplus/." "$KDIR/lib/lz4k_oplus/" 2>/dev/null || \
               echo "⚠️ Failed to Copy LZ4K OPlus"
+          fi
+
+          if [[ "$ZRAMPATCHES" == "LZ4-1.10.0-Custom-Patch" ]]; then
+            echo "📥 Copying CCTV18 LZ4 1.10.0 and ZSTD 1.5.7 Patches..."
+            cp -r "$CUSTOMPATCH/001-lz4.patch" "$KDIR/" 2>/dev/null || \
+              echo "⚠️ Failed to Copy"          
+            cp -r "$CUSTOMPATCH/lz4armv8.S" "$KDIR/lib" 2>/dev/null || \
+              echo "⚠️ Failed to Copy"        
+            cp -r "$CUSTOMPATCH/002-zstd.patch" "$KDIR/" 2>/dev/null || \
+              echo "⚠️ Failed to Copy"          
+          fi
+
+          if [[ "$ZRAMPATCHES" == "LZ4-1.10.0-Patch" ]]; then
+            echo "📥 Copying Xiao LZ4 1.10.0 and ZSTD 1.5.7 Patches..."
+            cp -r "$XMPATCH/001-lz4.patch" "$KDIR/" 2>/dev/null || \
+              echo "⚠️ Failed to Copy"          
+            cp -r "$XMPATCH/lz4armv8.S" "$KDIR/lib" 2>/dev/null || \
+              echo "⚠️ Failed to Copy"        
+            cp -r "$XMPATCH/002-zstd.patch" "$KDIR/" 2>/dev/null || \
+              echo "⚠️ Failed to Copy"          
           fi
 
           # Navigate to Common Directory
@@ -2500,6 +2529,119 @@ jobs:
 
           echo ""
           echo "🎉 Kernel Compatibility Fix Stage Completed"
+
+      # ==============================
+      # SukiSU ZRAM Setup
+      # ==============================
+      - name: 🔧 SukiSU ZRAM Setup
+        if: ${{ startsWith(github.event.inputs.ZRAMALGORITHM, '1/') }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          # Environment Variables and Inputs
+          ZRAM="${{ github.event.inputs.ZRAMALGORITHM }}"
+          KERNELVERSION="${{ env.KERNELVERSION }}"
+      
+          echo "------------------------------"
+          echo "📌 ZRAM Setup Stage"
+          echo "📁 Input Parameter : $ZRAM"
+          echo "📁 Kernel Version  : $KERNELVERSION"
+          echo "------------------------------"
+          echo ""
+
+          # Validate Format
+          if [[ "$ZRAM" != */*/* ]]; then
+              echo "⚠️ Invalid ZRAM Parameter Format"
+              echo "🧾 Expected Format: Switch(0/1) / Algorithm / Size"
+              exit 10
+          fi
+
+          # Parse Fields
+          IFS='/' read -r SWITCH ALGORITHM SIZE <<< "$ZRAM"
+          
+          # Normalize Casing
+          ALGORITHM=$(echo "$ALGORITHM" | tr '[:upper:]' '[:lower:]')
+          UALGORITHM=$(echo "$ALGORITHM" | tr '[:lower:]' '[:upper:]')
+
+          # Export to Github Environment
+          echo "ALGORITHM=$ALGORITHM" >> "$GITHUB_ENV"
+          echo "UALGORITHM=$UALGORITHM" >> "$GITHUB_ENV"
+          echo "SIZE=$SIZE" >> "$GITHUB_ENV"
+      
+          echo "------------------------------"
+          echo "📂 ZRAM Switch    : $SWITCH"
+          echo "📂 ZRAM Algorithm : $ALGORITHM"
+          echo "📂 ZRAM Size      : $SIZE"
+          echo "------------------------------"
+
+          # Kernel and Patch Directories
+          KCDIR="${GITHUB_WORKSPACE}/kernel_workspace/kernel_platform/common"
+          DEFCONFIG="${KCDIR}/arch/arm64/configs/gki_defconfig"
+      
+          PBASEDIR="${GITHUB_WORKSPACE}/kernel_workspace/SukiSU_patch/other/zram/zram_patch"
+          PDIR=$(find "$PBASEDIR" -maxdepth 1 -type d -name "${KERNELVERSION}*" | sort -V | tail -n 1 || true)
+      
+          if [[ -z "$PDIR" || ! -d "$PDIR" ]]; then
+              echo "⚠️ ZRAM Patch Directory Not Found for Kernel Version ${KERNELVERSION}"
+              echo "🔎 Searched Under: ${PBASEDIR}"
+              exit 1
+          fi
+      
+          echo "📂 Using ZRAM Patch Directory: $PDIR"
+
+          if [[ ! -d "$KCDIR" ]]; then
+              echo "⚠️ Kernel Directory Not Found: $KCDIR"
+              exit 1
+          fi
+      
+          cd "$KCDIR"
+
+          # Function: Apply Patch
+          apply() {
+            local PFILE="$1"
+            local PNAME
+            PNAME=$(basename "$PFILE")
+      
+            if [[ ! -f "$PFILE" ]]; then
+              echo "⚠️ $PNAME Not Found, Skipping..."
+              return
+            fi
+      
+            echo "⚙️ Applying $PNAME"
+
+            if patch -p1 --dry-run < "$PFILE" >/dev/null 2>&1; then
+              patch -p1 -F3 --forward < "$PFILE"
+              echo "✔️ $PNAME Applied"
+            else
+              echo "🎉 $PNAME Already Applied or Not Needed"
+            fi
+          }
+
+          # Apply ZRAM Patches
+          apply "${PDIR}/lz4kd.patch"
+          apply "${PDIR}/lz4k_oplus.patch"
+      
+          # Kernel Config: ZRAM Options
+          if [[ "$SWITCH" == "1" ]]; then
+            echo "🔧 Enabling ZRAM-Related Kernel Options..."      
+            if [[ "$ZRAM" == 1* ]]; then
+              # Non-LZ4 Base ZRAM Options
+              cat >> "$DEFCONFIG" << EOF
+          CONFIG_CRYPTO_LZ4HC=y
+          CONFIG_CRYPTO_LZ4K=y
+          CONFIG_CRYPTO_LZ4KD=y
+          CONFIG_CRYPTO_842=y
+          CONFIG_CRYPTO_LZ4K_OPLUS=y
+          CONFIG_ZRAM_WRITEBACK=y
+          EOF
+            echo "✔️ ZRAM Configuration Applied"
+          else
+            echo "⚠️ Skipping ZRAM Configuration"
+          fi
+
+          echo ""
+          echo "🎉 SukiSU ZRAM Patch Process Completed"
 
       - name: LZ4 1.10.0 and ZSTD 1.5.7 Patches
         if: ${{ github.event.inputs.ZRAMCUSTOMPATCH == 'true' }}
