@@ -12,6 +12,11 @@ on:
           - KernelSU-Next
           - ReSukiSU
           - None
+          
+      SUBLEVEL:
+        description: "Custom Kernel Level Spoofing (Sublevel)"
+        required: false
+        default: ""
 
 env:
   TZ: Asia/Shanghai
@@ -109,6 +114,78 @@ jobs:
         echo "CONFIG_DODGE_DTB=y" >> "$CONFIG"
         echo "CONFIG_KSU=y" >> "$CONFIG"
         echo "CONFIG_KSU_SUSFS=y" >> "$CONFIG"
+
+    # ==============================
+    # Kernel Version Setup 
+    # ==============================
+    - name: Kernel Version Setup
+      run: | 
+        cd "$WORKSPACE"
+        
+        BRANCH=""
+
+        # Try to Read Branch from Build Configuration Files
+        for cfg in ./common/build.config.constants ./common/build.config.common; do
+          if [[ -f "$cfg" ]]; then
+            BRANCH=$(grep -m1 '^BRANCH=' "$cfg" | cut -d= -f2)
+            [[ -n "$BRANCH" ]] && break
+          fi
+        done
+
+        # Fallback: Use ACK SHA from Kernel Repositories if Kernel Repositories Defined
+        if [[ -z "$BRANCH" && -n "${KERNEL_REPOS:-}" && -f "./$KERNEL_REPOS/android/ACK_SHA" ]]; then
+          BRANCH=$(sed -n '2p' "./$KERNEL_REPOS/android/ACK_SHA" | awk -F'-' '{print $1"-"$2}')
+        fi
+
+        if [[ -n "$BRANCH" ]]; then
+          ANDROIDVERSION="${BRANCH%-*}"
+          KERNELVERSION="${BRANCH#*-}"
+          echo "ANDROIDVERSION=$ANDROIDVERSION" >> $GITHUB_ENV
+          echo "KERNELVERSION=$KERNELVERSION" >> $GITHUB_ENV
+          echo "🔎 Branch Found: $BRANCH"
+        else
+          echo "⚠️ No Branch Found in Build Configuration or Ack Sha"
+          ANDROIDVERSION="unknown"
+          KERNELVERSION="unknown"
+          echo "ANDROIDVERSION=$ANDROIDVERSION" >> $GITHUB_ENV
+          echo "KERNELVERSION=$KERNELVERSION" >> $GITHUB_ENV
+        fi
+
+        # Read Original Kernel Version from Makefile
+        echo "🧾 Reading Original Kernel Version..."
+        OGVERSION=$(awk '/^VERSION =/ {v=$3} /^PATCHLEVEL =/ {p=$3} /^SUBLEVEL =/ {s=$3} END {print v"."p"."s}' ./common/Makefile)
+        echo "📌 Original Kernel Version: $OGVERSION"
+
+        # Update SubLevel if Input Provided
+        INPUTSUBLEVEL="${{ github.event.inputs.SUBLEVEL }}"
+        if [[ -n "$INPUTSUBLEVEL" ]]; then
+          echo "🧾 Updating Sublevel to: $INPUTSUBLEVEL"
+          sed -i "s/^\(SUBLEVEL[[:space:]]*=[[:space:]]*\).*/\1$INPUTSUBLEVEL/" ./common/Makefile
+        else
+          echo "📌 No SubLevel Input Provided ⚙️ Keeping Default"
+        fi
+
+        # Determine New Kernel Version
+        NEWVERSION=$(awk '/^VERSION =/ {v=$3} /^PATCHLEVEL =/ {p=$3} /^SUBLEVEL =/ {s=$3} END {print v"."p"."s}' ./common/Makefile)
+        echo "📊 New Kernel Version: $NEWVERSION"
+
+        if [[ "$OGVERSION" != "$NEWVERSION" ]]; then
+          echo "⚙️ Kernel Version Changed: $OGVERSION -> $NEWVERSION"
+          echo "FULLVERSION=$NEWVERSION" >> $GITHUB_ENV
+        else
+          echo "✔️ Kernel Version Unchanged: $OGVERSION"
+          echo "FULLVERSION=$OGVERSION" >> $GITHUB_ENV
+        fi
+
+        # Export KV1, KV2, KV3 for Further Use
+        KV_TMP="${KERNELVERSION}"
+        echo "KV1=$(echo "$KV_TMP" | cut -d. -f1)" >> $GITHUB_ENV
+        echo "KV2=$(echo "$KV_TMP" | tr -d '.')" >> $GITHUB_ENV
+        echo "KV3=$(echo "$NEWVERSION" | tr -d '.')" >> $GITHUB_ENV
+        echo "KSHORTVERSION=$(echo $NEWVERSION | cut -d. -f1,2)" >> $GITHUB_ENV
+        echo "KSHORTPATCHVERSION=$(echo $NEWVERSION | cut -d. -f1,2 | tr '.' '_')" >> $GITHUB_ENV
+
+        echo "🎉 Kernel Version Setup Complete"
 
     # =========================
     # KernelSU Next
