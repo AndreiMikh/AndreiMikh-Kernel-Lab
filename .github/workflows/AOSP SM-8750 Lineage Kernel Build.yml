@@ -164,45 +164,37 @@ jobs:
     # =========================
     - name: Build Kernel
       run: |
-        cd "$WORKSPACE/$KDIR"
+        cd "$GITHUB_WORKSPACE/$KDIR"
 
-        # Core Environment
         export ARCH=arm64
         export SUBARCH=arm64
-        export PATH="$WORKSPACE/clang-aosp/bin:$PATH"
+        export HEADER_ARCH=arm64
+        export PATH="$GITHUB_WORKSPACE/kernel_workspace/clang-aosp/bin:$PATH"
 
-        # Compiler Cache
-        export USE_CCACHE=1
-        export CCACHE_DIR="$WORKSPACE/.ccache"
-        ccache -M 10G
+        export KBUILD_BUILD_HOST="Github-Action"
+        export KBUILD_BUILD_USER="$(echo "${{ github.actor }}" | tr '[:upper:]' '[:lower:]')"
 
-        # Build Identity
-        export KBUILD_BUILD_USER="${{ github.actor }}"
-        export KBUILD_BUILD_HOST="github-actions"
+        LTO=thin
 
-        # Compiler Toolchain
-        export CC="ccache clang"
-        export CXX="ccache clang++"
-        export LD="ld.lld"
-        export AR="llvm-ar"
-        export NM="llvm-nm"
-        export OBJCOPY="llvm-objcopy"
-        export OBJDUMP="llvm-objdump"  
-   
-        # Default Configuration List
+        AR_CMD="ARCH=${ARCH} SUBARCH=${SUBARCH} HEADER_ARCH=${HEADER_ARCH}"
+        CC_CMD="CC=clang CXX=clang++"
+       
+        LLVM_CMD="LD=ld.lld AR=llvm-ar NM=llvm-nm OBJCOPY=llvm-objcopy OBJDUMP=llvm-objdump READELF=llvm-readelf OBJSIZE=llvm-size STRIP=llvm-strip LLVM=1 LLVM_IAS=1"
         DEFCONFIG="gki_defconfig vendor/sun_perf.config vendor/oplus/sun_perf.config"
 
-        # Configure
-        make O=out ARCH=arm64 SUBARCH=arm64 $DEFCONFIG
+        echo "📌 Running Default Configuration..."
+        make O=out $AR_CMD $CC_CMD $LLVM_CMD $DEFCONFIG
 
-        # Disable Heavy Debug
+        echo "⚙️ Enforcing LTO Configuration..."
         scripts/config --file out/.config \
-          -d DEBUG_INFO \
-          -d DEBUG_KERNEL \
-          -d KGDB
+            -e LTO_CLANG \
+            -d LTO_NONE \
+            -e LTO_CLANG_THIN \
+            -d LTO_CLANG_FULL \
+            -e THINLTO
 
-        # Build Fast
-        make -j$(nproc) O=out
+        echo "🚀 Starting Kernel Build..."
+        make -j"$(nproc --all)" O=out $AR_CMD $CC_CMD $LLVM_CMD
 
     # =========================
     # Validate Output
@@ -210,7 +202,7 @@ jobs:
     - name: Validate Output
       run: |
         if [ -f "$WORKSPACE/$KDIR/out/arch/arm64/boot/Image" ]; then
-          echo "CHECKIMAGE=true" >> $GITHUB_ENV
+          echo "IMAGEPATH=true" >> $GITHUB_ENV
         else
           echo "Kernel build failed"
           exit 1
@@ -220,7 +212,7 @@ jobs:
     # Package AnyKernel3
     # =========================
     - name: Package AnyKernel3
-      if: env.CHECKIMAGE == 'true'
+      if: env.IMAGEPATH == 'true'
       run: |
         cd "$WORKSPACE"
 
@@ -233,7 +225,7 @@ jobs:
     # Upload Kernel Image
     # =========================
     - name: Upload Kernel Image
-      if: env.CHECKIMAGE == 'true'
+      if: env.IMAGEPATH == 'true'
       uses: actions/upload-artifact@v7
       with:
         name: Image-KSU-${{ env.KSUVER }}
@@ -244,7 +236,7 @@ jobs:
     # Upload AnyKernel3
     # =========================
     - name: Upload AnyKernel3
-      if: env.CHECKIMAGE == 'true'
+      if: env.IMAGEPATH == 'true'
       uses: actions/upload-artifact@v7
       with:
         name: AnyKernel3-Dodge-${{ github.event.inputs.KSU }}-${{ env.KSUVER }}-${{ env.BUILDTIME }}
