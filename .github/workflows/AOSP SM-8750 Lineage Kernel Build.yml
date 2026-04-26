@@ -1,0 +1,241 @@
+name: AOSP SM-8750 Lineage Kernel Build
+
+on:
+  workflow_dispatch:
+    inputs:
+      KSU:
+        description: "KernelSU Variant"
+        required: true
+        type: choice
+        default: "KernelSU-Next"
+        options:
+          - KernelSU-Next
+          - None
+
+env:
+  TZ: Asia/Shanghai
+  WORKSPACE: ${{ github.workspace }}/kernel_workspace
+  KDIR: sm8750
+  CLANG_VERSION: clang-r547379
+
+jobs:
+  build:
+    name: Build Kernel SM-8750 - ${{ github.actor }}
+    runs-on: ubuntu-latest
+
+    steps:
+    # =========================
+    # Checkout
+    # =========================
+    - uses: actions/checkout@v6
+
+    # =========================
+    # Swap Space
+    # =========================
+    - name: Swap Space
+      uses: pierotofy/set-swap-space@master
+      with:
+        swap-size-gb: 10
+
+    # =========================
+    # Dependencies
+    # =========================
+    - name: Dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y git wget ccache flex bison \
+          build-essential libssl-dev libelf-dev bc \
+          device-tree-compiler python3 libncurses5-dev
+
+        mkdir -p "$WORKSPACE"
+        echo "BUILD_TIME=$(date '+%y%m%d')" >> $GITHUB_ENV
+
+    # =========================
+    # Cache CCache
+    # =========================
+    - name: Cache CCache
+      uses: actions/cache@v4
+      with:
+        path: kernel_workspace/.ccache
+        key: ccache-${{ runner.os }}-${{ hashFiles('**/*.c', '**/*.h') }}
+        restore-keys: |
+          ccache-${{ runner.os }}-
+
+    # =========================
+    # Cache Clang
+    # =========================
+    - name: Cache Clang
+      id: cache-clang
+      uses: actions/cache@v4
+      with:
+        path: ${{ env.WORKSPACE }}/clang-aosp
+        key: ${{ env.CLANG_VERSION }}
+
+    # =========================
+    # Download Clang
+    # =========================
+    - name: Download Clang
+      if: steps.cache-clang.outputs.cache-hit != 'true'
+      run: |
+        mkdir -p "$WORKSPACE/clang-aosp"
+        cd "$WORKSPACE"
+
+        wget -q -O clang.tar.gz \
+          https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/main/${CLANG_VERSION}.tar.gz
+
+        tar -xzf clang.tar.gz -C clang-aosp
+        rm clang.tar.gz
+
+    # =========================
+    # Clone Kernel Sources
+    # =========================
+    - name: Clone Kernel Sources
+      run: |
+        cd "$WORKSPACE"
+
+        git clone --depth=1 --single-branch \
+          https://github.com/LineageOS/android_kernel_oneplus_sm8750 \
+          "$KDIR" &
+
+        git clone --depth=1 --single-branch \
+          https://github.com/LineageOS/android_kernel_oneplus_sm8750-modules \
+          sm8750-modules &
+
+        wait
+
+        CONFIG="$KERNEL_DIR/arch/arm64/configs/vendor/oplus/sun_perf.config"
+
+        echo "CONFIG_DODGE_DTB=y" >> "$CONFIG"
+        echo "CONFIG_KSU=y" >> "$CONFIG"
+        echo "CONFIG_KSU_SUSFS=y" >> "$CONFIG"
+
+    # =========================
+    # KernelSU Next
+    # =========================
+    - name: KernelSU-Next
+      if: ${{ github.event.inputs.KSU == 'ksunext' }}
+      run: |
+        cd "$WORKSPACE/$KDIR"
+
+        curl -LSs https://raw.githubusercontent.com/pershoot/KernelSU-Next/refs/heads/dev-susfs/kernel/setup.sh \
+          | bash -s dev-susfs
+
+        cd KernelSU-Next
+        rm -rf .git
+
+        KSU_VERSION=$(expr $(curl -sI \
+          "https://api.github.com/repos/pershoot/KernelSU-Next/commits?sha=dev&per_page=1" \
+          | grep -i "link:" | sed -n 's/.*page=\([0-9]*\)>; rel="last".*/\1/p') + 30000)
+
+        echo "KSUVER=$KSU_VERSION" >> $GITHUB_ENV
+
+        sed -i "s/KSU_VERSION_FALLBACK := 1/KSU_VERSION_FALLBACK := $KSU_VERSION/" kernel/Kbuild
+
+        KSU_TAG=$(curl -s https://api.github.com/repos/KernelSU-Next/KernelSU-Next/tags \
+          | grep -o '"name": *"[^"]*"' | head -n1 | cut -d'"' -f4)
+
+        sed -i "s/KSU_VERSION_TAG_FALLBACK := v0.0.1/KSU_VERSION_TAG_FALLBACK := $KSU_TAG/" kernel/Kbuild
+
+    # =========================
+    # SUSFS
+    # =========================
+    - name: SUSFS
+      run: |
+        cd "$WORKSPACE"
+
+        git clone --depth=1 -b oki-android15-6.6 \
+          https://github.com/cctv18/susfs4oki.git susfs
+
+        SUSDIR="$WORKSPACE/$KDIR"
+
+        if [ ! -f "$SUSDIR/.susfs_done" ]; then
+          cp -r susfs/kernel_patches/fs/* "$SUSDIR/fs/"
+          cp -r susfs/kernel_patches/include/linux/* "$SUSDIR/include/linux/"
+
+          patch -d "$SUSDIR" -p1 --forward --ignore-whitespace < \
+            susfs/kernel_patches/50_add_susfs_in_gki-android15-6.6.patch \
+            || echo "SUSFS patch warnings"
+
+          touch "$SUSDIR/.susfs_done"
+        fi
+
+    # =========================
+    # Build Kernel
+    # =========================
+    - name: Build Kernel
+      run: |
+        cd "$WORKSPACE/$KDIR"
+
+        export ARCH=arm64
+        export SUBARCH=arm64
+        export PATH="$WORKSPACE/clang-aosp/bin:$PATH"
+
+        export USE_CCACHE=1
+        export CCACHE_DIR="$WORKSPACE/.ccache"
+        ccache -M 10G
+
+        export KBUILD_BUILD_USER=$(echo "${{ github.actor }}" | tr A-Z a-z)
+        export KBUILD_BUILD_HOST="github-actions"
+
+        ARGS="ARCH=arm64 SUBARCH=arm64"
+        CC_ARGS="CC='ccache clang' CXX='ccache clang++'"
+        LD_ARGS="LD=ld.lld AR=llvm-ar NM=llvm-nm OBJCOPY=llvm-objcopy OBJDUMP=llvm-objdump"
+
+        DEFCONFIG="gki_defconfig vendor/sun_perf.config vendor/oplus/sun_perf.config"
+
+        make O=out $ARGS $CC_ARGS $LD_ARGS $DEFCONFIG
+
+        # Disable Expensive Debug Features
+        scripts/config --file out/.config \
+          -d DEBUG_INFO \
+          -d DEBUG_KERNEL \
+          -d KGDB
+
+        make -j$(nproc) O=out $ARGS $CC_ARGS $LD_ARGS
+
+    # =========================
+    # Validate Output
+    # =========================
+    - name: Validate Output
+      run: |
+        if [ -f "$WORKSPACE/$KDIR/out/arch/arm64/boot/Image" ]; then
+          echo "CHECKIMAGE=true" >> $GITHUB_ENV
+        else
+          echo "Kernel build failed"
+          exit 1
+        fi
+
+    # =========================
+    # Package AnyKernel3
+    # =========================
+    - name: Package AnyKernel3
+      if: env.CHECKIMAGE == 'true'
+      run: |
+        cd "$WORKSPACE"
+
+        git clone --depth=1 https://github.com/AndreiMikh/AnyKernel3
+        rm -rf AnyKernel3/.git
+
+        cp "$KDIR/out/arch/arm64/boot/Image" AnyKernel3/
+
+    # =========================
+    # Upload Kernel Image
+    # =========================
+    - name: Upload Kernel Image
+      if: env.CHECKIMAGE == 'true'
+      uses: actions/upload-artifact@v7
+      with:
+        name: Image-KSU-${{ env.KSUVER }}
+        path: kernel_workspace/sm8750/out/arch/arm64/boot/Image
+        compression-level: 0
+
+    # =========================
+    # Upload AnyKernel3
+    # =========================
+    - name: Upload AnyKernel3
+      if: env.CHECKIMAGE == 'true'
+      uses: actions/upload-artifact@v7
+      with:
+        name: AK3-SM8750-${{ env.KSUVER }}-${{ env.BUILD_TIME }}
+        path: kernel_workspace/AnyKernel3/*
+        compression-level: 0
