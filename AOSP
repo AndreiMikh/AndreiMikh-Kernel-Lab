@@ -1,0 +1,179 @@
+name: AOSP SM-8750
+on:
+  workflow_dispatch:
+    inputs:
+      ksu_type:
+        description: 'KernelSU(ReSukiSU/SukiSU Ultra/KernelSU Next/KSU/ReSukiSU)'
+        required: true
+        type: choice
+        default: 'ksunext'
+        options:
+          - 'ksunext'
+          - 'none'
+
+env:
+  TZ: Asia/Shanghai
+
+jobs:
+  build:
+    name: Build Kernel AOSP SM-8750 by ${{ github.actor }}
+    runs-on: ubuntu-latest
+    env:
+      CLANG_VERSION: clang-r547379
+
+    steps:
+    - uses: actions/checkout@v6
+    
+    - name: Swap Disk Space
+      uses: pierotofy/set-swap-space@master
+      with:
+        swap-size-gb: 10
+    
+    - name: Setup Build Tools Environment 
+      run: |
+        echo "BUILD_TIME=$(TZ=Asia/Shanghai date "+%y%m%d")" >> $GITHUB_ENV
+        sudo apt-get update
+        sudo apt-get install git dwarves libelf-dev ccache automake flex bison build-essential zlib1g-dev libncurses5-dev libc6-dev-i386 bc device-tree-compiler python3 make
+        mkdir -p $GITHUB_WORKSPACE/kernel_workspace
+    
+    - name: Cache AOSP Clang Toolchain
+      id: cache-clang
+      uses: actions/cache@v4
+      with:
+        path: ${{ github.workspace }}/kernel_workspace/clang-aosp
+        key: ${{ env.CLANG_VERSION }}
+
+    - name: Download and Extract Clang AODP
+      if: steps.cache-clang.outputs.cache-hit != 'true'
+      run: |
+        cd $GITHUB_WORKSPACE/kernel_workspace
+        mkdir -p clang-aosp
+        wget -O ${CLANG_VERSION}.tar.gz \
+          https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/main/${CLANG_VERSION}.tar.gz
+        tar -C clang-aosp -zxvf ${CLANG_VERSION}.tar.gz
+    
+    - name: Download OPlus LineageOS SM-8750 Kernel Source
+      run: |
+        cd $GITHUB_WORKSPACE/kernel_workspace
+        git clone --recursive https://github.com/LineageOS/android_kernel_oneplus_sm8750 -b lineage-23.2 sm8750 --depth=1
+        cd $GITHUB_WORKSPACE/kernel_workspace/sm8750/scripts
+        sed -i 's/ -dirty//g' setlocalversion
+        cd $GITHUB_WORKSPACE/kernel_workspace
+      
+        git clone --recursive https://github.com/LineageOS/android_kernel_oneplus_sm8750-modules -b lineage-23.2 sm8750-modules --depth=1
+        sed -i '$a CONFIG_DODGE_DTB=y' $GITHUB_WORKSPACE/kernel_workspace/sm8750/arch/arm64/configs/vendor/oplus/sun_perf.config
+        sed -i '$a CONFIG_KSU=y' $GITHUB_WORKSPACE/kernel_workspace/sm8750/arch/arm64/configs/vendor/oplus/sun_perf.config
+        sed -i '$a CONFIG_KSU_SUSFS=y' $GITHUB_WORKSPACE/kernel_workspace/sm8750/arch/arm64/configs/vendor/oplus/sun_perf.config
+
+
+    - name: Setup Pershoot KernelSU-Next
+      run: |
+        cd $GITHUB_WORKSPACE/kernel_workspace/sm8750
+
+        if [[ ${{ github.event.inputs.ksu_type }} == "ksunext" ]]; then
+          echo "Configuring KernelSU Next..."
+          curl -LSs "https://raw.githubusercontent.com/pershoot/KernelSU-Next/refs/heads/dev-susfs/kernel/setup.sh" | bash -s dev-susfs
+          cd KernelSU-Next
+        
+          rm -rf .git
+        
+          KSU_VERSION=$(expr $(curl -sI "https://api.github.com/repos/pershoot/KernelSU-Next/commits?sha=dev&per_page=1" | grep -i "link:" | sed -n 's/.*page=\([0-9]*\)>; rel="last".*/\1/p') "+" 30000)
+          echo "KSUVER=$KSU_VERSION" >> $GITHUB_ENV
+          echo "ksuver=$KSU_VERSION" >> $GITHUB_OUTPUT
+          sed -i "s/KSU_VERSION_FALLBACK := 1/KSU_VERSION_FALLBACK := $KSU_VERSION/g" kernel/Kbuild
+
+          KSU_GIT_TAG=$(curl -sL "https://api.github.com/repos/KernelSU-Next/KernelSU-Next/tags" | grep -o '"name": *"[^"]*"' | head -n 1 | sed 's/"name": "//;s/"//')
+          sed -i "s/KSU_VERSION_TAG_FALLBACK := v0.0.1/KSU_VERSION_TAG_FALLBACK := $KSU_GIT_TAG/g" kernel/Kbuild
+
+        else
+          echo "No Built-in KSU Selected, Skipping KSU Configuration..."
+        fi
+
+    - name: Setup SUSFS
+      run: |
+        cd $GITHUB_WORKSPACE/kernel_workspace/sm8750
+        echo "Cloning susfs4ksu..."
+        git clone --depth=1 -b gki-android15-6.6 https://gitlab.com/simonpunk/susfs4ksu.git
+        echo "Copying Patch Files..."
+     
+        cp susfs4ksu/kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch KernelSU-Next/
+        cp susfs4ksu/kernel_patches/50_add_susfs_in_gki-android15-6.6.patch 50_add_susfs_in_kernel.patch
+      
+        echo "Copying SUSFS Source Files..."
+        cp susfs4ksu/kernel_patches/fs/* fs/
+        cp susfs4ksu/kernel_patches/include/linux/* include/linux/
+     
+        echo "Applying KernelSU-Next Patch..."
+        cd KernelSU-Next
+        patch -p1 < 10_enable_susfs_for_ksu.patch || true
+        echo "Applying Kernel Patch..."
+      
+        cd ..
+        patch -p1 < 50_add_susfs_in_kernel.patch  || true
+
+    - name: Apply WildKernels Patches
+      run: |
+          cd $GITHUB_WORKSPACE/kernel_workspace/sm8750/KernelSU-Next
+          echo "Cloning WildKernels Patches..."
+        
+          git clone https://github.com/Liam314839/wildpatches
+         
+          echo "Applying WildKernels Patches..."
+          for patch in wildpatches/*.patch; do
+            echo "Applying $patch"
+            patch -p1 < "$patch" || true
+          done
+
+          echo "Wild Kernels Patches Applied Successfully"
+   
+    - name: Build OPlus LineageOS SM-8750 AOSP Kernel
+      run: |
+        cd $GITHUB_WORKSPACE/kernel_workspace/sm8750
+        LTO=thin
+        export ARCH=arm64
+        export SUBARCH=arm64
+        export HEADER_ARCH=arm64
+        export PATH=$GITHUB_WORKSPACE/kernel_workspace/clang-aosp/bin:$PATH
+        export KBUILD_BUILD_HOST=Github-Action
+        export KBUILD_BUILD_USER=$(echo ${{ github.actor }} | tr A-Z a-z)
+    
+        AR_CMD="ARCH=${ARCH} SUBARCH=${SUBARCH} HEADER_ARCH=${HEADER_ARCH}"
+        BA_CMD="CC=clang CXX=clang++"
+        EX_CMD="LD=ld.lld AR=llvm-ar NM=llvm-nm OBJCOPY=llvm-objcopy OBJDUMP=llvm-objdump READELF=llvm-readelf OBJSIZE=llvm-size STRIP=llvm-strip LLVM=1 LLVM_IAS=1"
+        DEFCONFIG="gki_defconfig vendor/sun_perf.config vendor/oplus/sun_perf.config"
+  
+        make O=out $AR_CMD $BA_CMD $EX_CMD $DEFCONFIG
+        scripts/config --file out/.config -e LTO_CLANG -d LTO_NONE -e LTO_CLANG_THIN -d LTO_CLANG_FULL -e THINLTO
+        make -j$(nproc --all) O=out $AR_CMD $BA_CMD $EX_CMD
+    
+    - name: Check kernel Output Files
+      run: |
+       cd $GITHUB_WORKSPACE/kernel_workspace
+       if [ -f sm8750/out/arch/arm64/boot/Image ]; then
+           echo "CHECK_IMAGE=true" >> $GITHUB_ENV
+       else
+           echo "Kernel Output File is Empty"
+           exit 1
+       fi
+      
+    - name: Make AnyKernel3
+      if: env.CHECK_IMAGE == 'true'
+      run: |
+        cd $GITHUB_WORKSPACE/kernel_workspace
+        git clone https://github.com/AndreiMikh/AnyKernel3 --depth=1
+        rm -rf AnyKernel3/.git
+        cp sm8750/out/arch/arm64/boot/Image AnyKernel3/
+  
+    - name: Upload Image
+      if: env.CHECK_IMAGE == 'true'
+      uses: actions/upload-artifact@v7
+      with:
+        name: Image-Pershoot-KSU-Next-${{ env.KSUVER }}
+        path: kernel_workspace/sm8750/out/arch/arm64/boot/Image
+
+    - name: Upload AnyKernel3
+      if: env.CHECK_IMAGE == 'true'
+      uses: actions/upload-artifact@v7
+      with:
+        name: AK3-LineageOS-23.2-Dodge-Pershoot-KSU-Next-${{ env.KSUVER }}-${{ env.BUILD_TIME }}
+        path: kernel_workspace/AnyKernel3/*
