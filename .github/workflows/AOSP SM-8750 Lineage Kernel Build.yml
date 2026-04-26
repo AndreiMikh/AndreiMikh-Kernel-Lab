@@ -115,119 +115,146 @@ jobs:
         echo "CONFIG_KSU=y" >> "$CONFIG"
         echo "CONFIG_KSU_SUSFS=y" >> "$CONFIG"
 
-    # =========================
-    # Kernel Version Setup
-    # =========================
     - name: Kernel Version Setup
-      run: |
-        cd "$WORKSPACE"
+  run: |
+    echo "🔎 Universal Kernel Version..."
+    
+    if [[ -z "${WORKSPACE:-}" || -z "${KDIR:-}" ]]; then
+      echo "❌ WORKSPACE or KDIR not set"
+      exit 1
+    fi
 
-        echo "🔎 Detecting Kernel Tree Root..."
+    KERNEL_ROOT="$WORKSPACE/$KDIR"
 
-        # Detect Kernel Directory
-        if [[ -d "$WORKSPACE/$KDIR" ]]; then
-          KERNELROOT="$WORKSPACE/$KDIR"
-        else
-          echo "⚠️ Kernel Directory Not Found: $KDIR"
-          echo "📂 Available Folders:"
-          ls -la "$WORKSPACE"
-          exit 1
+    if [[ ! -d "$KERNEL_ROOT" ]]; then
+      echo "❌ Kernel root not found: $KERNEL_ROOT"
+      echo "📂 Workspace Contents:"
+      ls -la "$WORKSPACE"
+      exit 1
+    fi
+
+    echo "📁 Kernel Root: $KERNEL_ROOT"
+
+    echo "🔎 Detecting kernel system type..."
+
+    KERNEL_TYPE="UNKNOWN"
+
+    if [[ -f "$KERNEL_ROOT/build.config.gki" ]]; then
+      KERNEL_TYPE="GKI"
+    elif [[ -f "$KERNEL_ROOT/android/ACK_SHA" ]]; then
+      KERNEL_TYPE="ACK"
+    elif grep -qi "lineage" "$KERNEL_ROOT/Makefile" 2>/dev/null; then
+      KERNEL_TYPE="LINEAGE"
+    elif [[ -d "$KERNEL_ROOT/vendor" ]] || grep -qi "oplus\|oneplus" "$KERNEL_ROOT/Makefile" 2>/dev/null; then
+      KERNEL_TYPE="OEM"
+    else
+      KERNEL_TYPE="GENERIC"
+    fi
+
+    echo "📌 Kernel Type: $KERNEL_TYPE"
+    echo "KERNEL_TYPE=$KERNEL_TYPE" >> $GITHUB_ENV
+
+    echo "🔎 Resolving Kernel Makefile..."
+
+    MAKEFILE=""
+
+    case "$KERNEL_TYPE" in
+
+      GKI|ACK|LINEAGE)
+        if [[ -f "$KERNEL_ROOT/Makefile" ]]; then
+          MAKEFILE="$KERNEL_ROOT/Makefile"
         fi
+        ;;
 
-        echo "📁 Kernel Root: $KERNELROOT"
-
-        # Auto-Detect Makefile
-        MAKEFILE=$(find "$KERNELROOT" -maxdepth 4 -type f -name "Makefile" | head -n 1)
-
-        if [[ -z "$MAKEFILE" ]]; then
-          echo "⚠️ No Makefile Found in Kernel Tree!"
-          echo "🔍 Dumping Structure:"
-          find "$KERNELROOT" -maxdepth 3 -type f | head -n 50
-          exit 1
+      OEM)
+        if [[ -f "$KERNEL_ROOT/Makefile" ]]; then
+          MAKEFILE="$KERNEL_ROOT/Makefile"
+        elif [[ -f "$KERNEL_ROOT/kernel/Makefile" ]]; then
+          MAKEFILE="$KERNEL_ROOT/kernel/Makefile"
+        elif [[ -f "$KERNEL_ROOT/common/Makefile" ]]; then
+          MAKEFILE="$KERNEL_ROOT/common/Makefile"
         fi
+        ;;
 
-        echo "📄 Using Makefile: $MAKEFILE"
+      *)
+        MAKEFILE="$KERNEL_ROOT/Makefile"
+        ;;
+    esac
 
-        # Detect Branch (Optional)
-        BRANCH=""
+    if [[ -z "$MAKEFILE" ]]; then
+      echo "⚠️ Fallback Scan Activated..."
 
-        CONFIGFILES=$(find "$KERNELROOT" -type f \
-          \( -name "build.config*" -o -name "*config*" \) 2>/dev/null)
+      MAKEFILE=$(find "$KERNEL_ROOT" -maxdepth 3 -type f -name "Makefile" \
+        ! -path "*/drivers/*" \
+        ! -path "*/net/*" \
+        ! -path "*/virt/*" \
+        ! -path "*/fs/*" \
+        | head -n 1)
+    fi
 
-        for cfg in $CONFIGFILES; do
-          if [[ -f "$cfg" ]]; then
-            BRANCH=$(grep -m1 '^BRANCH=' "$cfg" | cut -d= -f2 || true)
-            [[ -n "$BRANCH" ]] && break
-          fi
-        done
+    if [[ -z "$MAKEFILE" || ! -f "$MAKEFILE" ]]; then
+      echo "❌ No Valid Kernel Makefile Found"
+      find "$KERNEL_ROOT" -maxdepth 2 -type f | head -n 50
+      exit 1
+    fi
 
-        # Fallback from ACK SHA (Optional)
-        if [[ -z "$BRANCH" && -n "${KERNEL_REPOS:-}" ]]; then
-          ACK_FILE="$WORKSPACE/$KERNEL_REPOS/android/ACK_SHA"
-          if [[ -f "$ACK_FILE" ]]; then
-            BRANCH=$(sed -n '2p' "$ACK_FILE" | awk -F'-' '{print $1"-"$2}' || true)
-          fi
-        fi
+    echo "📄 Selected Makefile: $MAKEFILE"
 
-        if [[ -n "$BRANCH" ]]; then
-          ANDROIDVERSION="${BRANCH%-*}"
-          KERNELVERSION="${BRANCH#*-}"
-        else
-          echo "⚠️ Branch Not Found → Using Fallback"
-          ANDROIDVERSION="unknown"
-          KERNELVERSION="unknown"
-        fi
+    if ! grep -qE "^(VERSION|PATCHLEVEL|SUBLEVEL)" "$MAKEFILE"; then
+      echo "❌ Invalid Kernel Makefile Detected"
+      head -n 20 "$MAKEFILE"
+      exit 1
+    fi
 
-        echo "ANDROIDVERSION=$ANDROIDVERSION" >> $GITHUB_ENV
-        echo "KERNELVERSION=$KERNELVERSION" >> $GITHUB_ENV
+    echo "🧾 Parsing kernel version..."
 
-        # Read Kernel Version
-        echo "🧾 Reading Kernel Version from Makefile..."
+    OGVERSION=$(awk '
+      /^VERSION =/ {v=$3}
+      /^PATCHLEVEL =/ {p=$3}
+      /^SUBLEVEL =/ {s=$3}
+      END {print v"."p"."s}
+    ' "$MAKEFILE")
 
-        OGVERSION=$(awk '
-          /^VERSION =/ {v=$3}
-          /^PATCHLEVEL =/ {p=$3}
-          /^SUBLEVEL =/ {s=$3}
-          END {print v"."p"."s}
-        ' "$MAKEFILE")
+    if [[ -z "$OGVERSION" || "$OGVERSION" == ".." ]]; then
+      echo "❌ Kernel Version Parsing Failed"
+      exit 1
+    fi
 
-        echo "📌 Original Kernel Version: $OGVERSION"
+    echo "📌 Original Kernel Version: $OGVERSION"
 
-        # Apply Sublevel Override
-        INPUTSUBLEVEL="${{ github.event.inputs.SUBLEVEL }}"
+    INPUTSUBLEVEL="${{ github.event.inputs.SUBLEVEL }}"
 
-        if [[ -n "$INPUTSUBLEVEL" ]]; then
-          echo "🧾 Overriding Sublevel → $INPUTSUBLEVEL"
+    if [[ -n "$INPUTSUBLEVEL" ]]; then
+      echo "🧾 Applying SUBLEVEL override: $INPUTSUBLEVEL"
+      sed -i "s/^\(SUBLEVEL[[:space:]]*=[[:space:]]*\).*/\1$INPUTSUBLEVEL/" "$MAKEFILE"
+    else
+      echo "📌 No SUBLEVEL override applied"
+    fi
 
-          sed -i "s/^\(SUBLEVEL[[:space:]]*=[[:space:]]*\).*/\1$INPUTSUBLEVEL/" "$MAKEFILE"
-        else
-          echo "📌 No Sublevel Override"
-        fi
+    NEWVERSION=$(awk '
+      /^VERSION =/ {v=$3}
+      /^PATCHLEVEL =/ {p=$3}
+      /^SUBLEVEL =/ {s=$3}
+      END {print v"."p"."s}
+    ' "$MAKEFILE")
 
-        # Compute New Version
-        NEWVERSION=$(awk '
-          /^VERSION =/ {v=$3}
-          /^PATCHLEVEL =/ {p=$3}
-          /^SUBLEVEL =/ {s=$3}
-          END {print v"."p"."s}
-        ' "$MAKEFILE")
+    echo "📊 Final Kernel Version: $NEWVERSION"
 
-        echo "📊 New Kernel Version: $NEWVERSION"
+    echo "FULLVERSION=$NEWVERSION" >> $GITHUB_ENV
 
-        echo "FULLVERSION=$NEWVERSION" >> $GITHUB_ENV
+    echo "KV1=$(echo "$NEWVERSION" | cut -d. -f1)" >> $GITHUB_ENV
+    echo "KV2=$(echo "$NEWVERSION" | tr -d '.')" >> $GITHUB_ENV
+    echo "KV3=$(echo "$NEWVERSION" | tr -d '.')" >> $GITHUB_ENV
 
-        # Export Kernel Version values
-        KVTMP="${KERNELVERSION:-unknown}"
+    echo "KSHORTVERSION=$(echo "$NEWVERSION" | cut -d. -f1,2)" >> $GITHUB_ENV
+    echo "KSHORTPATCHVERSION=$(echo "$NEWVERSION" | cut -d. -f1,2 | tr '.' '_')" >> $GITHUB_ENV
 
-        echo "KV1=$(echo "$KVTMP" | cut -d. -f1 || echo 0)" >> $GITHUB_ENV
-        echo "KV2=$(echo "$KVTMP" | tr -d '.' || echo 0)" >> $GITHUB_ENV
-        echo "KV3=$(echo "$NEWVERSION" | tr -d '.' || echo 0)" >> $GITHUB_ENV
-
-        echo "KSHORTVERSION=$(echo "$NEWVERSION" | cut -d. -f1,2)" >> $GITHUB_ENV
-        echo "KSHORTPATCHVERSION=$(echo "$NEWVERSION" | cut -d. -f1,2 | tr '.' '_')" >> $GITHUB_ENV
-
-        echo "🎉 Kernel Version System Initialized Successfully"
-  
+    echo ""
+    echo "🎉 Kernel Version System Complete"
+    echo "➡ Type: $KERNEL_TYPE"
+    echo "➡ Version: $NEWVERSION"
+    echo ""
+    
     # =========================
     # KernelSU Next
     # =========================
