@@ -116,78 +116,118 @@ jobs:
         echo "CONFIG_KSU_SUSFS=y" >> "$CONFIG"
 
     # =========================
-    # Kernel Version Setup 
+    # Kernel Version Setup
     # =========================
     - name: Kernel Version Setup
-      run: | 
+      run: |
         cd "$WORKSPACE"
-        
+
+        echo "🔎 Detecting Kernel Tree Root..."
+
+        # Detect Kernel Directory
+        if [[ -d "$WORKSPACE/$KDIR" ]]; then
+          KERNELROOT="$WORKSPACE/$KDIR"
+        else
+          echo "⚠️ Kernel Directory Not Found: $KDIR"
+          echo "📂 Available Folders:"
+          ls -la "$WORKSPACE"
+          exit 1
+        fi
+
+        echo "📁 Kernel Root: $KERNELROOT"
+
+        # Auto-Detect Makefile
+        MAKEFILE=$(find "$KERNELROOT" -maxdepth 4 -type f -name "Makefile" | head -n 1)
+
+        if [[ -z "$MAKEFILE" ]]; then
+          echo "⚠️ No Makefile Found in Kernel Tree!"
+          echo "🔍 Dumping Structure:"
+          find "$KERNELROOT" -maxdepth 3 -type f | head -n 50
+          exit 1
+        fi
+
+        echo "📄 Using Makefile: $MAKEFILE"
+
+        # Detect Branch (Optional)
         BRANCH=""
 
-        # Try to Read Branch from Build Configuration Files
-        for cfg in "$WORKSPACE/$KDIR/common/build.config.constants" \
-               "$WORKSPACE/$KDIR/common/build.config.common"; do
+        CONFIGFILES=$(find "$KERNELROOT" -type f \
+          \( -name "build.config*" -o -name "*config*" \) 2>/dev/null)
+
+        for cfg in $CONFIGFILES; do
           if [[ -f "$cfg" ]]; then
             BRANCH=$(grep -m1 '^BRANCH=' "$cfg" | cut -d= -f2 || true)
             [[ -n "$BRANCH" ]] && break
           fi
         done
 
-        # Fallback: Use ACK SHA from Kernel Repositories if Kernel Repositories Defined
-        if [[ -z "$BRANCH" && -n "${KERNEL_REPOS:-}" && -f "./$KERNEL_REPOS/android/ACK_SHA" ]]; then
-          BRANCH=$(sed -n '2p' "./$KERNEL_REPOS/android/ACK_SHA" | awk -F'-' '{print $1"-"$2}')
+        # Fallback from ACK SHA (Optional)
+        if [[ -z "$BRANCH" && -n "${KERNEL_REPOS:-}" ]]; then
+          ACK_FILE="$WORKSPACE/$KERNEL_REPOS/android/ACK_SHA"
+          if [[ -f "$ACK_FILE" ]]; then
+            BRANCH=$(sed -n '2p' "$ACK_FILE" | awk -F'-' '{print $1"-"$2}' || true)
+          fi
         fi
 
         if [[ -n "$BRANCH" ]]; then
           ANDROIDVERSION="${BRANCH%-*}"
           KERNELVERSION="${BRANCH#*-}"
-          echo "ANDROIDVERSION=$ANDROIDVERSION" >> $GITHUB_ENV
-          echo "KERNELVERSION=$KERNELVERSION" >> $GITHUB_ENV
-          echo "🔎 Branch Found: $BRANCH"
         else
-          echo "⚠️ No Branch Found in Build Configuration or Ack Sha"
+          echo "⚠️ Branch Not Found → Using Fallback"
           ANDROIDVERSION="unknown"
           KERNELVERSION="unknown"
-          echo "ANDROIDVERSION=$ANDROIDVERSION" >> $GITHUB_ENV
-          echo "KERNELVERSION=$KERNELVERSION" >> $GITHUB_ENV
         fi
 
-        # Read Original Kernel Version from Makefile
-        echo "🧾 Reading Original Kernel Version..."
-        OGVERSION=$(awk '/^VERSION =/ {v=$3} /^PATCHLEVEL =/ {p=$3} /^SUBLEVEL =/ {s=$3} END {print v"."p"."s}' ./common/Makefile)
+        echo "ANDROIDVERSION=$ANDROIDVERSION" >> $GITHUB_ENV
+        echo "KERNELVERSION=$KERNELVERSION" >> $GITHUB_ENV
+
+        # Read Kernel Version
+        echo "🧾 Reading Kernel Version from Makefile..."
+
+        OGVERSION=$(awk '
+          /^VERSION =/ {v=$3}
+          /^PATCHLEVEL =/ {p=$3}
+          /^SUBLEVEL =/ {s=$3}
+          END {print v"."p"."s}
+        ' "$MAKEFILE")
+
         echo "📌 Original Kernel Version: $OGVERSION"
 
-        # Update SubLevel if Input Provided
+        # Apply Sublevel Override
         INPUTSUBLEVEL="${{ github.event.inputs.SUBLEVEL }}"
+
         if [[ -n "$INPUTSUBLEVEL" ]]; then
-          echo "🧾 Updating Sublevel to: $INPUTSUBLEVEL"
-          sed -i "s/^\(SUBLEVEL[[:space:]]*=[[:space:]]*\).*/\1$INPUTSUBLEVEL/" ./common/Makefile
+          echo "🧾 Overriding Sublevel → $INPUTSUBLEVEL"
+
+          sed -i "s/^\(SUBLEVEL[[:space:]]*=[[:space:]]*\).*/\1$INPUTSUBLEVEL/" "$MAKEFILE"
         else
-          echo "📌 No SubLevel Input Provided ⚙️ Keeping Default"
+          echo "📌 No Sublevel Override"
         fi
 
-        # Determine New Kernel Version
-        NEWVERSION=$(awk '/^VERSION =/ {v=$3} /^PATCHLEVEL =/ {p=$3} /^SUBLEVEL =/ {s=$3} END {print v"."p"."s}' ./common/Makefile)
+        # Compute New Version
+        NEWVERSION=$(awk '
+          /^VERSION =/ {v=$3}
+          /^PATCHLEVEL =/ {p=$3}
+          /^SUBLEVEL =/ {s=$3}
+          END {print v"."p"."s}
+        ' "$MAKEFILE")
+
         echo "📊 New Kernel Version: $NEWVERSION"
 
-        if [[ "$OGVERSION" != "$NEWVERSION" ]]; then
-          echo "⚙️ Kernel Version Changed: $OGVERSION -> $NEWVERSION"
-          echo "FULLVERSION=$NEWVERSION" >> $GITHUB_ENV
-        else
-          echo "✔️ Kernel Version Unchanged: $OGVERSION"
-          echo "FULLVERSION=$OGVERSION" >> $GITHUB_ENV
-        fi
+        echo "FULLVERSION=$NEWVERSION" >> $GITHUB_ENV
 
-        # Export KV1, KV2, KV3 for Further Use
-        KV_TMP="${KERNELVERSION}"
-        echo "KV1=$(echo "$KV_TMP" | cut -d. -f1)" >> $GITHUB_ENV
-        echo "KV2=$(echo "$KV_TMP" | tr -d '.')" >> $GITHUB_ENV
-        echo "KV3=$(echo "$NEWVERSION" | tr -d '.')" >> $GITHUB_ENV
-        echo "KSHORTVERSION=$(echo $NEWVERSION | cut -d. -f1,2)" >> $GITHUB_ENV
-        echo "KSHORTPATCHVERSION=$(echo $NEWVERSION | cut -d. -f1,2 | tr '.' '_')" >> $GITHUB_ENV
+        # Export Kernel Version values
+        KVTMP="${KERNELVERSION:-unknown}"
 
-        echo "🎉 Kernel Version Setup Complete"
+        echo "KV1=$(echo "$KVTMP" | cut -d. -f1 || echo 0)" >> $GITHUB_ENV
+        echo "KV2=$(echo "$KVTMP" | tr -d '.' || echo 0)" >> $GITHUB_ENV
+        echo "KV3=$(echo "$NEWVERSION" | tr -d '.' || echo 0)" >> $GITHUB_ENV
 
+        echo "KSHORTVERSION=$(echo "$NEWVERSION" | cut -d. -f1,2)" >> $GITHUB_ENV
+        echo "KSHORTPATCHVERSION=$(echo "$NEWVERSION" | cut -d. -f1,2 | tr '.' '_')" >> $GITHUB_ENV
+
+        echo "🎉 Kernel Version System Initialized Successfully"
+  
     # =========================
     # KernelSU Next
     # =========================
