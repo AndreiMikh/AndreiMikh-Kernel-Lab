@@ -296,59 +296,101 @@ jobs:
         fi
 
     # =========================
-    # SUSFS GKI
+    # SUSFS for GKI
     # =========================
-    - name: SUSFS GKI
+    - name: SUSFS for GKI
       if: ${{ github.event.inputs.SUSFS == 'SUSFS-GKI' }}
       run: |
         cd "$WORKSPACE"
-
-        git clone --depth=1 -b gki-android15-6.6 \
-          https://gitlab.com/simonpunk/susfs4ksu.git susfs4ksu
-
+    
+        echo "📥 Cloning SUSFS..."
+        git clone --depth=1 https://gitlab.com/simonpunk/susfs4ksu.git susfs4ksu
+    
         SUSDIR="$WORKSPACE/$KDIR"
-
-        if [ ! -f "$SUSDIR/.susfs_done" ]; then
+    
+        if [ ! -f "$SUSDIR/.SUSFS" ]; then
+          echo "🔧 Copying SUSFS Sources..."
           cp -r susfs4ksu/kernel_patches/fs/* "$SUSDIR/fs/"
           cp -r susfs4ksu/kernel_patches/include/linux/* "$SUSDIR/include/linux/"
-
-          patch -d "$SUSDIR" -p1 --forward --ignore-whitespace < \
-            susfs4ksu/kernel_patches/50_add_susfs_in_gki-android15-6.6.patch \
-            || echo "SUSFS patch warnings"
-
-          touch "$SUSDIR/.susfs_done"
+    
+          echo "📥 Auto-Detecting Correct Patch..."
+          PATCH=$(find susfs4ksu/kernel_patches -name "*6.6*.patch" | head -n1)
+    
+          echo "📦 Using Patch: $PATCH"
+    
+          applied=false
+          for level in 0 1 2 3; do
+            if patch -d "$SUSDIR" -p$level --dry-run < "$PATCH" >/dev/null 2>&1; then
+              echo "✔ Patch Level Detected: $level"
+              patch -d "$SUSDIR" -p$level --forward --ignore-whitespace < "$PATCH" && applied=true
+              break
+            fi
+          done
+    
+          if [ "$applied" = false ]; then
+            echo "⚠️ SUSFS Patch Failed — But Continuing (Manual Merge Likely Applied)"
+          fi
+    
+          touch "$SUSDIR/.SUSFS_${{ github.event.inputs.SUSFS }}"
         fi
 
     # =========================
-    # SUSFS OKI
+    # SUSFS for OKI
     # =========================
-    - name: SUSFS OKI
+    - name: SUSFS for OKI
       if: ${{ github.event.inputs.SUSFS == 'SUSFS-OKI' }}
       run: |
         cd "$WORKSPACE"
-
-        git clone --depth=1 -b oki-android15-6.6 \
-          https://github.com/cctv18/susfs4oki.git susfs4ksu
-
+    
+        echo "📥 Cloning SUSFS..."
+        git clone --depth=1 https://gitlab.com/cctv18/susfs4oki.git susfs4ksu
+    
         SUSDIR="$WORKSPACE/$KDIR"
-
-        if [ ! -f "$SUSDIR/.susfs_done" ]; then
+    
+        if [ ! -f "$SUSDIR/.SUSFS" ]; then
+          echo "🔧 Copying SUSFS Sources..."
           cp -r susfs4ksu/kernel_patches/fs/* "$SUSDIR/fs/"
           cp -r susfs4ksu/kernel_patches/include/linux/* "$SUSDIR/include/linux/"
-
-          patch -d "$SUSDIR" -p1 --forward --ignore-whitespace < \
-            susfs4ksu/kernel_patches/50_add_susfs_in_gki-android15-6.6.patch \
-            || echo "SUSFS patch warnings"
-
-          touch "$SUSDIR/.susfs_done"
+    
+          echo "📥 Auto-Detecting Correct Patch..."
+          PATCH=$(find susfs4ksu/kernel_patches -name "*6.6*.patch" | head -n1)
+    
+          echo "📦 Using Patch: $PATCH"
+    
+          applied=false
+          for level in 0 1 2 3; do
+            if patch -d "$SUSDIR" -p$level --dry-run < "$PATCH" >/dev/null 2>&1; then
+              echo "✔ Patch Level Detected: $level"
+              patch -d "$SUSDIR" -p$level --forward --ignore-whitespace < "$PATCH" && applied=true
+              break
+            fi
+          done
+    
+          if [ "$applied" = false ]; then
+            echo "⚠️ SUSFS Patch Failed — But Continuing (Manual Merge Likely Applied)"
+          fi
+    
+          touch "$SUSDIR/.SUSFS_${{ github.event.inputs.SUSFS }}"
         fi
 
-    - name: Apply WildKernels Patches
-      if: ${{ github.event.inputs.SUSFS != 'None' }}
+    # =========================
+    # WildKernels Patches
+    # =========================
+    - name: WildKernels Patches
+      if: ${{ github.event.inputs.KSU != 'None' }}
       run: |
-        cd "$WORKSPACE/$KDIR/KernelSU-Next"
+        cd "$WORKSPACE/$KDIR"
+        
+        KSUPATH=$(find . -maxdepth 2 -type d -name "KernelSU*" | head -n1)
+        
+        if [ -z "$KSUPATH" ]; then
+          echo "⚠️ KernelSU Directory Not Found, Skipping Wild Patches"
+          exit 0
+        fi
+        
+        cd "$KSUPATH"
 
-        echo "📥 Cloning WildKernels Patches..."
+        echo "📥 Cloning Wild Patches..."
         git clone https://github.com/Liam314839/wildpatches
 
         PATCHDIR="wildpatches"
@@ -390,73 +432,99 @@ jobs:
     - name: Build Kernel
       run: |
         cd "$WORKSPACE/$KDIR"
-
+    
         export ARCH=arm64
         export SUBARCH=arm64
         export HEADER_ARCH=arm64
         export PATH="$GITHUB_WORKSPACE/kernel_workspace/clang-aosp/bin:$PATH"
-
+    
         export KBUILD_BUILD_HOST="Github-Action"
         export KBUILD_BUILD_USER="$(echo "${{ github.actor }}" | tr '[:upper:]' '[:lower:]')"
-
-        LTO=thin
-
+    
         AR_CMD="ARCH=${ARCH} SUBARCH=${SUBARCH} HEADER_ARCH=${HEADER_ARCH}"
         CC_CMD="CC=clang CXX=clang++"
-       
         LLVM_CMD="LD=ld.lld AR=llvm-ar NM=llvm-nm OBJCOPY=llvm-objcopy OBJDUMP=llvm-objdump READELF=llvm-readelf OBJSIZE=llvm-size STRIP=llvm-strip LLVM=1 LLVM_IAS=1"
-        DEFCONFIG="gki_defconfig vendor/sun_perf.config vendor/oplus/sun_perf.config"
-
+    
+        DEFCONFIG="gki_defconfig vendor/oplus/sun_perf.config"
+    
         echo "📌 Running Default Configuration..."
         make O=out $AR_CMD $CC_CMD $LLVM_CMD $DEFCONFIG
-   
+    
+        echo "🔄 Resolving Base Configuration..."
+        make O=out $AR_CMD $CC_CMD $LLVM_CMD olddefconfig
+    
+        echo "🔧 Generating Scripts..."
+        make O=out $AR_CMD $CC_CMD $LLVM_CMD scripts
+    
+        CONFIGTOOL="out/scripts/config"
+    
         # KSU Handling
-        echo "🔧 Applying KSU Config..."
+        echo "🔧 Checking KSU Support..."
         if grep -R "config KSU" -n . >/dev/null 2>&1; then
-          echo "🎉 KSU Supported in Source"
-          scripts/config --file out/.config -e CONFIG_KSU
+          echo "🎉 KSU Supported"
+          $CONFIGTOOL --file out/.config -e CONFIG_KSU
         else
-          echo "⚠️ KSU Not Supported in Kernel Source - Skipping"
+          echo "⚠️ KSU Not Supported → Skipping"
         fi
-
+    
         # SUSFS Handling
-        if [ "${{ github.event.inputs.SUSFS }}" != "None" ]; then
-          echo "🔍 Checking SUSFS Support..."
+        if [ "${{ github.event.inputs.SUSFS }}" = "SUSFS-GKI" ] || [ "${{ github.event.inputs.SUSFS }}" = "SUSFS-OKI" ]; then
+          echo "🔧 Checking SUSFS Support..."
           if grep -R "config .*SUSFS" -n . >/dev/null 2>&1; then
-            echo "🎉 SUSFS Supported - Enabling SUSFS Config"
-            scripts/config --file out/.config -e CONFIG_KSU_SUSFS
+            echo "🎉 SUSFS Supported"
+            $CONFIGTOOL --file out/.config -e CONFIG_KSU_SUSFS
           else
-            echo "⚠️ SUSFS Not Supported in this Kernel - Skipping"
+            echo "⚠️ SUSFS Not Supported → Skipping"
           fi
         fi
-
-        echo "🔄 Resolving Configuration Dependencies..."
-        make O=out $AR_CMD $CC_CMD $LLVM_CMD olddefconfig
-
-        echo "🔍 Checking KSU and SUSFS Configuration in Final Configurations..."
-        grep -i "ksu" out/.config || echo "⚠️ KSU Not Found in Final Configurations"
-        grep -i "susfs" out/.config || echo "⚠️ SUSFS Not Found in Final Configurations"
-        
+    
+        # Required FS Configurations
+        $CONFIGTOOL --file out/.config \
+          -e CONFIG_OVERLAY_FS \
+          -e CONFIG_TMPFS \
+          -e CONFIG_TMPFS_XATTR \
+          -e CONFIG_TMPFS_POSIX_ACL
+    
+        # LTO
         echo "⚙️ Enforcing LTO Configuration..."
-        scripts/config --file out/.config \
-            -e LTO_CLANG \
-            -d LTO_NONE \
-            -e LTO_CLANG_THIN \
-            -d LTO_CLANG_FULL \
-            -e THINLTO
-
-        echo "🚀 Starting Kernel Build..."
-        make -j"$(nproc --all)" O=out $AR_CMD $CC_CMD $LLVM_CMD
+        $CONFIGTOOL --file out/.config \
+          -e LTO_CLANG \
+          -d LTO_NONE \
+          -e LTO_CLANG_THIN \
+          -d LTO_CLANG_FULL \
+          -e THINLTO
+    
+        echo "🔄 Finalizing Configuration..."
+        make O=out $AR_CMD $CC_CMD $LLVM_CMD olddefconfig
+    
+        echo "🔧 Preparing Kernel..."
+        make -j$(nproc) O=out $AR_CMD $CC_CMD $LLVM_CMD prepare modules_prepare
+    
+        echo "🔍 Final Configuration Check:"
+        grep -i "CONFIG_KSU=" out/.config || echo "⚠️ KSU Not Enabled"
+        grep -i "SUSFS" out/.config || echo "⚠️ SUSFS Not Enabled"
+    
+        echo "🚀 Building Kernel..."
+        make -j$(nproc --all) O=out $AR_CMD $CC_CMD $LLVM_CMD
 
     # =========================
     # Validate Output
     # =========================
     - name: Validate Output
       run: |
-        if [ -f "$WORKSPACE/$KDIR/out/arch/arm64/boot/Image" ]; then
+        echo "🔍 Checking Kernel Output Images..."
+    
+        OUTPUTDIR="$WORKSPACE/$KDIR/out/arch/arm64/boot"
+    
+        IMAGEFOUND=$(find "$OUTPUTDIR" -name "Image*" | head -n 1)
+    
+        if [ -n "$IMAGEFOUND" ]; then
+          echo "🚀 Kernel Image Found: $IMAGEFOUND"
           echo "IMAGEPATH=true" >> $GITHUB_ENV
+          echo "IMAGEFILE=$(basename "$IMAGEFOUND")" >> $GITHUB_ENV
         else
-          echo "Kernel build failed"
+          echo "⚠️ Kernel Build Failed: No Image* found"
+          ls -la "$OUTPUTDIR"
           exit 1
         fi
 
@@ -464,33 +532,33 @@ jobs:
     # Package AnyKernel3
     # =========================
     - name: Package AnyKernel3
-      if: env.IMAGEPATH == 'true'
+      if: env.IMAGEFILE != ''
       run: |
         cd "$WORKSPACE"
 
         git clone --depth=1 https://github.com/AndreiMikh/AnyKernel3
         rm -rf AnyKernel3/.git
 
-        cp "$KDIR/out/arch/arm64/boot/Image" AnyKernel3/
+        cp "$IMAGEFILE" AnyKernel3/
 
     # =========================
     # Upload Kernel Image
     # =========================
     - name: Upload Kernel Image
-      if: env.IMAGEPATH == 'true'
+      if: env.IMAGEFILE != ''
       uses: actions/upload-artifact@v7
       with:
         name: Boot-Image-Dodge-${{ env.FULLVERSION }}-${{ github.event.inputs.KSU }}
-        path: kernel_workspace/sm8750/out/arch/arm64/boot/Image
+        path: ${{ env.IMAGEFILE }}
         compression-level: 0
 
     # =========================
     # Upload AnyKernel3
     # =========================
     - name: Upload AnyKernel3
-      if: env.IMAGEPATH == 'true'
+      if: env.IMAGEFILE != ''
       uses: actions/upload-artifact@v7
       with:
         name: AnyKernel3-Dodge-${{ env.FULLVERSION }}-${{ github.event.inputs.KSU }}
-        path: kernel_workspace/AnyKernel3/*
+        path: kernel_workspace/AnyKernel3
         compression-level: 0
