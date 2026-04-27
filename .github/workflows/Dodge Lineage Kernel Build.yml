@@ -482,7 +482,12 @@ jobs:
     # =========================
     - name: Build Kernel
       run: |
+        set -e
+    
         cd "$WORKSPACE/$KDIR"
+    
+        # Fix "Source Tree Not Clean"
+        rm -rf out
     
         export ARCH=arm64
         export SUBARCH=arm64
@@ -504,30 +509,23 @@ jobs:
         echo "🔄 Resolving Base Config..."
         make O=out $AR_CMD $CC_CMD $LLVM_CMD olddefconfig
     
-        echo "🔧 Generating Scripts..."
-        make O=out $AR_CMD $CC_CMD $LLVM_CMD scripts
-        
-        # find config binary safely
-        CONFIGTOOL=$(find out/scripts -type f -name "config" -executable | head -n 1)
-        
-        if [ -z "$CONFIGTOOL" ]; then
-          echo "⚠️ Config Tool Not Found, Trying Fallback..."
-        
-          CONFIGTOOL=$(find out/scripts -type f -name "conf" -executable | head -n 1)
-        fi
-        
-        if [ -z "$CONFIGTOOL" ]; then
-          echo "⚠️ No Config Tool Found in Out/Scripts"
+        echo "🔧 Building Scripts/Config"
+        make O=out $AR_CMD $CC_CMD $LLVM_CMD scripts/config
+    
+        # Config Tool
+        CONFIGTOOL="out/scripts/config"
+    
+        if [ ! -f "$CONFIGTOOL" ]; then
+          echo "⚠️ Scripts/Config Not Found"
           ls -R out/scripts || true
           exit 1
         fi
-        
-        echo "📌 Using Config Tool = $CONFIGTOOL"
+    
         chmod +x "$CONFIGTOOL"
+        echo "📌 Using Config Tool = $CONFIGTOOL"
     
         # KSU Handling
         echo "🔧 Checking KSU Support..."
-        
         if grep -q "^CONFIG_KSU=y" out/.config; then
           echo "🎉 KSU Supported"
           $CONFIGTOOL --file out/.config -e CONFIG_KSU
@@ -536,26 +534,22 @@ jobs:
         fi
     
         # SUSFS Handling
-        if [ "${{ github.event.inputs.SUSFS }}" = "SUSFS-GKI" ] || [ "${{ github.event.inputs.SUSFS }}" = "SUSFS-OKI" ]; then
+        if [ "${{ github.event.inputs.SUSFS }}" = "SUSFS-GKI" ] || \
+           [ "${{ github.event.inputs.SUSFS }}" = "SUSFS-OKI" ]; then
+    
           echo "🔧 Checking SUSFS Support..."
-        
+    
           if grep -q "^CONFIG_KSU_SUSFS=y" out/.config || grep -q "^CONFIG_SUSFS=y" out/.config; then
             echo "🎉 SUSFS Supported"
-            
-            if grep -q "CONFIG_KSU_SUSFS" out/.config; then
-              $CONFIGTOOL --file out/.config -e CONFIG_KSU_SUSFS
-            fi
-        
-            if grep -q "CONFIG_SUSFS" out/.config; then
-              $CONFIGTOOL --file out/.config -e CONFIG_SUSFS
-            fi
-        
+    
+            $CONFIGTOOL --file out/.config -e CONFIG_KSU_SUSFS || true
+            $CONFIGTOOL --file out/.config -e CONFIG_SUSFS || true
           else
             echo "⚠️ SUSFS Not Supported → Skipping"
           fi
         fi
     
-        # Required FS Configs
+        # FS Configs
         $CONFIGTOOL --file out/.config \
           -e CONFIG_OVERLAY_FS \
           -e CONFIG_TMPFS \
