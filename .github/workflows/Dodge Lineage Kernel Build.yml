@@ -508,6 +508,31 @@ jobs:
         done
 
         echo "🎉 WildKernels Patches Process Finished"
+
+    # =========================
+    # Kernel Configuration
+    # =========================
+    - name: 🔧 Kernel Configuration
+      run: |
+        cd "$WORKSPACE/$KDIR"
+
+        # Set the Path to the Configuration File
+        CONFIG="$KDIR/arch/arm64/configs/vendor/oplus/sun_perf.config"
+
+        # Get Github Environment Variables and GitHub Actions Inputs    
+        SUSFS="${{ github.event.inputs.SUSFS }}"
+
+        # KSU Config
+        echo "CONFIG_KSU=y" >> "$CONFIG"
+
+        # SUSFS Config
+        if [[ "$SUSFS" == "SUSFS-GKI" || "$SUSFS" == "SUSFS-OKI" ]]; then
+          echo "CONFIG_KSU_SUSFS=y" >> "$CONFIG"
+        fi
+
+        # FS Config
+        echo "CONFIG_TMPFS_POSIX_ACL=y" >> "$CONFIG"
+        echo "CONFIG_TMPFS_XATTR=y" >> "$CONFIG"      
    
     # =========================
     # Build Kernel
@@ -515,9 +540,6 @@ jobs:
     - name: Build Kernel
       run: |
         cd "$WORKSPACE/$KDIR"
-    
-        echo "🧹 Ensuring Clean Build State..."
-        rm -rf out
     
         export ARCH=arm64
         export SUBARCH=arm64
@@ -527,93 +549,40 @@ jobs:
         export KBUILD_BUILD_HOST="Github-Action"
         export KBUILD_BUILD_USER="$(echo "${{ github.actor }}" | tr '[:upper:]' '[:lower:]')"
     
-        ARGS="ARCH=$ARCH SUBARCH=$SUBARCH HEADER_ARCH=$HEADER_ARCH"
-        CC="CC=clang CXX=clang++"
-        LLVM="LD=ld.lld AR=llvm-ar NM=llvm-nm OBJCOPY=llvm-objcopy OBJDUMP=llvm-objdump READELF=llvm-readelf OBJSIZE=llvm-size STRIP=llvm-strip LLVM=1 LLVM_IAS=1"
+        export LTO=thin
+    
+        AR_CMD="ARCH=${ARCH} SUBARCH=${SUBARCH} HEADER_ARCH=${HEADER_ARCH}"
+        CC_CMD="CC=clang CXX=clang++"
+    
+        LLVM_CMD="LLVM=1 LLVM_IAS=1 \
+        LD=ld.lld \
+        AR=llvm-ar \
+        NM=llvm-nm \
+        OBJCOPY=llvm-objcopy \
+        OBJDUMP=llvm-objdump \
+        READELF=llvm-readelf \
+        OBJSIZE=llvm-size \
+        STRIP=llvm-strip"
     
         DEFCONFIG="gki_defconfig vendor/oplus/sun_perf.config"
     
-        # Base Config
-        echo "⚙️ Running Def Config..."
-        make O=out $ARGS $CC $LLVM $DEFCONFIG
+        echo "📌 Running Default Configuration..."
+        make O=out $AR_CMD $CC_CMD $LLVM_CMD $DEFCONFIG
     
-        echo "🔄 Old Def Config..."
-        make O=out $ARGS $CC $LLVM olddefconfig
+        echo "🔍 Checking KSU and SUSFS Configuration..."
+        grep -i "CONFIG_KSU" out/.config || echo "⚠️ KSU Not Found in Final Config"
+        grep -i "SUSFS" out/.config || echo "⚠️ SUSFS Not Found in Final Config"
     
+        echo "⚙️ Enforcing LTO Configuration..."
+        scripts/config --file out/.config \
+            -e LTO_CLANG \
+            -d LTO_NONE \
+            -e LTO_CLANG_THIN \
+            -d LTO_CLANG_FULL \
+            -e THINLTO
     
-        # Select correct config tool
-        echo "🔧 Locating Config Tool..."
-    
-        CONFIGTOOL=""
-    
-        if [ -x out/scripts/config ]; then
-            CONFIGTOOL="out/scripts/config"
-        elif [ -x scripts/config ]; then
-            CONFIGTOOL="scripts/config"
-        else
-            echo "⚠️ Scripts/Config Not Found... Kernel Does Not Support it..."
-            echo "ℹ️ Falling Back to Direct Config Edits via Old Def Config Only..."
-            CONFIGTOOL=""
-        fi
-    
-        echo "📌 CONFIGTOOL=$CONFIGTOOL"
-    
-        # KSU handling
-        echo "🔧 KSU check..."
-        if grep -q "CONFIG_KSU=y" out/.config; then
-            echo "🔄 KSU Enabled in Base Config"
-            [ -n "$CONFIGTOOL" ] && $CONFIGTOOL --file out/.config -e CONFIG_KSU || true
-        else
-            echo "⚠️ KSU Not Enabled"
-        fi
-        
-        # SUSFS Handling
-        if [[ "${{ github.event.inputs.SUSFS }}" == "SUSFS-GKI" || \
-              "${{ github.event.inputs.SUSFS }}" == "SUSFS-OKI" ]]; then    
-            echo "📦 SUSFS Enabled: ${{ github.event.inputs.SUSFS }}"
-    
-            if grep -q "^CONFIG_KSU_SUSFS=y" out/.config; then
-                echo "🔄 SUSFS Already Present in Config"
-            else
-                echo "⚠️ Config KSU SUSFS Not Found (SUSFS Patch Likely Not Applied)"
-            fi
-        fi
-    
-        # Required FS features
-        if [ -n "$CONFIGTOOL" ]; then
-            $CONFIGTOOL --file out/.config \
-                -e CONFIG_OVERLAY_FS \
-                -e CONFIG_TMPFS \
-                -e CONFIG_TMPFS_XATTR \
-                -e CONFIG_TMPFS_POSIX_ACL || true
-        fi
-    
-        # LTO
-        if [ -n "$CONFIGTOOL" ]; then
-            $CONFIGTOOL --file out/.config \
-                -e LTO_CLANG \
-                -d LTO_NONE \
-                -e LTO_CLANG_THIN \
-                -d LTO_CLANG_FULL \
-                -e THINLTO || true
-        fi
-    
-        # Finalize Config
-        echo "🔄 Final Old Def Config..."
-        make O=out $ARGS $CC $LLVM olddefconfig
-    
-    
-        # Prepare Build
-        echo "🛠 Preparing Kernel..."
-        make -j$(nproc) O=out $ARGS $CC $LLVM prepare modules_prepare
-        
-        # Sanity Check
-        echo "🔍 Config Sanity:"
-        grep -E "CONFIG_KSU|CONFIG_SUSFS" out/.config || true
-        
-        # Build
-        echo "🚀 Building Kernel..."
-        make -j$(nproc --all) O=out $ARGS $CC $LLVM
+        echo "🚀 Starting Kernel Build..."
+        make -j"$(nproc --all)" O=out $AR_CMD $CC_CMD $LLVM_CMD
 
     # =========================
     # Validate Output
