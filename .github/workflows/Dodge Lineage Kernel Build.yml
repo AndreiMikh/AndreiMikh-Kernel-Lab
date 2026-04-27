@@ -514,11 +514,9 @@ jobs:
     # =========================
     - name: Build Kernel
       run: |
-        set -e
-    
         cd "$WORKSPACE/$KDIR"
     
-        # Fix "Source Tree Not Clean"
+        echo "🧹 Ensuring Clean Build State..."
         rm -rf out
     
         export ARCH=arm64
@@ -529,86 +527,94 @@ jobs:
         export KBUILD_BUILD_HOST="Github-Action"
         export KBUILD_BUILD_USER="$(echo "${{ github.actor }}" | tr '[:upper:]' '[:lower:]')"
     
-        AR_CMD="ARCH=${ARCH} SUBARCH=${SUBARCH} HEADER_ARCH=${HEADER_ARCH}"
-        CC_CMD="CC=clang CXX=clang++"
-        LLVM_CMD="LD=ld.lld AR=llvm-ar NM=llvm-nm OBJCOPY=llvm-objcopy OBJDUMP=llvm-objdump READELF=llvm-readelf OBJSIZE=llvm-size STRIP=llvm-strip LLVM=1 LLVM_IAS=1"
+        ARGS="ARCH=$ARCH SUBARCH=$SUBARCH HEADER_ARCH=$HEADER_ARCH"
+        CC="CC=clang CXX=clang++"
+        LLVM="LD=ld.lld AR=llvm-ar NM=llvm-nm OBJCOPY=llvm-objcopy OBJDUMP=llvm-objdump READELF=llvm-readelf OBJSIZE=llvm-size STRIP=llvm-strip LLVM=1 LLVM_IAS=1"
     
         DEFCONFIG="gki_defconfig vendor/oplus/sun_perf.config"
     
-        echo "📌 Running Default Config..."
-        make O=out $AR_CMD $CC_CMD $LLVM_CMD $DEFCONFIG
+        # Base Config
+        echo "⚙️ Running Def Config..."
+        make O=out $ARGS $CC $LLVM $DEFCONFIG
     
-        echo "🔄 Resolving Base Config..."
-        make O=out $AR_CMD $CC_CMD $LLVM_CMD olddefconfig
+        echo "🔄 Old Def Config..."
+        make O=out $ARGS $CC $LLVM olddefconfig
     
-        echo "🔧 Building Scripts/Config"
-        make O=out $AR_CMD $CC_CMD $LLVM_CMD scripts/config
     
-        # Config Tool
-        CONFIGTOOL="out/scripts/config"
+        # Select correct config tool
+        echo "🔧 Locating Config Tool..."
     
-        if [ ! -f "$CONFIGTOOL" ]; then
-          echo "⚠️ Scripts/Config Not Found"
-          ls -R out/scripts || true
-          exit 1
-        fi
+        CONFIGTOOL=""
     
-        chmod +x "$CONFIGTOOL"
-        echo "📌 Using Config Tool = $CONFIGTOOL"
-    
-        # KSU Handling
-        echo "🔧 Checking KSU Support..."
-        if grep -q "^CONFIG_KSU=y" out/.config; then
-          echo "🎉 KSU Supported"
-          $CONFIGTOOL --file out/.config -e CONFIG_KSU
+        if [ -x out/scripts/config ]; then
+            CONFIGTOOL="out/scripts/config"
+        elif [ -x scripts/config ]; then
+            CONFIGTOOL="scripts/config"
         else
-          echo "⚠️ KSU Not Supported → Skipping"
+            echo "⚠️ Scripts/Config Not Found... Kernel Does Not Support it..."
+            echo "ℹ️ Falling Back to Direct Config Edits via Old Def Config Only..."
+            CONFIGTOOL=""
         fi
     
+        echo "📌 CONFIGTOOL=$CONFIGTOOL"
+    
+        # KSU handling
+        echo "🔧 KSU check..."
+        if grep -q "CONFIG_KSU=y" out/.config; then
+            echo "🔄 KSU Enabled in Base Config"
+            [ -n "$CONFIGTOOL" ] && $CONFIGTOOL --file out/.config -e CONFIG_KSU || true
+        else
+            echo "⚠️ KSU Not Enabled"
+        fi
+        
         # SUSFS Handling
-        if [ "${{ github.event.inputs.SUSFS }}" = "SUSFS-GKI" ] || \
-           [ "${{ github.event.inputs.SUSFS }}" = "SUSFS-OKI" ]; then
+        if [[ "${{ github.event.inputs.SUSFS }}" == "SUSFS-GKI" || \
+              "${{ github.event.inputs.SUSFS }}" == "SUSFS-OKI" ]]; then
     
-          echo "🔧 Checking SUSFS Support..."
+            echo "📦 SUSFS Enabled: ${{ github.event.inputs.SUSFS }}"
     
-          if grep -q "^CONFIG_KSU_SUSFS=y" out/.config || grep -q "^CONFIG_SUSFS=y" out/.config; then
-            echo "🎉 SUSFS Supported"
-    
-            $CONFIGTOOL --file out/.config -e CONFIG_KSU_SUSFS || true
-            $CONFIGTOOL --file out/.config -e CONFIG_SUSFS || true
-          else
-            echo "⚠️ SUSFS Not Supported → Skipping"
-          fi
+            if grep -q "CONFIG_SUSFS=y" out/.config || grep -q "CONFIG_KSU_SUSFS=y" out/.config; then
+                echo "🔄 SUSFS Already Present in Config"
+            else
+                echo "⚠️ SUSFS Config Missing"
+            fi
         fi
     
-        # FS Configs
-        $CONFIGTOOL --file out/.config \
-          -e CONFIG_OVERLAY_FS \
-          -e CONFIG_TMPFS \
-          -e CONFIG_TMPFS_XATTR \
-          -e CONFIG_TMPFS_POSIX_ACL
+        # Required FS features
+        if [ -n "$CONFIGTOOL" ]; then
+            $CONFIGTOOL --file out/.config \
+                -e CONFIG_OVERLAY_FS \
+                -e CONFIG_TMPFS \
+                -e CONFIG_TMPFS_XATTR \
+                -e CONFIG_TMPFS_POSIX_ACL || true
+        fi
     
         # LTO
-        echo "⚙️ Enforcing LTO Config..."
-        $CONFIGTOOL --file out/.config \
-          -e LTO_CLANG \
-          -d LTO_NONE \
-          -e LTO_CLANG_THIN \
-          -d LTO_CLANG_FULL \
-          -e THINLTO
+        if [ -n "$CONFIGTOOL" ]; then
+            $CONFIGTOOL --file out/.config \
+                -e LTO_CLANG \
+                -d LTO_NONE \
+                -e LTO_CLANG_THIN \
+                -d LTO_CLANG_FULL \
+                -e THINLTO || true
+        fi
     
-        echo "🔄 Finalizing Config..."
-        make O=out $AR_CMD $CC_CMD $LLVM_CMD olddefconfig
+        # Finalize Config
+        echo "🔄 Final Old Def Config..."
+        make O=out $ARGS $CC $LLVM olddefconfig
     
-        echo "🔧 Preparing Kernel..."
-        make -j$(nproc) O=out $AR_CMD $CC_CMD $LLVM_CMD prepare modules_prepare
     
-        echo "🔍 Final Config Check:"
-        grep -i "CONFIG_KSU=" out/.config || echo "⚠️ KSU Not Enabled"
-        grep -i "SUSFS" out/.config || echo "⚠️ SUSFS Not Enabled"
-    
+        # Prepare Build
+        echo "🛠 Preparing Kernel..."
+        make -j$(nproc) O=out $ARGS $CC $LLVM prepare modules_prepare
+        
+        # Sanity Check
+        echo "🔍 Config Sanity:"
+        grep -E "CONFIG_KSU|CONFIG_SUSFS" out/.config || true
+        
+        # Build
         echo "🚀 Building Kernel..."
-        make -j$(nproc --all) O=out $AR_CMD $CC_CMD $LLVM_CMD
+        make -j$(nproc --all) O=out $ARGS $CC $LLVM
 
     # =========================
     # Validate Output
