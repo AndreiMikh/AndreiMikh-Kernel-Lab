@@ -627,9 +627,9 @@ jobs:
           echo ""
 
           {
-            echo "MANIFEST_REPO=$MANIFESTFOUNDREPO"
-            echo "MANIFEST_REPO_NAME=$MANIFESTFOUNDREPONAME"
-            echo "MANIFEST_BRANCH=$MANIFESTFOUNDBRANCH"
+            echo "MANIFESTREPO=$MANIFESTFOUNDREPO"
+            echo "MANIFESTREPONAME=$MANIFESTFOUNDREPONAME"
+            echo "MANIFESTBRANCH=$MANIFESTFOUNDBRANCH"
           } >> "$GITHUB_ENV"
 
           # Parse Revision String
@@ -671,6 +671,102 @@ jobs:
 
           echo ""
           echo "🎉 Manifest Parsing Complete"
+      
+      # ==============================
+      # Toolchain Patch System
+      # ==============================
+      - name: 🔧 Toolchain Patch System
+        shell: bash
+        run: |
+          set -euo pipefail
+      
+          echo "------------------------------"
+          echo "🚀 Detecting System on Chip from Manifest..."
+          echo "------------------------------"
+          echo ""
+      
+          # Get Authoritative Branch
+          BRANCH="${MANIFESTBRANCHOVERRIDE:-${MANIFESTBRANCH:-}}"
+      
+          if [[ -z "$BRANCH" ]]; then
+            echo "⚠️ ERROR: No Manifest Branch Found"
+            exit 1
+          fi
+      
+          echo "📌 Using Branch: $BRANCH"
+      
+          # Detect SoC (System on Chip)
+          SOCCHIP="$(echo "$BRANCH" | grep -oiE 'sm[0-9]+' | tr 'A-Z' 'a-z' || true)"
+      
+          if [[ -z "$SOCCHIP" ]]; then
+            SOCCHIP="Unknown"
+            echo "⚠️ No System on Chip Detected → Fallback: Unknown"
+          else
+            echo "📌 Detected System on Chip: $SOCCHIP"
+          fi
+      
+          echo "SOCCHIP=$SOCCHIP" >> "$GITHUB_ENV"
+      
+          # Toolchain Patch Function
+          applyccache() {
+            local chipname="$1"
+            local urlccache="$2"
+      
+            echo ""
+            echo "🚀 Applying Toolchain Patch for $chipname"
+
+            # WGET + Compiler Cache already Exist from Cache-APT-PKGS-Action
+            echo "📥 Downloading Compiler Cache Binary..."
+           
+            wget -q --retry-connrefused --tries=3 --timeout=20 \
+              "$urlccache" -O ccache
+      
+            chmod +x ccache
+      
+            # Safe Install (No APT, No Overwrite Issues)
+            sudo install -m 0755 ccache /usr/bin/ccache
+      
+            echo "📦 Configuring Compiler Cache Environment..."
+      
+            echo "CCACHE_EXEC=/usr/bin/ccache" >> "$GITHUB_ENV"
+            echo "USE_CCACHE=1" >> "$GITHUB_ENV"
+            echo "CCACHE_COMPRESS=1" >> "$GITHUB_ENV"
+            echo "/usr/lib/ccache" >> "$GITHUB_PATH"
+      
+            echo "🔎 Verifying Compiler Cache..."
+            ccache --version || true
+      
+            echo "🎉 $chipname Toolchain Patch Applied Successfully"
+          }
+      
+          # Multi-SoC (System on Chip) Dispatcher
+          echo ""
+          echo "------------------------------"
+          echo "🚀 Checking SoC (System on Chip) Toolchain Patch..."
+          echo "------------------------------"
+      
+          case "$SOCCHIP" in
+      
+            sm8650)
+              applyccache "SM8650" \
+                "https://github.com/cctv18/oppo_oplus_realme_sm8650/raw/refs/heads/main/lib/ccache-x86-64"
+              ;;
+      
+            sm8750)
+              applyccache "SM8750" \
+                "https://github.com/cctv18/oppo_oplus_realme_sm8750/raw/refs/heads/main/lib/ccache-x86-64"
+              ;;
+      
+            sm8850)
+              applyccache "SM8850" \
+                "https://github.com/cctv18/oppo_oplus_realme_sm8850/raw/refs/heads/main/lib/ccache-x86-64"
+              ;;
+      
+            *)
+              echo "ℹ️ No Optimized System on Chip Toolchain Available for: $SOCCHIP"
+              echo "ℹ️ Skipping Toolchain Patch"
+              ;;
+          esac
       
       # ==============================
       # Debug – Show Selected Inputs
@@ -841,7 +937,7 @@ jobs:
       - name: 🔧 Local Cache Restoration
         id: ccache-restore
         if: ${{ env.BUILDCCACHE != 'Disabled' }}
-        uses: actions/cache@v5
+        uses: actions/cache/restore@v5
         with:
           path: ${{ env.CCACHE_DIR }}
           key: CCache-${{ runner.os }}-${{ env.MANIFESTBASEFILE }}-${{ env.CPUD }}-${{ github.ref_name }}-${{ github.event.inputs.ROOTENGINE }}        
@@ -1113,11 +1209,11 @@ jobs:
           mkdir -p .repo/manifests
           cp "$GITHUB_WORKSPACE/.repo/manifests_fallback/${FILE}.xml" ".repo/manifests/${FILE}.xml"
       
-          BASE_URL="https://github.com/${MANIFEST_REPO}/${MANIFEST_REPO_NAME}.git"
+          MANIFESTBASE="https://github.com/${MANIFESTREPO}/${MANIFESTREPONAME}.git"
       
           echo "🚀 Initializing Repository..."
       
-          repo init -u "$BASE_URL" -b "$MANIFEST_BRANCH" -m "${FILE}.xml" \
+          repo init -u "$MANIFESTBASE" -b "$MANIFESTBRANCH" -m "${FILE}.xml" \
             --depth=1 \
             --no-clone-bundle \
             --no-tags
@@ -4682,7 +4778,7 @@ jobs:
       # ==============================
       - name: 🔧 Save Compiler Cache
         if: ${{ env.BUILDCCACHE != 'Disabled' && steps.ccache-restore.outputs.cache-hit != 'true' && steps.cache-restoration.outputs.cache-restored != 'true' }}
-        uses: actions/cache@v5
+        uses: actions/cache/save@v5
         with:
           path: ${{ env.CCACHE_DIR }}
           key: CCache-${{ runner.os }}-${{ env.MANIFESTBASEFILE }}-${{ env.CPUD }}-${{ github.ref_name }}-${{ github.event.inputs.ROOTENGINE }}
@@ -4855,7 +4951,7 @@ jobs:
           if [[ $SCORECOLOR -eq 0 && $SCOREOXYGEN -eq 0 ]]; then
             echo "⚠️ No Strong Kernel Indicators → Checking Manifest..."
 
-            INFOMANIFEST="$(printf "%s %s %s" "$MANIFEST_BRANCH" "$MANIFEST_REPO" "$MANIFESTFILECONFIG" | tr '[:upper:]' '[:lower:]')"
+            INFOMANIFEST="$(printf "%s %s %s" "$MANIFESTBRANCH" "$MANIFESTREPO" "$MANIFESTFILECONFIG" | tr '[:upper:]' '[:lower:]')"
 
             echo "🔎 Manifest Information: $INFOMANIFEST"
 
@@ -5036,19 +5132,22 @@ jobs:
               | cut -d '"' -f 4)
           fi
          
-          # Final Check
+          # Final Fallback Check
           if [[ -z "$TAG" || "$TAG" == "null" ]]; then
-            echo "⚠️ Failed to Resolve KernelPatch-Next Tag"
-            exit 1
+            echo "⚠️ Failed to Resolve Tag → Using Fallback Tag Version"
+            TAG="0.13.5-2"
           fi
 
-          echo "🏷️ Latest Tag Detected: $TAG"
+          echo "🏷️ Using Tag : $TAG"
 
           # Build Download URLs from Tag
           BASE="https://github.com/$KPREPO/releases/download/$TAG"
 
           URLKPTOOLS="$BASE/kptools-linux"
           URLKPIMG="$BASE/kpimg-linux"
+
+          FALLKPTOOLS="https://raw.githubusercontent.com/AndreiMikh/AndreiMikh-Kernel-Lab/LiquidAndrei/patches/kptools-linux"
+          FALLKPIMG="https://raw.githubusercontent.com/AndreiMikh/AndreiMikh-Kernel-Lab/LiquidAndrei/patches/kpimg-linux"
 
           echo "------------------------------"
           echo "📦 KernelPatch-Next Latest Tag : $TAG"
@@ -5057,11 +5156,39 @@ jobs:
           echo "------------------------------"          
           echo ""
 
-          # Download
-          curl -L --retry 5 --fail -o kptools-linux "$URLKPTOOLS"
-          curl -L --retry 5 --fail -o kpimg-linux "$URLKPIMG"
+          # Download with Fallback
+          download() {
+            local primary="$1"
+            local fallback="$2"
+            local output="$3"
 
-          chmod +x kptools-linux
+            echo "📥 Downloading $output..."
+
+            curl -L \
+              -H "User-Agent: Mozilla/5.0" \
+              --fail \
+              --retry 5 \
+              --retry-all-errors \
+              --retry-delay 3 \
+              -o "$output" "$primary" || {
+
+              echo "⚠️ Primary Failed → Switching to Fallback..."
+
+              curl -L \
+                -H "User-Agent: Mozilla/5.0" \
+                --fail \
+                --retry 5 \
+                --retry-all-errors \
+                --retry-delay 3 \
+                -o "$output" "$fallback"
+            }
+
+            chmod +x "$output"
+          }
+
+          # Download Tools
+          download "$URLKPTOOLS" "$FALLKPTOOLS" "kptools-linux"
+          download "$URLKPIMG" "$FALLKPIMG" "kpimg-linux"
           
           # Apply patch
           echo "⚙️ Patching Kernel Image..."
@@ -5084,7 +5211,7 @@ jobs:
             echo "🧩 Image Modified by KernelPatch-Next (Expected)"
           fi
       
-          # Sync and Copy to AnyKernel3      
+          # Copy and Sync to AnyKernel3      
           [[ -d "$AK3DIRECTORY" ]] || { echo "⚠️ AnyKernel3 Not Found"; exit 1; }
       
           echo "📩 Copying to AnyKernel3..."
