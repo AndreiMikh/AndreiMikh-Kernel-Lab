@@ -412,54 +412,6 @@ jobs:
 
           # Required for Cache-APT-PKGS-Action
           execute_install_scripts: true
-          
-      # ==============================
-      # SM-8750 Extra Toolchain Patch
-      # ==============================
-      - name: 🔧 SM-8750 Extra Toolchain Patch
-        if: ${{ contains(github.event.inputs.FILE, 'sm8750') }}
-        shell: bash
-        run: |
-          set -euo pipefail
-      
-          echo "------------------------------"
-          echo "🚀 SM8750 Detected → Installing Extra Toolchain Bits..."
-          echo "------------------------------"
-          echo ""
-      
-          sudo apt-get update
-          sudo apt-get install -y wget
-      
-          # Backup existing ccache if present
-          if command -v ccache >/dev/null 2>&1; then
-            echo "ℹ️ Existing ccache detected: $(which ccache)"
-            ccache --version || true
-          fi
-      
-          echo "📥 Downloading SM8750 optimized ccache binary..."
-          wget -q --retry-connrefused --tries=3 \
-            https://github.com/cctv18/oppo_oplus_realme_sm8750/raw/refs/heads/main/lib/ccache-x86-64 \
-            -O ccache
-      
-          chmod +x ccache
-          sudo mv ccache /usr/bin/ccache
-      
-          echo "📦 Wiring Compiler Cache into Build Environment..."
-      
-          # Core environment (IMPORTANT)
-          echo "CCACHE_EXEC=/usr/bin/ccache" >> $GITHUB_ENV
-          echo "USE_CCACHE=1" >> $GITHUB_ENV
-      
-          # Ensure kernel toolchain actually uses it
-          echo "/usr/lib/ccache" >> $GITHUB_PATH
-      
-          # Safety tuning (optional but useful)
-          echo "CCACHE_COMPRESS=1" >> $GITHUB_ENV
-      
-          echo "🔎 Verifying ccache..."
-          ccache --version || true
-      
-          echo "🎉 SM8750 toolchain patch applied successfully"
 
       # ==============================
       # Extract Manifest Information (Token/No-Token + LS-Remote Fallback)
@@ -675,9 +627,9 @@ jobs:
           echo ""
 
           {
-            echo "MANIFEST_REPO=$MANIFESTFOUNDREPO"
-            echo "MANIFEST_REPO_NAME=$MANIFESTFOUNDREPONAME"
-            echo "MANIFEST_BRANCH=$MANIFESTFOUNDBRANCH"
+            echo "MANIFESTREPO=$MANIFESTFOUNDREPO"
+            echo "MANIFESTREPONAME=$MANIFESTFOUNDREPONAME"
+            echo "MANIFESTBRANCH=$MANIFESTFOUNDBRANCH"
           } >> "$GITHUB_ENV"
 
           # Parse Revision String
@@ -728,36 +680,41 @@ jobs:
         run: |
           set -euo pipefail
       
-          FILE="${{ github.event.inputs.FILE }}"
-      
           echo "------------------------------"
-          echo "🚀 Detecting SoC from File / Manifest..."
+          echo "🚀 Detecting SoC from Manifest..."
           echo "------------------------------"
           echo ""
       
-          # Extract SoC
-          SOC="$(echo "$FILE" | grep -oiE 'sm[0-9]+' | tr 'A-Z' 'a-z' || true)"
+          # Get Authoritative Branch
+          BRANCH="${MANIFESTBRANCHOVERRIDE:-${MANIFESTBRANCH:-}}"
       
-          if [[ -z "$SOC" ]]; then
-            echo "⚠️ No SoC Detected → Using Default Manifest Behavior"
-            SOC="unknown"
-            echo "SOC=$SOC" >> "$GITHUB_ENV"
-          else
-            echo "📌 Detected SoC: $SOC"
-      
-            MANIFEST_OVERRIDE="oneplus/$SOC"
-            echo "📌 Manifest Override Branch: $MANIFEST_OVERRIDE"
-      
-            echo "MANIFEST_BRANCH_OVERRIDE=$MANIFEST_OVERRIDE" >> "$GITHUB_ENV"
-            echo "SOC=$SOC" >> "$GITHUB_ENV"
+          if [[ -z "$BRANCH" ]]; then
+            echo "⚠️ ERROR: No Manifest Branch Found"
+            exit 1
           fi
       
+          echo "📌 Using Branch: $BRANCH"
+      
+          # Detect SoC from Branch
+          SOC="$(echo "$BRANCH" | grep -oiE 'sm[0-9]+' | tr 'A-Z' 'a-z' || true)"
+      
+          if [[ -z "$SOC" ]]; then
+            SOC="Unknown"
+            echo "⚠️ No SoC Detected from Branch → Fallback: Unknown"
+          else
+            echo "📌 Detected SoC: $SOC"
+          fi
+      
+          echo "SOC=$SOC" >> "$GITHUB_ENV"
+      
+          # SM8750 Toolchain Patch
           echo ""
           echo "------------------------------"
           echo "🚀 Checking SM8750 Toolchain Patch..."
           echo "------------------------------"
       
-          if [[ "$SOC" == "sm8750" ]]; then      
+          if [[ "$SOC" == "sm8750" ]]; then
+      
             echo "🚀 SM8750 Detected → Applying Toolchain Patch"
       
             sudo apt-get update -y
@@ -769,7 +726,7 @@ jobs:
               ccache --version || true
             fi
       
-            echo "📥 Installing optimized SM8750 Compiler Cache..."
+            echo "📥 Installing SM8750 Optimized Compiler Cache..."
             wget -q --retry-connrefused --tries=3 --timeout=20 \
               https://github.com/cctv18/oppo_oplus_realme_sm8750/raw/refs/heads/main/lib/ccache-x86-64 \
               -O ccache
@@ -1234,11 +1191,11 @@ jobs:
           mkdir -p .repo/manifests
           cp "$GITHUB_WORKSPACE/.repo/manifests_fallback/${FILE}.xml" ".repo/manifests/${FILE}.xml"
       
-          BASE_URL="https://github.com/${MANIFEST_REPO}/${MANIFEST_REPO_NAME}.git"
+          MANIFESTBASE="https://github.com/${MANIFESTREPO}/${MANIFESTREPONAME}.git"
       
           echo "🚀 Initializing Repository..."
       
-          repo init -u "$BASE_URL" -b "$MANIFEST_BRANCH" -m "${FILE}.xml" \
+          repo init -u "$MANIFESTBASE" -b "$MANIFESTBRANCH" -m "${FILE}.xml" \
             --depth=1 \
             --no-clone-bundle \
             --no-tags
@@ -4976,7 +4933,7 @@ jobs:
           if [[ $SCORECOLOR -eq 0 && $SCOREOXYGEN -eq 0 ]]; then
             echo "⚠️ No Strong Kernel Indicators → Checking Manifest..."
 
-            INFOMANIFEST="$(printf "%s %s %s" "$MANIFEST_BRANCH" "$MANIFEST_REPO" "$MANIFESTFILECONFIG" | tr '[:upper:]' '[:lower:]')"
+            INFOMANIFEST="$(printf "%s %s %s" "$MANIFESTBRANCH" "$MANIFESTREPO" "$MANIFESTFILECONFIG" | tr '[:upper:]' '[:lower:]')"
 
             echo "🔎 Manifest Information: $INFOMANIFEST"
 
