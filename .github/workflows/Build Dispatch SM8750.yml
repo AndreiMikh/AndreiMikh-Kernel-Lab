@@ -12,8 +12,10 @@ on:
           - Main.yml        
 
       UNIQUE:
+        type: boolean
         description: "Unique Identifier for Dispatch Run"
         required: false
+        default: true                       
 
       RELEASECHANNEL:
         type: choice
@@ -313,19 +315,11 @@ jobs:
           echo "🚀 Dispatching: $WORKFLOW for ${{ matrix.device }}"
 
           # Capture Timestamp Before Dispatch
-          START_TIME=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+          TIMESTART=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
           
           # Unique Tag
-          INPUTUNIQUE="${{ github.event.inputs.UNIQUE }}"
-          
-          if [[ -n "$INPUTUNIQUE" ]]; then
-            UNIQUE="$INPUTUNIQUE"
-          else
-            UNIQUE="${{ matrix.device }}-${GITHUB_RUN_ID}"
-          fi
-          
-          echo "UNIQUE=$UNIQUE"
-          echo "UNIQUE=$UNIQUE" >> $GITHUB_ENV
+          UNIQUE="${{ matrix.device }}-$(date +%s)"
+          echo "UNIQUE (Local Only)=$UNIQUE"
 
           gh workflow run "$WORKFLOW" \
             --ref LiquidAndrei \
@@ -351,7 +345,7 @@ jobs:
             -f SUSFSBRANCHDEV="${{ github.event.inputs.SUSFSBRANCHDEV }}" \
             -f REKERNEL="${{ github.event.inputs.REKERNEL }}" \
             -f PROFILE="${{ github.event.inputs.PROFILE }}" \
-            -f UNIQUE="$UNIQUE"
+            -f UNIQUE="${{ github.event.inputs.UNIQUE }}"
 
           echo "⏳ Waiting for Run to Register..."
 
@@ -360,8 +354,8 @@ jobs:
           # Fetch Latest Matching Run After Timestamp
           echo "⏳ Resolving Run ID via API..."
 
-          RUN_ID=$(gh api repos/${GITHUB_REPOSITORY}/actions/runs \
-            | jq -r --arg time "$START_TIME" '
+          RUNID=$(gh api repos/${GITHUB_REPOSITORY}/actions/runs \
+            | jq -r --arg time "$TIMESTART" '
                 .workflow_runs
                 | map(select(.created_at > $time))
                 | sort_by(.created_at)
@@ -370,13 +364,13 @@ jobs:
               ')
 
           # Validate
-          if [[ -z "$RUN_ID" ]]; then
+          if [[ -z "$RUNID" ]]; then
             echo "❌ Failed to Re-Solve Run ID"
             exit 1
           fi
 
-          echo "✔️ Run ID=$RUN_ID"
-          echo "RUN_ID=$RUN_ID" >> $GITHUB_ENV
+          echo "✔️ Run ID=$RUNID"
+          echo "RUNID=$RUNID" >> $GITHUB_ENV
 
       # --------------------------
       # 🔍 Debug Run ID
@@ -385,9 +379,9 @@ jobs:
         run: |
           set -euo pipefail
 
-          RUN_ID="${{ env.RUN_ID }}"
+          RUNID="${{ env.RUNID }}"
 
-          echo "Run ID (Environment Context): $RUN_ID"
+          echo "Run ID (Environment Context): $RUNID"
   
       # --------------------------
       # 💾 Save Run ID
@@ -397,25 +391,25 @@ jobs:
           set -euo pipefail
 
           mkdir -p meta
-          echo "${{ matrix.device }}" > meta/device.txt
+          echo "${{ matrix.device }}" > meta/Device.txt
 
           # Read from GitHub Environment Properly
-          RUN_ID="${{ env.RUN_ID }}"
+          RUNID="${{ env.RUNID }}"
 
-          if [[ -z "${RUN_ID:-}" || "$RUN_ID" == "null" ]]; then
+          if [[ -z "${RUNID:-}" || "$RUNID" == "null" ]]; then
             echo "❌ Failed to Get Run ID"
             exit 1
           fi
 
-          echo "✔️ Saving Run ID: $RUN_ID"
-          echo "$RUN_ID" > meta/run_id.txt
+          echo "✔️ Saving Run ID: $RUNID"
+          echo "$RUNID" > meta/Run-ID.txt
  
       # --------------------------
       # 🏗️ Solve Device Name (Meta)
       # --------------------------    
       - name: 🏗️ Solve Device Name (Meta)
         run: |
-          map_device() {
+          mapdevice() {
             case "$1" in
               oneplus_13_b) echo "OnePlus13" ;;
               oneplus_13s_b) echo "OnePlus13S" ;;
@@ -428,12 +422,12 @@ jobs:
             esac
           }
 
-          DEVICE_NAME=$(map_device "${{ matrix.device }}")
-          echo "DEVICE_NAME=$DEVICE_NAME" >> $GITHUB_ENV
+          DEVICENAME=$(mapdevice "${{ matrix.device }}")
+          echo "DEVICENAME=$DEVICENAME" >> $GITHUB_ENV
 
       - uses: actions/upload-artifact@v4
         with:
-          name: meta-${{ env.DEVICE_NAME }}
+          name: meta-${{ env.DEVICENAME }}
           path: meta/
 
 # --------------------------
@@ -455,8 +449,8 @@ jobs:
           JSON="{}"
 
           for d in meta/meta-*; do
-            DEV=$(cat "$d/device.txt")
-            ID=$(cat "$d/run_id.txt")
+            DEV=$(cat "$d/Device.txt")
+            ID=$(cat "$d/Run-ID.txt")
 
             [[ -z "$ID" || "$ID" == "null" ]] && continue
 
@@ -499,11 +493,11 @@ jobs:
         run: |
           MAP='${{ needs.merge.outputs.map }}'
 
-          RUN_ID=$(echo "$MAP" | jq -r --arg d "${{ matrix.device }}" '.[$d] // empty')
+          RUNID=$(echo "$MAP" | jq -r --arg d "${{ matrix.device }}" '.[$d] // empty')
 
-          [[ -z "$RUN_ID" ]] && exit 1
+          [[ -z "$RUNID" ]] && exit 1
 
-          echo "RUN_ID=$RUN_ID" >> $GITHUB_ENV
+          echo "RUNID=$RUNID" >> $GITHUB_ENV
 
       # --------------------------
       # ⏳ Wait for Completion (40 Mins Max)
@@ -514,7 +508,7 @@ jobs:
           SLEEP=20
 
           for ((i=1;i<=MAX;i++)); do
-            DATA=$(gh api repos/${{ github.repository }}/actions/runs/$RUN_ID)
+            DATA=$(gh api repos/${{ github.repository }}/actions/runs/$RUNID)
 
             STATUS=$(echo "$DATA" | jq -r .status)
             CONCLUSION=$(echo "$DATA" | jq -r .conclusion)
@@ -541,16 +535,16 @@ jobs:
           set -euo pipefail
 
           # Use Existing Run ID from Environment
-          if [[ -z "${RUN_ID:-}" || "$RUN_ID" == "null" ]]; then
+          if [[ -z "${RUNID:-}" || "$RUNID" == "null" ]]; then
             echo "❌ Run ID is Missing"
             exit 1
           fi
 
-          echo "📥 Downloading Artifacts for Run ID=$RUN_ID"
+          echo "📥 Downloading Artifacts for Run ID=$RUNID"
 
           mkdir -p artifacts/${{ matrix.device }}
 
-          gh run download "$RUN_ID" \
+          gh run download "$RUNID" \
             --dir "artifacts/${{ matrix.device }}" \
             --repo "$GITHUB_REPOSITORY"
    
@@ -559,7 +553,7 @@ jobs:
       # --------------------------
       - name: 📊 Device Build Summary
         run: |
-          map_device() {
+          mapdevice() {
             case "$1" in
               oneplus_13_b) echo "OnePlus13" ;;
               oneplus_13s_b) echo "OnePlus13S" ;;
@@ -572,7 +566,7 @@ jobs:
             esac
           }
 
-          DEVICE_NAME=$(map_device "${{ matrix.device }}")
+          DEVICENAME=$(mapdevice "${{ matrix.device }}")
 
           if [[ -d "artifacts/${{ matrix.device }}" ]] && [[ $(ls -A artifacts/${{ matrix.device }}) ]]; then
             STATUS="✔️ Success"
@@ -587,7 +581,7 @@ jobs:
             echo ""
             echo "| Device | Status | Run | Artifacts |"
             echo "|--------|--------|-----|-----------|"
-            echo "| $DEVICE_NAME | $STATUS | [View](https://github.com/${GITHUB_REPOSITORY}/actions/runs/$RUN_ID) | $COUNT File(s) |"
+            echo "| $DEVICENAME | $STATUS | [View](https://github.com/${GITHUB_REPOSITORY}/actions/runs/$RUNID) | $COUNT File(s) |"
           } >> $GITHUB_STEP_SUMMARY
   
       # --------------------------
@@ -595,7 +589,7 @@ jobs:
       # --------------------------
       - name: 🏗️ Re-Solve Device Name (Final)
         run: |
-          map_device() {
+          mapdevice() {
             case "$1" in
               oneplus_13_b) echo "OnePlus13" ;;
               oneplus_13s_b) echo "OnePlus13S" ;;
@@ -608,12 +602,12 @@ jobs:
             esac
           }
 
-          DEVICE_NAME=$(map_device "${{ matrix.device }}")
-          echo "DEVICE_NAME=$DEVICE_NAME" >> $GITHUB_ENV
+          DEVICENAME=$(mapdevice "${{ matrix.device }}")
+          echo "DEVICENAME=$DEVICENAME" >> $GITHUB_ENV
 
       - uses: actions/upload-artifact@v4
         with:
-          name: final-${{ env.DEVICE_NAME }}
+          name: final-${{ env.DEVICENAME }}
           path: artifacts/${{ matrix.device }}
 
 # --------------------------
@@ -776,7 +770,7 @@ jobs:
           ---   
           📦 Build Configuration
           ---   
-          📞 Device                       : ${{ env.DEVICE_NAME }}
+          📞 Device                       : ${{ env.DEVICENAME }}
           ☘️ KernelPatch                  : ${{ github.event.inputs.KERNELPATCH }}
           🔥 SUSFS                        : ${{ github.event.inputs.SUSFSREPOSITORY }}
           🔥 SUSFS Variant                : ${{ github.event.inputs.SUSFSVARIANT }}
@@ -791,7 +785,8 @@ jobs:
           ---   
           📱 Kernel Suffix                : ${{ github.event.inputs.SUFFIX }}
           📱 Kernel Sub-Level             : ${{ github.event.inputs.SUBLEVEL }}
-          📱 Kernel Build Time            : ${{ github.event.inputs.BUILDTIME }}         
+          📱 Kernel Build Time            : ${{ github.event.inputs.BUILDTIME }}
+          📱 Unique                       : ${{ github.event.inputs.UNIQUE }}
           ---   
           🔰 LSM-Baseband Guard           : ${{ github.event.inputs.LSMBBG }}
           📊 Linux Container Support      : ${{ github.event.inputs.LXCDOCKERSUPPORT }}
