@@ -4460,6 +4460,10 @@ jobs:
           # Replace Placeholder with Actual Clang Version
           CLANG_PREBUILT_BIN=${CLANG_PREBUILT_BIN/\$\{CLANG_VERSION\}/$CLANG_VERSION}
 
+          # Clang Path Validation
+          CLANG_BASE="$GITHUB_WORKSPACE/kernel_workspace/kernel_platform/$CLANG_PREBUILT_BIN"
+          CLANG_FULL_PATH="$CLANG_BASE/clang"
+
           # Verify Clang Binary Exists
           # Info: Ensures the Resolved Clang Prebuilt Bin Path Contains a Valid Clang Executable
           # Info: Prevents Build from Continuing if Clang is Missing or Cache / Setup Failed
@@ -4496,25 +4500,33 @@ jobs:
           echo "------------------------------"
           echo ""
 
-          # Load Environment Script
+          # Load Kernel Environment Script
           set +u
           source "$GITHUB_WORKSPACE/kernel_workspace/kernel_platform/build/kernel/_setup_env.sh" 2>/dev/null || true
           set -u
 
-          # Export Paths
-          export PATH="/usr/lib/ccache:$GITHUB_WORKSPACE/kernel_workspace/kernel_platform/$CLANG_PREBUILT_BIN:$PATH"
+          # Export Path / Path Setup (Merge Compiler Cache + Clang)
+          export PATH="/usr/lib/ccache:$CLANG_BASE:$PATH"
 
-          # Setup: Enables Compiler Caching to Speed Up Re-Builds
-          export CCACHE_LOGFILE="${{ github.workspace }}/kernel_workspace/ccache.log" || echo "⚠️ Cache Log Not Available"
-          export CCACHE_DIR="${{ env.CCACHE_DIR }}" || echo "⚠️ Directory Not Available"
-          export CCACHE_COMPILERCHECK="${{ env.CCACHE_COMPILERCHECK }}" || echo "⚠️ Compiler Check Not Available"
-          export CCACHE_BASEDIR="${{ env.CCACHE_BASEDIR }}" || echo "⚠️ Base Directory Not Available"
-          export CCACHE_NOHASHDIR="${{ env.CCACHE_NOHASHDIR }}" || echo "⚠️ NoHash Directory Not Available"
-          export CCACHE_NOHARDLINK="${{ env.CCACHE_NOHARDLINK }}" || echo "⚠️ Cache Hardlink Not Available"                  
-          ccache -M "${{ env.CCACHE_MAXSIZE }}" || echo "⚠️ Max Size Not Available"
-          export CCACHE_IS_KERNEL_COMPILING="${{ env.CCACHE_IS_KERNEL_COMPILING }}" || echo "⚠️ Cache Is Kernel Compiling Not Available"                   
-          echo "sloppiness = file_stat_matches,include_file_ctime,include_file_mtime,pch_defines,file_macro,time_macros" >> "${{ env.CCACHE_DIR }}/ccache.conf"          
+          echo "📌 Path Configured for Compiler Cache + Clang"
           
+          # Setup: Enables Compiler Caching to Speed Up Re-Builds
+          # ccache setup
+          command -v ccache >/dev/null 2>&1 || {
+            echo "⚠️ ccache not found"
+            export USE_CCACHE=0
+          }
+
+          export USE_CCACHE=1
+
+          export CC="ccache clang"
+          export HOSTCC="ccache clang"
+
+          ccache -M "${CCACHE_MAXSIZE}" || true
+          ccache -o compression=true
+          ccache -o sloppiness=file_stat_matches,include_file_ctime,include_file_mtime,pch_defines,file_macro,time_macros
+          ccache -z || true
+       
           if [[ "${ENABLE_RUST:-false}" == "true" ]]; then
             echo "🦀 Setting up Rust Environment..."
           
@@ -4542,22 +4554,18 @@ jobs:
           # Physical Path Re-Mapping
           ROOT_REAL_PATH=$(realpath ../..) || { echo "⚠️ Real Path Failed"; exit 1; }
           
-          MAP="-fdebug-prefix-map=$ROOT_REAL_PATH=."
-          MPMAP="-fmacro-prefix-map=$ROOT_REAL_PATH=."
-          FPMAP="-ffile-prefix-map=$ROOT_REAL_PATH=."
-
-          KCFLAGS="$MAP $MPMAP $FPMAP -no-canonical-prefixes -Wno-error -O2 -pipe -D__ANDROID_COMMON_KERNEL__"
-
-          # Compiler Cache Toggle
-          if [[ "${CCACHE_IS_KERNEL_COMPILING:-false}" == "true" ]]; then
-            CC="ccache clang"
-            HOSTCC="ccache clang"
-          else
-            CC="clang"
-            HOSTCC="clang"
-          fi
+          KCFLAGS="
+              -fdebug-prefix-map=$ROOT_REAL_PATH=.
+              -fmacro-prefix-map=$ROOT_REAL_PATH=.
+              -ffile-prefix-map=$ROOT_REAL_PATH=.
+              -no-canonical-prefixes
+              -Wno-error
+              -O2
+              -pipe
+              -D__ANDROID_COMMON_KERNEL__
+              "
           
-          # Prepare Make Arguments
+          # Prepare Make Arguments / Configurations
           MAKE_ARGS=(
             LLVM=1
             ARCH=arm64
