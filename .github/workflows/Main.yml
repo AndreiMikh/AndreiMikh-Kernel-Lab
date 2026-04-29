@@ -504,8 +504,8 @@ jobs:
             fi
 
             # Export Keys and Values for Parallel Jobs
-            export REPOS_KEYS="${!REPOS[@]}"
-            export REPOS_VALUES="${REPOS[@]}"
+            export REPOSKEYS="${!REPOS[@]}"
+            export REPOSVALUES="${REPOS[@]}"
 
           MANIFESTFOUNDREPO=""
           MANIFESTFOUNDREPONAME=""
@@ -596,40 +596,61 @@ jobs:
 
           pids=()
 
-          for key in $REPOS_KEYS; do
-              value="${REPOS[$key]}" || true
-              if [[ -n "$value" ]]; then
-                  (
-                      OWNER="${value%%|*}"
-                      REPOSITORYNAME="${value##*|}"
+          for key in $REPOSKEYS; do
+            value="${REPOS[$key]-}"
+          
+            [[ -z "$value" ]] && continue
+              (
+                OWNER="${value%%|*}"
+                REPOSITORYNAME="${value##*|}"
+          
+                echo "🔎 Checking $OWNER/$REPOSITORYNAME"
+          
+                # Stop Immediately if Another Worker Already Found a Match
+                [[ -f "$FOUNDTMP" ]] && exit 0
+          
+                # Get Branches (GitHub API)
+                BRANCHES=$(curl -s "https://api.github.com/repos/$OWNER/$REPOSITORYNAME/branches?per_page=100" \
+                  | jq -r '.[].name? // empty' 2>/dev/null || true)
+          
+                # Fallback to Git if API Fails
+                if [[ -z "$BRANCHES" ]]; then
+                  BRANCHES=$(git ls-remote --heads "https://github.com/${OWNER}/${REPOSITORYNAME}.git" \
+                    2>/dev/null | sed 's|.*refs/heads/||' || true)
+                fi
 
-                      echo "🔎 Checking $OWNER/$REPOSITORYNAME"
-
-                      # Try Branches as Before
-                      BRANCHES=$(curl -s "https://api.github.com/repos/$OWNER/$REPOSITORYNAME/branches?per_page=100" | jq -r '.[].name? // empty' 2>/dev/null || true)
-                      [[ -z "$BRANCHES" ]] && BRANCHES=$(git ls-remote --heads https://github.com/$OWNER/$REPOSITORYNAME.git 2>/dev/null | sed 's|.*refs/heads/||' || true)
-
-                      for BRANCH in $BRANCHES; do
-                        XMLURL="https://raw.githubusercontent.com/$OWNER/$REPOSITORYNAME/$BRANCH/${FILE}.xml"
-                        READMEURL="https://raw.githubusercontent.com/$OWNER/$REPOSITORYNAME/$BRANCH/README.md"
-                        if curl -sf --head "$XMLURL" >/dev/null; then
-                          curl -fsSL -o "$XMLPATH" "$XMLURL"
-                          curl -fsSL -o "$READMEPATH" "$READMEURL" || true
-                              
-                          # Write Success Information to a Temporary File (Parent Shell will Read this)
-                          echo "$OWNER|$REPOSITORYNAME|$BRANCH" > "$INFOTMP"
-                          touch "$FOUNDTMP"
-                          exit 0
-                        fi
-                      done
-                  ) &
-                  pids+=($!)
-              fi
+                [[ -z "$BRANCHES" ]] && exit 0
+          
+                for BRANCH in $BRANCHES; do
+          
+                  # Stop if Already Found by Another Process
+                  [[ -f "$FOUNDTMP" ]] && exit 0
+          
+                  XMLURL="https://raw.githubusercontent.com/$OWNER/$REPOSITORYNAME/$BRANCH/${FILE}.xml"
+                  READMEURL="https://raw.githubusercontent.com/$OWNER/$REPOSITORYNAME/$BRANCH/README.md"
+          
+                  if curl -sf --head "$XMLURL" >/dev/null; then
+          
+                    # Double-Check Race Condition Before Writing
+                    [[ -f "$FOUNDTMP" ]] && exit 0
+          
+                    curl -fsSL -o "$XMLPATH" "$XMLURL"
+                    curl -fsSL -o "$READMEPATH" "$READMEURL" || true
+          
+                    echo "$OWNER|$REPOSITORYNAME|$BRANCH" > "$INFOTMP"
+                    : > "$FOUNDTMP"
+          
+                    exit 0
+                  fi
+                done
+              ) &
+              pids+=($!)
+            fi
           done
 
           # Wait for All Jobs
           for pid in "${pids[@]}"; do
-              wait $pid || true
+            wait $pid || true
           done
 
           # Read Results from Temporary File
