@@ -1439,7 +1439,6 @@ jobs:
       - name: 🔧 Inject Custom Kernel Version Suffix
         if: ${{ github.event.inputs.SUFFIX != '' }}
         id: inject
-        continue-on-error: true
         run: |
           cd kernel_workspace
 
@@ -1463,19 +1462,26 @@ jobs:
 
             if grep -q 'KERNELVERSION.*scm_version' "$path"; then
               echo "📌 New Set Local Version Format Detected"
-              sed -i "s|echo \"\${KERNELVERSION}.*scm_version}\"|echo \"\${KERNELVERSION}-${ANDROIDVERSION}-${SUFFIX}\"|" "$path"
+            
+              ESCSUFFIX=$(printf '%s' "$SUFFIX" | sed 's/[\/&]/\\&/g')
+            
+              if ! grep -q "${ESCSUFFIX}" "$path"; then
+                sed -i "s|\(echo \"\${KERNELVERSION}.*scm_version.*\)|\1-${ANDROIDVERSION}-${ESCSUFFIX}|" "$path"
+              fi
 
             elif grep -q 'echo "\$res"' "$path"; then
               echo "Old Set Local Version Format Detected"
 
               if [ "$FASTBUILD" = "true" ]; then
                 echo "✔️ Fast Build Enabled: Setting Static Res Value"
-                sed -i "s/^res=.*/res=\"-${ANDROIDVERSION}-${SUFFIX}\"/" "$path"
+                sed -i "s/^res=.*/res=\"\${res}-${ANDROIDVERSION}-${SUFFIX}\"/" "$path"
+      
               else
                 echo "🛠️ Standard Build: Dynamically Injecting Suffix"
                 if [[ -f ./kernel_platform/build_with_bazel.py ]]; then
                   echo "Note: Using Bazel may Limit Special Characters, Adjust Script if Compilation Fails"
                 fi
+             
                 tac "$path" | sed "0,/echo \"\\\$res\"/s//res=\\\$(echo \\\$res | cut -d- -f1-2)-${SUFFIX}; echo \"\\\$res\";/" | tac > "$path.tmp"
                 mv "$path.tmp" "$path"
               fi
@@ -1489,14 +1495,20 @@ jobs:
           done
 
           echo "⚙️ Committing Suffix Modifications..."
+          
           git add -A
-          git commit -m "🎉 Inject Custom Kernel Suffix and Remove Dirty Tags"
+          
+          if git diff --cached --quiet; then
+            echo "✔️ No Changes to Commit"
+          else
+            git commit -m "🎉 Inject Custom Kernel Suffix and Remove Dirty Tags"
+          fi
 
       # ==============================
       # Fallback - Inject Local Kernel Version Suffix (Bazel-Safe)
       # ==============================
       - name: 🔧 Fallback - Inject Local Kernel Version Suffix (Bazel Safe)
-        if: ${{ steps.inject.outcome == 'failure' && github.event.inputs.SUFFIX != '' }}
+        if: ${{ steps.inject.conclusion == 'failure' && github.event.inputs.SUFFIX != '' }}
         run: |
           cd kernel_workspace
 
@@ -1527,55 +1539,63 @@ jobs:
         run: |
           cd kernel_workspace
 
+          # Inputs and Variables
           ANDROIDVERSION="${{ env.ANDROIDVERSION }}"
           FASTBUILD="${{ github.event.inputs.FASTBUILD }}"
 
           echo "🚀 Generating Random Kernel Suffix..."
-          RANDOM_DIGIT=$(od -An -N1 -tu1 < /dev/urandom | tr -d '[:space:]' | awk '{print $1 % 11}')
-          RANDOM_HASH=$(od -An -N7 -tx1 /dev/urandom | tr -d ' \n')
-          AUTO_SUFFIX="${RANDOM_DIGIT}-o-g${RANDOM_HASH}"
-
-          echo "🧾 Random Suffix Generated: $AUTO_SUFFIX"
-
-          for path in \
-            kernel_platform/common/scripts/setlocalversion \
-            kernel_platform/msm-kernel/scripts/setlocalversion \
-            kernel_platform/external/dtc/scripts/setlocalversion; do
-
-            [ -f "$path" ] || continue
+          
+          # Random Generation
+          RANDOMDIGIT=$((RANDOM % 10))
+          RANDOMHASH=$(head -c 7 /dev/urandom | xxd -p)
+      
+          AUTOSUFFIX="${RANDOMDIGIT}-g${RANDOMHASH}"
+      
+          echo "🧾 Suffix: $AUTOSUFFIX"
+      
+          FILES=(
+            kernel_platform/common/scripts/setlocalversion
+            kernel_platform/msm-kernel/scripts/setlocalversion
+            kernel_platform/external/dtc/scripts/setlocalversion
+          )
+      
+          for path in "${FILES[@]}"; do
+            [[ -f "$path" ]] || continue
             echo "⚙️ Processing: $path"
-
+      
+            # Ensure Executable
+            chmod +x "$path"
+      
             # Remove Dirty Markers
             sed -i 's/ -dirty//g' "$path"
-            sed -i '$i res=$(echo "$res" | sed '\''s/-dirty//g'\'')' "$path"
-
-            if grep -q 'KERNELVERSION.*scm_version' "$path"; then
-              echo "🔎 New SetLocalVersion Format Detected"
-              sed -i "s|echo \"\${KERNELVERSION}.*scm_version}\"|echo \"\${KERNELVERSION}-${ANDROIDVERSION}-${AUTO_SUFFIX}\"|" "$path"
-
-            elif grep -q 'echo "\$res"' "$path"; then
-              echo "🔎 Old SetLocalVersion Format Detected"
-
-              if [ "$FASTBUILD" = "true" ]; then
-                echo "🛠️ Fast Build: Using Static Res with Random Suffix"
-                sed -i "s/^res=.*/res=\"-${ANDROIDVERSION}-${AUTO_SUFFIX}\"/" "$path"
-              else
-                echo "🛠️ Standard Build: Injecting Random Suffix Dynamically"
-                tac "$path" | sed "0,/echo \"\\\$res\"/s//res=\\\$(echo \\\$res | cut -d- -f1-2)-${AUTO_SUFFIX}; echo \"\\\$res\";/" | tac > "$path.tmp"
-                mv "$path.tmp" "$path"
+      
+            # Append Suffix Logic in a Safe Way (No Rewriting Core Logic)
+            if ! grep -q "Kernel Auto Suffix Injection" "$path"; then
+              cat >> "$path" <<EOF
+              
+              # Kernel Auto Suffix Injection
+              if [ -n "\$res" ]; then
+                case "\$res" in
+                  *"-${AUTOSUFFIX}"*) ;;
+                  *)
+                    res="\$res-${ANDROIDVERSION}-${AUTOSUFFIX}"
+                    ;;
+                esac
               fi
-
-            else
-              echo "⚠️ Unknown Format: Appending Random Suffix Manually"
-              echo "echo \"\$res-${AUTO_SUFFIX}\"" >> "$path"
+              EOF
             fi
-
-            chmod +x "$path"
+      
           done
-
-          echo "⚙️ Committing Changes with Auto-Generated Kernel Suffix..."
+      
+          echo "⚙️ Committing changes..."
+      
           git add -A
-          git commit -m "🎉 Apply Auto-Generated Kernel Suffix and Remove Dirty Markers"
+      
+          if git diff --cached --quiet; then
+            echo "✔️ No changes to commit"
+          else
+            git commit -m "🎉 Apply Auto-Generated Kernel Suffix"
+          fi
 
       # ==============================
       # Solve Root Engine Source
@@ -2655,7 +2675,7 @@ jobs:
           echo "------------------------------"
           echo ""
 
-          # Kernel and Patch Directories
+          # Kernel and Patch Path Directories
           KCDIR="${GITHUB_WORKSPACE}/kernel_workspace/kernel_platform/common"
           DEFCONFIG="${KCDIR}/arch/arm64/configs/gki_defconfig"
       
@@ -2679,22 +2699,22 @@ jobs:
 
           # Function: Apply Patch
           apply() {
-            local PATCHFILE="$1"
-            local PATCHNAME
-            PATCHNAME=$(basename "$PFILE")
+            local patchfile="$1"
+            local patchname
+            patchname=$(basename "$patchfile")
       
-            if [[ ! -f "$PATCHFILE" ]]; then
-              echo "⚠️ $PATCHNAME Not Found, Skipping..."
+            if [[ ! -f "$patchfile" ]]; then
+              echo "⚠️ $patchname Not Found, Skipping..."
               return
             fi
       
-            echo "⚙️ Applying $PATCHNAME"
+            echo "⚙️ Applying $patchname"
 
-            if patch -p1 --dry-run < "$PATCHFILE" >/dev/null 2>&1; then
-              patch -p1 -F3 --forward < "$PATCHFILE"
-              echo "✔️ $PATCHNAME Applied"
+            if patch -p1 --dry-run < "$patchfile" >/dev/null 2>&1; then
+              patch -p1 -F3 --forward < "$patchfile"
+              echo "✔️ $patchname Applied"
             else
-              echo "🎉 $PATCHNAME Already Applied or Not Needed"
+              echo "🎉 $patchname Already Applied or Not Needed"
             fi
           }
 
@@ -2705,9 +2725,8 @@ jobs:
           # Kernel Config: ZRAM Options
           if [[ "$SWITCH" == "1" ]]; then
             echo "🔧 Enabling ZRAM-Related Kernel Options..."      
-            if [[ "$ZRAM" == 1* ]]; then
-              # Non-LZ4 Base ZRAM Options
-              cat >> "$DEFCONFIG" << EOF
+           
+            cat >> "$DEFCONFIG" << EOF
           CONFIG_ZSMALLOC=y
           CONFIG_CRYPTO_LZ4HC=y
           CONFIG_CRYPTO_LZ4K=y
@@ -2716,7 +2735,7 @@ jobs:
           EOF
             echo "✔️ ZRAM Configuration Applied"
           else
-            echo "⚠️ Skipping ZRAM Configuration"
+            echo "⚠️ Disabled — Skipping SukiSU ZRAM Configuration"
           fi
 
           echo ""
@@ -2855,7 +2874,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-      
+
+          # Paths
           PDIR="${GITHUB_WORKSPACE}/kernel_workspace/AndreiMikh-Kernel-Lab/patches"
           KCDIR="${GITHUB_WORKSPACE}/kernel_workspace/kernel_platform/common"
       
@@ -2874,7 +2894,7 @@ jobs:
       
           cd "$KCDIR"
       
-          # Early Skip if Already Present
+          # Early Skip if Scheduler Already Exists
           if [[ -d "kernel/sched/hmbird" ]] || \
              [[ -d "vendor/oplus/kernel/cpu/sched_ext/hmbird" ]]; then
       
@@ -2889,11 +2909,9 @@ jobs:
             exit 1
           fi
       
-          # Inject Build Rule
-          if ! grep -q "hmbird_patch.o" drivers/Makefile; then
+          # Idempotent Makefile Injection
+          if ! grep -qE "^[[:space:]]*obj-y[[:space:]]*\+=.*hmbird_patch\.o" drivers/Makefile; then
             echo "🛠️ Injecting Hmbird Build Rule"
-      
-            # Safer Than Raw Insert at Top (Prevents Breaking Ordering)
             echo "obj-y += hmbird_patch.o" >> drivers/Makefile
           else
             echo "✔️ Hmbird Build Rule Already Present"
@@ -2910,12 +2928,13 @@ jobs:
           fi
       
           echo "🚀 Applying Scheduler Conversion Patch..."
-      
-          if patch -p1 --dry-run --silent < "$PFILE" >/dev/null 2>&1; then
+
+          # Apply Patch
+          if patch -p1 --dry-run < "$PFILE" >/dev/null 2>&1; then
             patch -p1 --forward < "$PFILE"
             echo "✔️ Scheduler Conversion Applied Successfully"
           else
-            echo "✔️ Patch Already Applied or Not Required"
+            echo "ℹ️ Patch Not Applied (Already Applied or Not Compatible)"
           fi
       
           echo ""
@@ -2983,7 +3002,7 @@ jobs:
           # Pre-Check Before Applying
           echo "🔍 Checking Patch Applicability..."
       
-          if patch -p1 --dry-run --silent < "$PFILE" >/dev/null 2>&1; then
+          if patch -p1 --dry-run < "$PFILE" >/dev/null 2>&1; then
             echo "🛠️ Applying Unicode Bypass Patch..."
             patch -p1 --forward < "$PFILE"
             echo "✔️ Patch Applied Successfully"
@@ -3002,6 +3021,8 @@ jobs:
         shell: bash
         env:
           FILE: ${{ github.event.inputs.FILE }}
+          CPU: ${{ env.CPU }}
+          CPUD: ${{ env.CPUD }}
         run: |
           set -euo pipefail
       
@@ -3030,18 +3051,13 @@ jobs:
               echo "🎉 Fengchi / Windspeed Scheduler Already Present"
               echo "⏭️ Skipping Patch Stage"
               exit 0
-          fi
-      
+          fi          
+          
           # Validate Required Variables
-          if [[ -z "${CPU:-}" ]]; then
-              echo "🧾 CPU Branch Not Specified"
-              exit 11
-          fi
-      
-          if [[ -z "${FILE:-}" ]]; then
-              echo "🧾 File Input Not Specified"
-              exit 12
-          fi
+          CPU="${CPU:-${CPUD:-}}"
+          
+          [[ -n "$CPU" ]] || { echo "🧾 CPU Branch Not Specified"; exit 11; }
+          [[ -n "${FILE:-}" ]] || { echo "🧾 File Input Not Specified"; exit 12; }
 
           echo ""
           echo "------------------------------"
@@ -3196,7 +3212,7 @@ jobs:
         continue-on-error: true
         shell: bash
         run: |
-          set -uo pipefail   
+          set -euo pipefail   
 
           echo "------------------------------"
           echo "🚀 Starting Linux Container / Docker Patch Setup..."
@@ -3221,7 +3237,11 @@ jobs:
           cd "$KCDIR"
 
           # Detect Kernel Version
-          KERNELVERSION=$(make kernelversion 2>/dev/null || echo "6.6.0")
+          KERNELVERSION=$(make kernelversion 2>/dev/null) || {
+            echo "⚠️ Failed to detect kernel version"
+            exit 1
+          }
+        
           echo "🧾 Using Kernel Version: $KERNELVERSION"
 
           KERNELMAJORMINOR=$(echo "$KERNELVERSION" | cut -d. -f1,2)
@@ -3243,34 +3263,48 @@ jobs:
             ANDROIDV="android16"
           fi
 
-          ANDROID_NUM="${ANDROIDV#android}"
+          ANDROIDNUM="${ANDROIDV#android}"
           echo "📊 Android Version: $ANDROIDV"
 
           # Export for Downstream Steps
-          echo "VANDROID=${ANDROID_NUM}.0.0" >> $GITHUB_ENV
-          echo "ASHORTVERSION=${ANDROID_NUM}" >> $GITHUB_ENV
+          echo "VANDROID=${ANDROIDNUMBER}.0.0" >> $GITHUB_ENV
+          echo "ASHORTVERSION=${ANDROIDNUMBER}" >> $GITHUB_ENV
           echo "ANDROIDVERSION=$ANDROIDV" >> $GITHUB_ENV
 
           # Determine Patch Directory (Smart Matching)
           PBASEPATCH="$PLOCALDIR/lxc_docker_patches"
 
           # Gather All Candidate Patches for the Android Version
-          CANDIDATES=$(find "$PBASEPATCH" -maxdepth 1 -type d -name "a${ANDROID_NUM}-*" | sort -V)
-
+          mapfile -t DIRS < <(
+            find "$PBASEPATCH" -maxdepth 1 -type d -name "a${ANDROIDNUMBER}-*" | sort -Vr
+          )
+          
+          KVER="$KERNELMAJORMINOR"
           LXCTARGETPATCH=""
-
-          for dir in $CANDIDATES; do
-            LXCPATCHKERNEL=$(basename "$dir" | cut -d- -f2)
-            LXCPATCHMAJOR=$(echo "$LXCPATCHKERNEL" | cut -d. -f1)
-            LXCPATCHMINOR=$(echo "$LXCPATCHKERNEL" | cut -d. -f2)
-            LXCKERNELMAJOR=$(echo "$KERNELMAJORMINOR" | cut -d. -f1)
-            LXCKERNELMINOR=$(echo "$KERNELMAJORMINOR" | cut -d. -f2)
-
-            # Select Patch if Patch Kernel ≤ Current Kernel
-            if (( LXCPATCHMAJOR < LXCKERNELMAJOR )) || { (( LXCPATCHMAJOR == LXCKERNELMAJOR )) && (( LXCPATCHMINOR <= LXCKERNELMINOR )); }; then
-              LXCTARGETPATCH="$dir"
+          
+          bestversions=""
+          bestdirectories=""
+          
+          for dir in "${DIRS[@]}"; do
+            base="$(basename "$dir")"
+          
+            # Extract Version After First Dash: Android 16-6.6.12 -> 6.6.12
+            ver="${base#a*-}"
+          
+            # Skip Invalid
+            [[ -z "$ver" ]] && continue
+          
+            # Keep Only Versions <= Kernel Using True Semantic Compare
+            if [[ "$(printf '%s\n%s' "$ver" "$KVER" | sort -V | head -n1)" == "$ver" ]]; then
+              # Pick Highest Valid Match
+              if [[ -z "$bestversions" ]] || [[ "$(printf '%s\n%s' "$bestversions" "$ver" | sort -V | head -n1)" == "$bestversions" ]]; then
+                bestversions="$ver"
+                bestdirectories="$dir"
+              fi
             fi
           done
+          
+          LXCTARGETPATCH="$bestdirectories"
 
           # If No Patch ≤ Current Kernel, Pick the Highest Available as Fallback
           if [ -z "$LXCTARGETPATCH" ] && [ -n "$CANDIDATES" ]; then
@@ -3278,7 +3312,7 @@ jobs:
           fi
 
           if [ -z "$LXCTARGETPATCH" ]; then
-            echo "⚠️ No Compatible Patch Found for Android${ANDROID_NUM}-${KERNELMAJORMINOR}"
+            echo "⚠️ No Compatible Patch Found for Android${ANDROIDNUMBER}-${KERNELMAJORMINOR}"
             exit 0
           fi
 
@@ -3353,10 +3387,16 @@ jobs:
           # Check Each Directory to Find the Correct One
           for directory in "${possiblekerneldirectories[@]}"; do
             echo "🔎 Checking Directory: $directory"
-            if [ -d "$directory" ] && { [ -f "$directory/Makefile" ] || [ -d "$directory/arch/arm64/configs" ]; }; then
-              KCDIR="$directory"
-              echo "📌 Kernel Directory Detected: $KCDIR"
-              break
+          
+            # Must-Have Indicators (Safe Minimum)
+            if [[ -f "$directory/Makefile" ]] && [[ -d "$directory/arch" ]]; then
+          
+              # Strong Kernel Confirmation (Soft Validation)
+              if [[ -d "$directory/init" ]] && [[ -f "$directory/init/main.c" ]]; then
+                KCDIR="$directory"
+                echo "📌 Kernel Directory Detected: $KCDIR"
+                break
+              fi         
             fi
           done
 
@@ -3367,6 +3407,7 @@ jobs:
 
           # Environment Variables
           GKIVERSION="${{ env.ANDROIDVERSION }}-${{ env.KERNELVERSION }}"
+          KERNELVERSION="${{ env.KERNELVERSION }}"
           
           echo "------------------------------"
           echo "🧾 Kernel Base: $GKIVERSION"
@@ -3400,16 +3441,21 @@ jobs:
 
           echo "🔧 Applying ADIOS Scheduler Patch..."
 
+          cd "$KCDIR"
+
           if [ ! -f "$ADIOSPATCHFILE" ]; then
             echo "⚠️ Patch File Missing, Skipping Patch Application..."
           else
             # Check if the Patch has Already been Applied
-            if grep -q "CONFIG_MQ_IOSCHED_ADIOS=y" "$DEFCONFIG"; then
-              echo "✔️ Patch Already Applied, Skipping..."
-            else
-              echo "⚙️ Applying Patch..."
-              cd "$KCDIR"
-              patch -p1 -F3 --forward < "$ADIOSPATCHFILE" || true
+            if grep -q "CONFIG_MQ_IOSCHED_ADIOS" "$DEFCONFIG"; then
+              echo "✔️ ADIOS Already Present for ${{ env.MANIFESTFILEBASE }}, Skipping..."
+              exit 0
+            fi
+            
+            # Apply Patch
+            if ! patch -p1 -F3 --forward < "$ADIOSPATCHFILE"; then
+              echo "⚠️ ADIOS Patch Failed for ${{ env.MANIFESTFILEBASE }}"
+              exit 1
             fi
 
             # Clean Up by Removing the Patch File
