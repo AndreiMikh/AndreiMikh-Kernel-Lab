@@ -303,7 +303,6 @@ jobs:
       CCACHE_COMPILERCHECK: "%compiler% -dumpmachine; %compiler% -dumpversion"
       CCACHE_NOHASHDIR: "true"
       CCACHE_NOHARDLINK: "true"
-      CCACHE_SLOPPINESS: file_stat_matches,include_file_ctime,include_file_mtime,pch_defines,file_macro,time_macros    
       CCACHE_MAXSIZE: 10G
    
     steps:    
@@ -912,15 +911,7 @@ jobs:
           fi
       
           echo "📦 Using Compiler Cache: $(which ccache)"
-          ccache --version
-      
-          # Safe Environment Setup
-          echo "USE_CCACHE=1" >> "$GITHUB_ENV"
-          echo "CCACHE_EXEC=$(which ccache)" >> "$GITHUB_ENV"
-      
-          # Compiler Wrappers
-          echo "CC=ccache clang" >> "$GITHUB_ENV"
-          echo "HOSTCC=ccache clang" >> "$GITHUB_ENV"      
+          ccache --version      
       
           # Optional SoC-specific tuning (safe, no binary override)
           case "$SOCCHIP" in
@@ -4510,60 +4501,39 @@ jobs:
           echo "------------------------------"
           echo ""
 
-          # Export Path / Path Setup (Merge Compiler Cache + Clang)
-          if command -v ccache >/dev/null 2>&1; then
-            export PATH="/usr/lib/ccache:$CLANG_BASE:$PATH"
-          else
-            export PATH="$CLANG_BASE:$PATH"
-          fi
+          # Load Environment Script
+          set +u
+          source "$GITHUB_WORKSPACE/kernel_workspace/kernel_platform/build/kernel/_setup_env.sh" 2>/dev/null || true
+          set -u
 
-          # Cache Runtime Bindings
-          export CCACHE_EXEC="$(command -v ccache || true)"
-          export CCACHE_DIR="${CCACHE_DIR}"
-          export CCACHE_BASEDIR="$GITHUB_WORKSPACE"
+          # Export Paths
+          export PATH="/usr/lib/ccache:$GITHUB_WORKSPACE/kernel_workspace/kernel_platform/$CLANG_PREBUILT_BIN:$PATH"
 
-          echo "📌 Path Configured for Compiler Cache + Clang"
-
-          # Compiler Cache Setup
-          if command -v ccache >/dev/null 2>&1; then
-            export USE_CCACHE=1
-            ccache -M "${CCACHE_MAXSIZE}" || true
-            ccache -o compression=true || true
-            ccache -o sloppiness=file_stat_matches,include_file_ctime,include_file_mtime,pch_defines,file_macro,time_macros || true
-            ccache -z || true
-          else
-            export USE_CCACHE=0
-          fi
-       
+          # Setup: Enables Compiler Caching to Speed Up Re-Builds
+          export CCACHE_LOGFILE="${{ github.workspace }}/kernel_workspace/ccache.log" || echo "⚠️ Cache Log Not Available"
+          export CCACHE_DIR="${{ env.CCACHE_DIR }}" || echo "⚠️ Directory Not Available"
+          export CCACHE_COMPILERCHECK="${{ env.CCACHE_COMPILERCHECK }}" || echo "⚠️ Compiler Check Not Available"
+          export CCACHE_BASEDIR="${{ env.CCACHE_BASEDIR }}" || echo "⚠️ Base Directory Not Available"
+          export CCACHE_NOHASHDIR="${{ env.CCACHE_NOHASHDIR }}" || echo "⚠️ NoHash Directory Not Available"
+          export CCACHE_NOHARDLINK="${{ env.CCACHE_NOHARDLINK }}" || echo "⚠️ Cache Hardlink Not Available"          
+          ccache -M "${{ env.CCACHE_MAXSIZE }}" || echo "⚠️ Max Size Not Available"
+          echo "sloppiness = file_stat_matches,include_file_ctime,include_file_mtime,pch_defines,file_macro,time_macros" >> "${{ env.CCACHE_DIR }}/ccache.conf"          
+          
           if [[ "${ENABLE_RUST:-false}" == "true" ]]; then
-            echo "🦀 Setting / Enabling up Rust Environment..."
+            echo "🦀 Setting up Rust Environment..."
           
             export RUST_PREBUILT="$GITHUB_WORKSPACE/kernel_workspace/kernel_platform/prebuilts/rust/linux-x86"
           
             if [[ -x "$RUST_PREBUILT/bin/rustc" ]]; then
               export PATH="$RUST_PREBUILT/bin:$PATH"
-              echo "✔ rustc found: $("$RUST_PREBUILT/bin/rustc" --version)"
+              echo "✔ RUSTC Found: $("$RUST_PREBUILT/bin/rustc" --version)"
             else
-              echo "⚠️ RUSTC Not Found in Pre-Builts!"
+              echo "⚠️ RUSTC Not Found in Prebuilts!"
             fi
           
             export BINDGEN="bindgen"
-            LIBCLANG_FOUND=$(find "$CLANG_BASE" -name "libclang.so*" 2>/dev/null | head -n1 || true)
-            if [[ -n "$LIBCLANG_FOUND" ]]; then
-              export LIBCLANG_PATH="$(dirname "$LIBCLANG_FOUND")"
-            else
-              export LIBCLANG_PATH="$CLANG_BASE/lib"
-            fi
+            export LIBCLANG_PATH="$GITHUB_WORKSPACE/kernel_workspace/kernel_platform/$(dirname "$CLANG_PREBUILT_BIN")/lib"
           fi
-
-          # Load Kernel Environment Script
-          set +u
-          source "$GITHUB_WORKSPACE/kernel_workspace/kernel_platform/build/kernel/_setup_env.sh" 2>/dev/null || true
-          set -u
-
-          # Force Compiler Wrapping
-          export CC="ccache clang"
-          export HOSTCC="ccache clang"
          
           # Enter Kernel Source Directory
           if [[ -f ./common/Makefile ]]; then
@@ -4576,24 +4546,19 @@ jobs:
           # Physical Path Re-Mapping
           ROOT_REAL_PATH=$(realpath ../..) || { echo "⚠️ Real Path Failed"; exit 1; }
           
-          KCFLAGS="
-              -fdebug-prefix-map=$ROOT_REAL_PATH=.
-              -fmacro-prefix-map=$ROOT_REAL_PATH=.
-              -ffile-prefix-map=$ROOT_REAL_PATH=.
-              -no-canonical-prefixes
-              -Wno-error
-              -O2
-              -pipe
-              -D__ANDROID_COMMON_KERNEL__
-              "
+          MAP="-fdebug-prefix-map=$ROOT_REAL_PATH=."
+          MPMAP="-fmacro-prefix-map=$ROOT_REAL_PATH=."
+          FPMAP="-ffile-prefix-map=$ROOT_REAL_PATH=."
+
+          KCFLAGS="$MAP $MPMAP $FPMAP -no-canonical-prefixes -Wno-error -O2 -pipe -D__ANDROID_COMMON_KERNEL__"
           
-          # Prepare Make Arguments / Configurations
+          # Prepare Make Arguments
           MAKE_ARGS=(
             LLVM=1
             ARCH=arm64
             CROSS_COMPILE=aarch64-linux-gnu-
-            CC="$CC"
-            HOSTCC="$HOSTCC"
+            CC="ccache clang"
+            HOSTCC="ccache clang"
             LD=ld.lld
             HOSTLD=ld.lld
             PAHOLE=../../prebuilts/kernel-build-tools/linux-x86/bin/pahole
