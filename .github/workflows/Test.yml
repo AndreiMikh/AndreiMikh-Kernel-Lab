@@ -295,14 +295,16 @@ jobs:
     runs-on: ubuntu-latest
     
     env:
+      # ==============================
+      # Compiler Cache
+      # ==============================
       CCACHE_DIR: ${{ github.workspace }}/.ccache
+      CCACHE_BASEDIR: ${{ github.workspace }}
       CCACHE_COMPILERCHECK: none
       CCACHE_NOHASHDIR: "true"
-      CCACHE_BASEDIR: ${{ github.workspace }}
-      CCACHE_HARDLINK: "true"
-      CCACHE_MAXSIZE: 10G        # Balance Limit Cache to Prevent Disk Exhaustion       
-      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
-  
+      CCACHE_NOHARDLINK: "true"
+      CCACHE_MAXSIZE: 10G
+   
     steps:    
       # ==============================
       # Checkout Code
@@ -493,8 +495,8 @@ jobs:
             fi
 
             # Export Keys and Values for Parallel Jobs
-            export REPOS_KEYS="${!REPOS[@]}"
-            export REPOS_VALUES="${REPOS[@]}"
+            export REPOSKEYS="${!REPOS[@]}"
+            export REPOSVALUES="${REPOS[@]}"
 
           MANIFESTFOUNDREPO=""
           MANIFESTFOUNDREPONAME=""
@@ -520,7 +522,7 @@ jobs:
                         -H "Accept: application/vnd.github.v3+json" \
                         "https://api.github.com/repos/${OWNER}/${REPOSITORYNAME}/branches?per_page=100" \
                         | jq -r '.[].name? // empty' 2>/dev/null || true)
-                        fi
+            fi
 
             # 2️⃣ Fallback to Unauthenticated API if Empty
             if [[ -z "$BRANCHES" ]]; then
@@ -540,17 +542,25 @@ jobs:
             # Try Each Branch Until XML File is Found
             for BRANCH in $BRANCHES; do
               echo "  → 📃 Trying Branch: $BRANCH"
+            
               XMLURL="https://raw.githubusercontent.com/${OWNER}/${REPOSITORYNAME}/${BRANCH}/${FILE}.xml"
               READMEURL="https://raw.githubusercontent.com/${OWNER}/${REPOSITORYNAME}/${BRANCH}/README.md"
-
+            
               if curl -sf --head "$XMLURL" >/dev/null; then
                 echo "🔎 Found ${FILE}.xml in ${OWNER}/${REPOSITORYNAME} (Branch: $BRANCH)"
-                curl -fsSL -o "$XMLPATH" "$XMLURL"
-                curl -fsSL -o "$READMEPATH" "$READMEURL" || true
-
-                MANIFESTFOUNDREPO="$OWNER"
-                MANIFESTFOUNDREPONAME="$REPOSITORYNAME"
-                MANIFESTFOUNDBRANCH="$BRANCH"
+            
+                TMPXML="${XMLPATH}.${OWNER}.${REPOSITORYNAME}.${BRANCH}.tmp"
+                TMPREADME="${READMEPATH}.${OWNER}.${REPOSITORYNAME}.${BRANCH}.tmp"
+            
+                curl -fsSL -o "$TMPXML" "$XMLURL" || { rm -f "$TMPXML"; continue; }
+                mv "$TMPXML" "$XMLPATH"
+            
+                curl -fsSL -o "$TMPREADME" "$READMEURL" 2>/dev/null || true
+                [[ -f "$TMPREADME" ]] && mv "$TMPREADME" "$READMEPATH"
+            
+                echo "$OWNER|$REPOSITORYNAME|$BRANCH" > "$INFOTMP"
+                touch "$FOUNDTMP"
+            
                 return 0
               fi
             done
@@ -568,49 +578,69 @@ jobs:
 
           pids=()
 
-          for key in $REPOS_KEYS; do
-              value="${REPOS[$key]}" || true
-              if [[ -n "$value" ]]; then
-                  (
-                      OWNER="${value%%|*}"
-                      REPOSITORYNAME="${value##*|}"
+          for key in $REPOSKEYS; do
+            value="${REPOS[$key]-}"
+            [[ -z "$value" ]] && continue
+          
+            (
+              OWNER="${value%%|*}"
+              REPOSITORYNAME="${value##*|}"
+          
+                echo "🔎 Checking $OWNER/$REPOSITORYNAME"
+          
+                # Stop Immediately if Another Worker Already Found a Match
+                [[ -f "$FOUNDTMP" ]] && exit 0
+          
+                # Get Branches (GitHub API)
+                BRANCHES=$(curl -s "https://api.github.com/repos/$OWNER/$REPOSITORYNAME/branches?per_page=100" \
+                  | jq -r '.[].name? // empty' 2>/dev/null || true)
+          
+                # Fallback to Git if API Fails
+                if [[ -z "$BRANCHES" ]]; then
+                  BRANCHES=$(git ls-remote --heads "https://github.com/${OWNER}/${REPOSITORYNAME}.git" \
+                    2>/dev/null | sed 's|.*refs/heads/||' || true)
+                fi
 
-                      echo "🔎 Checking $OWNER/$REPOSITORYNAME"
-
-                      # Try Branches as Before
-                      BRANCHES=$(curl -s "https://api.github.com/repos/$OWNER/$REPOSITORYNAME/branches?per_page=100" | jq -r '.[].name? // empty' 2>/dev/null || true)
-                      [[ -z "$BRANCHES" ]] && BRANCHES=$(git ls-remote --heads https://github.com/$OWNER/$REPOSITORYNAME.git 2>/dev/null | sed 's|.*refs/heads/||' || true)
-
-                      for BRANCH in $BRANCHES; do
-                          XMLURL="https://raw.githubusercontent.com/$OWNER/$REPOSITORYNAME/$BRANCH/${FILE}.xml"
-                          READMEURL="https://raw.githubusercontent.com/$OWNER/$REPOSITORYNAME/$BRANCH/README.md"
-                          if curl -sf --head "$XMLURL" >/dev/null; then
-                              curl -fsSL -o "$XMLPATH" "$XMLURL"
-                              curl -fsSL -o "$READMEPATH" "$READMEURL" || true
-                              
-                              # Write Success Information to a Temporary File (Parent Shell will Read this)
-                              echo "$OWNER|$REPOSITORYNAME|$BRANCH" > "$INFOTMP"
-                              touch "$FOUNDTMP"
-                              exit 0
-                          fi
-                      done
-                  ) &
-                  pids+=($!)
-              fi
+                [[ -z "$BRANCHES" ]] && exit 0
+          
+                for BRANCH in $BRANCHES; do
+          
+                  # Stop if Already Found by Another Process
+                  [[ -f "$FOUNDTMP" ]] && exit 0
+          
+                  XMLURL="https://raw.githubusercontent.com/$OWNER/$REPOSITORYNAME/$BRANCH/${FILE}.xml"
+                  READMEURL="https://raw.githubusercontent.com/$OWNER/$REPOSITORYNAME/$BRANCH/README.md"
+          
+                  if curl -sf --head "$XMLURL" >/dev/null; then
+          
+                    # Double-Check Race Condition Before Writing
+                    [[ -f "$FOUNDTMP" ]] && exit 0
+          
+                    curl -fsSL -o "$XMLPATH" "$XMLURL"
+                    curl -fsSL -o "$READMEPATH" "$READMEURL" || true
+          
+                    echo "$OWNER|$REPOSITORYNAME|$BRANCH" > "$INFOTMP"
+                    touch "$FOUNDTMP"
+          
+                    exit 0
+                  fi
+                done
+            ) &
+            pids+=($!)
           done
 
           # Wait for All Jobs
           for pid in "${pids[@]}"; do
-              wait $pid || true
+            wait $pid || true
           done
 
           # Read Results from Temporary File
           if [[ -f "$FOUNDTMP" && -s "$INFOTMP" ]]; then
-              IFS='|' read -r MANIFESTFOUNDREPO MANIFESTFOUNDREPONAME MANIFESTFOUNDBRANCH < "$INFOTMP"
-              echo "✔️ Manifest Successfully Found: $MANIFESTFOUNDREPO/$MANIFESTFOUNDREPONAME (Branch: $MANIFESTFOUNDBRANCH)"
+            IFS='|' read -r MANIFESTFOUNDREPO MANIFESTFOUNDREPONAME MANIFESTFOUNDBRANCH < "$INFOTMP"
+            echo "✔️ Manifest Successfully Found: $MANIFESTFOUNDREPO/$MANIFESTFOUNDREPONAME (Branch: $MANIFESTFOUNDBRANCH)"
           else
-              echo "⚠️ WARNING: ${FILE}.xml Not Found in Any Repository"
-              exit 1
+            echo "⚠️ WARNING: ${FILE}.xml Not Found in Any Repository"
+            exit 1
           fi
 
           # Final Safe Validation
@@ -671,102 +701,6 @@ jobs:
 
           echo ""
           echo "🎉 Manifest Parsing Complete"
-      
-      # ==============================
-      # Toolchain Patch System
-      # ==============================
-      - name: 🔧 Toolchain Patch System
-        shell: bash
-        run: |
-          set -euo pipefail
-      
-          echo "------------------------------"
-          echo "🚀 Detecting System on Chip from Manifest..."
-          echo "------------------------------"
-          echo ""
-      
-          # Get Authoritative Branch
-          BRANCH="${MANIFESTBRANCHOVERRIDE:-${MANIFESTBRANCH:-}}"
-      
-          if [[ -z "$BRANCH" ]]; then
-            echo "⚠️ ERROR: No Manifest Branch Found"
-            exit 1
-          fi
-      
-          echo "📌 Using Branch: $BRANCH"
-      
-          # Detect SoC (System on Chip)
-          SOCCHIP="$(echo "$BRANCH" | grep -oiE 'sm[0-9]+' | tr 'A-Z' 'a-z' || true)"
-      
-          if [[ -z "$SOCCHIP" ]]; then
-            SOCCHIP="Unknown"
-            echo "⚠️ No System on Chip Detected → Fallback: Unknown"
-          else
-            echo "📌 Detected System on Chip: $SOCCHIP"
-          fi
-      
-          echo "SOCCHIP=$SOCCHIP" >> "$GITHUB_ENV"
-      
-          # Toolchain Patch Function
-          applyccache() {
-            local chipname="$1"
-            local urlccache="$2"
-      
-            echo ""
-            echo "🚀 Applying Toolchain Patch for $chipname"
-
-            # WGET + Compiler Cache already Exist from Cache-APT-PKGS-Action
-            echo "📥 Downloading Compiler Cache Binary..."
-           
-            wget -q --retry-connrefused --tries=3 --timeout=20 \
-              "$urlccache" -O ccache
-      
-            chmod +x ccache
-      
-            # Safe Install (No APT, No Overwrite Issues)
-            sudo install -m 0755 ccache /usr/bin/ccache
-      
-            echo "📦 Configuring Compiler Cache Environment..."
-      
-            echo "CCACHE_EXEC=/usr/bin/ccache" >> "$GITHUB_ENV"
-            echo "USE_CCACHE=1" >> "$GITHUB_ENV"
-            echo "CCACHE_COMPRESS=1" >> "$GITHUB_ENV"
-            echo "/usr/lib/ccache" >> "$GITHUB_PATH"
-      
-            echo "🔎 Verifying Compiler Cache..."
-            ccache --version || true
-      
-            echo "🎉 $chipname Toolchain Patch Applied Successfully"
-          }
-      
-          # Multi-SoC (System on Chip) Dispatcher
-          echo ""
-          echo "------------------------------"
-          echo "🚀 Checking SoC (System on Chip) Toolchain Patch..."
-          echo "------------------------------"
-      
-          case "$SOCCHIP" in
-      
-            sm8650)
-              applyccache "SM8650" \
-                "https://github.com/cctv18/oppo_oplus_realme_sm8650/raw/refs/heads/main/lib/ccache-x86-64"
-              ;;
-      
-            sm8750)
-              applyccache "SM8750" \
-                "https://github.com/cctv18/oppo_oplus_realme_sm8750/raw/refs/heads/main/lib/ccache-x86-64"
-              ;;
-      
-            sm8850)
-              applyccache "SM8850" \
-                "https://github.com/cctv18/oppo_oplus_realme_sm8850/raw/refs/heads/main/lib/ccache-x86-64"
-              ;;
-      
-            *)
-              echo "ℹ️ No Optimized System on Chip Toolchain Available for: $SOCCHIP"
-              echo "ℹ️ Skipping Toolchain Patch"
-              ;;
-          esac
       
       # ==============================
       # Debug – Show Selected Inputs
@@ -883,53 +817,162 @@ jobs:
           echo ""
       
           SWAPFILE="/swapfile"
-          SWAPSIZE="4G"
-      
-          # Skip if Swap Already Active Anywhere
-          if swapon --noheadings --show | grep -q "/swapfile"; then
+          SWAPSIZE="2G"
+          
+          if swapon --show | grep -q "$SWAPFILE"; then
             echo "ℹ️ Swap Already Active"
             free -h
             exit 0
           fi
-      
-          echo "📦 Creating Swap File ($SWAPSIZE)..."
-      
-          # Always Use Fallocate
-          sudo fallocate -l "$SWAPSIZE" "$SWAPFILE"
-      
+          
+          echo "📦 Creating Swap ($SWAPSIZE)..."
+          
+          # Try Fallocate First, Fallback to DD
+          if ! sudo fallocate -l "$SWAPSIZE" "$SWAPFILE"; then
+            echo "⚠️ Fallocate Failed → Using DD"
+            sudo dd if=/dev/zero of="$SWAPFILE" bs=1M count=2048
+          fi
+          
           sudo chmod 600 "$SWAPFILE"
           sudo mkswap "$SWAPFILE"
           sudo swapon "$SWAPFILE"
-
-          echo ""
-          echo "🎉 Swap Enabled Successfully"
-      
-          echo ""
-          echo "📌 Swap Status:"
+          
+          echo "🎉 Swap Enabled"
           free -h
           
       # ==============================
-      # Configure Git Identity
+      # Git Identity
       # ==============================
-      - name: 🔧 Configure Git Identity
+      - name: 🔧 Git Identity
         shell: bash
         run: |
           echo "------------------------------"
-          echo "🚀 Configuring Git Identity..."
+          echo "🚀 Configuring Git..."
           echo "------------------------------"
           echo ""
-
+      
+          # Identity
           if ! git config --global user.name >/dev/null; then
             git config --global user.name "AndreiMikh"
           fi
           
           if ! git config --global user.email >/dev/null; then
             git config --global user.email "andreimikhail0088@gmail.com"
-          fi
-
+          fi      
+      
           echo ""
           echo "🎉 Git Configuration Applied:"
-          git config --global --list
+          git config --global --list      
+
+      # ==============================
+      # Cache ECS System
+      # ==============================
+      - name: 🔧 Cache ECS System
+        if: ${{ env.BUILDCCACHE != 'Disabled' && steps.ccache-restore.outputs.cache-hit != 'true' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+      
+          echo "------------------------------"
+          echo "🚀 Detecting System on Chip from Manifest..."
+          echo "------------------------------"
+          echo ""
+      
+          BRANCH="${MANIFESTBRANCHOVERRIDE:-${MANIFESTBRANCH:-}}"
+      
+          if [[ -z "$BRANCH" ]]; then
+            echo "⚠️ ERROR: No Manifest Branch Found"
+            exit 1
+          fi
+      
+          echo "📌 Using Branch: $BRANCH"
+      
+          SOCCHIP="$(echo "$BRANCH" | grep -oiE 'sm[0-9]+' | tr 'A-Z' 'a-z' || true)"
+      
+          if [[ -z "$SOCCHIP" ]]; then
+            SOCCHIP="Unknown"
+            echo "⚠️ No System on Chip Detected → Fallback: Unknown"
+          else
+            echo "📌 Detected System on Chip: $SOCCHIP"
+          fi
+      
+          echo "SOCCHIP=$SOCCHIP" >> "$GITHUB_ENV"
+      
+          echo ""
+          echo "------------------------------"
+          echo "🚀 Configuring Compiler Cache..."
+          echo "------------------------------"
+      
+          # Ensure Compiler Cache Exists (From APT)
+          if ! command -v ccache >/dev/null 2>&1; then
+            echo "⚠️ Compiler Cache Not Found (APT Step Failed?)"
+            exit 1
+          fi
+      
+          echo "📦 System Compiler Cache: $(which ccache)"
+          ccache --version
+      
+          echo ""
+          echo "🔧 Installing Custom Compiler Cache Binary (Override)..."
+      
+          # Inject Cache
+          if [[ -f ./ccache ]]; then
+            sudo cp -f ./ccache /usr/bin/ccache
+            sudo chmod +x /usr/bin/ccache
+            rm -f ./ccache
+          else
+            echo "⚠️ Custom Compiler Cache Binary Not Found, Skipping Override"
+          fi
+      
+          echo "📦 Overridden Compiler Cache: $(which ccache)"
+          ccache --version
+      
+          echo ""
+          echo "------------------------------"
+          echo "🚀 Applying Toolchain Patch..."
+          echo "------------------------------"
+      
+          applyccache() {
+            local chipname="$1"
+            local urlccache="$2"
+      
+            echo ""
+            echo "🚀 Applying Toolchain Patch for $chipname"
+      
+            wget -q --retry-connrefused --tries=3 --timeout=20 \
+              "$urlccache" -O ccache
+      
+            chmod +x ccache
+      
+            sudo install -m 0755 ccache /usr/bin/ccache
+            rm -f ccache
+      
+            echo "📦 Final Compiler Cache: $(which ccache)"
+            ccache --version
+      
+            echo "🎉 $chipname Toolchain Patch Applied"
+          }
+      
+          case "$SOCCHIP" in
+            sm8650)
+              applyccache "SM8650" \
+                "https://github.com/cctv18/oppo_oplus_realme_sm8650/raw/refs/heads/main/lib/ccache-x86-64"
+              ;;
+            sm8750)
+              applyccache "SM8750" \
+                "https://github.com/cctv18/oppo_oplus_realme_sm8750/raw/refs/heads/main/lib/ccache-x86-64"
+              ;;
+            sm8850)
+              applyccache "SM8850" \
+                "https://github.com/cctv18/oppo_oplus_realme_sm8850/raw/refs/heads/main/lib/ccache-x86-64"
+              ;;
+            *)
+              echo "ℹ️ No Optimized Toolchain Available for: $SOCCHIP"
+              ;;
+          esac
+
+          echo ""
+          echo "🎉 Cache ECS Setup Complete"
 
       # ==============================
       # Local Cache Restoration
@@ -937,16 +980,16 @@ jobs:
       - name: 🔧 Local Cache Restoration
         id: ccache-restore
         if: ${{ env.BUILDCCACHE != 'Disabled' }}
-        uses: actions/cache/restore@v5
+        uses: actions/cache@v5
         with:
           path: ${{ env.CCACHE_DIR }}
-          key: CCache-${{ runner.os }}-${{ env.MANIFESTBASEFILE }}-${{ env.CPUD }}-${{ github.ref_name }}-${{ github.event.inputs.ROOTENGINE }}        
+          key: CCache-${{ runner.os }}-${{ env.MANIFESTBASEFILE }}-${{ env.CPUD }}-${{ github.ref_name }}
           restore-keys: |
-            CCache-${{ runner.os }}-${{ env.MANIFESTBASEFILE }}-${{ env.CPUD }}-${{ github.ref_name }}-${{ github.event.inputs.ROOTENGINE }}
-            CCache-${{ runner.os }}-${{ env.MANIFESTBASEFILE }}-${{ env.CPUD }}-${{ github.ref_name }}-
+            CCache-${{ runner.os }}-${{ env.MANIFESTBASEFILE }}-${{ env.CPUD }}-${{ github.ref_name }}
             CCache-${{ runner.os }}-${{ env.MANIFESTBASEFILE }}-${{ env.CPUD }}-
             CCache-${{ runner.os }}-${{ env.MANIFESTBASEFILE }}-
-
+            CCache-${{ runner.os }}-
+            
       # ==============================
       # Release Cache Restoration
       # ==============================
@@ -991,9 +1034,8 @@ jobs:
           fi
       
           # Validate Extraction
-          if [ -d "${{ env.CCACHE_DIR }}" ] && [ "$(ls -A ${{ env.CCACHE_DIR }})" ]; then
+          if [[ -n "$(ls -A "${CCACHE_DIR}" 2>/dev/null)" ]]; then
             echo "👾 Cache Successfully Restored"
-            ls -la "${{ env.CCACHE_DIR }}"
             echo "cache-restored=true" >> $GITHUB_OUTPUT
           else
             echo "⚠️ Cache Extraction Failed"
@@ -1017,53 +1059,39 @@ jobs:
           echo "📂 Using Cache Directory : ${{ env.CCACHE_DIR }}"
           echo "📊 Setting Cache Size    : ${{ env.CCACHE_MAXSIZE }}"
 
-          # Set Compiler Cache Environment Variables
-          export CCACHE_COMPILERCHECK="${{ env.CCACHE_COMPILERCHECK }}"
-          export CCACHE_BASEDIR="${{ env.CCACHE_BASEDIR }}"
-          export CCACHE_NOHASHDIR="${{ env.CCACHE_NOHASHDIR }}"
-          export CCACHE_HARDLINK="${{ env.CCACHE_HARDLINK }}"
-          export CCACHE_DIR="${{ env.CCACHE_DIR }}"
-          export CCACHE_MAXSIZE="${{ env.CCACHE_MAXSIZE }}"
-          
-          # Ensure Cache Directory Exists (Global Cache Directory)
-          mkdir -p "${{ env.CCACHE_DIR }}"
+          # Ensure Compiler Cache Directory Exists
+          mkdir -p "$CCACHE_DIR"
 
-          # Check if Compiler Cache is Installed
+          # Check Compiler Cache Availability
           if ! command -v ccache >/dev/null 2>&1; then
-            echo "⚠️ Compiler Cache Not Found 🛠️ Skipping Compiler Cache Setup"
+            echo "⚠️ Compiler Cache Not Found → Skipping Setup"
             exit 0
           fi
-
-          echo "🚀 Using Compiler Cache at ${{ env.CCACHE_DIR }}"
-         
-          # Force Correct Path
-          export PATH="/usr/lib/ccache:$PATH"
-          
-          # Set Cache Size 
-          ccache -M "${{ env.CCACHE_MAXSIZE }}"
-
-          # Performance Boost
+      
+          echo "🚀 Using Compiler Cache: $(command -v ccache)"
+      
+          # Core Runtime Configuration
+          export CCACHE_DIR="${{ env.CCACHE_DIR }}" || echo "⚠️ Directory Not Available"
+          export CCACHE_COMPILERCHECK="${{ env.CCACHE_COMPILERCHECK }}" || echo "⚠️ Compiler Check Not Available"
+          export CCACHE_BASEDIR="${{ env.CCACHE_BASEDIR }}" || echo "⚠️ Base Directory Not Available"
+          export CCACHE_NOHASHDIR="${{ env.CCACHE_NOHASHDIR }}" || echo "⚠️ NoHash Directory Not Available"
+          export CCACHE_NOHARDLINK="${{ env.CCACHE_NOHARDLINK }}" || echo "⚠️ Cache Hardlink Not Available"                 
+      
+          # Cache Size
+          ccache -M "${CCACHE_MAXSIZE}"
+      
+          # Compression 
           ccache -o compression=true
-        
-          # Make Compiler Cache Global
-          echo "/usr/lib/ccache" >> $GITHUB_PATH
-
-          echo "🎉 Compiler Cache Ready!"
-
-          # Reset Statistics for this Build
+      
           echo "🧾 Resetting Compiler Cache Statistics..."
           ccache -z
-
-          # Show Initial Statistics
+      
           echo ""
           echo "📊 Compiler Cache Statistics (Before Build):"
           ccache -s
-
-          # If Cache Restored is a Hit, Display Detailed Information
-          if [ "${{ steps.ccache-restore.outputs.cache-hit }}" == 'true' ]; then
-            echo "📊 Cache Hit Details:"
-            ccache -sv
-          fi
+      
+          echo ""
+          echo "🎉 Compiler Cache Ready"
            
       # ==============================
       # Debug - Cache Key and Status
@@ -1105,14 +1133,14 @@ jobs:
           echo "| Status | Reported Value |" >> $GITHUB_STEP_SUMMARY
           echo "|--------|----------------|" >> $GITHUB_STEP_SUMMARY
 
-          if [[ "${{ steps.restore-cache.outputs.cache-hit }}" == "true" || "${{ steps.cache-restoration.outputs.cache-restored }}" == "true" ]]; then
+          if [[ "${{ steps.ccache-restore.outputs.cache-hit }}" == "true" || "${{ steps.cache-restoration.outputs.cache-restored }}" == "true" ]]; then
             STATUS="✔️ Exact Cache Match Restored (Fully Matched Cache Key with Identical Build Signature for Maximum Reuse Efficiency)"
             echo "🎉 Exact Cache Hit!"
             echo "📈 Compiler Cache Hit Details:"
             ccache -sv           
     
           # Check if Cache was Restored from GitHub Release
-          elif [[ -d "${{ env.CCACHE_DIR }}" && "$(ls -A "${{ env.CCACHE_DIR }}")" && "${{ steps.ccache-restoration.outputs.cache-restore }}" != 'false' ]]; then         
+          elif [[ -d "${{ env.CCACHE_DIR }}" && "$(ls -A "${{ env.CCACHE_DIR }}")" && "${{ steps.cache-restoration.outputs.cache-restored }}" != 'false' ]]; then         
             STATUS="♻️ Cache Restored from GitHub Release"
             echo "♻️ Cache Restored from GitHub Release"
             echo "| Cache | Cache Restored from GitHub Release (${{ env.CCACHE_DIR }}) |" >> $GITHUB_STEP_SUMMARY
@@ -1200,6 +1228,11 @@ jobs:
           git config --global http.postBuffer 524288000
           git config --global core.compression 0
           git config --global protocol.version 2
+
+          # Optional: Git Memory Tuning
+          git config --global core.deltaBaseCacheLimit 2g
+          git config --global pack.windowMemory 2g
+          git config --global pack.packSizeLimit 2g
       
           WORKDIR="kernel_workspace"
           mkdir -p "$WORKDIR"
@@ -1438,7 +1471,6 @@ jobs:
       - name: 🔧 Inject Custom Kernel Version Suffix
         if: ${{ github.event.inputs.SUFFIX != '' }}
         id: inject
-        continue-on-error: true
         run: |
           cd kernel_workspace
 
@@ -1462,19 +1494,26 @@ jobs:
 
             if grep -q 'KERNELVERSION.*scm_version' "$path"; then
               echo "📌 New Set Local Version Format Detected"
-              sed -i "s|echo \"\${KERNELVERSION}.*scm_version}\"|echo \"\${KERNELVERSION}-${ANDROIDVERSION}-${SUFFIX}\"|" "$path"
+            
+              ESCSUFFIX=$(printf '%s' "$SUFFIX" | sed 's/[\/&]/\\&/g')
+            
+              if ! grep -q "${ESCSUFFIX}" "$path"; then
+                sed -i "s|\(echo \"\${KERNELVERSION}.*scm_version.*\)|\1-${ANDROIDVERSION}-${ESCSUFFIX}|" "$path"
+              fi
 
             elif grep -q 'echo "\$res"' "$path"; then
               echo "Old Set Local Version Format Detected"
 
               if [ "$FASTBUILD" = "true" ]; then
                 echo "✔️ Fast Build Enabled: Setting Static Res Value"
-                sed -i "s/^res=.*/res=\"-${ANDROIDVERSION}-${SUFFIX}\"/" "$path"
+                sed -i "s/^res=.*/res=\"\${res}-${ANDROIDVERSION}-${SUFFIX}\"/" "$path"
+      
               else
                 echo "🛠️ Standard Build: Dynamically Injecting Suffix"
                 if [[ -f ./kernel_platform/build_with_bazel.py ]]; then
                   echo "Note: Using Bazel may Limit Special Characters, Adjust Script if Compilation Fails"
                 fi
+             
                 tac "$path" | sed "0,/echo \"\\\$res\"/s//res=\\\$(echo \\\$res | cut -d- -f1-2)-${SUFFIX}; echo \"\\\$res\";/" | tac > "$path.tmp"
                 mv "$path.tmp" "$path"
               fi
@@ -1488,14 +1527,20 @@ jobs:
           done
 
           echo "⚙️ Committing Suffix Modifications..."
+          
           git add -A
-          git commit -m "🎉 Inject Custom Kernel Suffix and Remove Dirty Tags"
+          
+          if git diff --cached --quiet; then
+            echo "✔️ No Changes to Commit"
+          else
+            git commit -m "🎉 Inject Custom Kernel Suffix and Remove Dirty Tags"
+          fi
 
       # ==============================
       # Fallback - Inject Local Kernel Version Suffix (Bazel-Safe)
       # ==============================
       - name: 🔧 Fallback - Inject Local Kernel Version Suffix (Bazel Safe)
-        if: ${{ steps.inject.outcome == 'failure' && github.event.inputs.SUFFIX != '' }}
+        if: ${{ steps.inject.conclusion == 'failure' && github.event.inputs.SUFFIX != '' }}
         run: |
           cd kernel_workspace
 
@@ -1526,55 +1571,63 @@ jobs:
         run: |
           cd kernel_workspace
 
+          # Inputs and Variables
           ANDROIDVERSION="${{ env.ANDROIDVERSION }}"
           FASTBUILD="${{ github.event.inputs.FASTBUILD }}"
 
           echo "🚀 Generating Random Kernel Suffix..."
-          RANDOM_DIGIT=$(od -An -N1 -tu1 < /dev/urandom | tr -d '[:space:]' | awk '{print $1 % 11}')
-          RANDOM_HASH=$(od -An -N7 -tx1 /dev/urandom | tr -d ' \n')
-          AUTO_SUFFIX="${RANDOM_DIGIT}-o-g${RANDOM_HASH}"
-
-          echo "🧾 Random Suffix Generated: $AUTO_SUFFIX"
-
-          for path in \
-            kernel_platform/common/scripts/setlocalversion \
-            kernel_platform/msm-kernel/scripts/setlocalversion \
-            kernel_platform/external/dtc/scripts/setlocalversion; do
-
-            [ -f "$path" ] || continue
+          
+          # Random Generation
+          RANDOMDIGIT=$((RANDOM % 10))
+          RANDOMHASH=$(head -c 7 /dev/urandom | xxd -p)
+      
+          AUTOSUFFIX="${RANDOMDIGIT}-g${RANDOMHASH}"
+      
+          echo "🧾 Suffix: $AUTOSUFFIX"
+      
+          FILES=(
+            kernel_platform/common/scripts/setlocalversion
+            kernel_platform/msm-kernel/scripts/setlocalversion
+            kernel_platform/external/dtc/scripts/setlocalversion
+          )
+      
+          for path in "${FILES[@]}"; do
+            [[ -f "$path" ]] || continue
             echo "⚙️ Processing: $path"
-
+      
+            # Ensure Executable
+            chmod +x "$path"
+      
             # Remove Dirty Markers
             sed -i 's/ -dirty//g' "$path"
-            sed -i '$i res=$(echo "$res" | sed '\''s/-dirty//g'\'')' "$path"
-
-            if grep -q 'KERNELVERSION.*scm_version' "$path"; then
-              echo "🔎 New SetLocalVersion Format Detected"
-              sed -i "s|echo \"\${KERNELVERSION}.*scm_version}\"|echo \"\${KERNELVERSION}-${ANDROIDVERSION}-${AUTO_SUFFIX}\"|" "$path"
-
-            elif grep -q 'echo "\$res"' "$path"; then
-              echo "🔎 Old SetLocalVersion Format Detected"
-
-              if [ "$FASTBUILD" = "true" ]; then
-                echo "🛠️ Fast Build: Using Static Res with Random Suffix"
-                sed -i "s/^res=.*/res=\"-${ANDROIDVERSION}-${AUTO_SUFFIX}\"/" "$path"
-              else
-                echo "🛠️ Standard Build: Injecting Random Suffix Dynamically"
-                tac "$path" | sed "0,/echo \"\\\$res\"/s//res=\\\$(echo \\\$res | cut -d- -f1-2)-${AUTO_SUFFIX}; echo \"\\\$res\";/" | tac > "$path.tmp"
-                mv "$path.tmp" "$path"
+      
+            # Append Suffix Logic in a Safe Way (No Rewriting Core Logic)
+            if ! grep -q "Kernel Auto Suffix Injection" "$path"; then
+              cat >> "$path" <<EOF
+              
+              # Kernel Auto Suffix Injection
+              if [ -n "\$res" ]; then
+                case "\$res" in
+                  *"-${AUTOSUFFIX}"*) ;;
+                  *)
+                    res="\$res-${ANDROIDVERSION}-${AUTOSUFFIX}"
+                    ;;
+                esac
               fi
-
-            else
-              echo "⚠️ Unknown Format: Appending Random Suffix Manually"
-              echo "echo \"\$res-${AUTO_SUFFIX}\"" >> "$path"
+              EOF
             fi
-
-            chmod +x "$path"
+      
           done
-
-          echo "⚙️ Committing Changes with Auto-Generated Kernel Suffix..."
+      
+          echo "⚙️ Committing changes..."
+      
           git add -A
-          git commit -m "🎉 Apply Auto-Generated Kernel Suffix and Remove Dirty Markers"
+      
+          if git diff --cached --quiet; then
+            echo "✔️ No changes to commit"
+          else
+            git commit -m "🎉 Apply Auto-Generated Kernel Suffix"
+          fi
 
       # ==============================
       # Solve Root Engine Source
@@ -2654,7 +2707,7 @@ jobs:
           echo "------------------------------"
           echo ""
 
-          # Kernel and Patch Directories
+          # Kernel and Patch Path Directories
           KCDIR="${GITHUB_WORKSPACE}/kernel_workspace/kernel_platform/common"
           DEFCONFIG="${KCDIR}/arch/arm64/configs/gki_defconfig"
       
@@ -2678,22 +2731,22 @@ jobs:
 
           # Function: Apply Patch
           apply() {
-            local PATCHFILE="$1"
-            local PATCHNAME
-            PATCHNAME=$(basename "$PFILE")
+            local patchfile="$1"
+            local patchname
+            patchname=$(basename "$patchfile")
       
-            if [[ ! -f "$PATCHFILE" ]]; then
-              echo "⚠️ $PATCHNAME Not Found, Skipping..."
+            if [[ ! -f "$patchfile" ]]; then
+              echo "⚠️ $patchname Not Found, Skipping..."
               return
             fi
       
-            echo "⚙️ Applying $PATCHNAME"
+            echo "⚙️ Applying $patchname"
 
-            if patch -p1 --dry-run < "$PATCHFILE" >/dev/null 2>&1; then
-              patch -p1 -F3 --forward < "$PATCHFILE"
-              echo "✔️ $PATCHNAME Applied"
+            if patch -p1 --dry-run < "$patchfile" >/dev/null 2>&1; then
+              patch -p1 -F3 --forward < "$patchfile"
+              echo "✔️ $patchname Applied"
             else
-              echo "🎉 $PATCHNAME Already Applied or Not Needed"
+              echo "🎉 $patchname Already Applied or Not Needed"
             fi
           }
 
@@ -2704,9 +2757,8 @@ jobs:
           # Kernel Config: ZRAM Options
           if [[ "$SWITCH" == "1" ]]; then
             echo "🔧 Enabling ZRAM-Related Kernel Options..."      
-            if [[ "$ZRAM" == 1* ]]; then
-              # Non-LZ4 Base ZRAM Options
-              cat >> "$DEFCONFIG" << EOF
+           
+            cat >> "$DEFCONFIG" << EOF
           CONFIG_ZSMALLOC=y
           CONFIG_CRYPTO_LZ4HC=y
           CONFIG_CRYPTO_LZ4K=y
@@ -2715,7 +2767,7 @@ jobs:
           EOF
             echo "✔️ ZRAM Configuration Applied"
           else
-            echo "⚠️ Skipping ZRAM Configuration"
+            echo "⚠️ Disabled — Skipping SukiSU ZRAM Configuration"
           fi
 
           echo ""
@@ -2854,7 +2906,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-      
+
+          # Paths
           PDIR="${GITHUB_WORKSPACE}/kernel_workspace/AndreiMikh-Kernel-Lab/patches"
           KCDIR="${GITHUB_WORKSPACE}/kernel_workspace/kernel_platform/common"
       
@@ -2873,7 +2926,7 @@ jobs:
       
           cd "$KCDIR"
       
-          # Early Skip if Already Present
+          # Early Skip if Scheduler Already Exists
           if [[ -d "kernel/sched/hmbird" ]] || \
              [[ -d "vendor/oplus/kernel/cpu/sched_ext/hmbird" ]]; then
       
@@ -2888,11 +2941,9 @@ jobs:
             exit 1
           fi
       
-          # Inject Build Rule
-          if ! grep -q "hmbird_patch.o" drivers/Makefile; then
+          # Idempotent Makefile Injection
+          if ! grep -qE "^[[:space:]]*obj-y[[:space:]]*\+=.*hmbird_patch\.o" drivers/Makefile; then
             echo "🛠️ Injecting Hmbird Build Rule"
-      
-            # Safer Than Raw Insert at Top (Prevents Breaking Ordering)
             echo "obj-y += hmbird_patch.o" >> drivers/Makefile
           else
             echo "✔️ Hmbird Build Rule Already Present"
@@ -2909,12 +2960,13 @@ jobs:
           fi
       
           echo "🚀 Applying Scheduler Conversion Patch..."
-      
-          if patch -p1 --dry-run --silent < "$PFILE" >/dev/null 2>&1; then
+
+          # Apply Patch
+          if patch -p1 --dry-run < "$PFILE" >/dev/null 2>&1; then
             patch -p1 --forward < "$PFILE"
             echo "✔️ Scheduler Conversion Applied Successfully"
           else
-            echo "✔️ Patch Already Applied or Not Required"
+            echo "ℹ️ Patch Not Applied (Already Applied or Not Compatible)"
           fi
       
           echo ""
@@ -2982,7 +3034,7 @@ jobs:
           # Pre-Check Before Applying
           echo "🔍 Checking Patch Applicability..."
       
-          if patch -p1 --dry-run --silent < "$PFILE" >/dev/null 2>&1; then
+          if patch -p1 --dry-run < "$PFILE" >/dev/null 2>&1; then
             echo "🛠️ Applying Unicode Bypass Patch..."
             patch -p1 --forward < "$PFILE"
             echo "✔️ Patch Applied Successfully"
@@ -3001,6 +3053,8 @@ jobs:
         shell: bash
         env:
           FILE: ${{ github.event.inputs.FILE }}
+          CPU: ${{ env.CPU }}
+          CPUD: ${{ env.CPUD }}
         run: |
           set -euo pipefail
       
@@ -3029,18 +3083,13 @@ jobs:
               echo "🎉 Fengchi / Windspeed Scheduler Already Present"
               echo "⏭️ Skipping Patch Stage"
               exit 0
-          fi
-      
+          fi          
+          
           # Validate Required Variables
-          if [[ -z "${CPU:-}" ]]; then
-              echo "🧾 CPU Branch Not Specified"
-              exit 11
-          fi
-      
-          if [[ -z "${FILE:-}" ]]; then
-              echo "🧾 File Input Not Specified"
-              exit 12
-          fi
+          CPU="${CPU:-${CPUD:-}}"
+          
+          [[ -n "$CPU" ]] || { echo "🧾 CPU Branch Not Specified"; exit 11; }
+          [[ -n "${FILE:-}" ]] || { echo "🧾 File Input Not Specified"; exit 12; }
 
           echo ""
           echo "------------------------------"
@@ -3195,7 +3244,7 @@ jobs:
         continue-on-error: true
         shell: bash
         run: |
-          set -uo pipefail   
+          set -euo pipefail   
 
           echo "------------------------------"
           echo "🚀 Starting Linux Container / Docker Patch Setup..."
@@ -3220,7 +3269,11 @@ jobs:
           cd "$KCDIR"
 
           # Detect Kernel Version
-          KERNELVERSION=$(make kernelversion 2>/dev/null || echo "6.6.0")
+          KERNELVERSION=$(make kernelversion 2>/dev/null) || {
+            echo "⚠️ Failed to detect kernel version"
+            exit 1
+          }
+        
           echo "🧾 Using Kernel Version: $KERNELVERSION"
 
           KERNELMAJORMINOR=$(echo "$KERNELVERSION" | cut -d. -f1,2)
@@ -3242,34 +3295,48 @@ jobs:
             ANDROIDV="android16"
           fi
 
-          ANDROID_NUM="${ANDROIDV#android}"
+          ANDROIDNUM="${ANDROIDV#android}"
           echo "📊 Android Version: $ANDROIDV"
 
           # Export for Downstream Steps
-          echo "VANDROID=${ANDROID_NUM}.0.0" >> $GITHUB_ENV
-          echo "ASHORTVERSION=${ANDROID_NUM}" >> $GITHUB_ENV
+          echo "VANDROID=${ANDROIDNUMBER}.0.0" >> $GITHUB_ENV
+          echo "ASHORTVERSION=${ANDROIDNUMBER}" >> $GITHUB_ENV
           echo "ANDROIDVERSION=$ANDROIDV" >> $GITHUB_ENV
 
           # Determine Patch Directory (Smart Matching)
           PBASEPATCH="$PLOCALDIR/lxc_docker_patches"
 
           # Gather All Candidate Patches for the Android Version
-          CANDIDATES=$(find "$PBASEPATCH" -maxdepth 1 -type d -name "a${ANDROID_NUM}-*" | sort -V)
-
+          mapfile -t DIRS < <(
+            find "$PBASEPATCH" -maxdepth 1 -type d -name "a${ANDROIDNUMBER}-*" | sort -Vr
+          )
+          
+          KVER="$KERNELMAJORMINOR"
           LXCTARGETPATCH=""
-
-          for dir in $CANDIDATES; do
-            LXCPATCHKERNEL=$(basename "$dir" | cut -d- -f2)
-            LXCPATCHMAJOR=$(echo "$LXCPATCHKERNEL" | cut -d. -f1)
-            LXCPATCHMINOR=$(echo "$LXCPATCHKERNEL" | cut -d. -f2)
-            LXCKERNELMAJOR=$(echo "$KERNELMAJORMINOR" | cut -d. -f1)
-            LXCKERNELMINOR=$(echo "$KERNELMAJORMINOR" | cut -d. -f2)
-
-            # Select Patch if Patch Kernel ≤ Current Kernel
-            if (( LXCPATCHMAJOR < LXCKERNELMAJOR )) || { (( LXCPATCHMAJOR == LXCKERNELMAJOR )) && (( LXCPATCHMINOR <= LXCKERNELMINOR )); }; then
-              LXCTARGETPATCH="$dir"
+          
+          bestversions=""
+          bestdirectories=""
+          
+          for dir in "${DIRS[@]}"; do
+            base="$(basename "$dir")"
+          
+            # Extract Version After First Dash: Android 16-6.6.12 -> 6.6.12
+            ver="${base#a*-}"
+          
+            # Skip Invalid
+            [[ -z "$ver" ]] && continue
+          
+            # Keep Only Versions <= Kernel Using True Semantic Compare
+            if [[ "$(printf '%s\n%s' "$ver" "$KVER" | sort -V | head -n1)" == "$ver" ]]; then
+              # Pick Highest Valid Match
+              if [[ -z "$bestversions" ]] || [[ "$(printf '%s\n%s' "$bestversions" "$ver" | sort -V | head -n1)" == "$bestversions" ]]; then
+                bestversions="$ver"
+                bestdirectories="$dir"
+              fi
             fi
           done
+          
+          LXCTARGETPATCH="$bestdirectories"
 
           # If No Patch ≤ Current Kernel, Pick the Highest Available as Fallback
           if [ -z "$LXCTARGETPATCH" ] && [ -n "$CANDIDATES" ]; then
@@ -3277,7 +3344,7 @@ jobs:
           fi
 
           if [ -z "$LXCTARGETPATCH" ]; then
-            echo "⚠️ No Compatible Patch Found for Android${ANDROID_NUM}-${KERNELMAJORMINOR}"
+            echo "⚠️ No Compatible Patch Found for Android${ANDROIDNUMBER}-${KERNELMAJORMINOR}"
             exit 0
           fi
 
@@ -4341,13 +4408,6 @@ jobs:
             local code="$2"
 
             echo "⚠️ Fast Build Failed at Line $line (Exit Code $code)"
-
-            if [[ -z "${FALLBACK_SET:-}" ]]; then
-              echo "fallback_reason=unexpected_error" >> "$GITHUB_OUTPUT"
-              echo "fallback=true" >> "$GITHUB_OUTPUT"
-              export FALLBACK_SET=1
-            fi
-
             exit 1
           }
 
@@ -4396,9 +4456,6 @@ jobs:
 
           if [[ -z "$CLANG_PREBUILT_BIN" ]]; then
             echo "⚠️ Clang Prebuilt Bin Not Found. Falling Back to Official Build Script"
-            echo "fallback_reason=missing_clang_prebuilt_bin" >> "$GITHUB_OUTPUT"
-            echo "fallback=true" >> "$GITHUB_OUTPUT"
-            export FALLBACK_SET=1
             exit 1
           fi
 
@@ -4420,7 +4477,7 @@ jobs:
               echo "📌 Detected Clang Version from Build Configuration: $CLANG_VERSION"
             fi
 
-          # If Still Couldn't Determine Version, try clang Version Fallback
+          # If Still Couldn't Determine Version, Try Clang Version Fallback
           elif [[ -z "$CLANG_VERSION" ]]; then
             if [[ -n "$CLANG_FULL_PATH" && -x "$CLANG_FULL_PATH" ]]; then
               CLANG_VERSION=$("$CLANG_FULL_PATH" --version 2>/dev/null \
@@ -4435,11 +4492,7 @@ jobs:
           
           # Final Validation
           if [[ -z "$CLANG_VERSION" ]]; then
-            echo "⚠️ Unable to Determine Clang Version"
-            echo "fallback_reason=missing_clang_version" >> "$GITHUB_OUTPUT"
-            echo "fallback=true" >> "$GITHUB_OUTPUT"
-            export FALLBACK_SET=1
-          
+            echo "⚠️ Unable to Determine Clang Version"          
             echo "⚠️ Exiting Build Due to Missing Clang Version Detection"
             exit 1
           fi
@@ -4453,11 +4506,14 @@ jobs:
           # Replace Placeholder with Actual Clang Version
           CLANG_PREBUILT_BIN=${CLANG_PREBUILT_BIN/\$\{CLANG_VERSION\}/$CLANG_VERSION}
 
+          # Clang Path Validation
+          CLANG_BASE="$GITHUB_WORKSPACE/kernel_workspace/kernel_platform/$CLANG_PREBUILT_BIN"
+          CLANG_FULL_PATH="$CLANG_BASE/clang"
+
           # Verify Clang Binary Exists
           # Info: Ensures the Resolved Clang Prebuilt Bin Path Contains a Valid Clang Executable
           # Info: Prevents Build from Continuing if Clang is Missing or Cache / Setup Failed
           # Info: Avoids "Clang: Command Not Found" Errors Later in Compilation
-          CLANG_FULL_PATH="$GITHUB_WORKSPACE/kernel_workspace/kernel_platform/$CLANG_PREBUILT_BIN/clang"
           if [[ ! -x "$CLANG_FULL_PATH" ]]; then
             echo "⚠️ Clang Binary Not Found!"
             echo "📍 Expected Path: $CLANG_FULL_PATH"
@@ -4468,11 +4524,7 @@ jobs:
 
             echo ""
             echo "🔍 Debug: Listing Directory Contents..."
-            ls -lah "$(dirname "$CLANG_FULL_PATH")" || true
-            
-            echo "fallback_reason=missing_clang" >> "$GITHUB_OUTPUT"
-            echo "fallback=true" >> "$GITHUB_OUTPUT"
-            export FALLBACK_SET=1
+            ls -lah "$(dirname "$CLANG_FULL_PATH")" || true      
             exit 1
           fi
 
@@ -4497,14 +4549,15 @@ jobs:
           # Export Paths
           export PATH="/usr/lib/ccache:$GITHUB_WORKSPACE/kernel_workspace/kernel_platform/$CLANG_PREBUILT_BIN:$PATH"
 
-          # Setup: Enables Compiler Caching to Speed Up Re-Builds
+          # Setup: Enables Compiler Caching to Speed Up Rebuilds
           export CCACHE_LOGFILE="${{ github.workspace }}/kernel_workspace/ccache.log" || echo "⚠️ Cache Log Not Available"
           export CCACHE_DIR="${{ env.CCACHE_DIR }}" || echo "⚠️ Directory Not Available"
           export CCACHE_COMPILERCHECK="${{ env.CCACHE_COMPILERCHECK }}" || echo "⚠️ Compiler Check Not Available"
           export CCACHE_BASEDIR="${{ env.CCACHE_BASEDIR }}" || echo "⚠️ Base Directory Not Available"
           export CCACHE_NOHASHDIR="${{ env.CCACHE_NOHASHDIR }}" || echo "⚠️ NoHash Directory Not Available"
-          export CCACHE_HARDLINK="${{ env.CCACHE_HARDLINK }}" || echo "⚠️ Cache Hardlink Not Available"          
-          ccache -M "${{ env.CCACHE_MAXSIZE }}" || echo "⚠️ Max Size Not Available"
+          export CCACHE_NOHARDLINK="${{ env.CCACHE_NOHARDLINK }}" || echo "⚠️ Cache Hardlink Not Available"    
+          export CCACHE_IS_KERNEL_COMPILING="true" || echo "⚠️ Cache IS Kernel Compiling Not Available"
+          ccache -M "${{ env.CCACHE_MAXSIZE }}" || echo "⚠️ Max Size Not Available"          
           echo "sloppiness = file_stat_matches,include_file_ctime,include_file_mtime,pch_defines,file_macro,time_macros" >> "${{ env.CCACHE_DIR }}/ccache.conf"          
           
           if [[ "${ENABLE_RUST:-false}" == "true" ]]; then
@@ -4514,9 +4567,9 @@ jobs:
           
             if [[ -x "$RUST_PREBUILT/bin/rustc" ]]; then
               export PATH="$RUST_PREBUILT/bin:$PATH"
-              echo "✔ rustc found: $("$RUST_PREBUILT/bin/rustc" --version)"
+              echo "✔ RUSTC Found: $("$RUST_PREBUILT/bin/rustc" --version)"
             else
-              echo "⚠️ RUSTC Not Found in Pre-Builts!"
+              echo "⚠️ RUSTC Not Found in Prebuilts!"
             fi
           
             export BINDGEN="bindgen"
@@ -4560,9 +4613,6 @@ jobs:
           echo ">> 🚀 Running GKI Default Configuration"
           if ! make O=out ARCH=arm64 "${MAKE_ARGS[@]}" gki_defconfig; then
             echo "⚠️ GKI Default Configuration Failed"
-            echo "fallback_reason=gki_defconfig_failed" >> "$GITHUB_OUTPUT"
-            echo "fallback=true" >> "$GITHUB_OUTPUT"
-            export FALLBACK_SET=1
             exit 1
           fi
           
@@ -4632,9 +4682,6 @@ jobs:
           echo ">> 🚀 Running Old Default Configuration"
           if ! make O=out "${MAKE_ARGS[@]}" olddefconfig; then
             echo "⚠️ Old Default Configuration Failed"
-            echo "fallback_reason=olddefconfig_failed" >> "$GITHUB_OUTPUT"
-            echo "fallback=true" >> "$GITHUB_OUTPUT"
-            export FALLBACK_SET=1
             exit 1
           fi
           
@@ -4646,9 +4693,6 @@ jobs:
           echo ">> 🧾 Compiling Kernel with $(nproc) Threads"
           if ! make -j"$(nproc)" O=out "${MAKE_ARGS[@]}"; then
             echo "⚠️ Kernel Compilation Failed"
-            echo "fallback_reason=compile_failed" >> "$GITHUB_OUTPUT"
-            echo "fallback=true" >> "$GITHUB_OUTPUT"
-            export FALLBACK_SET=1
             exit 1
           fi
           
@@ -4671,7 +4715,7 @@ jobs:
       # Fallback to Build Kernel
       # ==============================
       - name: 🔧 Fallback to Build Kernel
-        if: ${{ steps.fast_build.outputs.fallback == 'true' || github.event.inputs.FASTBUILD != 'true' }}
+        if: ${{ github.event.inputs.FASTBUILD != 'true' }}
         run: |
           set -Eeuo pipefail
       
@@ -4695,54 +4739,40 @@ jobs:
           echo "📁 Method   : $METHOD"
           echo "📁 Version  : $GKIV"
           echo "------------------------------"
-          echo ""
-      
-          echo "⚠️ Fallback Reason: ${{ steps.fast_build.outputs.fallback_reason || 'unknown' }}"
-      
-          if [[ -n "${{ steps.fast_build.outputs.fast_build_time }}" ]]; then
-            echo "⏱️ Fast Build Ran For: ${{ steps.fast_build.outputs.fast_build_time }}s (before fallback)"
-          fi
-          echo ""
+          echo ""      
       
           # Restore Fast Build Cache
           echo "📥 Restoring Fast Build Cache..."
       
           if [[ -d ../cache ]]; then
-            [[ -f ../cache/.config ]] && cp ../cache/.config out/.config || true
-            [[ -d ../cache/include ]] && mkdir -p out && cp -rf ../cache/include out/ || true
-            [[ -f ../cache/Module.symvers ]] && cp ../cache/Module.symvers out/ || true
+            [[ -f ../cache/.config ]] && cp -f ../cache/.config out/.config
+            [[ -d ../cache/include ]] && cp -rf ../cache/include out/
+            [[ -f ../cache/Module.symvers ]] && cp -f ../cache/Module.symvers out/
       
             echo "✔ Cache Restored from Fast Build"
           else
             echo "⚠️ No Fast Build Cache Found (Full Rebuild)"
-          fi
-      
-          # Cleanup
-          echo "🧹 Cleaning up Previous Build Artifacts..."
-          rm -rf out || true
-      
+          fi  
+            
           if command -v bazel >/dev/null 2>&1; then
             echo "🔎 Bazel Detected, Cleaning Build..."
-            bazel clean --expunge || true
+            bazel clean --expunge || echo "⚠️ Bazel Clean Failed (Ignored)"
           fi
       
           # Build Flags
-          export LTO=${LTO:-thin}
-          export SYSTEM_DLKM_RE_SIGN=${SYSTEM_DLKM_RE_SIGN:-0}
-          export BUILD_SYSTEM_DLKM=${BUILD_SYSTEM_DLKM:-0}
           export KMI_SYMBOL_LIST_STRICT_MODE=${KMI_SYMBOL_LIST_STRICT_MODE:-0}
+          export BUILD_SYSTEM_DLKM=${BUILD_SYSTEM_DLKM:-0}
+          export SYSTEM_DLKM_RE_SIGN=${SYSTEM_DLKM_RE_SIGN:-0}
       
           # Build System Detection
-          if [[ -n "${BAZEL_SCRIPT:-}" && -f "$BAZEL_SCRIPT" ]]; then
+          if [[ -n "${BAZEL_SCRIPT:-}" && -f "${BAZEL_SCRIPT:-}" ]]; then
             echo "🔎 Detected Bazel / KLeaf Build System"
       
             ./kernel_platform/oplus/bazel/oplus_modules_variant.sh "$CPU" "$METHOD"
-      
             python3 "$BAZEL_SCRIPT" -t "$CPU" "$METHOD"
       
-          elif [[ -n "${OPLUS_SCRIPT:-}" && -f "$OPLUS_SCRIPT" ]]; then
+          elif [[ -n "${OPLUS_SCRIPT:-}" && -f "${OPLUS_SCRIPT:-}" ]]; then
             echo "🔎 Detected Legacy OPlus Build System"
-      
             "$OPLUS_SCRIPT" "$CPU" "$METHOD"
       
           else
@@ -4750,7 +4780,6 @@ jobs:
             exit 1
           fi
       
-          # Final Summary
           FALLBACK_END=$(date +%s)
           FALLBACK_TIME=$((FALLBACK_END - FALLBACK_START))
       
@@ -4777,54 +4806,50 @@ jobs:
       # Save Compiler Cache
       # ==============================
       - name: 🔧 Save Compiler Cache
-        if: ${{ env.BUILDCCACHE != 'Disabled' && steps.ccache-restore.outputs.cache-hit != 'true' && steps.cache-restoration.outputs.cache-restored != 'true' }}
-        uses: actions/cache/save@v5
+        if: ${{ env.BUILDCCACHE != 'Disabled' && steps.ccache-restore.outputs.cache-hit != 'true' }}
+        uses: actions/cache@v5
         with:
           path: ${{ env.CCACHE_DIR }}
-          key: CCache-${{ runner.os }}-${{ env.MANIFESTBASEFILE }}-${{ env.CPUD }}-${{ github.ref_name }}-${{ github.event.inputs.ROOTENGINE }}
+          key: CCache-${{ runner.os }}-${{ env.MANIFESTBASEFILE }}-${{ env.CPUD }}-${{ github.ref_name }}
          
       # ==============================
-      # Cleanup Old Compiler Cache
+      # Clean Old Compiler Cache
       # ==============================
-      - name: 🔧 Cleanup Old Compiler Cache
-        if: ${{ env.BUILDCCACHE != 'Disabled' && steps.ccache-restore.outputs.cache-hit != 'true' && steps.cache-restoration.outputs.cache-restored != 'true' }}
+      - name: 🔧 Clean Old Compiler Cache
+        if: ${{ env.BUILDCCACHE != 'Disabled' }}
         shell: bash
         run: |
           set -euo pipefail
-
+          
           echo "--------------------------------------"
           echo "🚀 Maintaining Compiler Cache..."
           echo "--------------------------------------"
-          echo ""
-
-          if ! command -v ccache >/dev/null 2>&1; then
-            echo "⚠️ Compiler Cache Not Found, Skipping..."
+          
+          command -v ccache >/dev/null 2>&1 || {
+            echo "⚠️ Compiler Cache Not Found, Skipping"
             exit 0
-          fi
-
-          # Enforce Compiler Cache Uses Correct Cache Directory
-          export CCACHE_DIR="${CCACHE_DIR:-/tmp/ccache}"
-
+          }
+          
+          export CCACHE_DIR="${CCACHE_DIR:-$HOME/.ccache}"
+          
           echo "📂 Cache Directory: $CCACHE_DIR"
-
+          
           echo ""
           echo "📊 Cache Statistics (Before):"
           ccache -s || true
-
-          # Enforce Cache Size Limit
+          
           echo ""
           echo "📏 Setting Cache Size Limit..."
           ccache -M "${{ env.CCACHE_MAXSIZE }}" || true
-
-          # Internal Cleanup
+          
           echo ""
           echo "🧹 Running Internal Cleanup..."
           ccache -c || true
-
+          
           echo ""
           echo "📊 Cache Statistics (After):"
           ccache -s || true
-
+          
           echo ""
           echo "🎉 Compiler Cache Maintenance Complete"
 
@@ -5793,86 +5818,51 @@ jobs:
           name: ${{ env.MANIFESTBASEFILE }}-${{ steps.suffix.outputs.suffix }}-${{ env.FULLVERSION }}
           body: |
             ### 📋 **INSTALLATION GUIDE**:
-
          
-            #### 📩 **DOWNLOAD THE KERNEL ZIP FILE**:
-            
-            ---
-            
-               - Navigate to the Release Page & Download & Correct Kernel Zip File for Your Device & Kernel Version
-               - Ensure that You Select the File that Matches Your Device's Model & the Kernel Version You're Installing
-
-
-            #### 📲 **PREPARE YOUR DEVICE**:
-            
-            ---
-            
-               - Make Sure Your Device has an **Unlocked Bootloader** & a Compatible Custom Recovery (TWRP/OrangeFox/Etc)
-               - It's Recommended to **Backup Your Data** Before Proceeding with the Installation to Avoid Any Loss
-
-
-            #### 📤 **INSTALL THROUGH RECOVERY TOOL**:
-            
-            ---
-            
-               - Reboot Your Device Into **Recovery Mode** (TWRP/OrangeFox/Etc)
-               - In the Recovery Menu, Select **Install** & Navigate to the Downloaded Kernel Zip File
-               - Select the Kernel Zip File & Swipe to Confirm Installation
-               - After the Installation Completes, Reboot Your Device Into the System
-
-
-            #### ⚙️ **INSTALLATION VIA KERNELFLASHER APP**:
-            
-            ---
-            
-               - **Download KernelFlasher**: Get the **KernelFlasher** App from [KernelFlasher GitHub](https://github.com/fatalcoder524/KernelFlasher)
-               - **Launch KernelFlasher**: Open the App & Make Sure Your **Device is Rooted**
-               - **Select Kernel**: Choose the Downloaded **Kernel Zip File** Within the App
-               - **Flash the Kernel**: Follow the Prompts to Flash the Kernel Directly Onto your Device
-               - **Reboot**: After Flashing, the App will Prompt to Reboot the Device Into the System
-   
-
-            #### ⚙️ **INSTALLATION VIA HORIZON FLASHER APP**:
-            
-            ---
-            
-               - **Download Horizon Flasher**: Download the **Horizon Flasher App** from [HorizonKernelFlasher GitHub](https://github.com/libxzr/HorizonKernelFlasher/releases) 
-               - **Install the App**: Once the App is Installed, Launch & Select the **Downloaded Kernel Zip File**
-               - **Flash**: App will Automatically Flash the Kernel for You... It may Take Some Time, Depending on the Size of the Kernel File
-               - **Reboot the System**: After Flashing, App will Prompt You to Reboot... Follow the On-Screen Instructions to Reboot Into the System   
-
-
-            #### 🛠️ **TROUBLESHOOTING**:
-            
-            ---
-            
-               - If You Encounter Any Issues with the Installation or Booting, Here are some Common Fixes:
-                  - **Bootloops**: If Your Device is Stuck in a Bootloop After Installation, Try Clearing the Cache & Dalvik Cache from the Recovery Menu
-                  - **Kernel Panic**: This may Occur if Your Device is Incompatible with the Kernel, Try Reverting to a Different Kernel Version or Check for Device-Specific Patches
-                  - **Stuck on Recovery**: If You Can’t Boot Into the System After Installation, Reflash the Recovery & Reattempt the Installation
-          
-
-            #### 🧩 **TIPS**:
-            
-            ---
-            
-               - **Root Access**: If You Need Root Access, Ensure that the Corresponding Root Manager (`SukiSU-Ultra`, `ReSukiSU`, Etc) is Installed After Flashing the Kernel, Follow the Specific Instructions Provided by the Root Manager's Documentation
-            
-
-            #### 🔧 **COMMON ISSUES & FIXES**:
-            
-            ---
-            
-               - **Issue - Kernel Does Not Boot**:
-                  - Fix: Make Sure You are Using a Kernel Compatible with Your Device, Review the Device-Specific Kernel Settings or Check if There are Any Custom Patches Required for Your Device Model  
-
-
-            #### 📊 **AFTER INSTALLATION**:
-            
-            ---
-            
-               - Once Installed, You Can Verify the Kernel Version & Root Access by Using a Kernel Checker App or a Root Checker App from the Play Store
-               - Enjoy the New Kernel Features & Enhancements Designed to Improve Your Device's Performance       
+            #### 📩 **DOWNLOAD THE KERNEL ZIP FILE**:            
+            ---            
+            - Navigate to the Release Page & Download & Correct Kernel Zip File for Your Device & Kernel Version
+            - Ensure that You Select the File that Matches Your Device's Model & the Kernel Version You're Installing
+            #### 📲 **PREPARE YOUR DEVICE**:            
+            ---            
+            - Make Sure Your Device has an **Unlocked Bootloader** & a Compatible Custom Recovery (TWRP/OrangeFox/Etc)
+            - It's Recommended to **Backup Your Data** Before Proceeding with the Installation to Avoid Any Loss
+            #### 📤 **INSTALL THROUGH RECOVERY TOOL**:            
+            ---            
+            - Reboot Your Device Into **Recovery Mode** (TWRP/OrangeFox/Etc)
+            - In the Recovery Menu, Select **Install** & Navigate to the Downloaded Kernel Zip File
+            - Select the Kernel Zip File & Swipe to Confirm Installation
+            - After the Installation Completes, Reboot Your Device Into the System
+            #### 📥 **INSTALLATION VIA KERNELFLASHER APP**:            
+            ---            
+            - **Download KernelFlasher**: Get the **KernelFlasher** App from [KernelFlasher GitHub](https://github.com/fatalcoder524/KernelFlasher)
+            - **Launch KernelFlasher**: Open the App & Make Sure Your **Device is Rooted**
+            - **Select Kernel**: Choose the Downloaded **Kernel Zip File** Within the App
+            - **Flash the Kernel**: Follow the Prompts to Flash the Kernel Directly Onto your Device
+            - **Reboot**: After Flashing, the App will Prompt to Reboot the Device Into the System
+            #### 📥 **INSTALLATION VIA HORIZON FLASHER APP**:            
+            ---            
+            - **Download Horizon Flasher**: Download the **Horizon Flasher App** from [HorizonKernelFlasher GitHub](https://github.com/libxzr/HorizonKernelFlasher/releases) 
+            - **Install the App**: Once the App is Installed, Launch & Select the **Downloaded Kernel Zip File**
+            - **Flash**: App will Automatically Flash the Kernel for You... It may Take Some Time, Depending on the Size of the Kernel File
+            - **Reboot the System**: After Flashing, App will Prompt You to Reboot... Follow the On-Screen Instructions to Reboot Into the System   
+            #### 🛠️ **TROUBLESHOOTING**:            
+            ---            
+            - If You Encounter Any Issues with the Installation or Booting, Here are some Common Fixes:
+            - **Bootloops**: If Your Device is Stuck in a Bootloop After Installation, Try Clearing the Cache & Dalvik Cache from the Recovery Menu
+            - **Kernel Panic**: This may Occur if Your Device is Incompatible with the Kernel, Try Reverting to a Different Kernel Version or Check for Device-Specific Patches
+            - **Stuck on Recovery**: If You Can’t Boot Into the System After Installation, Reflash the Recovery & Reattempt the Installation        
+            #### 🧩 **TIPS**:            
+            ---            
+            - **Root Access**: If You Need Root Access, Ensure that the Corresponding Root Manager (`SukiSU-Ultra`, `ReSukiSU`, Etc) is Installed After Flashing the Kernel, Follow the Specific Instructions Provided by the Root Manager's Documentation          
+            #### 🔧 **COMMON ISSUES & FIXES**:            
+            ---            
+            - **Issue - Kernel Does Not Boot**:
+            - Fix: Make Sure You are Using a Kernel Compatible with Your Device, Review the Device-Specific Kernel Settings or Check if There are Any Custom Patches Required for Your Device Model  
+            #### 📊 **AFTER INSTALLATION**:            
+            ---            
+            - Once Installed, You Can Verify the Kernel Version & Root Access by Using a Kernel Checker App or a Root Checker App from the Play Store
+            - Enjoy the New Kernel Features & Enhancements Designed to Improve Your Device's Performance       
             
           files: |
             ${{ env.ANYKERNEL3ZIP }}
