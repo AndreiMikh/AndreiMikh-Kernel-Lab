@@ -554,10 +554,27 @@ jobs:
               XMLURL="https://raw.githubusercontent.com/${OWNER}/${REPOSITORYNAME}/${BRANCH}/${FILE}.xml"
               READMEURL="https://raw.githubusercontent.com/${OWNER}/${REPOSITORYNAME}/${BRANCH}/README.md"
 
-              if curl -sf --head "$XMLURL" >/dev/null; then
-                echo "🔎 Found ${FILE}.xml in ${OWNER}/${REPOSITORYNAME} (Branch: $BRANCH)"
-                curl -fsSL -o "$XMLPATH" "$XMLURL"
-                curl -fsSL -o "$READMEPATH" "$READMEURL" || true
+                if curl -sf --head "$XMLURL" >/dev/null; then
+                  echo "🔎 Found ${FILE}.xml in ${OWNER}/${REPOSITORYNAME} (Branch: $BRANCH)"
+                
+                  TMPXML="${XMLPATH}.${OWNER}.${REPOSITORYNAME}.${BRANCH}.tmp"
+                  TMPREADME="${READMEPATH}.${OWNER}.${REPOSITORYNAME}.${BRANCH}.tmp"
+                
+                  if curl -fsSL "$XMLURL" -o "$TMPXML"; then
+                    mv "$TMPXML" "$XMLPATH"
+                  else
+                    echo "⚠️ Failed to Download XML"
+                    rm -f "$TMPXML"
+                    exit 1
+                  fi
+                
+                  curl -fsSL "$READMEURL" -o "$TMPREADME" 2>/dev/null || true
+                  [[ -f "$TMPREADME" ]] && mv "$TMPREADME" "$READMEPATH"
+                
+                  echo "$OWNER|$REPOSITORYNAME|$BRANCH" > "$INFOTMP"
+                  touch "$FOUNDTMP"
+                  exit 0
+                fi
 
                 MANIFESTFOUNDREPO="$OWNER"
                 MANIFESTFOUNDREPONAME="$REPOSITORYNAME"
@@ -718,67 +735,52 @@ jobs:
       
           echo "SOCCHIP=$SOCCHIP" >> "$GITHUB_ENV"
       
-          # Toolchain Patch Function
-          applyccache() {
-            local chipname="$1"
-            local urlccache="$2"
-      
-            echo ""
-            echo "🚀 Applying Toolchain Patch for $chipname"
-
-            # Compiler Cache already Exist from Cache-APT-PKGS-Action
-            echo "📥 Downloading Compiler Cache Binary..."
-           
-            wget -q --retry-connrefused --tries=3 --timeout=20 \
-              "$urlccache" -O ccache
-
-            test -s ccache || {
-              echo "⚠️ Compiler Cache Download Failed"
-              exit 1
-            }
-
-            chmod +x ccache
-
-            sudo install -m 0755 ccache /usr/local/bin/ccache
-
-            echo "CCACHE_EXEC=/usr/local/bin/ccache" >> "$GITHUB_ENV"
-            echo "USE_CCACHE=1" >> "$GITHUB_ENV"
-
-            echo "/usr/local/bin" >> "$GITHUB_PATH"
-
-            echo "🔎 Verifying Compiler Cache..."
-            ccache --version || {
-              echo "⚠️ Compiler Cache Execution Failed"
-              exit 1
-            }
-
-            echo "🎉 $chipname Toolchain Patch Applied"
-          }
-      
-          # Multi-SoC (System on Chip) Dispatcher
           echo ""
           echo "------------------------------"
-          echo "🚀 Checking SoC (System on Chip) Toolchain Patch..."
+          echo "🚀 Configuring Compiler Cache..."
           echo "------------------------------"
       
-          case "$SOCCHIP" in   
-            sm8650)
-              applyccache "SM8650" \
-                "https://github.com/cctv18/oppo_oplus_realme_sm8650/raw/refs/heads/main/lib/ccache-x86-64"
-              ;;     
-            sm8750)
-              applyccache "SM8750" \
-                "https://github.com/cctv18/oppo_oplus_realme_sm8750/raw/refs/heads/main/lib/ccache-x86-64"
-              ;;     
-            sm8850)
-              applyccache "SM8850" \
-                "https://github.com/cctv18/oppo_oplus_realme_sm8850/raw/refs/heads/main/lib/ccache-x86-64"
-              ;;    
+          # Ensure Compiler Cache Exists (From APT)
+          if ! command -v ccache >/dev/null 2>&1; then
+            echo "⚠️ Compiler Cache Not Found (APT Step Failed?)"
+            exit 1
+          fi
+      
+          echo "📦 Using Compiler Cache: $(which ccache)"
+          ccache --version
+      
+          # Safe Environment Setup
+          echo "USE_CCACHE=1" >> "$GITHUB_ENV"
+          echo "CCACHE_EXEC=$(which ccache)" >> "$GITHUB_ENV"
+      
+          # Compiler Wrappers
+          echo "CC=ccache clang" >> "$GITHUB_ENV"
+          echo "HOSTCC=ccache clang" >> "$GITHUB_ENV"
+      
+          # Performance Tuning
+          echo "CCACHE_DIR=${CCACHE_DIR}" >> "$GITHUB_ENV"
+          echo "CCACHE_BASEDIR=${GITHUB_WORKSPACE}" >> "$GITHUB_ENV"
+          echo "CCACHE_COMPILERCHECK=content" >> "$GITHUB_ENV"
+          echo "CCACHE_CPP2=true" >> "$GITHUB_ENV"
+          echo "CCACHE_DEPEND=true" >> "$GITHUB_ENV"
+      
+          # Optional SoC-specific tuning (safe, no binary override)
+          case "$SOCCHIP" in
+            sm8650|sm8750|sm8850)
+              echo "⚡ Applying High-Performance Cache Tuning for $SOCCHIP"
+              echo "CCACHE_SLOPPINESS=file_stat_matches,include_file_ctime,include_file_mtime,time_macros" >> "$GITHUB_ENV"
+              ;;
             *)
-              echo "ℹ️ No Optimized System on Chip Toolchain Available for: $SOCCHIP"
-              echo "ℹ️ Skipping Toolchain Patch"
+              echo "ℹ️ Using default cache configuration"
               ;;
           esac
+      
+          echo ""
+          echo "📊 Compiler Cache Initial Statistics:"
+          ccache -s || true
+      
+          echo ""
+          echo "🎉 Toolchain Setup Complete"
       
       # ==============================
       # Debug – Show Selected Inputs
@@ -895,7 +897,7 @@ jobs:
           echo ""
       
           SWAPFILE="/swapfile"
-          SWAPSIZE="4G"
+          SWAPSIZE="8G"
       
           # Skip if Swap Already Active Anywhere
           if swapon --noheadings --show | grep -q "/swapfile"; then
@@ -921,24 +923,25 @@ jobs:
           free -h
           
       # ==============================
-      # Configure Git Identity
+      # Git Identity + Performance
       # ==============================
-      - name: 🔧 Configure Git Identity
+      - name: 🔧 Git Identity + Performance
         shell: bash
         run: |
           echo "------------------------------"
-          echo "🚀 Configuring Git Identity..."
+          echo "🚀 Configuring Git..."
           echo "------------------------------"
           echo ""
-
+      
+          # Identity
           if ! git config --global user.name >/dev/null; then
             git config --global user.name "AndreiMikh"
           fi
           
           if ! git config --global user.email >/dev/null; then
             git config --global user.email "andreimikhail0088@gmail.com"
-          fi
-
+          fi      
+      
           echo ""
           echo "🎉 Git Configuration Applied:"
           git config --global --list
@@ -1031,47 +1034,37 @@ jobs:
           # Ensure Compiler Cache Directory Exists
           mkdir -p "$CCACHE_DIR"
 
-          # Check Compiler Cache Availability early
+          # Check Compiler Cache Availability
           if ! command -v ccache >/dev/null 2>&1; then
             echo "⚠️ Compiler Cache Not Found → Skipping Setup"
             exit 0
           fi
-
-          echo "🚀 Using Compiler Cache: $(which ccache)"
-
-          # Compiler Cache Runtime Bindings
-          export CCACHE_DIR="${CCACHE_DIR}"
-          export CCACHE_BASEDIR="${GITHUB_WORKSPACE}"
-
-          # Configure Compiler Cache Size
+      
+          echo "🚀 Using Compiler Cache: $(command -v ccache)"
+      
+          # Core Runtime Configuration
+          export CCACHE_BASEDIR="$GITHUB_WORKSPACE"
+      
+          # Make Persistent Environment Variables
+          echo "CCACHE_BASEDIR=$CCACHE_BASEDIR" >> "$GITHUB_ENV"
+      
+          # Compiler Wrapper
+          echo "CC=ccache clang" >> "$GITHUB_ENV"
+          echo "HOSTCC=ccache clang" >> "$GITHUB_ENV"
+      
+          # Cache Size
           ccache -M "${CCACHE_MAXSIZE}"
-
-          # Enable Compression
+      
+          # Compression 
           ccache -o compression=true
-
-          # Ensure Correct Compiler Wrapper Path
-          if [[ -d /usr/local/bin ]]; then
-            echo "/usr/local/bin" >> "$GITHUB_PATH"
-          fi
-
-          if [[ -d /usr/lib/ccache ]]; then
-            echo "/usr/lib/ccache" >> "$GITHUB_PATH"
-          fi
-
-          # Reset Statistics for this Build
+      
           echo "🧾 Resetting Compiler Cache Statistics..."
           ccache -z
-
+      
           echo ""
           echo "📊 Compiler Cache Statistics (Before Build):"
           ccache -s
-
-          # Safe Compiler Cache Hit Check
-          if [[ "${CCACHE_RESTORE_HIT:-false}" == "true" ]]; then
-            echo "📊 Cache Restore Hit Detected"
-            ccache -sv || true
-          fi
-
+      
           echo ""
           echo "🎉 Compiler Cache Ready"
            
@@ -1115,14 +1108,14 @@ jobs:
           echo "| Status | Reported Value |" >> $GITHUB_STEP_SUMMARY
           echo "|--------|----------------|" >> $GITHUB_STEP_SUMMARY
 
-          if [[ "${{ steps.restore-cache.outputs.cache-hit }}" == "true" || "${{ steps.cache-restoration.outputs.cache-restored }}" == "true" ]]; then
+          if [[ "${{ steps.ccache-restore.outputs.cache-hit }}" == "true" || "${{ steps.cache-restoration.outputs.cache-restored }}" == "true" ]]; then
             STATUS="✔️ Exact Cache Match Restored (Fully Matched Cache Key with Identical Build Signature for Maximum Reuse Efficiency)"
             echo "🎉 Exact Cache Hit!"
             echo "📈 Compiler Cache Hit Details:"
             ccache -sv           
     
           # Check if Cache was Restored from GitHub Release
-          elif [[ -d "${{ env.CCACHE_DIR }}" && "$(ls -A "${{ env.CCACHE_DIR }}")" && "${{ steps.ccache-restoration.outputs.cache-restore }}" != 'false' ]]; then         
+          elif [[ -d "${{ env.CCACHE_DIR }}" && "$(ls -A "${{ env.CCACHE_DIR }}")" && "${{ steps.cache-restoration.outputs.cache-restored }}" != 'false' ]]; then         
             STATUS="♻️ Cache Restored from GitHub Release"
             echo "♻️ Cache Restored from GitHub Release"
             echo "| Cache | Cache Restored from GitHub Release (${{ env.CCACHE_DIR }}) |" >> $GITHUB_STEP_SUMMARY
@@ -1210,6 +1203,11 @@ jobs:
           git config --global http.postBuffer 524288000
           git config --global core.compression 0
           git config --global protocol.version 2
+
+          # Optional: Git Memory Tuning
+          git config --global core.deltaBaseCacheLimit 2g
+          git config --global pack.windowMemory 2g
+          git config --global pack.packSizeLimit 2g
       
           WORKDIR="kernel_workspace"
           mkdir -p "$WORKDIR"
@@ -4351,13 +4349,6 @@ jobs:
             local code="$2"
 
             echo "⚠️ Fast Build Failed at Line $line (Exit Code $code)"
-
-            if [[ -z "${FALLBACK_SET:-}" ]]; then
-              echo "fallback_reason=unexpected_error" >> "$GITHUB_OUTPUT"
-              echo "fallback=true" >> "$GITHUB_OUTPUT"
-              export FALLBACK_SET=1
-            fi
-
             exit 1
           }
 
@@ -4406,9 +4397,6 @@ jobs:
 
           if [[ -z "$CLANG_PREBUILT_BIN" ]]; then
             echo "⚠️ Clang Prebuilt Bin Not Found. Falling Back to Official Build Script"
-            echo "fallback_reason=missing_clang_prebuilt_bin" >> "$GITHUB_OUTPUT"
-            echo "fallback=true" >> "$GITHUB_OUTPUT"
-            export FALLBACK_SET=1
             exit 1
           fi
 
@@ -4430,7 +4418,7 @@ jobs:
               echo "📌 Detected Clang Version from Build Configuration: $CLANG_VERSION"
             fi
 
-          # If Still Couldn't Determine Version, try clang Version Fallback
+          # If Still Couldn't Determine Version, Try Clang Version Fallback
           elif [[ -z "$CLANG_VERSION" ]]; then
             if [[ -n "$CLANG_FULL_PATH" && -x "$CLANG_FULL_PATH" ]]; then
               CLANG_VERSION=$("$CLANG_FULL_PATH" --version 2>/dev/null \
@@ -4445,11 +4433,7 @@ jobs:
           
           # Final Validation
           if [[ -z "$CLANG_VERSION" ]]; then
-            echo "⚠️ Unable to Determine Clang Version"
-            echo "fallback_reason=missing_clang_version" >> "$GITHUB_OUTPUT"
-            echo "fallback=true" >> "$GITHUB_OUTPUT"
-            export FALLBACK_SET=1
-          
+            echo "⚠️ Unable to Determine Clang Version"          
             echo "⚠️ Exiting Build Due to Missing Clang Version Detection"
             exit 1
           fi
@@ -4471,7 +4455,6 @@ jobs:
           # Info: Ensures the Resolved Clang Prebuilt Bin Path Contains a Valid Clang Executable
           # Info: Prevents Build from Continuing if Clang is Missing or Cache / Setup Failed
           # Info: Avoids "Clang: Command Not Found" Errors Later in Compilation
-          CLANG_FULL_PATH="$GITHUB_WORKSPACE/kernel_workspace/kernel_platform/$CLANG_PREBUILT_BIN/clang"
           if [[ ! -x "$CLANG_FULL_PATH" ]]; then
             echo "⚠️ Clang Binary Not Found!"
             echo "📍 Expected Path: $CLANG_FULL_PATH"
@@ -4482,11 +4465,7 @@ jobs:
 
             echo ""
             echo "🔍 Debug: Listing Directory Contents..."
-            ls -lah "$(dirname "$CLANG_FULL_PATH")" || true
-            
-            echo "fallback_reason=missing_clang" >> "$GITHUB_OUTPUT"
-            echo "fallback=true" >> "$GITHUB_OUTPUT"
-            export FALLBACK_SET=1
+            ls -lah "$(dirname "$CLANG_FULL_PATH")" || true      
             exit 1
           fi
 
@@ -4503,40 +4482,33 @@ jobs:
           echo "------------------------------"
           echo ""
 
-          # Load Kernel Environment Script
-          set +u
-          source "$GITHUB_WORKSPACE/kernel_workspace/kernel_platform/build/kernel/_setup_env.sh" 2>/dev/null || true
-          set -u
-
           # Export Path / Path Setup (Merge Compiler Cache + Clang)
-          export PATH="/usr/lib/ccache:$CLANG_BASE:$PATH"
-
-          echo "📌 Path Configured for Compiler Cache + Clang"
-          
-          # Setup: Enables Compiler Caching to Speed Up Re-Builds
-          # Compiler Cache Setup
-          if ! command -v ccache >/dev/null 2>&1; then
-            echo "⚠️ Compiler Cache Not Found"
-            export USE_CCACHE=0
+          if command -v ccache >/dev/null 2>&1; then
+            export PATH="/usr/lib/ccache:$CLANG_BASE:$PATH"
           else
-            export USE_CCACHE=1
+            export PATH="$CLANG_BASE:$PATH"
           fi
 
           # Cache Runtime Bindings
+          export CCACHE_EXEC="$(command -v ccache || true)"
           export CCACHE_DIR="${CCACHE_DIR}"
-          export CCACHE_BASEDIR="${GITHUB_WORKSPACE}"
+          export CCACHE_BASEDIR="$GITHUB_WORKSPACE"
 
-          # Force Compiler Wrapping
-          export CC="ccache clang"
-          export HOSTCC="ccache clang"
+          echo "📌 Path Configured for Compiler Cache + Clang"
 
-          ccache -M "${CCACHE_MAXSIZE}" || true
-          ccache -o compression=true
-          ccache -o sloppiness=file_stat_matches,include_file_ctime,include_file_mtime,pch_defines,file_macro,time_macros
-          ccache -z || true
+          # Compiler Cache Setup
+          if command -v ccache >/dev/null 2>&1; then
+            export USE_CCACHE=1
+            ccache -M "${CCACHE_MAXSIZE}" || true
+            ccache -o compression=true || true
+            ccache -o sloppiness=file_stat_matches,include_file_ctime,include_file_mtime,pch_defines,file_macro,time_macros || true
+            ccache -z || true
+          else
+            export USE_CCACHE=0
+          fi
        
           if [[ "${ENABLE_RUST:-false}" == "true" ]]; then
-            echo "🦀 Setting up Rust Environment..."
+            echo "🦀 Setting / Enabling up Rust Environment..."
           
             export RUST_PREBUILT="$GITHUB_WORKSPACE/kernel_workspace/kernel_platform/prebuilts/rust/linux-x86"
           
@@ -4548,8 +4520,22 @@ jobs:
             fi
           
             export BINDGEN="bindgen"
-            export LIBCLANG_PATH="$GITHUB_WORKSPACE/kernel_workspace/kernel_platform/$(dirname "$CLANG_PREBUILT_BIN")/lib"
+            LIBCLANG_FOUND=$(find "$CLANG_BASE" -name "libclang.so*" 2>/dev/null | head -n1 || true)
+            if [[ -n "$LIBCLANG_FOUND" ]]; then
+              export LIBCLANG_PATH="$(dirname "$LIBCLANG_FOUND")"
+            else
+              export LIBCLANG_PATH="$CLANG_BASE/lib"
+            fi
           fi
+
+          # Load Kernel Environment Script
+          set +u
+          source "$GITHUB_WORKSPACE/kernel_workspace/kernel_platform/build/kernel/_setup_env.sh" 2>/dev/null || true
+          set -u
+
+          # Force Compiler Wrapping
+          export CC="ccache clang"
+          export HOSTCC="ccache clang"
          
           # Enter Kernel Source Directory
           if [[ -f ./common/Makefile ]]; then
@@ -4593,9 +4579,6 @@ jobs:
           echo ">> 🚀 Running GKI Default Configuration"
           if ! make O=out ARCH=arm64 "${MAKE_ARGS[@]}" gki_defconfig; then
             echo "⚠️ GKI Default Configuration Failed"
-            echo "fallback_reason=gki_defconfig_failed" >> "$GITHUB_OUTPUT"
-            echo "fallback=true" >> "$GITHUB_OUTPUT"
-            export FALLBACK_SET=1
             exit 1
           fi
           
@@ -4665,9 +4648,6 @@ jobs:
           echo ">> 🚀 Running Old Default Configuration"
           if ! make O=out "${MAKE_ARGS[@]}" olddefconfig; then
             echo "⚠️ Old Default Configuration Failed"
-            echo "fallback_reason=olddefconfig_failed" >> "$GITHUB_OUTPUT"
-            echo "fallback=true" >> "$GITHUB_OUTPUT"
-            export FALLBACK_SET=1
             exit 1
           fi
           
@@ -4679,9 +4659,6 @@ jobs:
           echo ">> 🧾 Compiling Kernel with $(nproc) Threads"
           if ! make -j"$(nproc)" O=out "${MAKE_ARGS[@]}"; then
             echo "⚠️ Kernel Compilation Failed"
-            echo "fallback_reason=compile_failed" >> "$GITHUB_OUTPUT"
-            echo "fallback=true" >> "$GITHUB_OUTPUT"
-            export FALLBACK_SET=1
             exit 1
           fi
           
@@ -4704,7 +4681,7 @@ jobs:
       # Fallback to Build Kernel
       # ==============================
       - name: 🔧 Fallback to Build Kernel
-        if: ${{ steps.fast_build.outputs.fallback == 'true' || github.event.inputs.FASTBUILD != 'true' }}
+        if: ${{ github.event.inputs.FASTBUILD != 'true' }}
         run: |
           set -Eeuo pipefail
       
@@ -4728,54 +4705,40 @@ jobs:
           echo "📁 Method   : $METHOD"
           echo "📁 Version  : $GKIV"
           echo "------------------------------"
-          echo ""
-      
-          echo "⚠️ Fallback Reason: ${{ steps.fast_build.outputs.fallback_reason || 'unknown' }}"
-      
-          if [[ -n "${{ steps.fast_build.outputs.fast_build_time }}" ]]; then
-            echo "⏱️ Fast Build Ran For: ${{ steps.fast_build.outputs.fast_build_time }}s (before fallback)"
-          fi
-          echo ""
+          echo ""      
       
           # Restore Fast Build Cache
           echo "📥 Restoring Fast Build Cache..."
       
           if [[ -d ../cache ]]; then
-            [[ -f ../cache/.config ]] && cp ../cache/.config out/.config || true
-            [[ -d ../cache/include ]] && mkdir -p out && cp -rf ../cache/include out/ || true
-            [[ -f ../cache/Module.symvers ]] && cp ../cache/Module.symvers out/ || true
+            [[ -f ../cache/.config ]] && cp -f ../cache/.config out/.config
+            [[ -d ../cache/include ]] && cp -rf ../cache/include out/
+            [[ -f ../cache/Module.symvers ]] && cp -f ../cache/Module.symvers out/
       
             echo "✔ Cache Restored from Fast Build"
           else
             echo "⚠️ No Fast Build Cache Found (Full Rebuild)"
-          fi
-      
-          # Cleanup
-          echo "🧹 Cleaning up Previous Build Artifacts..."
-          rm -rf out || true
-      
+          fi  
+            
           if command -v bazel >/dev/null 2>&1; then
             echo "🔎 Bazel Detected, Cleaning Build..."
-            bazel clean --expunge || true
+            bazel clean --expunge || echo "⚠️ Bazel Clean Failed (Ignored)"
           fi
       
           # Build Flags
-          export LTO=${LTO:-thin}
-          export SYSTEM_DLKM_RE_SIGN=${SYSTEM_DLKM_RE_SIGN:-0}
-          export BUILD_SYSTEM_DLKM=${BUILD_SYSTEM_DLKM:-0}
           export KMI_SYMBOL_LIST_STRICT_MODE=${KMI_SYMBOL_LIST_STRICT_MODE:-0}
+          export BUILD_SYSTEM_DLKM=${BUILD_SYSTEM_DLKM:-0}
+          export SYSTEM_DLKM_RE_SIGN=${SYSTEM_DLKM_RE_SIGN:-0}
       
           # Build System Detection
-          if [[ -n "${BAZEL_SCRIPT:-}" && -f "$BAZEL_SCRIPT" ]]; then
+          if [[ -n "${BAZEL_SCRIPT:-}" && -f "${BAZEL_SCRIPT:-}" ]]; then
             echo "🔎 Detected Bazel / KLeaf Build System"
       
             ./kernel_platform/oplus/bazel/oplus_modules_variant.sh "$CPU" "$METHOD"
-      
             python3 "$BAZEL_SCRIPT" -t "$CPU" "$METHOD"
       
-          elif [[ -n "${OPLUS_SCRIPT:-}" && -f "$OPLUS_SCRIPT" ]]; then
+          elif [[ -n "${OPLUS_SCRIPT:-}" && -f "${OPLUS_SCRIPT:-}" ]]; then
             echo "🔎 Detected Legacy OPlus Build System"
-      
             "$OPLUS_SCRIPT" "$CPU" "$METHOD"
       
           else
@@ -4783,7 +4746,6 @@ jobs:
             exit 1
           fi
       
-          # Final Summary
           FALLBACK_END=$(date +%s)
           FALLBACK_TIME=$((FALLBACK_END - FALLBACK_START))
       
