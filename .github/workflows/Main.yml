@@ -4595,15 +4595,20 @@ jobs:
           export CCACHE_IS_KERNEL_COMPILING="${{ env.CCACHE_IS_KERNEL_COMPILING }}" || echo "⚠️ Cache is Kernel Compiling Not Found"
                    
           # Force Optimal Runtime Behavior
-          ccache -o direct_mode=true
-          ccache -o hash_dir=false
-          ccache -o depend_mode=true
-          ccache -o compression=true
-          ccache -o compression_level=6
+          ccache -F 0
+          ccache -o direct_mode=true \
+                 -o hash_dir=false \
+                 -o depend_mode=true \
+                 -o compression=true \
+                 -o compression_level=6
 
           # Kernel Sloppiness
-          echo "sloppiness = file_stat_matches,include_file_ctime,include_file_mtime,pch_defines,file_macro,time_macros" >> "${{ env.CCACHE_DIR }}/ccache.conf"          
+          CCACHECONF="${CCACHE_DIR}/ccache.conf"
 
+          grep -q "sloppiness" "$CCACHECONF" 2>/dev/null || cat >> "$CCACHECONF" <<EOF
+          sloppiness = file_stat_matches,include_file_ctime,include_file_mtime,pch_defines,file_macro,time_macros
+          EOF
+        
           # Ensure Size is Respected
           ccache -M "${{ env.CCACHE_MAXSIZE }}" || echo "⚠️ Max Size Not Found"          
 
@@ -4634,14 +4639,29 @@ jobs:
             exit 1
           fi
 
-          # Physical Path Re-Mapping
-          ROOT_REAL_PATH=$(realpath ../..) || { echo "⚠️ Real Path Failed"; exit 1; }
-          
-          MAP="-fdebug-prefix-map=$ROOT_REAL_PATH=."
-          MPMAP="-fmacro-prefix-map=$ROOT_REAL_PATH=."
-          FPMAP="-ffile-prefix-map=$ROOT_REAL_PATH=."
+          # Physical Path Remapping
+          ROOT_REAL_PATH=$(realpath ../..) || {
+            echo "⚠️ Real Path Failed"
+            exit 1
+          }
 
-          KCFLAGS="$MAP $MPMAP $FPMAP -no-canonical-prefixes -Wno-error -O2 -pipe -D__ANDROID_COMMON_KERNEL__"
+          # Normalize Root Real Path
+          ROOT_REAL_PATH="${ROOT_REAL_PATH%/}"
+
+          # Build KCFLAGS as Array Structured
+          KCFLAGS=(
+            -fdebug-prefix-map="${ROOT_REAL_PATH}=."
+            -fmacro-prefix-map="${ROOT_REAL_PATH}=."
+            -ffile-prefix-map="${ROOT_REAL_PATH}=."
+            -no-canonical-prefixes
+            -Wno-error
+            -O2
+            -pipe
+            -D__ANDROID_COMMON_KERNEL__
+          )
+
+          # Convert to Space-Separated String for Make
+          KCFLAGS="${KCFLAGS[*]}"         
           
           # Prepare Make Arguments
           MAKE_ARGS=(
