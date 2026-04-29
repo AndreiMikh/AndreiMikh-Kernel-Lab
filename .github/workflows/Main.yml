@@ -300,7 +300,7 @@ jobs:
       # ==============================
       CCACHE_DIR: ${{ github.workspace }}/.ccache
       CCACHE_BASEDIR: ${{ github.workspace }}
-      CCACHE_COMPILERCHECK: "%compiler% -dumpmachine; %compiler% -dumpversion"
+      CCACHE_COMPILERCHECK: content
       CCACHE_NOHASHDIR: "true"
       CCACHE_NOHARDLINK: "true"
       CCACHE_MAXSIZE: 10G
@@ -862,74 +862,7 @@ jobs:
       
           echo ""
           echo "🎉 Git Configuration Applied:"
-          git config --global --list
-
-      # ==============================
-      # Cache ECS System
-      # ==============================
-      - name: 🔧 Cache ECS System
-        shell: bash
-        run: |
-          set -euo pipefail
-      
-          echo "------------------------------"
-          echo "🚀 Detecting System on Chip from Manifest..."
-          echo "------------------------------"
-          echo ""
-      
-          # Get Authoritative Branch
-          BRANCH="${MANIFESTBRANCHOVERRIDE:-${MANIFESTBRANCH:-}}"
-      
-          if [[ -z "$BRANCH" ]]; then
-            echo "⚠️ ERROR: No Manifest Branch Found"
-            exit 1
-          fi
-      
-          echo "📌 Using Branch: $BRANCH"
-      
-          # Detect SoC (System on Chip)
-          SOCCHIP="$(echo "$BRANCH" | grep -oiE 'sm[0-9]+' | tr 'A-Z' 'a-z' || true)"
-      
-          if [[ -z "$SOCCHIP" ]]; then
-            SOCCHIP="Unknown"
-            echo "⚠️ No System on Chip Detected → Fallback: Unknown"
-          else
-            echo "📌 Detected System on Chip: $SOCCHIP"
-          fi
-      
-          echo "SOCCHIP=$SOCCHIP" >> "$GITHUB_ENV"
-      
-          echo ""
-          echo "------------------------------"
-          echo "🚀 Configuring Compiler Cache..."
-          echo "------------------------------"
-      
-          # Ensure Compiler Cache Exists (From APT)
-          if ! command -v ccache >/dev/null 2>&1; then
-            echo "⚠️ Compiler Cache Not Found (APT Step Failed?)"
-            exit 1
-          fi
-      
-          echo "📦 Using Compiler Cache: $(which ccache)"
-          ccache --version      
-      
-          # Optional SoC-specific tuning (safe, no binary override)
-          case "$SOCCHIP" in
-            sm8650|sm8750|sm8850)
-              echo "⚡ Applying High-Performance Cache Tuning for $SOCCHIP"
-              echo "CCACHE_SLOPPINESS=file_stat_matches,include_file_ctime,include_file_mtime,time_macros" >> "$GITHUB_ENV"
-              ;;
-            *)
-              echo "ℹ️ Using default cache configuration"
-              ;;
-          esac
-      
-          echo ""
-          echo "📊 Compiler Cache Initial Statistics:"
-          ccache -s || true
-      
-          echo ""
-          echo "🎉 Cache ECS Setup Complete"
+          git config --global --list      
       
       # ==============================
       # Local Cache Restoration
@@ -940,13 +873,13 @@ jobs:
         uses: actions/cache@v5
         with:
           path: ${{ env.CCACHE_DIR }}
-          key: CCache-${{ runner.os }}-${{ env.MANIFESTBASEFILE }}-${{ env.CPUD }}-${{ github.ref_name }}-${{ github.event.inputs.ROOTENGINE }}        
+          key: ccache-ecsv2-${{ env.CCACHE_KEY }}     
           restore-keys: |
-            CCache-${{ runner.os }}-${{ env.MANIFESTBASEFILE }}-${{ env.CPUD }}-${{ github.ref_name }}-${{ github.event.inputs.ROOTENGINE }}
-            CCache-${{ runner.os }}-${{ env.MANIFESTBASEFILE }}-${{ env.CPUD }}-${{ github.ref_name }}-
+            CCache-${{ runner.os }}-${{ env.MANIFESTBASEFILE }}-${{ env.CPUD }}-${{ github.ref_name }}
             CCache-${{ runner.os }}-${{ env.MANIFESTBASEFILE }}-${{ env.CPUD }}-
             CCache-${{ runner.os }}-${{ env.MANIFESTBASEFILE }}-
-
+            CCache-${{ runner.os }}-
+            
       # ==============================
       # Release Cache Restoration
       # ==============================
@@ -998,6 +931,116 @@ jobs:
             echo "⚠️ Cache Extraction Failed"
             echo "cache-restored=false" >> $GITHUB_OUTPUT
           fi
+
+      # ==============================
+      # Cache ECS System
+      # ==============================
+      - name: 🔧 Cache ECS System
+        shell: bash
+        run: |
+          set -euo pipefail
+      
+          echo "------------------------------"
+          echo "🚀 Detecting System on Chip from Manifest..."
+          echo "------------------------------"
+          echo ""
+      
+          BRANCH="${MANIFESTBRANCHOVERRIDE:-${MANIFESTBRANCH:-}}"
+      
+          if [[ -z "$BRANCH" ]]; then
+            echo "⚠️ ERROR: No Manifest Branch Found"
+            exit 1
+          fi
+      
+          echo "📌 Using Branch: $BRANCH"
+      
+          SOCCHIP="$(echo "$BRANCH" | grep -oiE 'sm[0-9]+' | tr 'A-Z' 'a-z' || true)"
+      
+          if [[ -z "$SOCCHIP" ]]; then
+            SOCCHIP="Unknown"
+            echo "⚠️ No System on Chip Detected → Fallback: Unknown"
+          else
+            echo "📌 Detected System on Chip: $SOCCHIP"
+          fi
+      
+          echo "SOCCHIP=$SOCCHIP" >> "$GITHUB_ENV"
+      
+          echo ""
+          echo "------------------------------"
+          echo "🚀 Configuring Compiler Cache..."
+          echo "------------------------------"
+      
+          # Ensure Compiler Cache Exists (From APT)
+          if ! command -v ccache >/dev/null 2>&1; then
+            echo "⚠️ Compiler Cache Not Found (APT Step Failed?)"
+            exit 1
+          fi
+      
+          echo "📦 System Compiler Cache: $(which ccache)"
+          ccache --version
+      
+          echo ""
+          echo "🔧 Installing Custom Compiler Cache Binary (Override)..."
+      
+          # Inject Cache
+          if [[ -f ./ccache ]]; then
+            sudo cp -f ./ccache /usr/bin/ccache
+            sudo chmod +x /usr/bin/ccache
+            rm -f ./ccache
+          else
+            echo "⚠️ Custom Compiler Cache Binary Not Found, Skipping Override"
+          fi
+          # -------------------------------------------
+      
+          echo "📦 Overridden Compiler Cache: $(which ccache)"
+          ccache --version
+      
+          echo ""
+          echo "------------------------------"
+          echo "🚀 Applying Toolchain Patch..."
+          echo "------------------------------"
+      
+          applyccache() {
+            local chipname="$1"
+            local urlccache="$2"
+      
+            echo ""
+            echo "🚀 Applying Toolchain Patch for $chipname"
+      
+            wget -q --retry-connrefused --tries=3 --timeout=20 \
+              "$urlccache" -O ccache
+      
+            chmod +x ccache
+      
+            sudo install -m 0755 ccache /usr/bin/ccache
+            rm -f ccache
+      
+            echo "📦 Final Compiler Cache: $(which ccache)"
+            ccache --version
+      
+            echo "🎉 $chipname Toolchain Patch Applied"
+          }
+      
+          case "$SOCCHIP" in
+            sm8650)
+              applyccache "SM8650" \
+                "https://github.com/cctv18/oppo_oplus_realme_sm8650/raw/refs/heads/main/lib/ccache-x86-64"
+              ;;
+            sm8750)
+              applyccache "SM8750" \
+                "https://github.com/cctv18/oppo_oplus_realme_sm8750/raw/refs/heads/main/lib/ccache-x86-64"
+              ;;
+            sm8850)
+              applyccache "SM8850" \
+                "https://github.com/cctv18/oppo_oplus_realme_sm8850/raw/refs/heads/main/lib/ccache-x86-64"
+              ;;
+            *)
+              echo "ℹ️ No Optimized Toolchain Available for: $SOCCHIP"
+              ;;
+          esac
+
+          echo ""
+          echo "🎉 Cache ECS Setup Complete"
   
       # ==============================
       # Configure and Setup Compiler Cache
@@ -4769,7 +4812,7 @@ jobs:
         uses: actions/cache@v5
         with:
           path: ${{ env.CCACHE_DIR }}
-          key: CCache-${{ runner.os }}-${{ env.MANIFESTBASEFILE }}-${{ env.CPUD }}-${{ github.ref_name }}-${{ github.event.inputs.ROOTENGINE }}
+          key: CCache-${{ runner.os }}-${{ env.MANIFESTBASEFILE }}-${{ env.CPUD }}-${{ github.ref_name }}
          
       # ==============================
       # Cleanup Old Compiler Cache
