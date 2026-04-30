@@ -900,16 +900,15 @@ jobs:
       # Set Local Cache Flag
       # ==============================
       - name: 🔧 Set Local Cache Flag
-        id: localcacheflag
         if: ${{ env.BUILDCCACHE != 'Disabled' }}
         run: |
           if [[ "${{ steps.ccache-restore.outputs.cache-hit }}" == "true" ]]; then
             echo "CCACHELOCALHIT=true" >> $GITHUB_ENV
-            echo "localhit=true" >> $GITHUB_OUTPUT
           else
             echo "CCACHELOCALHIT=false" >> $GITHUB_ENV
-            echo "localhit=false" >> $GITHUB_OUTPUT
           fi
+      
+          echo "CCACHEFOUND=${{ steps.ccache-restore.outputs.cache-hit }}" >> $GITHUB_ENV
             
       # ==============================
       # Release Cache Restoration
@@ -975,130 +974,28 @@ jobs:
       # Cache ECS System
       # ==============================
       - name: 🔧 Cache ECS System
-        if: ${{ env.BUILDCCACHE != 'Disabled' && env.CCACHELOCALHIT != 'true' && env.CCACHERELEASEHIT != 'true' }}
+        if: ${{ env.BUILDCCACHE != 'Disabled' }}
         shell: bash
         run: |
           set -euo pipefail
       
           echo "------------------------------"
-          echo "🚀 Detecting System on Chip from Manifest..."
+          echo "🚀 Cache ECS System Setup..."
           echo "------------------------------"
           echo ""
       
-          BRANCH="${MANIFESTBRANCHOVERRIDE:-${MANIFESTBRANCH:-}}"
+          curl -LfsS --retry 5 --retry-delay 5 --retry-all-errors \
+            --connect-timeout 30 --tcp-fastopen \
+            -H "User-Agent: Mozilla/5.0" \
+            "https://github.com/WildKernels/kernel_patches/raw/refs/heads/main/ccache/ccache-x86-64" \
+            -o ccache
       
-          if [[ -z "$BRANCH" ]]; then
-            echo "⚠️ ERROR: No Manifest Branch Found"
-            exit 1
-          fi
+          sudo cp -f ./ccache /usr/bin/ccache
+          sudo chmod +x /usr/bin/ccache
+          rm -f ./ccache
       
-          echo "📌 Using Branch: $BRANCH"
+          echo "Cache ECS Version : $(ccache --version)"
       
-          SOCCHIP="$(echo "$BRANCH" | grep -oiE 'sm[0-9]+' | tr 'A-Z' 'a-z' || true)"
-      
-          if [[ -z "$SOCCHIP" ]]; then
-            SOCCHIP="Unknown"
-            echo "⚠️ No System on Chip Detected → Fallback: Unknown"
-          else
-            echo "📌 Detected System on Chip: $SOCCHIP"
-          fi
-      
-          echo "SOCCHIP=$SOCCHIP" >> "$GITHUB_ENV"
-      
-          echo ""
-          echo "------------------------------"
-          echo "🚀 Configuring Compiler Cache..."
-          echo "------------------------------"
-      
-          # Ensure Compiler Cache Exists (From APT)
-          if ! command -v ccache >/dev/null 2>&1; then
-            echo "⚠️ Compiler Cache Not Found (APT Step Failed?)"
-            exit 1
-          fi
-      
-          echo "📦 System Compiler Cache: $(which ccache)"
-          ccache --version
-      
-          echo ""
-          echo "🔧 Checking Cache Sources..."
-      
-          # Inject Cache
-          CCACHELOCAL="${{ steps.ccache-restore.outputs.cache-hit }}"
-          CCACHERELEASE="${{ steps.cache-restoration.outputs.cache-restored }}"
-
-          echo "LOCAL=$CCACHELOCAL"
-          echo "RELEASE=$CCACHERELEASE"
-
-          # Fused Compiler Cache Mode
-          if [[ "$CCACHELOCAL" == "true" || "$CCACHERELEASE" == "true" ]]; then
-            echo "🎯 Cache Found → System Mode (Local / Release Cache) Enabled"
-            CCMODE="system"
-            CCACHEFOUND="true"
-          else
-            echo "⚠️ No Cache Anywhere → Custom Mode (ECS Cache) Enabled"
-            CCMODE="custom"
-            CCACHEFOUND="false"
-          fi
-      
-          echo "CCMODE=$CCMODE" >> "$GITHUB_ENV"
-          echo "CCACHEFOUND=$CCACHEFOUND" >> "$GITHUB_ENV"
-      
-          echo ""
-          echo "📦 Final Compiler Cache: $(which ccache)"
-          ccache --version
-      
-          echo ""
-          echo "------------------------------"
-          echo "🚀 Applying Toolchain Patch..."
-          echo "------------------------------"
-      
-          applyccache() {
-            local chipname="$1"
-            local urlccache="$2"
-          
-            echo ""
-            echo "🚀 Applying Toolchain Patch for $chipname"
-          
-            wget -q --retry-connrefused --tries=3 --timeout=20 \
-              "$urlccache" -O ccache
-          
-            chmod +x ccache
-          
-            echo "📦 CCMODE = $CCMODE"
-          
-            if [[ "$CCMODE" == "custom" ]]; then
-              echo "⚠️ Applying CUstom Compiler Cache Override..."
-              sudo install -m 0755 ccache /usr/bin/ccache
-            else
-              echo "🎯 Skipping Toolchain Override (System Compiler Cache Active)"
-            fi
-          
-            rm -f ccache
-          
-            echo "📦 Final Compiler Cache: $(which ccache)"
-            ccache --version
-          
-            echo "🎉 $chipname Toolchain Patch Applied"
-          }
-      
-          case "$SOCCHIP" in
-            sm8650)
-              applyccache "SM8650" \
-                "https://github.com/cctv18/oppo_oplus_realme_sm8650/raw/refs/heads/main/lib/ccache-x86-64"
-              ;;
-            sm8750)
-              applyccache "SM8750" \
-                "https://github.com/cctv18/oppo_oplus_realme_sm8750/raw/refs/heads/main/lib/ccache-x86-64"
-              ;;
-            sm8850)
-              applyccache "SM8850" \
-                "https://github.com/cctv18/oppo_oplus_realme_sm8850/raw/refs/heads/main/lib/ccache-x86-64"
-              ;;
-            *)
-              echo "ℹ️ No Optimized Toolchain Available for: $SOCCHIP"
-              ;;
-          esac
-
           echo ""
           echo "🎉 Cache ECS Setup Complete"
   
@@ -1122,13 +1019,16 @@ jobs:
           # Ensure Compiler Cache Directory Exists
           mkdir -p "$CCACHE_DIR"
 
+          export CCACHE_DIR="${{ env.CCACHE_DIR }}"
+          export CCACHE_BASEDIR="${{ env.CCACHE_MAXSIZE }}"
+
           # Check Compiler Cache Availability
           if ! command -v ccache >/dev/null 2>&1; then
             echo "⚠️ Compiler Cache Not Found → Skipping Setup"
             exit 0
           fi
       
-          echo "🚀 Using Compiler Cache: $(which ccache)"
+          echo "🚀 Using Compiler Cache: $(ccache --version)"
       
           # Core Performance Tuning
           # Cache Size
