@@ -1468,135 +1468,109 @@ jobs:
 
           echo ""
           echo "🎉 ENABLE_RUST (Final): $RUST_ENABLED"
-          
+
+      # ==============================
+      # Normalize Kernel Suffix Input
+      # ==============================
+      - name: 🔧 Normalize Kernel Suffix Input
+        run: |
+          SUFFIX="${{ github.event.inputs.SUFFIX }}"
+          SUFFIX="$(echo "$SUFFIX" | xargs)"
+
+          if [ -z "$SUFFIX" ]; then
+            echo "MODE=Auto" >> $GITHUB_ENV
+          else
+            echo "MODE=Custom" >> $GITHUB_ENV
+            echo "SUFFIX=$SUFFIX" >> $GITHUB_ENV
+          fi
+
       # ==============================
       # Inject Custom Kernel Version Suffix
-      # ==============================
+      # ==============================          
       - name: 🔧 Inject Custom Kernel Version Suffix
-        if: ${{ github.event.inputs.SUFFIX != '' }}
-        id: inject
-        continue-on-error: true
+        if: ${{ env.MODE == 'Custom' }}
         run: |
           cd kernel_workspace
 
-          SUFFIX="${{ github.event.inputs.SUFFIX }}"
           ANDROIDVERSION="${{ env.ANDROIDVERSION }}"
+          SUFFIX="${{ env.SUFFIX }}"
           FASTBUILD="${{ github.event.inputs.FASTBUILD }}"
 
-          echo "🚀 Injecting Custom Kernel Suffix: $SUFFIX"
+          echo "🚀 Using Custom Suffix: $SUFFIX"
 
-          for path in \
-            kernel_platform/common/scripts/setlocalversion \
-            kernel_platform/msm-kernel/scripts/setlocalversion \
-            kernel_platform/external/dtc/scripts/setlocalversion; do
+          FILES=(
+            kernel_platform/common/scripts/setlocalversion
+            kernel_platform/msm-kernel/scripts/setlocalversion
+            kernel_platform/external/dtc/scripts/setlocalversion
+          )
 
+          for path in "${FILES[@]}"; do
             [ -f "$path" ] || continue
-            echo "Processing: $path"
+            echo "⚙️ Processing: $path"
 
-            # Remove Dirty Tags
+            # Clean Dirty Tags 
             sed -i 's/ -dirty//g' "$path"
-            sed -i '$i res=$(echo "$res" | sed '\''s/-dirty//g'\'')' "$path"
 
             if grep -q 'KERNELVERSION.*scm_version' "$path"; then
-              echo "📌 New Set Local Version Format Detected"
+              echo "📜 New Format Detected"
               sed -i "s|echo \"\${KERNELVERSION}.*scm_version}\"|echo \"\${KERNELVERSION}-${ANDROIDVERSION}-${SUFFIX}\"|" "$path"
 
             elif grep -q 'echo "\$res"' "$path"; then
-              echo "Old Set Local Version Format Detected"
+              echo "📜 Old Format Detected"
 
               if [ "$FASTBUILD" = "true" ]; then
-                echo "✔️ Fast Build Enabled: Setting Static Res Value"
                 sed -i "s/^res=.*/res=\"-${ANDROIDVERSION}-${SUFFIX}\"/" "$path"
               else
-                echo "🛠️ Standard Build: Dynamically Injecting Suffix"
-                if [[ -f ./kernel_platform/build_with_bazel.py ]]; then
-                  echo "Note: Using Bazel may Limit Special Characters, Adjust Script if Compilation Fails"
-                fi
                 tac "$path" | sed "0,/echo \"\\\$res\"/s//res=\\\$(echo \\\$res | cut -d- -f1-2)-${SUFFIX}; echo \"\\\$res\";/" | tac > "$path.tmp"
                 mv "$path.tmp" "$path"
               fi
 
             else
-              echo "⚠️ Unknown Format: Appending Suffix Manually"
+              echo "⚠️ Unknown Format Fallback"
               echo "echo \"\$res-${SUFFIX}\"" >> "$path"
             fi
 
             chmod +x "$path"
           done
 
-          echo "⚙️ Committing Suffix Modifications..."
           git add -A
-          git commit -m "🎉 Inject Custom Kernel Suffix and Remove Dirty Tags"
-
-      # ==============================
-      # Fallback - Inject Local Kernel Version Suffix (Bazel-Safe)
-      # ==============================
-      - name: 🔧 Fallback - Inject Local Kernel Version Suffix (Bazel Safe)
-        if: ${{ steps.inject.conclusion == 'failure' && github.event.inputs.SUFFIX != '' }}
-        run: |
-          cd kernel_workspace
-
-          SUFFIX="${{ github.event.inputs.SUFFIX }}"
-          ANDROIDVERSION="${{ env.ANDROIDVERSION }}"
-
-          FINALSUFFIX="-${ANDROIDVERSION}-${SUFFIX}"
-
-          echo "⚠️ Fallback Triggered → Using Local Version: $FINALSUFFIX"
-          echo ""
-
-          # Persist to Next Steps
-          echo "LOCALVERSION=$FINALSUFFIX" >> $GITHUB_ENV
-          echo "KBUILDVERSION=$FINALSUFFIX" >> $GITHUB_ENV
-
-          # Also for Current Shell
-          export LOCALVERSION="$FINALSUFFIX"
-          export KBUILDVERSION="$FINALSUFFIX"
-
-          echo ""
-          echo "🎉 Local Version is Set to: $LOCALVERSION"
-
+          git commit -m "🎉 Inject Custom Kernel Suffix"
+      
       # ==============================
       # Auto-Generated Kernel Suffix
       # ==============================
       - name: 🔧 Auto-Generated Kernel Suffix
-        if: ${{ github.event.inputs.SUFFIX == '' }}
+        if: ${{ env.MODE == 'Auto' }}
         run: |
           cd kernel_workspace
 
-          # Inputs and Variables
           ANDROIDVERSION="${{ env.ANDROIDVERSION }}"
-          FASTBUILD="${{ github.event.inputs.FASTBUILD }}"
 
-          echo "🚀 Generating Random Kernel Suffix..."
-          
-          # Random Generation
+          echo "🚀 Generating Auto Suffix..."
+
           RANDOMDIGIT=$((RANDOM % 10))
           RANDOMHASH=$(head -c 7 /dev/urandom | xxd -p)
-      
+
           AUTOSUFFIX="${RANDOMDIGIT}-g${RANDOMHASH}"
-      
-          echo "🧾 Suffix: $AUTOSUFFIX"
-      
+
+          echo "📌 Auto Suffix: $AUTOSUFFIX"
+
           FILES=(
             kernel_platform/common/scripts/setlocalversion
             kernel_platform/msm-kernel/scripts/setlocalversion
             kernel_platform/external/dtc/scripts/setlocalversion
           )
-      
+
           for path in "${FILES[@]}"; do
-            [[ -f "$path" ]] || continue
+            [ -f "$path" ] || continue
             echo "⚙️ Processing: $path"
-      
-            # Ensure Executable
+
             chmod +x "$path"
-      
-            # Remove Dirty Markers
             sed -i 's/ -dirty//g' "$path"
-      
-            # Append Suffix Logic in a Safe Way (No Rewriting Core Logic)
+
             if ! grep -q "Kernel Auto Suffix Injection" "$path"; then
               cat >> "$path" <<EOF
-              
+
               # Kernel Auto Suffix Injection
               if [ -n "\$res" ]; then
                 case "\$res" in
@@ -1608,17 +1582,12 @@ jobs:
               fi
               EOF
             fi
-      
           done
-      
-          echo "⚙️ Committing changes..."
-      
+
           git add -A
-      
-          if git diff --cached --quiet; then
-            echo "✔️ No changes to commit"
-          else
-            git commit -m "🎉 Apply Auto-Generated Kernel Suffix"
+
+          if ! git diff --cached --quiet; then
+            git commit -m "🎉 Auto Kernel Suffix Applied"
           fi
 
       # ==============================
