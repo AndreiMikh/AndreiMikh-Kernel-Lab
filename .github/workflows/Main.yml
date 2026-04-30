@@ -1215,6 +1215,7 @@ jobs:
           
             echo "🔄 Running Repository Init (Missing or New Manifest)..."
             repo init -u "$MANIFESTBASE" -b "$MANIFESTBRANCH" -m "${FILE}.xml" \
+              --depth=1 \
               --no-clone-bundle \
               --no-tags
           else
@@ -1230,87 +1231,33 @@ jobs:
           echo "📃 Repository List:"
           repo list || true
 
-          # Sync Jobs Control
-          SYNCJOBS=$(nproc --all 2>/dev/null || echo 8)
-          [[ $SYNCJOBS -gt 10 ]] && SYNCJOBS=10
-      
-          echo "⚡ Sync Jobs: $SYNCJOBS"
-
-          # Shallow Sync
-          syncrepo() {
-            repo sync \
-              -c \
-              --current-branch \
-              --no-clone-bundle \
-              --no-tags \
-              --prune \
-              --optimized-fetch \
-              --retry-fetches=5 \
-              --force-sync \
-              --fail-fast \
-              -j"$SYNCJOBS" \
-              --progress \
-              -v
-          }
+          # Sync Jobs Control      
+          echo "📁 Syncing Repository..."
+          
+          SYNCFLAGS="-c --force-sync --no-clone-bundle --no-tags \
+          --optimized-fetch --prune --retry-fetches=3 --verbose \
+          -j$(nproc)"
+          
+          echo "⚡ Using $(nproc) Parallel Jobs"
       
           # Watchdog
           (
             while true; do
-              echo "⏳ Sync Alive: $(date)"
-              sleep 45
+              echo "⏳ Sync Alive...  : $(date)"
+              sleep 60
             done
           ) &
           WATCHDOGPID=$!
       
-          set +e
-
-          # Attempt #1 (Shallow)
-          echo "📡 Starting Sync (Attempt #1 - Shallow)..."
-          timeout 1500 syncrepo
-          STATUS=$?
-
-          # Attempt #2 (Force Sync)
-          if [[ $STATUS -ne 0 ]]; then
-            echo "⚠️ Retry #1 (Force Sync)..."
-          
-            timeout 1200 repo sync \
-              -c \
-              --current-branch \
-              --force-sync \
-              --no-clone-bundle \
-              --no-tags \
-              --prune \
-              -j"$SYNCJOBS" \
-              --progress \
-              -v
-          
-            STATUS=$?
-          fi
-          
-          # Attempt #3 (Isolation Mode)
-          if [[ $STATUS -ne 0 ]]; then
-            echo "⚠️ Retry #2 (Single-Thread Isolation)..."
-          
-            timeout 1800 repo sync \
-              -c \
-              --current-branch \
-              --force-sync \
-              -j1 \
-              --fail-fast \
-              --trace \
-              --progress
-          
-            STATUS=$?
-          fi
-          
-          set -e
+          timeout 25m repo sync $SYNCFLAGS
+          SYNCSTATUS=$?
 
           # Cleanup Watchdog
           kill "$WATCHDOGPID" >/dev/null 2>&1 || true
           wait "$WATCHDOGPID" 2>/dev/null || true
 
           # Final Check
-          if [[ $STATUS -ne 0 ]]; then
+          if [[ $SYNCSTATUS -ne 0 ]]; then
             echo "⚠️ Repository Sync Failed"
             exit 1
           fi
