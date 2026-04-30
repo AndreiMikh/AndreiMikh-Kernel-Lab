@@ -1294,11 +1294,12 @@ jobs:
             kernel_workspace/.repo/repo
             kernel_workspace/.repo/project-objects
             kernel_workspace/.repo/projects
-            kernel_workspace/.repo/manifests.git
-          key: repo-${{ github.event.inputs.FILE }}-${{ github.ref_name }}-${{ hashFiles('.repo/manifests_fallback/*.xml') }}
+            kernel_workspace/.repo/manifests
+          key: repo-${{ github.ref_name }}-base
           restore-keys: |
-            repo-${{ github.event.inputs.FILE }}-
-      
+            repo-${{ github.ref_name }}-
+            repo-
+        
       # ==============================
       # Initialize and Sync Repository
       # ==============================
@@ -1319,119 +1320,160 @@ jobs:
           git config --global http.postBuffer 524288000
           git config --global core.compression 0
           git config --global protocol.version 2
-      
+
+          # Workspace Setup
           WORKDIR="kernel_workspace"
+          rm -rf "$WORKDIR"
           mkdir -p "$WORKDIR"
           cd "$WORKDIR"
-      
-          MANIFESTBASE="https://github.com/${MANIFESTREPO}/${MANIFESTREPONAME}.git"
-      
-          echo "🚀 Initializing Repository..."
           
-          if [[ ! -d ".repo" ]] || \
-             [[ ! -f ".repo/manifests/${FILE}.xml" ]]; then
-          
-            echo "🔄 Running Repository Init (Missing or New Manifest)..."
-            repo init -u "$MANIFESTBASE" -b "$MANIFESTBRANCH" -m "${FILE}.xml" \
-              --no-clone-bundle \
-              --no-tags
+          echo "📁 Workspace Initialized"
+
+          # Analyze Repository Cache
+          echo "🧠 Analyzing Repository Cache Strategy..."
+      
+          MBLIMITSIZE=5000
+      
+          if [[ -d ".repo/repo" && -d ".repo/projects" ]]; then
+            echo "⚠️ Cache Hit Detected → Full Cache Mode Enabled"
+            CACHEMODE="Full"
           else
-            echo "⚡ Repository Initialized, Skipping Init"
+            echo "⚠️ Cache Miss Detected → Light Cache Mode Enabled"
+            CACHEMODE="Light"
           fi
 
-          # Inject Fallback Manifest
-          echo "📥 Enforcing Fallback Manifest..."
-          mkdir -p .repo/manifests
-          cp "$GITHUB_WORKSPACE/.repo/manifests_fallback/${FILE}.xml" \
-             ".repo/manifests/${FILE}.xml"
+          echo "CACHEMODE=$CACHEMODE" >> $GITHUB_ENV
 
-          echo "📃 Repository List:"
-          repo list
+          # Manifest Preparation
+          MANIFESTBASE="https://github.com/${MANIFESTREPO}/${MANIFESTREPONAME}.git"
+          FALLBACKMANIFEST="$GITHUB_WORKSPACE/.repo/manifests_fallback/${FILE}.xml"
+
+          if [[ ! -f "$FALLBACKMANIFEST" ]]; then
+            echo "⚠️ Missing Fallback Manifest: $FALLBACKMANIFEST"
+            exit 1
+          fi
       
-          echo "📁 Syncing Repository..."
+          echo "📥 Using Fallback Manifest"
+          cp "$FALLBACKMANIFEST" manifest.xml
+        
+          # Repository Init
+          echo "🚀 Running Repository Init..."
+          repo init -u "$MANIFESTBASE" \
+            -b "$MANIFESTBRANCH" \
+            -m manifest.xml \
+            --no-clone-bundle \
+            --no-tags
+      
+          echo "⚡ Repository Initialized"
           
+          # Repository Sync Engine
           SYNCJOBS=$(nproc --all 2>/dev/null || echo 8)
           [[ $SYNCJOBS -gt 8 ]] && SYNCJOBS=8
-          
-          SYNCFLAGS="-c --force-sync \
-          --optimized-fetch --prune --retry-fetches=5 --verbose \
-          -j${SYNCJOBS}"
-          
-          echo "⚡ Using Controlled Parallelism (${SYNCJOBS} Jobs)"
-
-          # Progress Watchdog
+      
+          echo "⚡ Sync Jobs: $SYNCJOBS"
+      
+          syncrepo() {
+            repo sync \
+              -c \
+              --force-sync \
+              --no-clone-bundle \
+              --no-tags \
+              --prune \
+              -j"$SYNCJOBS" \
+              --fail-fast
+          }
+      
+          # Watchdog
           (
             while true; do
-              echo "⏳ Still Syncing... $(date)"
+              echo "⏳ Repository Sync Alive: $(date)"
               sleep 60
             done
           ) &
-          PROGRESSPID=$!
-
-          # Multi-Attempt Sync
+          WATCHDOGPID=$!
+      
           set +e
-          timeout 25m repo sync $SYNCFLAGS
+      
+          echo "📡 Starting Sync (Attempt # 1)..."
+          syncrepo
           STATUS=$?
       
           if [[ $STATUS -ne 0 ]]; then
-            echo "⚠️ First Sync Failed, Retrying..."
-            repo sync $SYNCFLAGS
+            echo "⚠️ Retry Sync (Attempt # 2)..."
+            syncrepo
             STATUS=$?
           fi
       
           if [[ $STATUS -ne 0 ]]; then
-            echo "⚠️ Second Sync Failed, Fallback to Low Parallel..."
-            repo sync -c -j1
+            echo "⚠️ Fallback Single-Thread Recovery Sync..."
+            repo sync -c --force-sync -j1 --fail-fast --trace
             STATUS=$?
           fi
       
           set -e
       
-          kill $PROGRESSPID >/dev/null 2>&1 || true
-          wait $PROGRESSPID 2>/dev/null || true
+          kill "$WATCHDOGPID" >/dev/null 2>&1 || true
+          wait "$WATCHDOGPID" 2>/dev/null || true
       
           if [[ $STATUS -ne 0 ]]; then
-            echo "⚠️ Repository Sync Failed"
+            echo "⚠️ Repository Sync Failed Permanently"
             exit 1
           fi
+      
+          echo "⚡ Repository Sync Completed"
 
-          # Detect Kernel Repository
-          echo "🔎 Detecting Kernel Repository..."
+          echo "📂 Inspecting Repository Directory..."
+          echo "------------ Root ------------"
+          ls -la .repo/ || true
+          
+          echo "---------- Manifest ----------"
+          ls -la .repo/manifests* || true
+          
+          echo "------------ Tool ------------"
+          ls -la .repo/repo || true
+          
+          echo "📊 Repository Breakdown:"
+          du -sh .repo/* 2>/dev/null || true
+
+          echo "📊 Repository Size Summary:"
+          du -sh .repo || true
+      
+          # Kernel Repository Detection
+          echo "🔎 Detecting Kernel Source..."
+      
           KREPOSPATH=$(find . -type f -name "build.config*" \
             -not -path "*/.repo/*" \
             -print -quit)
       
           if [[ -z "$KREPOSPATH" ]]; then
-            echo "⚠️ ERROR: No Build Configuration Found"
+            echo "⚠️ Kernel Build Configurations Not Found"
             exit 1
           fi
       
-          echo "📌 Build Configuration Found: $KREPOSPATH"
-      
           KERNELREPOSITORY=$(dirname "${KREPOSPATH#./}")
-      
-          echo "🔎 Detected Kernel Repository: $KERNELREPOSITORY"
+          echo "📌 Kernel Repository: $KERNELREPOSITORY"
       
           echo "KERNELREPOSITORY=$KERNELREPOSITORY" >> $GITHUB_ENV
-
-          # Cleanup ABI Protected Exports
-          echo "🧹 Cleaning ABI Protected Exports..."
-          
+      
+          # ABI Cleanup
+          echo "🧹 Cleaning ABI Exports..."
+      
           for dir in kernel_platform/common kernel_platform/msm-kernel; do
             [[ -d "$dir" ]] || continue
-          
+      
             file="$dir/BUILD.bazel"
-          
+      
             if [[ -f "$file" ]]; then
-              grep -q "protected_exports_list" "$file" && \
+              if grep -q "protected_exports_list" "$file"; then
                 sed -i '/protected_exports_list/d' "$file"
+              fi
             fi
-          
-            rm -f "$dir/android/abi_gki_protected_exports_"* || true
+      
+            rm -f "$dir"/android/abi_gki_protected_exports_* 2>/dev/null || true
           done
       
           echo ""
-          echo "🎉 Repository Sync Complete"
+          echo "🎉 Kernel Repository Pipeline Complete"
 
       # ==============================
       # Save Repository Cache
@@ -1443,8 +1485,8 @@ jobs:
             kernel_workspace/.repo/repo
             kernel_workspace/.repo/project-objects
             kernel_workspace/.repo/projects
-            kernel_workspace/.repo/manifests.git
-          key: repo-${{ github.event.inputs.FILE }}-${{ github.ref_name }}-${{ hashFiles('.repo/manifests_fallback/*.xml') }}
+            kernel_workspace/.repo/manifests
+          key: repo-${{ github.ref_name }}-base
           
       # ==============================
       # Kernel Version Setup
