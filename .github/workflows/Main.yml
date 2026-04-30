@@ -302,9 +302,18 @@ jobs:
       # ==============================
       # Directories
       CCACHE_DIR: ${{ github.workspace }}/.ccache
+      CCACHE_BASEDIR: ${{ github.workspace }}/kernel_workspace
+
+      # Kernel Builds
+      CCACHE_COMPILERCHECK: content
+      CCACHE_NOHASHDIR: "true"
+      CCACHE_NOHARDLINK: "true"
+
+      # Kernel-Specific Optimization
+      CCACHE_IS_KERNEL_COMPILING: "true"
 
       # Size
-      CCACHE_MAXSIZE: 3G
+      CCACHE_MAXSIZE: 15G
    
     steps:    
       # ==============================
@@ -381,49 +390,15 @@ jobs:
           remove-codeql: true           # Remove CodeQL to Free Space
 
       # ==============================
-      # APT + Cache-ECS
-      # ==============================
-      - name: 🔧 APT + Cache-ECS
-        run: |
-          set -e
-      
-          # Prevent some Packages from being Upgraded (Keep System Stable)
-          sudo apt-mark hold firefox libc-bin
-      
-          # Remove Unnecessary Manual Pages Database to Save Space / Time
-          sudo apt purge -y man-db || true
-          sudo rm -rf /var/lib/man-db/auto-update || true
-      
-          # Update Package List
-          sudo apt update
-      
-          # Install Cache-ECS (Optimized for Kernel Builds)
-          curl -LfsS --retry 5 --retry-delay 5 --retry-all-errors \
-            --connect-timeout 30 --tcp-fastopen \
-            -H "User-Agent: Mozilla/5.0" \
-            "https://github.com/WildKernels/kernel_patches/raw/refs/heads/main/ccache/ccache-x86-64" \
-            -o ccache
-      
-          sudo cp -f ./ccache /usr/bin/ccache
-          sudo chmod +x /usr/bin/ccache
-          rm -f ./ccache
-      
-          echo "Cache ECS Version : $(ccache --version)"
-      
-          echo ""
-          echo "🎉 APT + Cache ECS Setup Complete"
-
-      # ==============================
       # Install and Cache Build Dependencies
       # ==============================
       - name: 🔧 Install and Cache Build Dependencies
-        uses: awalsh128/cache-apt-pkgs-action@v1
+        uses: awalsh128/cache-apt-pkgs-action@latest
         with:
           packages: >
             bc
             build-essential
             bison
-            ccache
             clang
             curl
             dos2unix
@@ -448,6 +423,27 @@ jobs:
 
           # Required for Cache-APT-PKGS-Action
           execute_install_scripts: true
+
+      # ==============================
+      # Cache-ECS
+      # ==============================
+      - name: 🔧 Cache-ECS
+        run: |      
+          # Install Cache-ECS (Optimized for Kernel Builds)
+          curl -LfsS --retry 5 --retry-delay 5 --retry-all-errors \
+            --connect-timeout 30 --tcp-fastopen \
+            -H "User-Agent: Mozilla/5.0" \
+            "https://github.com/WildKernels/kernel_patches/raw/refs/heads/main/ccache/ccache-x86-64" \
+            -o ccache
+      
+          sudo cp -f ./ccache /usr/bin/ccache
+          sudo chmod +x /usr/bin/ccache
+          rm -f ./ccache
+      
+          echo "Cache ECS Version : $(ccache --version)"
+      
+          echo ""
+          echo "🎉 Cache ECS Setup Complete"
 
       # ==============================
       # Extract Manifest Information (Token/No-Token + LS-Remote Fallback)
@@ -987,22 +983,38 @@ jobs:
           # Ensure Compiler Cache Directory Exists
           mkdir -p "$CCACHE_DIR"
 
-          # Export
-          export CCACHE_COMPILERCHECK="none"
-          export CCACHE_BASEDIR="${{ github.workspace }}"
-          export CCACHE_NOHASHDIR="true"
-          export CCACHE_NOHARDLINK="true"
           export CCACHE_DIR="${{ env.CCACHE_DIR }}"
-          export CCACHE_MAXSIZE="${{ env.CCACHE_MAXSIZE }}"
-         
+          export CCACHE_BASEDIR="$GITHUB_WORKSPACE"
+
+          # Check Compiler Cache Availability
+          if ! command -v ccache >/dev/null 2>&1; then
+            echo "⚠️ Compiler Cache Not Found → Skipping Setup"
+            exit 0
+          fi
+      
+          echo "🚀 Using Compiler Cache: $(ccache --version)"
+      
           # Core Performance Tuning
           # Cache Size
           ccache -M "${CCACHE_MAXSIZE}"
+      
+          # Direct Mode
+          ccache -o direct_mode=true
+
+          # Path-Based
+          ccache -o hash_dir=false
+
+          # Preprocessing Reuse
+          ccache -o depend_mode=true
 
           # Compression
           ccache -o compression=true
           ccache -o compression_level=6
 
+          # Kernel-Specific Tuning
+          # Avoid False Misses From Timestamps / Macros
+          ccache -o sloppiness=file_macro,time_macros,include_file_mtime,include_file_ctime
+      
           echo ""
           echo "📊 Compiler Cache Statistics (Before Build):"
           ccache -s
@@ -4540,14 +4552,20 @@ jobs:
 
           # Setup: Enables Compiler Caching to Speed Up Rebuilds
           # Compiler Cache Runtime Tuning
-          export CCACHE_LOGFILE="${{ github.workspace }}/kernel_workspace/ccache.log"
-          export CCACHE_COMPILERCHECK="none"
-          export CCACHE_BASEDIR="${{ github.workspace }}"
-          export CCACHE_NOHASHDIR="true"
-          export CCACHE_NOHARDLINK="true"
-          export CCACHE_DIR="${{ env.CCACHE_DIR }}"
-          export CCACHE_MAXSIZE="${{ env.CCACHE_MAXSIZE }}"
-          export CCACHE_IS_KERNEL_COMPILING="true"
+          export CCACHE_LOGFILE="${{ github.workspace }}/kernel_workspace/ccache.log" || echo "⚠️ Cache Log Not Found"
+          export CCACHE_DIR="${{ env.CCACHE_DIR }}" || echo "⚠️ Directory Not Available"
+          export CCACHE_COMPILERCHECK="${{ env.CCACHE_COMPILERCHECK }}" || echo "⚠️ Compiler Check Not Found"
+          export CCACHE_BASEDIR="${{ env.CCACHE_BASEDIR }}" || echo "⚠️ Base Directory Not Found"
+          export CCACHE_NOHASHDIR="${{ env.CCACHE_NOHASHDIR }}" || echo "⚠️ NoHash Directory Not Found"
+          export CCACHE_NOHARDLINK="${{ env.CCACHE_NOHARDLINK }}" || echo "⚠️ Cache Hardlink Not Found"    
+                   
+          # Force Optimal Runtime Behavior
+          ccache -F 0
+          ccache -o direct_mode=true \
+                 -o hash_dir=false \
+                 -o depend_mode=true \
+                 -o compression=true \
+                 -o compression_level=6
                                                                                    
           # Kernel Sloppiness
           CCACHECONF="${CCACHE_DIR}/ccache.conf"
