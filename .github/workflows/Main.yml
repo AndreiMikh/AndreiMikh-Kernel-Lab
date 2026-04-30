@@ -1295,11 +1295,11 @@ jobs:
             kernel_workspace/.repo/project-objects
             kernel_workspace/.repo/projects
             kernel_workspace/.repo/manifests
-          key: repo-${{ github.ref_name }}-base
+          key: repo-${{ github.event.inputs.FILE }}-${{ github.ref_name }}-${{ hashFiles('.repo/manifests_fallback/*.xml') }}
           restore-keys: |
-            repo-${{ github.ref_name }}-
+            repo-${{ github.event.inputs.FILE }}-
             repo-
-        
+      
       # ==============================
       # Initialize and Sync Repository
       # ==============================
@@ -1323,49 +1323,35 @@ jobs:
 
           # Workspace Setup
           WORKDIR="kernel_workspace"
-          rm -rf "$WORKDIR"
           mkdir -p "$WORKDIR"
           cd "$WORKDIR"
-          
-          echo "📁 Workspace Initialized"
-
-          # Analyze Repository Cache
-          echo "🧠 Analyzing Repository Cache Strategy..."
-      
-          MBLIMITSIZE=5000
-      
-          if [[ -d ".repo/repo" && -d ".repo/projects" ]]; then
-            echo "⚠️ Cache Hit Detected → Full Cache Mode Enabled"
-            CACHEMODE="Full"
-          else
-            echo "⚠️ Cache Miss Detected → Light Cache Mode Enabled"
-            CACHEMODE="Light"
-          fi
-
-          echo "CACHEMODE=$CACHEMODE" >> $GITHUB_ENV
 
           # Manifest Preparation
           MANIFESTBASE="https://github.com/${MANIFESTREPO}/${MANIFESTREPONAME}.git"
-          FALLBACKMANIFEST="$GITHUB_WORKSPACE/.repo/manifests_fallback/${FILE}.xml"
 
-          if [[ ! -f "$FALLBACKMANIFEST" ]]; then
-            echo "⚠️ Missing Fallback Manifest: $FALLBACKMANIFEST"
-            exit 1
-          fi
-      
-          echo "📥 Using Fallback Manifest"
-          cp "$FALLBACKMANIFEST" manifest.xml
-        
           # Repository Init
-          echo "🚀 Running Repository Init..."
-          repo init -u "$MANIFESTBASE" \
-            -b "$MANIFESTBRANCH" \
-            -m manifest.xml \
-            --no-clone-bundle \
-            --no-tags
-      
-          echo "⚡ Repository Initialized"
+          echo "🚀 Initializing Repository..."
           
+          if [[ ! -d ".repo" ]] || \
+             [[ ! -f ".repo/manifests/${FILE}.xml" ]]; then
+          
+            echo "🔄 Running Repository Init (Missing or New Manifest)..."
+            repo init -u "$MANIFESTBASE" -b "$MANIFESTBRANCH" -m "${FILE}.xml" \
+              --no-clone-bundle \
+              --no-tags
+          else
+            echo "⚡ Repository Initialized, Skipping Init"
+          fi
+
+          # Inject Fallback Manifest
+          echo "📥 Enforcing Fallback Manifest..."
+          mkdir -p .repo/manifests
+          cp "$GITHUB_WORKSPACE/.repo/manifests_fallback/${FILE}.xml" \
+             ".repo/manifests/${FILE}.xml"
+
+          echo "📃 Repository List:"
+          repo list
+
           # Repository Sync Engine
           SYNCJOBS=$(nproc --all 2>/dev/null || echo 8)
           [[ $SYNCJOBS -gt 8 ]] && SYNCJOBS=8
@@ -1437,44 +1423,45 @@ jobs:
 
           echo "📊 Repository Size Summary:"
           du -sh .repo || true
-      
+         
           # Kernel Repository Detection
-          echo "🔎 Detecting Kernel Source..."
-      
+          echo "🔎 Detecting Kernel Repository..."
           KREPOSPATH=$(find . -type f -name "build.config*" \
             -not -path "*/.repo/*" \
             -print -quit)
       
           if [[ -z "$KREPOSPATH" ]]; then
-            echo "⚠️ Kernel Build Configurations Not Found"
+            echo "⚠️ ERROR: No Build Configuration Found"
             exit 1
           fi
       
+          echo "📌 Build Configuration Found: $KREPOSPATH"
+      
           KERNELREPOSITORY=$(dirname "${KREPOSPATH#./}")
-          echo "📌 Kernel Repository: $KERNELREPOSITORY"
+      
+          echo "🔎 Detected Kernel Repository: $KERNELREPOSITORY"
       
           echo "KERNELREPOSITORY=$KERNELREPOSITORY" >> $GITHUB_ENV
-      
-          # ABI Cleanup
-          echo "🧹 Cleaning ABI Exports..."
-      
+
+          # Cleanup ABI Protected Exports
+          echo "🧹 Cleaning ABI Protected Exports..."
+          
           for dir in kernel_platform/common kernel_platform/msm-kernel; do
             [[ -d "$dir" ]] || continue
-      
+          
             file="$dir/BUILD.bazel"
-      
+          
             if [[ -f "$file" ]]; then
-              if grep -q "protected_exports_list" "$file"; then
+              grep -q "protected_exports_list" "$file" && \
                 sed -i '/protected_exports_list/d' "$file"
-              fi
             fi
-      
-            rm -f "$dir"/android/abi_gki_protected_exports_* 2>/dev/null || true
+          
+            rm -f "$dir/android/abi_gki_protected_exports_"* || true
           done
       
           echo ""
           echo "🎉 Kernel Repository Pipeline Complete"
-
+  
       # ==============================
       # Save Repository Cache
       # ==============================
@@ -1486,7 +1473,7 @@ jobs:
             kernel_workspace/.repo/project-objects
             kernel_workspace/.repo/projects
             kernel_workspace/.repo/manifests
-          key: repo-${{ github.ref_name }}-base
+          key: repo-${{ github.event.inputs.FILE }}-${{ github.ref_name }}-${{ hashFiles('.repo/manifests_fallback/*.xml') }}
           
       # ==============================
       # Kernel Version Setup
