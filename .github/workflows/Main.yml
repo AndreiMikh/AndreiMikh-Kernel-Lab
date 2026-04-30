@@ -1194,6 +1194,10 @@ jobs:
           git config --global core.compression 0
           git config --global protocol.version 2
 
+          export GIT_TERMINAL_PROMPT=0
+          export GIT_HTTP_LOW_SPEED_LIMIT=0
+          export GIT_HTTP_LOW_SPEED_TIME=999999
+
           # Workspace Setup
           WORKDIR="kernel_workspace"
           mkdir -p "$WORKDIR"
@@ -1216,70 +1220,106 @@ jobs:
             echo "⚡ Repository Initialized, Skipping Init"
           fi
 
-          # Inject Fallback Manifest
+          # Fallback Manifest Injection
           echo "📥 Enforcing Fallback Manifest..."
           mkdir -p .repo/manifests
           cp "$GITHUB_WORKSPACE/.repo/manifests_fallback/${FILE}.xml" \
              ".repo/manifests/${FILE}.xml"
 
           echo "📃 Repository List:"
-          repo list
+          repo list || true
 
-          # Repository Sync Engine
+          # Sync Jobs Control
           SYNCJOBS=$(nproc --all 2>/dev/null || echo 8)
           [[ $SYNCJOBS -gt 8 ]] && SYNCJOBS=8
       
           echo "⚡ Sync Jobs: $SYNCJOBS"
-      
+
+          # Shallow Sync
           syncrepo() {
             repo sync \
               -c \
+              --depth=1 \
+              --current-branch \
               --no-clone-bundle \
               --no-tags \
               --prune \
+              --optimized-fetch \
+              --retry-fetches=3 \
+              --force-sync \
               -j"$SYNCJOBS" \
-              --fail-fast
+              --fail-fast \
+              --progress \
+              -v
           }
       
           # Watchdog
           (
             while true; do
-              echo "⏳ Repository Sync Alive: $(date)"
+              echo "⏳ Sync Alive: $(date)"
               sleep 60
             done
           ) &
           WATCHDOGPID=$!
       
           set +e
-      
-          echo "📡 Starting Sync (Attempt # 1)..."
-          syncrepo
+
+          # Attempt #1 (Shallow)
+          echo "📡 Starting Sync (Attempt #1 - Shallow)..."
+          timeout 1800 bash -c syncrepo
           STATUS=$?
-      
+
+          # Attempt #2 (Force Sync)
           if [[ $STATUS -ne 0 ]]; then
-            echo "⚠️ Retry Sync (Attempt # 2 with Force)..."
-            repo sync -c --force-sync --no-clone-bundle --no-tags --prune -j"$SYNCJOBS" --fail-fast
+            echo "⚠️ Retry #1 (Force Sync)..."
+          
+            timeout 1200 repo sync \
+              -c \
+              --depth=1 \
+              --current-branch \
+              --force-sync \
+              --no-clone-bundle \
+              --no-tags \
+              --prune \
+              -j"$SYNCJOBS" \
+              --progress \
+              -v
+          
             STATUS=$?
           fi
           
+          # Attempt #3 (Isolation Mode)
           if [[ $STATUS -ne 0 ]]; then
-            echo "⚠️ Fallback Single-Thread Recovery Sync..."
-            repo sync -c --force-sync -j1 --fail-fast --trace
+            echo "⚠️ Retry #2 (Single-Thread Isolation)..."
+          
+            timeout 1800 repo sync \
+              -c \
+              --depth=1 \
+              --current-branch \
+              --force-sync \
+              -j1 \
+              --fail-fast \
+              --trace \
+              --progress
+          
             STATUS=$?
           fi
-      
+          
           set -e
-      
+
+          # Cleanup Watchdog
           kill "$WATCHDOGPID" >/dev/null 2>&1 || true
           wait "$WATCHDOGPID" 2>/dev/null || true
-      
+
+          # Final Check
           if [[ $STATUS -ne 0 ]]; then
-            echo "⚠️ Repository Sync Failed Permanently"
+            echo "⚠️ Repository Sync Failed"
             exit 1
           fi
       
           echo "⚡ Repository Sync Completed"
 
+          # Inspection
           echo "📂 Inspecting Repository Directory..."
           echo "------------ Root ------------"
           ls -la .repo/ || true
