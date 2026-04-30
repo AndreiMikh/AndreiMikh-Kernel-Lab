@@ -1309,7 +1309,7 @@ jobs:
           mkdir -p "$WORKDIR"
           cd "$WORKDIR"
       
-          # Use Fallback Manifest
+          # Inject Fallback Manifest
           mkdir -p .repo/manifests
           cp "$GITHUB_WORKSPACE/.repo/manifests_fallback/${FILE}.xml" ".repo/manifests/${FILE}.xml"
       
@@ -1318,20 +1318,19 @@ jobs:
           echo "🚀 Initializing Repository..."
       
           repo init -u "$MANIFESTBASE" -b "$MANIFESTBRANCH" -m "${FILE}.xml" \
-            --depth=1 \
             --no-clone-bundle \
             --no-tags
 
-          echo "📃 Repo List:"
+          echo "📃 Repository List:"
           repo list
       
           echo "📁 Syncing Repository..."
           
-          SYNC_FLAGS="-c --force-sync --no-clone-bundle --no-tags \
+          SYNCFLAGS="-c --force-sync --no-clone-bundle --no-tags \
           --optimized-fetch --prune --retry-fetches=3 --verbose \
-          -j$(nproc)"
-          
-          echo "⚡ Using $(nproc) Parallel Jobs"
+          -j4"
+      
+          echo "⚡ Using Controlled Parallelism (4 Jobs)"
           
           (
             while true; do
@@ -1339,36 +1338,53 @@ jobs:
               sleep 60
             done
           ) &
-          PROGRESS_PID=$!
-          
-          timeout 25m repo sync $SYNC_FLAGS
-          SYNC_STATUS=$?
-          
+          PROGRESSPID=$!
+
+          # Multi-Attempt Sync
+          set +e
+          timeout 25m repo sync $SYNCFLAGS
+          STATUS=$?
+      
+          if [[ $STATUS -ne 0 ]]; then
+            echo "⚠️ First Sync Failed, Retrying..."
+            repo sync $SYNCFLAGS
+            STATUS=$?
+          fi
+      
+          if [[ $STATUS -ne 0 ]]; then
+            echo "⚠️ Second Sync Failed, Fallback to Low Parallel..."
+            repo sync -c -j1
+            STATUS=$?
+          fi
+      
+          set -e
+      
           kill $PROGRESS_PID >/dev/null 2>&1 || true
           wait $PROGRESS_PID 2>/dev/null || true
-          
-          if [[ $SYNC_STATUS -ne 0 ]]; then
+      
+          if [[ $STATUS -ne 0 ]]; then
             echo "⚠️ Repository Sync Failed"
             exit 1
           fi
-      
+
+          # Detect Kernel Repository
           echo "🔎 Detecting Kernel Repository..."
-          KERNEL_REPOS_PATH=$(find . -type f -name "build.config*" \
+          KREPOSPATH=$(find . -type f -name "build.config*" \
             -not -path "*/.repo/*" \
             -print -quit)
       
-          if [[ -z "$KERNEL_REPOS_PATH" ]]; then
+          if [[ -z "$KREPOSPATH" ]]; then
             echo "⚠️ ERROR: No Build Configuration Found"
             exit 1
           fi
       
-          echo "📌 Build Configuration Found: $KERNEL_REPOS_PATH"
+          echo "📌 Build Configuration Found: $KREPOSPATH"
       
-          KERNEL_REPOS=$(dirname "${KERNEL_REPOS_PATH#./}")
+          KERNELREPOSITORY=$(dirname "${KREPOSPATH#./}")
       
-          echo "🔎 Detected Kernel Repository: $KERNEL_REPOS"
+          echo "🔎 Detected Kernel Repository: $KERNELREPOSITORY"
       
-          echo "KERNEL_REPOS=$KERNEL_REPOS" >> $GITHUB_ENV
+          echo "KERNELREPOSITORY=$KERNELREPOSITORY" >> $GITHUB_ENV
       
           echo "🧹 Cleaning ABI Protected Exports..."
           
@@ -1428,8 +1444,8 @@ jobs:
           done
 
           # Fallback: ACK SHA
-          if [[ -z "$BRANCH" && -n "${KERNEL_REPOS:-}" && -f "./$KERNEL_REPOS/android/ACK_SHA" ]]; then
-            BRANCH=$(sed -n '2p' "./$KERNEL_REPOS/android/ACK_SHA" | awk -F'-' '{print $1"-"$2}')
+          if [[ -z "$BRANCH" && -n "${KERNELREPOSITORY:-}" && -f "./$KERNELREPOSITORY/android/ACK_SHA" ]]; then
+            BRANCH=$(sed -n '2p' "./$KERNELREPOSITORY/android/ACK_SHA" | awk -F'-' '{print $1"-"$2}')
           fi
 
           # Parse Android / Kernel Version
@@ -4547,7 +4563,7 @@ jobs:
           CLANG_PREBUILT_BIN="${CLANG_PREBUILT_BIN:-$(
             grep -h '^CLANG_PREBUILT_BIN=' \
               ./common/build.config.common \
-              ./"$KERNEL_REPOS"/build.config.common 2>/dev/null \
+              ./"$KERNELREPOSITORY"/build.config.common 2>/dev/null \
             | cut -d'=' -f2 \
             | head -n1 || true
           )}"
