@@ -1,7 +1,7 @@
 # ===========================
 # OnePlus Kernel Build
 # ===========================
-name: ☘️ Test
+name: ☘️ Main
 on:
   workflow_dispatch:
     inputs:
@@ -878,227 +878,34 @@ jobs:
       
           echo ""
           echo "🎉 Git Configuration Applied:"
-          git config --global --list      
-
-      # ==============================
-      # Local Cache Restoration
-      # ==============================
-      - name: 🔧 Local Cache Restoration
-        id: ccache-restore
-        if: ${{ env.BUILDCCACHE != 'Disabled' }}
-        uses: actions/cache@v5
-        with:
-          path: ${{ env.CCACHE_DIR }}
-          key: CCache-${{ runner.os }}-${{ env.MANIFESTBASEFILE }}-${{ env.CPUD }}-${{ github.ref_name }}
-          restore-keys: |
-            CCache-${{ runner.os }}-${{ env.MANIFESTBASEFILE }}-${{ env.CPUD }}-${{ github.ref_name }}-
-            CCache-${{ runner.os }}-${{ env.MANIFESTBASEFILE }}-${{ env.CPUD }}-
-            CCache-${{ runner.os }}-${{ env.MANIFESTBASEFILE }}-
-            CCache-${{ runner.os }}-
-
-      # ==============================
-      # Set Local Cache Flag
-      # ==============================
-      - name: 🔧 Set Local Cache Flag
-        id: localcacheflag
-        if: ${{ env.BUILDCCACHE != 'Disabled' }}
-        run: |
-          if [[ "${{ steps.ccache-restore.outputs.cache-hit }}" == "true" ]]; then
-            echo "CCACHELOCALHIT=true" >> $GITHUB_ENV
-            echo "localhit=true" >> $GITHUB_OUTPUT
-          else
-            echo "CCACHELOCALHIT=false" >> $GITHUB_ENV
-            echo "localhit=false" >> $GITHUB_OUTPUT
-          fi
-            
-      # ==============================
-      # Release Cache Restoration
-      # ==============================
-      - name: 🔧 Release Cache Restoration
-        id: cache-restoration
-        if: ${{ env.BUILDCCACHE != 'Disabled' && steps.localcacheflag.outputs.localhit != 'true' }}
-        run: |
-          set -e
-
-          # Skip if Local Cache Already Hit
-          if [[ "${{ env.CCACHELOCALHIT }}" == "true" ]]; then
-            echo "⚡ Local Cache Hit Detected — Skipping Release Cache"
-            echo "CCACHERELEASEHIT=false" >> $GITHUB_ENV
-            echo "cache-restored=false" >> $GITHUB_OUTPUT
-            exit 0
-          fi
-
-          echo "------------------------------"  
-          echo "🚀 Cache Not Found Locally, Attempting to Restore from GitHub Release..."
-          echo "------------------------------"
-          echo ""
-      
-          # Define the Release Asset
-          TAR="CCache-${{ runner.os }}-${{ env.MANIFESTBASEFILE }}-${{ env.CPUD }}-${{ github.ref_name }}.tar.zst"
-      
-          # Build the Download URL
-          URL="https://github.com/AndreiMikh/CCache/releases/download/001/${TAR}"
-          echo "📩 Downloading from: $URL"
-      
-          # Ensure Cache Directory Exists
-          mkdir -p "${{ env.CCACHE_DIR }}"
-          chmod -R 775 "${{ env.CCACHE_DIR }}"
-      
-          # Download Cache
-          if ! curl -fsSL -o "$TAR" "$URL"; then
-            echo "⚠️ Cache Not Found, Skipping Restore..."
-            echo "cache-restored=false" >> $GITHUB_OUTPUT
-            exit 0
-          fi
-      
-          echo "🔥 Cache Found, Extracting..."
-      
-          # Extract
-          if [ -f "$TAR" ]; then
-            tar -I zstd -xvf "$TAR" -C "${{ env.CCACHE_DIR }}"
-          else
-            echo "⚠️ Archive Missing after Download"
-            echo "cache-restored=false" >> $GITHUB_OUTPUT
-            exit 0
-          fi
-      
-          # Validate Extraction
-          if [[ -n "$(ls -A "${CCACHE_DIR}" 2>/dev/null)" ]]; then
-            echo "👾 Cache Successfully Restored"
-            echo "CCACHERELEASEHIT=true" >> $GITHUB_ENV
-          else
-            echo "⚠️ Cache Extraction Failed"
-            echo "CCACHERELEASEHIT=false" >> $GITHUB_ENV
-          fi
+          git config --global --list                  
     
       # ==============================
       # Cache ECS System
       # ==============================
       - name: 🔧 Cache ECS System
-        if: ${{ env.BUILDCCACHE != 'Disabled' && env.CCACHELOCALHIT != 'true' && env.CCACHERELEASEHIT != 'true' }}
+        if: ${{ env.BUILDCCACHE != 'Disabled' }}
         shell: bash
         run: |
           set -euo pipefail
       
           echo "------------------------------"
-          echo "🚀 Detecting System on Chip from Manifest..."
+          echo "🚀 Cache ECS System Setup..."
           echo "------------------------------"
           echo ""
       
-          BRANCH="${MANIFESTBRANCHOVERRIDE:-${MANIFESTBRANCH:-}}"
+          curl -LfsS --retry 5 --retry-delay 5 --retry-all-errors \
+            --connect-timeout 30 --tcp-fastopen \
+            -H "User-Agent: Mozilla/5.0" \
+            "https://github.com/WildKernels/kernel_patches/raw/refs/heads/main/ccache/ccache-x86-64" \
+            -o ccache
       
-          if [[ -z "$BRANCH" ]]; then
-            echo "⚠️ ERROR: No Manifest Branch Found"
-            exit 1
-          fi
+          sudo cp -f ./ccache /usr/bin/ccache
+          sudo chmod +x /usr/bin/ccache
+          rm -f ./ccache
       
-          echo "📌 Using Branch: $BRANCH"
+          echo "Cache ECS Version : $(ccache --version)"
       
-          SOCCHIP="$(echo "$BRANCH" | grep -oiE 'sm[0-9]+' | tr 'A-Z' 'a-z' || true)"
-      
-          if [[ -z "$SOCCHIP" ]]; then
-            SOCCHIP="Unknown"
-            echo "⚠️ No System on Chip Detected → Fallback: Unknown"
-          else
-            echo "📌 Detected System on Chip: $SOCCHIP"
-          fi
-      
-          echo "SOCCHIP=$SOCCHIP" >> "$GITHUB_ENV"
-      
-          echo ""
-          echo "------------------------------"
-          echo "🚀 Configuring Compiler Cache..."
-          echo "------------------------------"
-      
-          # Ensure Compiler Cache Exists (From APT)
-          if ! command -v ccache >/dev/null 2>&1; then
-            echo "⚠️ Compiler Cache Not Found (APT Step Failed?)"
-            exit 1
-          fi
-      
-          echo "📦 System Compiler Cache: $(which ccache)"
-          ccache --version
-      
-          echo ""
-          echo "🔧 Checking Cache Sources..."
-      
-          # Inject Cache
-          CCACHELOCAL="${{ steps.ccache-restore.outputs.cache-hit }}"
-          CCACHERELEASE="${{ steps.cache-restoration.outputs.cache-restored }}"
-
-          echo "LOCAL=$CCACHELOCAL"
-          echo "RELEASE=$CCACHERELEASE"
-
-          # Fused Compiler Cache Mode
-          if [[ "$CCACHELOCAL" == "true" || "$CCACHERELEASE" == "true" ]]; then
-            echo "🎯 Cache Found → System Mode (Local / Release Cache) Enabled"
-            CCMODE="system"
-            CCACHEFOUND="true"
-          else
-            echo "⚠️ No Cache Anywhere → Custom Mode (ECS Cache) Enabled"
-            CCMODE="custom"
-            CCACHEFOUND="false"
-          fi
-      
-          echo "CCMODE=$CCMODE" >> "$GITHUB_ENV"
-          echo "CCACHEFOUND=$CCACHEFOUND" >> "$GITHUB_ENV"
-      
-          echo ""
-          echo "📦 Final Compiler Cache: $(which ccache)"
-          ccache --version
-      
-          echo ""
-          echo "------------------------------"
-          echo "🚀 Applying Toolchain Patch..."
-          echo "------------------------------"
-      
-          applyccache() {
-            local chipname="$1"
-            local urlccache="$2"
-          
-            echo ""
-            echo "🚀 Applying Toolchain Patch for $chipname"
-          
-            wget -q --retry-connrefused --tries=3 --timeout=20 \
-              "$urlccache" -O ccache
-          
-            chmod +x ccache
-          
-            echo "📦 CCMODE = $CCMODE"
-          
-            if [[ "$CCMODE" == "custom" ]]; then
-              echo "⚠️ Applying CUstom Compiler Cache Override..."
-              sudo install -m 0755 ccache /usr/bin/ccache
-            else
-              echo "🎯 Skipping Toolchain Override (System Compiler Cache Active)"
-            fi
-          
-            rm -f ccache
-          
-            echo "📦 Final Compiler Cache: $(which ccache)"
-            ccache --version
-          
-            echo "🎉 $chipname Toolchain Patch Applied"
-          }
-      
-          case "$SOCCHIP" in
-            sm8650)
-              applyccache "SM8650" \
-                "https://github.com/cctv18/oppo_oplus_realme_sm8650/raw/refs/heads/main/lib/ccache-x86-64"
-              ;;
-            sm8750)
-              applyccache "SM8750" \
-                "https://github.com/cctv18/oppo_oplus_realme_sm8750/raw/refs/heads/main/lib/ccache-x86-64"
-              ;;
-            sm8850)
-              applyccache "SM8850" \
-                "https://github.com/cctv18/oppo_oplus_realme_sm8850/raw/refs/heads/main/lib/ccache-x86-64"
-              ;;
-            *)
-              echo "ℹ️ No Optimized Toolchain Available for: $SOCCHIP"
-              ;;
-          esac
-
           echo ""
           echo "🎉 Cache ECS Setup Complete"
   
@@ -1122,13 +929,16 @@ jobs:
           # Ensure Compiler Cache Directory Exists
           mkdir -p "$CCACHE_DIR"
 
+          export CCACHE_DIR="${{ env.CCACHE_DIR }}"
+          export CCACHE_BASEDIR="${{ env.CCACHE_MAXSIZE }}"
+
           # Check Compiler Cache Availability
           if ! command -v ccache >/dev/null 2>&1; then
             echo "⚠️ Compiler Cache Not Found → Skipping Setup"
             exit 0
           fi
       
-          echo "🚀 Using Compiler Cache: $(which ccache)"
+          echo "🚀 Using Compiler Cache: $(ccache --version)"
       
           # Core Performance Tuning
           # Cache Size
@@ -1158,88 +968,6 @@ jobs:
           echo ""
           echo "🎉 Compiler Cache Ready"
            
-      # ==============================
-      # Debug - Cache Key and Status
-      # ==============================
-      - name: 🔧 Debug - Cache Key and Status
-        if: ${{ env.BUILDCCACHE != 'Disabled' }}
-        run: |
-          set -euo pipefail
-
-          # Environment Variables
-          CCACHELOCALHIT="${{ env.CCACHELOCALHIT }}"
-          CCACHERELEASEHIT="${{ env.CCACHERELEASEHIT }}"
-          CCACHEFOUND="${{ env.CCACHEFOUND }}"
-          CCMODE="${{ env.CCMODE }}"
-      
-          echo "🚀 Cache Debug Information..."
-          echo "🔑 Local Key   : CCache-${{ runner.os }}-${{ env.MANIFESTBASEFILE }}-${{ env.CPUD }}-${{ github.ref_name }}"
-          echo "🔑 Release Key : CCache-${{ runner.os }}-${{ env.MANIFESTBASEFILE }}-${{ env.CPUD }}-${{ github.ref_name }}"
-      
-          echo ""
-          echo "------------------------------"
-          echo "🎯 Cache Summary (Unified State)"
-          echo "------------------------------"
-          echo "📂 Local Hit     : ${CCACHELOCALHIT:-false}"
-          echo "📂 Release Hit   : ${CCACHERELEASEHIT:-false}"
-          echo "📂 Cache Found   : ${CCACHEFOUND:-false}"
-          echo "📂 Mode          : ${CCMODE:-unknown}"
-          echo "------------------------------"
-      
-          echo ""
-          case "${CCACHEFOUND:-false}" in
-            true)
-              echo "♻️ Cache Active (Local or Release)"
-              ;;
-            false)
-              echo "☘️ Cold Build (No Cache Available)"
-              ;;
-          esac
-
-      # ==============================
-      # Compiler Cache Status
-      # ==============================
-      - name: 🔧 Compiler Cache Status
-        if: ${{ env.BUILDCCACHE != 'Disabled' }}
-        run: |
-          set -euo pipefail
-
-          # Environment Variables
-          CCACHELOCALHIT="${{ env.CCACHELOCALHIT }}"
-          CCACHERELEASEHIT="${{ env.CCACHERELEASEHIT }}"
-          CCACHEFOUND="${{ env.CCACHEFOUND }}"
-          CCMODE="${{ env.CCMODE }}"
-      
-          echo "### ☘️ Compiler Cache Status" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "| Key | Reported Value |" >> $GITHUB_STEP_SUMMARY
-          echo "|-----|----------------|" >> $GITHUB_STEP_SUMMARY
-      
-          echo ""
-          echo "------------------------------"
-          echo "☘️ Final Cache State"
-          echo "------------------------------"
-          echo "📂 Local Hit   : ${CCACHELOCALHIT:-false}"
-          echo "📂 Release Hit : ${CCACHERELEASEHIT:-false}"
-          echo "📂 Mode        : ${CCMODE:-unknown}"
-          echo "------------------------------"
-          echo ""
-      
-          if [[ "${CCACHEFOUND:-false}" == "true" ]]; then
-            if [[ "${CCACHELOCALHIT:-false}" == "true" ]]; then
-              STATUS="🎉 Local GitHub Cache Hit"
-            elif [[ "${CCACHERELEASEHIT:-false}" == "true" ]]; then
-              STATUS="♻️ GitHub Release Cache Restored"
-            else
-              STATUS="♻️ Cache Restored (Unknown Source)"
-            fi
-          else
-            STATUS="☘️ Cold Build (No Cache)"
-          fi
-      
-          echo "| Cache Status | $STATUS |" >> $GITHUB_STEP_SUMMARY
-          echo "| Mode         | ${CCMODE:-unknown} |" >> $GITHUB_STEP_SUMMARY
-   
       # ==============================
       # Install Repository Tool (Fallback and Cached)
       # ==============================
@@ -1283,6 +1011,22 @@ jobs:
           
           echo ""
           echo "🎉 Repository Tool Installed Successfully"
+
+      # ==============================
+      # Restore Repository Cache
+      # ==============================
+      - name: 🔧 Restore Repository Cache
+        uses: actions/cache@v5
+        with:
+          path: |
+            kernel_workspace/.repo/repo
+            kernel_workspace/.repo/project-objects
+            kernel_workspace/.repo/projects
+            kernel_workspace/.repo/manifests
+          key: repo-${{ github.event.inputs.FILE }}-${{ github.ref_name }}-${{ hashFiles('.repo/manifests_fallback/*.xml') }}
+          restore-keys: |
+            repo-${{ github.event.inputs.FILE }}-
+            repo-
       
       # ==============================
       # Initialize and Sync Repository
@@ -1304,72 +1048,130 @@ jobs:
           git config --global http.postBuffer 524288000
           git config --global core.compression 0
           git config --global protocol.version 2
-      
+
+          # Workspace Setup
           WORKDIR="kernel_workspace"
           mkdir -p "$WORKDIR"
           cd "$WORKDIR"
-      
-          # Use Fallback Manifest
-          mkdir -p .repo/manifests
-          cp "$GITHUB_WORKSPACE/.repo/manifests_fallback/${FILE}.xml" ".repo/manifests/${FILE}.xml"
-      
-          MANIFESTBASE="https://github.com/${MANIFESTREPO}/${MANIFESTREPONAME}.git"
-      
-          echo "🚀 Initializing Repository..."
-      
-          repo init -u "$MANIFESTBASE" -b "$MANIFESTBRANCH" -m "${FILE}.xml" \
-            --depth=1 \
-            --no-clone-bundle \
-            --no-tags
 
-          echo "📃 Repo List:"
+          # Manifest Preparation
+          MANIFESTBASE="https://github.com/${MANIFESTREPO}/${MANIFESTREPONAME}.git"
+
+          # Repository Init
+          echo "🚀 Initializing Repository..."
+          
+          if [[ ! -d ".repo" ]] || \
+             [[ ! -f ".repo/manifests/${FILE}.xml" ]]; then
+          
+            echo "🔄 Running Repository Init (Missing or New Manifest)..."
+            repo init -u "$MANIFESTBASE" -b "$MANIFESTBRANCH" -m "${FILE}.xml" \
+              --no-clone-bundle \
+              --no-tags
+          else
+            echo "⚡ Repository Initialized, Skipping Init"
+          fi
+
+          # Inject Fallback Manifest
+          echo "📥 Enforcing Fallback Manifest..."
+          mkdir -p .repo/manifests
+          cp "$GITHUB_WORKSPACE/.repo/manifests_fallback/${FILE}.xml" \
+             ".repo/manifests/${FILE}.xml"
+
+          echo "📃 Repository List:"
           repo list
+
+          # Repository Sync Engine
+          SYNCJOBS=$(nproc --all 2>/dev/null || echo 8)
+          [[ $SYNCJOBS -gt 8 ]] && SYNCJOBS=8
       
-          echo "📁 Syncing Repository..."
-          
-          SYNC_FLAGS="-c --force-sync --no-clone-bundle --no-tags \
-          --optimized-fetch --prune --retry-fetches=3 --verbose \
-          -j$(nproc)"
-          
-          echo "⚡ Using $(nproc) Parallel Jobs"
-          
+          echo "⚡ Sync Jobs: $SYNCJOBS"
+      
+          syncrepo() {
+            repo sync \
+              -c \
+              --force-sync \
+              --no-clone-bundle \
+              --no-tags \
+              --prune \
+              -j"$SYNCJOBS" \
+              --fail-fast
+          }
+      
+          # Watchdog
           (
             while true; do
-              echo "⏳ Still Syncing... $(date)"
+              echo "⏳ Repository Sync Alive: $(date)"
               sleep 60
             done
           ) &
-          PROGRESS_PID=$!
-          
-          timeout 25m repo sync $SYNC_FLAGS
-          SYNC_STATUS=$?
-          
-          kill $PROGRESS_PID >/dev/null 2>&1 || true
-          wait $PROGRESS_PID 2>/dev/null || true
-          
-          if [[ $SYNC_STATUS -ne 0 ]]; then
-            echo "⚠️ Repository Sync Failed"
+          WATCHDOGPID=$!
+      
+          set +e
+      
+          echo "📡 Starting Sync (Attempt # 1)..."
+          syncrepo
+          STATUS=$?
+      
+          if [[ $STATUS -ne 0 ]]; then
+            echo "⚠️ Retry Sync (Attempt # 2)..."
+            syncrepo
+            STATUS=$?
+          fi
+      
+          if [[ $STATUS -ne 0 ]]; then
+            echo "⚠️ Fallback Single-Thread Recovery Sync..."
+            repo sync -c --force-sync -j1 --fail-fast --trace
+            STATUS=$?
+          fi
+      
+          set -e
+      
+          kill "$WATCHDOGPID" >/dev/null 2>&1 || true
+          wait "$WATCHDOGPID" 2>/dev/null || true
+      
+          if [[ $STATUS -ne 0 ]]; then
+            echo "⚠️ Repository Sync Failed Permanently"
             exit 1
           fi
       
+          echo "⚡ Repository Sync Completed"
+
+          echo "📂 Inspecting Repository Directory..."
+          echo "------------ Root ------------"
+          ls -la .repo/ || true
+          
+          echo "---------- Manifest ----------"
+          ls -la .repo/manifests* || true
+          
+          echo "------------ Tool ------------"
+          ls -la .repo/repo || true
+          
+          echo "📊 Repository Breakdown:"
+          du -sh .repo/* 2>/dev/null || true
+
+          echo "📊 Repository Size Summary:"
+          du -sh .repo || true
+         
+          # Kernel Repository Detection
           echo "🔎 Detecting Kernel Repository..."
-          KERNEL_REPOS_PATH=$(find . -type f -name "build.config*" \
+          KREPOSPATH=$(find . -type f -name "build.config*" \
             -not -path "*/.repo/*" \
             -print -quit)
       
-          if [[ -z "$KERNEL_REPOS_PATH" ]]; then
+          if [[ -z "$KREPOSPATH" ]]; then
             echo "⚠️ ERROR: No Build Configuration Found"
             exit 1
           fi
       
-          echo "📌 Build Configuration Found: $KERNEL_REPOS_PATH"
+          echo "📌 Build Configuration Found: $KREPOSPATH"
       
-          KERNEL_REPOS=$(dirname "${KERNEL_REPOS_PATH#./}")
+          KERNELREPOSITORY=$(dirname "${KREPOSPATH#./}")
       
-          echo "🔎 Detected Kernel Repository: $KERNEL_REPOS"
+          echo "🔎 Detected Kernel Repository: $KERNELREPOSITORY"
       
-          echo "KERNEL_REPOS=$KERNEL_REPOS" >> $GITHUB_ENV
-      
+          echo "KERNELREPOSITORY=$KERNELREPOSITORY" >> $GITHUB_ENV
+
+          # Cleanup ABI Protected Exports
           echo "🧹 Cleaning ABI Protected Exports..."
           
           for dir in kernel_platform/common kernel_platform/msm-kernel; do
@@ -1386,7 +1188,20 @@ jobs:
           done
       
           echo ""
-          echo "🎉 Repository Sync Complete"
+          echo "🎉 Kernel Repository Pipeline Complete"
+  
+      # ==============================
+      # Save Repository Cache
+      # ==============================
+      - name: 🔧 Save Repository Cache
+        uses: actions/cache@v5
+        with:
+          path: |
+            kernel_workspace/.repo/repo
+            kernel_workspace/.repo/project-objects
+            kernel_workspace/.repo/projects
+            kernel_workspace/.repo/manifests
+          key: repo-${{ github.event.inputs.FILE }}-${{ github.ref_name }}-${{ hashFiles('.repo/manifests_fallback/*.xml') }}
           
       # ==============================
       # Kernel Version Setup
@@ -1428,8 +1243,8 @@ jobs:
           done
 
           # Fallback: ACK SHA
-          if [[ -z "$BRANCH" && -n "${KERNEL_REPOS:-}" && -f "./$KERNEL_REPOS/android/ACK_SHA" ]]; then
-            BRANCH=$(sed -n '2p' "./$KERNEL_REPOS/android/ACK_SHA" | awk -F'-' '{print $1"-"$2}')
+          if [[ -z "$BRANCH" && -n "${KERNELREPOSITORY:-}" && -f "./$KERNELREPOSITORY/android/ACK_SHA" ]]; then
+            BRANCH=$(sed -n '2p' "./$KERNELREPOSITORY/android/ACK_SHA" | awk -F'-' '{print $1"-"$2}')
           fi
 
           # Parse Android / Kernel Version
@@ -4547,7 +4362,7 @@ jobs:
           CLANG_PREBUILT_BIN="${CLANG_PREBUILT_BIN:-$(
             grep -h '^CLANG_PREBUILT_BIN=' \
               ./common/build.config.common \
-              ./"$KERNEL_REPOS"/build.config.common 2>/dev/null \
+              ./"$KERNELREPOSITORY"/build.config.common 2>/dev/null \
             | cut -d'=' -f2 \
             | head -n1 || true
           )}"
@@ -4945,150 +4760,60 @@ jobs:
         if: ${{ env.BUILDCCACHE != 'Disabled' }}
         shell: bash
         run: |
-          # Get Compiler Cache Stats
-          STATS="$(ccache -s)"
-    
+          set -euo pipefail
+      
           echo "--------------------------------------"
           echo "-------- Compiler Cache Stats --------"
-          echo "$STATS"
           echo "--------------------------------------"
-
-          # Extract Values 
-          TOTAL=$(echo "$STATS" | grep -i "^Cacheable calls:" | sed 's/.*: *//' || true)
-          HITS=$(echo "$STATS" | grep -i "^ *Hits:" | head -n1 | sed 's/.*: *//' || true)
-          HIT_DIRECT=$(echo "$STATS" | grep -i "^ *Direct:" | sed 's/.*: *//' || true)
-          HIT_PRE=$(echo "$STATS" | grep -i "^ *Preprocessed:" | sed 's/.*: *//' || true)
-          MISS=$(echo "$STATS" | grep -i "^ *Misses:" | head -n1 | sed 's/.*: *//' || true)
-          SIZE=$(echo "$STATS" | grep -i "Cache size" | sed 's/.*: *//' || true)
-          RATE=$(echo "$STATS" | grep -i "^ *Hits:" | head -n1 | awk -F'[()]' '{print $2}' || true)
-  
-          # Fallback Defaults if Not Found
-          HIT_DIRECT=${HIT_DIRECT:-0}
-          HIT_PRE=${HIT_PRE:-0}
-          MISS=${MISS:-0}
+      
+          STATS="$(ccache -s || true)"
+          echo "$STATS"
+      
+          # Extract Values
+          TOTAL=$(echo "$STATS" | awk -F': *' '/Cacheable calls/ {print $2}' || true)
+          DIRECT=$(echo "$STATS" | awk -F': *' '/Direct/ {print $2}' || true)
+          PREPROC=$(echo "$STATS" | awk -F': *' '/Preprocessed/ {print $2}' || true)
+          MISSES=$(echo "$STATS" | awk -F': *' '/Misses/ {print $2}' || true)
+          SIZE=$(echo "$STATS" | awk -F': *' '/Cache size/ {print $2}' || true)
+          RATE=$(echo "$STATS" | awk -F'[()]' '/Hits/ {print $2}' || true)
+      
+          # Defaults
           TOTAL=${TOTAL:-0}
-          RATE=${RATE:-0%}
+          DIRECT=${DIRECT:-0}
+          PREPROC=${PREPROC:-0}
+          MISSES=${MISSES:-0}
           SIZE=${SIZE:-0}
-
-          # Cache Source Detection          
-          # Default Values
-          FROMRELEASE="✘ No"
-          FROMLOCAL="✘ No"
-          
-          # Define Cache Path
-          CCPATH="${{ env.CCACHE_DIR }}/CCache-${{ runner.os }}-${{ env.MANIFESTBASEFILE }}-${{ env.CPUD }}-${{ github.ref_name }}"
-          
-          # Check GitHub Release Cache
-          # Default Mode / State
-          FROMLOCAL="✘ No"
-          FROMRELEASE="✘ No"
-          FROMECS="✘ No"
-
-          # Environment Variables
-          CCACHELOCALHIT="${{ env.CCACHELOCALHIT }}"
-          CCACHERELEASEHIT="${{ env.CCACHERELEASEHIT }}"
-          CCACHEFOUND="${{ env.CCACHEFOUND }}"
-
-          # Local Cache
-          if [[ "$CCACHELOCALHIT" == "true" ]]; then
-            FROMLOCAL="✔ Yes"
-          fi
-
-          # Release Cache
-          if [[ "$CCACHERELEASEHIT" == "true" ]]; then
-            FROMRELEASE="✔ Yes"
-          fi
-
-          # ECS Cache Toolchain Fallback
-          if [[ "$CCACHEFOUND" == "false" ]]; then
-            FROMECS="✔ Yes"
-          fi
-
-          # Unified Cache Availability
-          if [[ "$CCACHELOCALHIT" == "true" || \
-                "$CCACHERELEASEHIT" == "true" || \
-                "$CCACHEFOUND" == "false" ]]; then
-            CACHEAVAIL="✔ Yes"
-          else
-            CACHEAVAIL="✘ No"
-          fi
-         
-          # Generate Summary Table with PRINTF for Cleaner Formatting
-          # Summary Table          
+          RATE=${RATE:-0%}
+      
+          # ECS-only model (no external cache tracking anymore)
+          FROMLOCAL="N/A"
+          FROMRELEASE="N/A"
+          FROMECS="✔ Yes"
+      
+          CACHEAVAIL="✔ Yes"
+      
+          # Summary output
           {
             echo "### ⚡ Compiler Cache Performance Summary"
             echo ""
-          
-            printf "| %-64s | %-22s |\n" "Metric Description" "Reported Value"
-            printf "|-----------------------------------------------------------------|------------------------|\n"
-          
-            printf "| %-64s | %-22s |\n" "Total Number of Compilation Requests Processed by the Compiler" "$TOTAL"
-            printf "| %-64s | %-22s |\n" "Direct Cache Hits (Immediate Object Reuse Without Reprocessing)" "$HIT_DIRECT"
-            printf "| %-64s | %-22s |\n" "Preprocessed Cache Hits (Reused After Full Preprocessing Match)" "$HIT_PRE"
-            printf "| %-64s | %-22s |\n" "Cache Misses (Files That Required Complete Recompilation)" "$MISS"
-            printf "| %-64s | %-22s |\n" "Overall Cache Hit Rate Across All Compilation Requests" "$RATE"
-            printf "| %-64s | %-22s |\n" "Current Compiler Cache Storage Utilization on Disk" "$SIZE"
-          
-            printf "| %-64s | %-22s |\n" "Restored From Local Cache (Actions/Cache)" "$FROMLOCAL"
-            printf "| %-64s | %-22s |\n" "Restored From GitHub Release" "$FROMRELEASE"
-            printf "| %-64s | %-22s |\n" "Any Cache Available" "$CACHEAVAIL"
-          
-            printf "| %-64s | %-22s |\n" "Restored Cache Path" "$CCPATH"
-          
+      
+            printf "| %-50s | %-20s |\n" "Metric" "Reported Value"
+            printf "|----------------------------------------------------|----------------------|\n"
+      
+            printf "| %-50s | %-20s |\n" "Cacheable Calls" "$TOTAL"
+            printf "| %-50s | %-20s |\n" "Direct Hits" "$DIRECT"
+            printf "| %-50s | %-20s |\n" "Preprocessed Hits" "$PREPROC"
+            printf "| %-50s | %-20s |\n" "Misses" "$MISSES"
+            printf "| %-50s | %-20s |\n" "Hit Rate" "$RATE"
+            printf "| %-50s | %-20s |\n" "Cache Size" "$SIZE"
+      
+            echo ""
+            printf "| %-50s | %-20s |\n" "Local Cache Hit" "$FROMLOCAL"
+            printf "| %-50s | %-20s |\n" "Release Cache Hit" "$FROMRELEASE"
+            printf "| %-50s | %-20s |\n" "ECS Toolchain Active" "$FROMECS"
+            printf "| %-50s | %-20s |\n" "Any Cache Available" "$CACHEAVAIL"
           } >> "$GITHUB_STEP_SUMMARY"
     
-
-      # ==============================
-      # Save Compiler Cache
-      # ==============================
-      - name: 🔧 Save Compiler Cache
-        if: ${{ env.BUILDCCACHE != 'Disabled' }}
-        uses: actions/cache@v5
-        with:
-          path: ${{ env.CCACHE_DIR }}
-          key: CCache-${{ runner.os }}-${{ env.MANIFESTBASEFILE }}-${{ env.CPUD }}-${{ github.ref_name }}
-    
-      # ==============================
-      # Clean Old Compiler Cache
-      # ==============================
-      - name: 🔧 Clean Old Compiler Cache
-        if: ${{ env.BUILDCCACHE != 'Disabled' }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          
-          echo "--------------------------------------"
-          echo "🚀 Maintaining Compiler Cache..."
-          echo "--------------------------------------"
-          
-          command -v ccache >/dev/null 2>&1 || {
-            echo "⚠️ Compiler Cache Not Found, Skipping"
-            exit 0
-          }
-          
-          export CCACHE_DIR="${CCACHE_DIR:-$HOME/.ccache}"
-          
-          echo "📂 Cache Directory: $CCACHE_DIR"
-          
-          echo ""
-          echo "📊 Cache Statistics (Before):"
-          ccache -s || true
-          
-          echo ""
-          echo "📏 Setting Cache Size Limit..."
-          ccache -M "${{ env.CCACHE_MAXSIZE }}" || true
-          
-          echo ""
-          echo "🧹 Running Internal Cleanup..."
-          ccache -c || true
-          
-          echo ""
-          echo "📊 Cache Statistics (After):"
-          ccache -s || true
-          
-          echo ""
-          echo "🎉 Compiler Cache Maintenance Complete"
-
       # ==============================
       # AnyKernel3 Packaging Engine
       # ==============================
