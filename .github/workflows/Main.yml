@@ -1291,10 +1291,11 @@ jobs:
         uses: actions/cache@v5
         with:
           path: |
+            kernel_workspace/.repo/repo
             kernel_workspace/.repo/project-objects
             kernel_workspace/.repo/projects
             kernel_workspace/.repo/manifests.git
-          key: repo-${{ github.event.inputs.FILE }}-${{ github.ref_name }}
+          key: repo-${{ github.event.inputs.FILE }}-${{ github.ref_name }}-${{ hashFiles('.repo/manifests_fallback/*.xml') }}
           restore-keys: |
             repo-${{ github.event.inputs.FILE }}-
       
@@ -1323,29 +1324,42 @@ jobs:
           mkdir -p "$WORKDIR"
           cd "$WORKDIR"
       
-          # Inject Fallback Manifest
-          mkdir -p .repo/manifests
-          cp "$GITHUB_WORKSPACE/.repo/manifests_fallback/${FILE}.xml" ".repo/manifests/${FILE}.xml"
-      
           MANIFESTBASE="https://github.com/${MANIFESTREPO}/${MANIFESTREPONAME}.git"
       
           echo "🚀 Initializing Repository..."
-      
-          repo init -u "$MANIFESTBASE" -b "$MANIFESTBRANCH" -m "${FILE}.xml" \
-            --no-clone-bundle \
-            --no-tags
+          
+          if [[ ! -d ".repo" ]] || \
+             [[ ! -f ".repo/manifests/${FILE}.xml" ]]; then
+          
+            echo "🔄 Running Repository Init (Missing or New Manifest)..."
+            repo init -u "$MANIFESTBASE" -b "$MANIFESTBRANCH" -m "${FILE}.xml" \
+              --no-clone-bundle \
+              --no-tags
+          else
+            echo "⚡ Repository Initialized, Skipping Init"
+          fi
+
+          # Inject Fallback Manifest
+          echo "📥 Enforcing Fallback Manifest..."
+          mkdir -p .repo/manifests
+          cp "$GITHUB_WORKSPACE/.repo/manifests_fallback/${FILE}.xml" \
+             ".repo/manifests/${FILE}.xml"
 
           echo "📃 Repository List:"
           repo list
       
           echo "📁 Syncing Repository..."
           
-          SYNCFLAGS="-c --force-sync --no-clone-bundle --no-tags \
-          --optimized-fetch --prune --retry-fetches=3 --verbose \
-          -j4"
-      
-          echo "⚡ Using Controlled Parallelism (4 Jobs)"
+          SYNCJOBS=$(nproc --all 2>/dev/null || echo 8)
+          [[ $SYNCJOBS -gt 8 ]] && SYNCJOBS=8
           
+          SYNCFLAGS="-c --force-sync \
+          --optimized-fetch --prune --retry-fetches=5 --verbose \
+          -j${SYNCJOBS}"
+          
+          echo "⚡ Using Controlled Parallelism (${SYNCJOBS} Jobs)"
+
+          # Progress Watchdog
           (
             while true; do
               echo "⏳ Still Syncing... $(date)"
@@ -1373,8 +1387,8 @@ jobs:
       
           set -e
       
-          kill $PROGRESS_PID >/dev/null 2>&1 || true
-          wait $PROGRESS_PID 2>/dev/null || true
+          kill $PROGRESSPID >/dev/null 2>&1 || true
+          wait $PROGRESSPID 2>/dev/null || true
       
           if [[ $STATUS -ne 0 ]]; then
             echo "⚠️ Repository Sync Failed"
@@ -1426,10 +1440,11 @@ jobs:
         uses: actions/cache@v5
         with:
           path: |
+            kernel_workspace/.repo/repo
             kernel_workspace/.repo/project-objects
             kernel_workspace/.repo/projects
             kernel_workspace/.repo/manifests.git
-          key: repo-${{ github.event.inputs.FILE }}-${{ github.ref_name }}
+          key: repo-${{ github.event.inputs.FILE }}-${{ github.ref_name }}-${{ hashFiles('.repo/manifests_fallback/*.xml') }}
           
       # ==============================
       # Kernel Version Setup
