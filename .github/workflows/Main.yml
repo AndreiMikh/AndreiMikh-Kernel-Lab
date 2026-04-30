@@ -396,6 +396,39 @@ jobs:
           remove-codeql: true           # Remove CodeQL to Free Space
 
       # ==============================
+      # APT + Cache-ECS
+      # ==============================
+      - name: 🔧 APT + Cache-ECS
+        run: |
+          set -e
+      
+          # Prevent some Packages from being Upgraded (Keep System Stable)
+          sudo apt-mark hold firefox libc-bin
+      
+          # Remove Unnecessary Manual Pages Database to Save Space / Time
+          sudo apt purge -y man-db || true
+          sudo rm -rf /var/lib/man-db/auto-update || true
+      
+          # Update Package List
+          sudo apt update
+      
+          # Install Cache-ECS (Optimized for Kernel Builds)
+          curl -LfsS --retry 5 --retry-delay 5 --retry-all-errors \
+            --connect-timeout 30 --tcp-fastopen \
+            -H "User-Agent: Mozilla/5.0" \
+            "https://github.com/WildKernels/kernel_patches/raw/refs/heads/main/ccache/ccache-x86-64" \
+            -o ccache
+      
+          sudo cp -f ./ccache /usr/bin/ccache
+          sudo chmod +x /usr/bin/ccache
+          rm -f ./ccache
+      
+          echo "Cache ECS Version : $(ccache --version)"
+      
+          echo ""
+          echo "🎉 APT + Cache ECS Setup Complete"
+
+      # ==============================
       # Install and Cache Build Dependencies
       # ==============================
       - name: 🔧 Install and Cache Build Dependencies
@@ -895,37 +928,15 @@ jobs:
             CCache-${{ runner.os }}-${{ env.MANIFESTBASEFILE }}-${{ env.CPUD }}-
             CCache-${{ runner.os }}-${{ env.MANIFESTBASEFILE }}-
             CCache-${{ runner.os }}-
-
-      # ==============================
-      # Set Local Cache Flag
-      # ==============================
-      - name: 🔧 Set Local Cache Flag
-        if: ${{ env.BUILDCCACHE != 'Disabled' }}
-        run: |
-          if [[ "${{ steps.ccache-restore.outputs.cache-hit }}" == "true" ]]; then
-            echo "CCACHELOCALHIT=true" >> $GITHUB_ENV
-          else
-            echo "CCACHELOCALHIT=false" >> $GITHUB_ENV
-          fi
-      
-          echo "CCACHEFOUND=${{ steps.ccache-restore.outputs.cache-hit }}" >> $GITHUB_ENV
             
       # ==============================
       # Release Cache Restoration
       # ==============================
       - name: 🔧 Release Cache Restoration
         id: cache-restoration
-        if: ${{ env.BUILDCCACHE != 'Disabled' && steps.localcacheflag.outputs.localhit != 'true' }}
+        if: ${{ env.BUILDCCACHE != 'Disabled' && steps.ccache-restore.outputs.cache-hit != 'true' }}
         run: |
           set -e
-
-          # Skip if Local Cache Already Hit
-          if [[ "${{ env.CCACHELOCALHIT }}" == "true" ]]; then
-            echo "⚡ Local Cache Hit Detected — Skipping Release Cache"
-            echo "CCACHERELEASEHIT=false" >> $GITHUB_ENV
-            echo "cache-restored=false" >> $GITHUB_OUTPUT
-            exit 0
-          fi
 
           echo "------------------------------"  
           echo "🚀 Cache Not Found Locally, Attempting to Restore from GitHub Release..."
@@ -962,42 +973,14 @@ jobs:
           fi
       
           # Validate Extraction
-          if [[ -n "$(ls -A "${CCACHE_DIR}" 2>/dev/null)" ]]; then
+          if [ -d "${{ env.CCACHE_DIR }}" ] && [ "$(ls -A ${{ env.CCACHE_DIR }})" ]; then
             echo "👾 Cache Successfully Restored"
-            echo "CCACHERELEASEHIT=true" >> $GITHUB_ENV
+            ls -la "${{ env.CCACHE_DIR }}"
+            echo "cache-restored=true" >> $GITHUB_OUTPUT
           else
             echo "⚠️ Cache Extraction Failed"
-            echo "CCACHERELEASEHIT=false" >> $GITHUB_ENV
+            echo "cache-restored=false" >> $GITHUB_OUTPUT
           fi
-    
-      # ==============================
-      # Cache ECS System
-      # ==============================
-      - name: 🔧 Cache ECS System
-        if: ${{ env.BUILDCCACHE != 'Disabled' }}
-        shell: bash
-        run: |
-          set -euo pipefail
-      
-          echo "------------------------------"
-          echo "🚀 Cache ECS System Setup..."
-          echo "------------------------------"
-          echo ""
-      
-          curl -LfsS --retry 5 --retry-delay 5 --retry-all-errors \
-            --connect-timeout 30 --tcp-fastopen \
-            -H "User-Agent: Mozilla/5.0" \
-            "https://github.com/WildKernels/kernel_patches/raw/refs/heads/main/ccache/ccache-x86-64" \
-            -o ccache
-      
-          sudo cp -f ./ccache /usr/bin/ccache
-          sudo chmod +x /usr/bin/ccache
-          rm -f ./ccache
-      
-          echo "Cache ECS Version : $(ccache --version)"
-      
-          echo ""
-          echo "🎉 Cache ECS Setup Complete"
   
       # ==============================
       # Configure and Setup Compiler Cache
@@ -1064,81 +1047,70 @@ jobs:
       - name: 🔧 Debug - Cache Key and Status
         if: ${{ env.BUILDCCACHE != 'Disabled' }}
         run: |
-          set -euo pipefail
-
-          # Environment Variables
-          CCACHELOCALHIT="${{ env.CCACHELOCALHIT }}"
-          CCACHERELEASEHIT="${{ env.CCACHERELEASEHIT }}"
-          CCACHEFOUND="${{ env.CCACHEFOUND }}"
-          CCMODE="${{ env.CCMODE }}"
-      
           echo "🚀 Cache Debug Information..."
-          echo "🔑 Local Key   : CCache-${{ runner.os }}-${{ env.MANIFESTBASEFILE }}-${{ env.CPUD }}-${{ github.ref_name }}"
-          echo "🔑 Release Key : CCache-${{ runner.os }}-${{ env.MANIFESTBASEFILE }}-${{ env.CPUD }}-${{ github.ref_name }}"
-      
+          echo "🔑 Local Key: CCache-${{ runner.os }}-${{ env.MANIFESTBASEFILE }}-${{ env.CPUD }}-${{ github.ref_name }}-${{ github.event.inputs.ROOTENGINE }}"        
+          echo "🔑 Release Key: CCache-${{ runner.os }}-${{ env.MANIFESTBASEFILE }}-${{ env.CPUD }}-${{ github.ref_name }}"        
+          
           echo ""
-          echo "------------------------------"
-          echo "🎯 Cache Summary (Unified State)"
-          echo "------------------------------"
-          echo "📂 Local Hit     : ${CCACHELOCALHIT:-false}"
-          echo "📂 Release Hit   : ${CCACHERELEASEHIT:-false}"
-          echo "📂 Cache Found   : ${CCACHEFOUND:-false}"
-          echo "📂 Mode          : ${CCMODE:-unknown}"
-          echo "------------------------------"
-      
-          echo ""
-          case "${CCACHEFOUND:-false}" in
-            true)
-              echo "♻️ Cache Active (Local or Release)"
-              ;;
-            false)
-              echo "☘️ Cold Build (No Cache Available)"
-              ;;
-          esac
+          echo "🎯 Cache Hit: ${{ steps.ccache-restore.outputs.cache-hit }}"
 
+          # Check if Cache was Restored from GitHub Release
+          if [[ "${{ steps.cache-restoration.outputs.cache-restored }}" != "false" ]]; then
+            echo "♻️ Compiler Cache Restored from GitHub Release"
+            echo "♻️ Compiler Cache File: $CCACHE_DIR/CCache-${{ runner.os }}-${{ env.MANIFESTBASEFILE }}-${{ env.CPUD }}-${{ github.ref_name }}"      
+          else
+            echo "☘️ Cache was Not Restored from GitHub Release"
+          fi
+
+          # Check if Cache was Restored from Local Cache Restoration
+          if [[ "${{ steps.ccache-restore.outputs.cache-hit }}" == 'true' ]]; then          
+            echo "♻️ Compiler Cache Restored from Local Cache"
+            echo "♻️ Compiler Cache File: $CCACHE_DIR/CCache-${{ runner.os }}-${{ env.MANIFESTBASEFILE }}-${{ env.CPUD }}-${{ github.ref_name }}-${{ github.event.inputs.ROOTENGINE }}"      
+          else
+            echo "☘️ Cache was Not Restored from Local Cache"
+          fi
+    
       # ==============================
       # Compiler Cache Status
       # ==============================
       - name: 🔧 Compiler Cache Status
         if: ${{ env.BUILDCCACHE != 'Disabled' }}
         run: |
-          set -euo pipefail
-
-          # Environment Variables
-          CCACHELOCALHIT="${{ env.CCACHELOCALHIT }}"
-          CCACHERELEASEHIT="${{ env.CCACHERELEASEHIT }}"
-          CCACHEFOUND="${{ env.CCACHEFOUND }}"
-          CCMODE="${{ env.CCMODE }}"
-      
-          echo "### ☘️ Compiler Cache Status" >> $GITHUB_STEP_SUMMARY
+          echo "### 🧠 Compiler Cache Status" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
-          echo "| Key | Reported Value |" >> $GITHUB_STEP_SUMMARY
-          echo "|-----|----------------|" >> $GITHUB_STEP_SUMMARY
-      
-          echo ""
-          echo "------------------------------"
-          echo "☘️ Final Cache State"
-          echo "------------------------------"
-          echo "📂 Local Hit   : ${CCACHELOCALHIT:-false}"
-          echo "📂 Release Hit : ${CCACHERELEASEHIT:-false}"
-          echo "📂 Mode        : ${CCMODE:-unknown}"
-          echo "------------------------------"
-          echo ""
-      
-          if [[ "${CCACHEFOUND:-false}" == "true" ]]; then
-            if [[ "${CCACHELOCALHIT:-false}" == "true" ]]; then
-              STATUS="🎉 Local GitHub Cache Hit"
-            elif [[ "${CCACHERELEASEHIT:-false}" == "true" ]]; then
-              STATUS="♻️ GitHub Release Cache Restored"
-            else
-              STATUS="♻️ Cache Restored (Unknown Source)"
-            fi
+          echo "| Status | Reported Value |" >> $GITHUB_STEP_SUMMARY
+          echo "|--------|----------------|" >> $GITHUB_STEP_SUMMARY
+
+          if [[ "${{ steps.restore-cache.outputs.cache-hit }}" == "true" || "${{ steps.cache-restoration.outputs.cache-restored }}" == "true" ]]; then
+            STATUS="✔️ Exact Cache Match Restored (Fully Matched Cache Key with Identical Build Signature for Maximum Reuse Efficiency)"
+            echo "🎉 Exact Cache Hit!"
+            echo "📈 Compiler Cache Hit Details:"
+            ccache -sv           
+    
+          # Check if Cache was Restored from GitHub Release
+          elif [[ -d "${{ env.CCACHE_DIR }}" && "$(ls -A "${{ env.CCACHE_DIR }}")" && "${{ steps.ccache-restoration.outputs.cache-restore }}" != 'false' ]]; then         
+            STATUS="♻️ Cache Restored from GitHub Release"
+            echo "♻️ Cache Restored from GitHub Release"
+            echo "| Cache | Cache Restored from GitHub Release (${{ env.CCACHE_DIR }}) |" >> $GITHUB_STEP_SUMMARY
+          elif [[ -d "${{ env.CCACHE_DIR }}" && "$(ls -A "${{ env.CCACHE_DIR }}")" ]]; then           
+            STATUS="♻️ Partial Cache Restored (Fallback Cache Retrieved via Restore Keys — May Result in Lower but Still Effective Cache Hit Rate)"
+            echo "♻️ Partial Cache Found via Restore Keys"
           else
-            STATUS="☘️ Cold Build (No Cache)"
+            STATUS="☘️ No Cache Available (Cold Build — All Compilation Requests Will Be Processed Without Any Cached Objects)"
+            echo "☘️ No Cache Found — Cold Build"
           fi
-      
-          echo "| Cache Status | $STATUS |" >> $GITHUB_STEP_SUMMARY
-          echo "| Mode         | ${CCMODE:-unknown} |" >> $GITHUB_STEP_SUMMARY
+
+          # Additional Cache Debug - Check if Cache was Restored from Local Cache
+          if [[ -d "${{ env.CCACHE_DIR }}" && "$(ls -A "${{ env.CCACHE_DIR }}")" && "${{ steps.ccache-restore.outputs.cache-hit }}" != 'false' ]]; then           
+            echo "♻️ Compiler Cache Restored from Local Cache"
+            echo "| Cache | Cache Restored from Local Cache |" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "☘️ Cache was Not Restored from Local Cache"
+            echo "| Cache | No Cache Restored from Local Cache |" >> $GITHUB_STEP_SUMMARY
+          fi
+
+          echo ""
+          echo "| Cache | $STATUS |" >> $GITHUB_STEP_SUMMARY
    
       # ==============================
       # Install Repository Tool (Fallback and Cached)
@@ -4966,40 +4938,22 @@ jobs:
           CCPATH="${{ env.CCACHE_DIR }}/CCache-${{ runner.os }}-${{ env.MANIFESTBASEFILE }}-${{ env.CPUD }}-${{ github.ref_name }}"
           
           # Check GitHub Release Cache
-          # Default Mode / State
-          FROMLOCAL="✘ No"
-          FROMRELEASE="✘ No"
-          FROMECS="✘ No"
-
-          # Environment Variables
-          CCACHELOCALHIT="${{ env.CCACHELOCALHIT }}"
-          CCACHERELEASEHIT="${{ env.CCACHERELEASEHIT }}"
-          CCACHEFOUND="${{ env.CCACHEFOUND }}"
-
-          # Local Cache
-          if [[ "$CCACHELOCALHIT" == "true" ]]; then
-            FROMLOCAL="✔ Yes"
-          fi
-
-          # Release Cache
-          if [[ "$CCACHERELEASEHIT" == "true" ]]; then
+          if [[ "${{ steps.cache-restoration.outputs.cache-restored }}" == "true" ]]; then
             FROMRELEASE="✔ Yes"
           fi
-
-          # ECS Cache Toolchain Fallback
-          if [[ "$CCACHEFOUND" == "false" ]]; then
-            FROMECS="✔ Yes"
+          
+          # Check Local Cache (Actions/Cache)
+          if [[ "${{ steps.ccache-restore.outputs.cache-hit }}" == "true" ]]; then
+            FROMLOCAL="✔ Yes"
           fi
-
-          # Unified Cache Availability
-          if [[ "$CCACHELOCALHIT" == "true" || \
-                "$CCACHERELEASEHIT" == "true" || \
-                "$CCACHEFOUND" == "false" ]]; then
+          
+          # Optional: Unified Cache Flag
+          if [[ "$FROMLOCAL" == "✔ Yes" || "$FROMRELEASE" == "✔ Yes" ]]; then
             CACHEAVAIL="✔ Yes"
           else
             CACHEAVAIL="✘ No"
           fi
-         
+
           # Generate Summary Table with PRINTF for Cleaner Formatting
           # Summary Table          
           {
@@ -5022,8 +4976,7 @@ jobs:
           
             printf "| %-64s | %-22s |\n" "Restored Cache Path" "$CCPATH"
           
-          } >> "$GITHUB_STEP_SUMMARY"
-    
+          } >> "$GITHUB_STEP_SUMMARY"  
 
       # ==============================
       # Save Compiler Cache
