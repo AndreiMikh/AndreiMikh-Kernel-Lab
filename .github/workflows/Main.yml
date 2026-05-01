@@ -927,11 +927,12 @@ jobs:
         uses: actions/cache@v5
         with:
           path: ${{ env.CCACHE_DIR }}
-          key: CCache-${{ runner.os }}-${{ env.MANIFESTBASEFILE }}-${{ env.CPUD }}-${{ github.ref_name }}
+          key: CCache-${{ runner.os }}-${{ env.FILE_BASE }}-${{ env.CPUD }}-${{ github.ref_name }}
+
           restore-keys: |
-            CCache-${{ runner.os }}-${{ env.MANIFESTBASEFILE }}-${{ env.CPUD }}-${{ github.ref_name }}
-            CCache-${{ runner.os }}-${{ env.MANIFESTBASEFILE }}-${{ env.CPUD }}-
-            CCache-${{ runner.os }}-${{ env.MANIFESTBASEFILE }}-
+            CCache-${{ runner.os }}-${{ env.CPU }}-${{ env.KERNELVERSION }}-${{ github.ref_name }}
+            CCache-${{ runner.os }}-${{ env.CPU }}-${{ env.KERNELVERSION }}-
+            CCache-${{ runner.os }}-${{ env.CPU }}-
             CCache-${{ runner.os }}-
       
       # ==============================
@@ -988,7 +989,7 @@ jobs:
           fi
   
       # ==============================
-      # Configure and Setup Compiler Cache
+      # Condigure and Setup Compiler Cache
       # ==============================
       - name: 🔧 Configure and Setup Compiler Cache
         if: ${{ env.BUILDCCACHE != 'Disabled' }}
@@ -1001,49 +1002,81 @@ jobs:
           echo "------------------------------"
           echo ""
 
-          echo "📂 Using Cache Directory : ${{ env.CCACHE_DIR }}"
-          echo "📊 Setting Cache Size    : ${{ env.CCACHE_MAXSIZE }}"
+          # Ensure Cache Directory Exists (Global Cache Directory)
+          mkdir -p "$CCACHE_DIR"
 
-          # Ensure Compiler Cache Directory Exists
-          mkdir -p "${{ env.CCACHE_DIR }}"
-       
-          export CCACHE_DIR="${{ env.CCACHE_DIR }}"
-          export CCACHE_BASEDIR="${{ env.CCACHE_BASEDIR }}"
-
-          # Check Compiler Cache Availability
+          # Check if Compiler Cache is Installed
           if ! command -v ccache >/dev/null 2>&1; then
-            echo "⚠️ Compiler Cache Not Found → Skipping Setup"
+            echo "⚠️ Compiler Cache Not Found 🛠️ Skipping Compiler Cache Setup"
             exit 0
           fi
-      
-          echo "🚀 Using Compiler Cache: $(ccache --version)"
-      
-          # Set Cache Size Limit
-          if [[ -n "${{ env.CCACHE_MAXSIZE }}" ]]; then
-            ccache -M "${CCACHE_MAXSIZE}"
-          fi
-      
-          # Enable Cache Compression
-          ccache -o compression=true
 
-          # Enable Sloppiness and Compiler Check Disabled for Faster Cache Hits
-          ccache -o sloppiness=time_macros
-          export CCACHE_COMPILERCHECK="${{ env.CCACHE_COMPILERCHECK }}"
+          echo "🚀 Using Compiler Cache at $CCACHE_DIR..."
 
-          # Enable Pre-Compiled Headers (PCH)
-          export CCACHE_PCH=1
+          # Force Correct Path
+          export PATH="/usr/lib/ccache:$PATH"
           
+          # Set Cache Size 
+          ccache -M "${CCACHE_MAXSIZE:-10G}"
+
+          # Core Optimizations 
+          ccache --set-config=base_dir="$GITHUB_WORKSPACE"
+          ccache --set-config=hash_dir=false
+          ccache --set-config=compiler_check=none
+
+          # Performance Boost
+          ccache --set-config=compression=false
+          ccache --set-config=direct_mode=true
+
+          # Improve Hit Rate (Safe Looseness)
+          ccache --set-config=sloppiness=file_macro,time_macros
+          
+          # Make Compiler Cache Global
+          echo "/usr/lib/ccache" >> $GITHUB_PATH
+
+          echo "🎉 Compiler Cache Ready!"
+
+          # Reset Statistics for this Build
+          echo "🧾 Resetting Compiler Cache Statistics..."
+          ccache -z
+
+          # Show Initial Statistics
           echo ""
           echo "📊 Compiler Cache Statistics (Before Build):"
           ccache -s
-
-          if [ "${{ steps.ccache-restore.outputs.cache-hit }}" == 'true' ]; then
-            echo "ccache cache hit details:"
-            ccache -sv
-          fi
-      
+           
+      # ==============================
+      # Cache Key and Status
+      # ==============================
+      - name: 🔧 Cache Key and Status
+        if: ${{ env.BUILDCCACHE != 'Disabled' }}
+        run: |
+          echo "🚀 Cache Debug Information..."
+          echo "Key: key: CCache-${{ runner.os }}-${{ env.FILE_BASE }}-${{ env.CPUD }}-${{ github.ref_name }}-${{ github.run_id }}"
+          
           echo ""
-          echo "🎉 Compiler Cache Ready"    
+          echo "🎯 Cache Hit: ${{ steps.restore-cache.outputs.cache-hit }}"
+
+          echo "### 🧠 Compiler Cache Status" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Status | Value |" >> $GITHUB_STEP_SUMMARY
+          echo "|--------|--------|" >> $GITHUB_STEP_SUMMARY
+
+          if [[ "${{ steps.restore-cache.outputs.cache-hit }}" == 'true' ]]; then
+            STATUS="✔️ Exact Cache Match Restored (Fully Matched Cache Key with Identical Build Signature for Maximum Reuse Efficiency)"
+            echo "🎉 Exact Cache Hit!"
+
+          elif [[ -d "$CCACHE_DIR" && "$(ls -A "$CCACHE_DIR")" ]]; then
+            STATUS="♻️ Partial Cache Restored (Fallback Cache Retrieved via Restore Keys — May Result in Lower but Still Effective Cache Hit Rate)"
+            echo "♻️ Partial Cache Found via Restore Keys"
+
+          else
+            STATUS="⚠️ No Cache Available (Cold Build — All Compilation Requests Will Be Processed Without Any Cached Objects)"
+            echo "⚠️ No Cache Found — Cold Build"
+          fi
+          
+          echo ""
+          echo "| Cache | $STATUS |" >> $GITHUB_STEP_SUMMARY
 
       # ==============================
       # Install Repository Tool (Fallback and Cached)
