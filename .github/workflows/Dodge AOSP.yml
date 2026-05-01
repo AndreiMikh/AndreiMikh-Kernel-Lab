@@ -1,0 +1,544 @@
+name: ☘️ Dodge (OnePlus13) AOSP
+
+on:
+  workflow_dispatch:
+    inputs:
+      AOSPBUILD:
+        description: "SUSFS Variant"
+        required: true
+        type: choice
+        default: "CrDroid"
+        options:
+          - CrDroid
+          - Lineage
+      KSU:
+        description: "KernelSU Variant"
+        required: true
+        type: choice
+        default: "KernelSU-Next"
+        options:
+          - KernelSU-Next
+          - Pershoot-KernelSU-Next
+          - None
+          
+      SUBLEVEL:
+        description: "Custom Kernel Level Spoofing (Sublevel)"
+        required: false
+        default: ""
+
+      SUSFS:
+        description: "SUSFS Variant"
+        required: true
+        type: choice
+        default: "SUSFS-OKI"
+        options:
+          - SUSFS-OKI
+          - SUSFS-GKI
+          - None 
+
+env:
+  TZ: Asia/Shanghai
+  WORKSPACE: ${{ github.workspace }}/kernel_workspace
+  KDIR: kernel/oneplus/sm8750
+  CLANG_VERSION: clang-r547379
+
+jobs:
+  build:
+    name: Build Kernel SM-8750 - ${{ github.actor }}
+    runs-on: ubuntu-latest
+
+    steps:
+    # =========================
+    # Checkout
+    # =========================
+    - uses: actions/checkout@v6
+
+    # =========================
+    # Swap Space
+    # =========================
+    - name: Swap Space
+      uses: pierotofy/set-swap-space@master
+      with:
+        swap-size-gb: 10
+
+    # =========================
+    # Dependencies
+    # =========================
+    - name: Dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y git wget ccache flex bison \
+          build-essential libssl-dev libelf-dev bc \
+          device-tree-compiler python3 libncurses5-dev
+
+        mkdir -p "${{ env.WORKSPACE }}"
+        echo "BUILDTIME=$(date '+%y%m%d')" >> $GITHUB_ENV
+
+    # =========================
+    # Cache CCache
+    # =========================
+    - name: Cache CCache
+      uses: actions/cache@v5
+      with:
+        path: kernel_workspace/.ccache
+        key: ccache-${{ runner.os }}-${{ hashFiles('**/*.c', '**/*.h') }}
+        restore-keys: |
+          ccache-${{ runner.os }}-
+
+    # =========================
+    # Restore Cache Clang Toolchain
+    # =========================
+    - name: Restore Cache Clang Toolchain
+      id: cache-clang
+      uses: actions/cache@v5
+      with:
+        path: ${{ env.WORKSPACE }}/clang-aosp
+        key: ${{ env.CLANG_VERSION }}
+
+    # =========================
+    # Download Clang Toolchain
+    # =========================
+    - name: Download Clang Toolchain
+      if: steps.cache-clang.outputs.cache-hit != 'true'
+      run: |
+        mkdir -p "$WORKSPACE/clang-aosp"
+        cd "$WORKSPACE"
+
+        wget -q -O clang.tar.gz \
+          https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/main/${CLANG_VERSION}.tar.gz
+
+        tar -xzf clang.tar.gz -C clang-aosp
+        rm clang.tar.gz
+
+    # =========================
+    # CrDroid Kernel Sources
+    # =========================
+    - name: CrDroid Kernel Sources
+      if: ${{ github.event.inputs.AOSPBUILD == 'CrDroid' }}
+      run: | 
+        cd "${{ env.WORKSPACE }}"
+
+        git clone --depth=1 --single-branch -b 16.0 \
+          https://github.com/crdroidandroid/android_kernel_oneplus_sm8750 \
+          kernel/oneplus/sm8750 &
+
+        git clone --depth=1 --single-branch -b 16.0 \
+          https://github.com/crdroidandroid/android_kernel_oneplus_sm8750-modules \
+          kernel/oneplus/sm8750-modules &
+
+        git clone --depth=1 --single-branch -b 16.0 \
+          https://github.com/crdroidandroid/android_kernel_oneplus_sm8750-modules \
+          kernel/oneplus/sm8750-devicetrees &
+
+        git clone --depth=1 --single-branch -b lineage-23.2 \
+          https://github.com/TheMuppets/proprietary_vendor_oneplus_sm8750-common \
+          vendor/oneplus/sm8750-common &
+
+        wait
+
+        CONFIG="${{ env.KDIR }}/arch/arm64/configs/vendor/oplus/sun_perf.config"
+
+        echo "CONFIG_DODGE_DTB=y" >> "$CONFIG"
+        echo "CONFIG_KSU=y" >> "$CONFIG"
+        echo "CONFIG_KSU_SUSFS=y" >> "$CONFIG"
+
+    # =========================
+    # Lineage Kernel Sources
+    # =========================
+    - name: Lineage Kernel Sources
+      if: ${{ github.event.inputs.AOSPBUILD == 'Lineage' }}
+      run: | 
+        cd "${{ env.WORKSPACE }}"
+
+        git clone --depth=1 --single-branch -b lineage-23.2 \
+          https://github.com/LineageOS/android_kernel_oneplus_sm8750 \
+          kernel/oneplus/sm8750 &
+
+        git clone --depth=1 --single-branch -b lineage-23.2 \
+          https://github.com/LineageOS/android_kernel_oneplus_sm8750-modules \
+          kernel/oneplus/sm8750-modules &
+
+        git clone --depth=1 --single-branch -b lineage-23.2 \
+          https://github.com/LineageOS/android_kernel_oneplus_sm8750-modules \
+          kernel/oneplus/sm8750-devicetrees &
+
+        git clone --depth=1 --single-branch -b lineage-23.2 \
+          https://github.com/TheMuppets/proprietary_vendor_oneplus_sm8750-common \
+          vendor/oneplus/sm8750-common &
+
+        wait
+
+        CONFIG="${{ env.KDIR }}/arch/arm64/configs/vendor/oplus/sun_perf.config"
+
+        echo "CONFIG_DODGE_DTB=y" >> "$CONFIG"
+        echo "CONFIG_KSU=y" >> "$CONFIG"
+        echo "CONFIG_KSU_SUSFS=y" >> "$CONFIG"
+
+    # =========================
+    # Kernel Version Setup
+    # =========================
+    - name: Kernel Version Setup
+      run: |
+        echo "🔎 Setup Kernel Version..."
+        KDIR="${{ env.KDIR }}"
+        WORKSPACE="${{ env.WORKSPACE }}"
+    
+        if [[ -z "${WORKSPACE:-}" || -z "${KDIR:-}" ]]; then
+          echo "⚠️ Workspace or Kernel Directory Not Set"
+          exit 1
+        fi
+
+        KROOT="$WORKSPACE/$KDIR"
+
+        if [[ ! -d "$KROOT" ]]; then
+          echo "⚠️ Kernel Root Not Found: $KROOT"
+          echo "📂 Workspace Contents:"
+          ls -la "$WORKSPACE"
+          exit 1
+        fi
+
+        echo "📁 Kernel Root: $KROOT"
+        echo "🔎 Detecting Kernel System Type..."
+        KTYPE="Unknown"
+
+        if [[ -f "$KROOT/build.config.gki" ]]; then
+          KTYPE="GKI"
+        elif [[ -f "$KROOT/android/ACK_SHA" ]]; then
+          KTYPE="ACK"
+        elif grep -qi "lineage" "$KROOT/Makefile" 2>/dev/null; then
+          KTYPE="LINEAGE"
+        elif [[ -d "$KROOT/vendor" ]] || grep -qi "oplus\|oneplus" "$KROOT/Makefile" 2>/dev/null; then
+          KTYPE="OEM"
+        else
+          KTYPE="GENERIC"
+        fi
+
+        echo "📌 Kernel Type: $KTYPE"
+        echo "KTYPE=$KTYPE" >> $GITHUB_ENV
+        echo "🔎 Resolving Kernel Makefile..."
+        MAKEFILE=""
+
+        case "$KTYPE" in
+          GKI|ACK|LINEAGE)
+            if [[ -f "$KROOT/Makefile" ]]; then
+              MAKEFILE="$KROOT/Makefile"
+            fi
+            ;;  
+          OEM)
+            if [[ -f "$KROOT/Makefile" ]]; then
+              MAKEFILE="$KROOT/Makefile"
+            elif [[ -f "$KROOT/kernel/Makefile" ]]; then
+              MAKEFILE="$KROOT/kernel/Makefile"
+            elif [[ -f "$KROOT/common/Makefile" ]]; then
+              MAKEFILE="$KROOT/common/Makefile"
+            fi
+            ;;
+          *)
+            MAKEFILE="$KROOT/Makefile"
+            ;;
+        esac
+
+        if [[ -z "$MAKEFILE" ]]; then
+          echo "⚠️ Fallback Scan Activated..."
+
+          MAKEFILE=$(find "$KROOT" -maxdepth 3 -type f -name "Makefile" \
+            ! -path "*/drivers/*" \
+            ! -path "*/net/*" \
+            ! -path "*/virt/*" \
+            ! -path "*/fs/*" \
+            | head -n 1)
+        fi
+
+        if [[ -z "$MAKEFILE" || ! -f "$MAKEFILE" ]]; then
+          echo "⚠️ No Valid Kernel Makefile Found"
+          find "$KROOT" -maxdepth 2 -type f | head -n 50
+          exit 1
+        fi
+
+        echo "📄 Selected Makefile: $MAKEFILE"
+
+        if ! grep -qE "^(VERSION|PATCHLEVEL|SUBLEVEL)" "$MAKEFILE"; then
+          echo "⚠️ Invalid Kernel Makefile Detected"
+          head -n 20 "$MAKEFILE"
+          exit 1
+        fi
+
+        echo "🧾 Parsing Kernel Version..."
+
+        OGVERSION=$(awk '
+          /^VERSION =/ {v=$3}
+          /^PATCHLEVEL =/ {p=$3}
+          /^SUBLEVEL =/ {s=$3}
+          END {print v"."p"."s}
+        ' "$MAKEFILE")
+
+        if [[ -z "$OGVERSION" || "$OGVERSION" == ".." ]]; then
+          echo "⚠️ Kernel Version Parsing Failed"
+          exit 1
+        fi
+
+        echo "📌 Original Kernel Version: $OGVERSION"
+
+        INPUTSUBLEVEL="${{ github.event.inputs.SUBLEVEL }}"
+
+        if [[ -n "$INPUTSUBLEVEL" ]]; then
+          echo "🧾 Applying Sublevel Override: $INPUTSUBLEVEL"
+          sed -i "s/^\(SUBLEVEL[[:space:]]*=[[:space:]]*\).*/\1$INPUTSUBLEVEL/" "$MAKEFILE"
+        else
+          echo "📌 No Sublevel Override Applied"
+        fi
+
+        NEWVERSION=$(awk '
+          /^VERSION =/ {v=$3}
+          /^PATCHLEVEL =/ {p=$3}
+          /^SUBLEVEL =/ {s=$3}
+          END {print v"."p"."s}
+        ' "$MAKEFILE")
+
+        echo "📊 Final Kernel Version: $NEWVERSION"
+
+        echo "FULLVERSION=$NEWVERSION" >> $GITHUB_ENV
+
+        echo "KV1=$(echo "$NEWVERSION" | cut -d. -f1)" >> $GITHUB_ENV
+        echo "KV2=$(echo "$NEWVERSION" | tr -d '.')" >> $GITHUB_ENV
+        echo "KV3=$(echo "$NEWVERSION" | tr -d '.')" >> $GITHUB_ENV
+
+        echo "KSHORTVERSION=$(echo "$NEWVERSION" | cut -d. -f1,2)" >> $GITHUB_ENV
+        echo "KSHORTPATCHVERSION=$(echo "$NEWVERSION" | cut -d. -f1,2 | tr '.' '_')" >> $GITHUB_ENV
+
+        echo ""
+        echo "🎉 Kernel Version System Complete"
+        echo "➡ Type: $KTYPE"
+        echo "➡ Version: $NEWVERSION"
+    
+    # =========================
+    # KernelSU Next
+    # =========================
+    - name: KernelSU-Next
+      if: ${{ github.event.inputs.KSU != 'None' }}
+      run: |
+        WORKSPACE="${{ env.WORKSPACE }}"
+        KDIR="${{ env.KDIR }}"
+        
+        cd "$WORKSPACE/$KDIR"
+
+        if [ "${{ github.event.inputs.KSU }}" = "Pershoot-KernelSU-Next" ]; then
+          curl -LSs https://raw.githubusercontent.com/pershoot/KernelSU-Next/refs/heads/dev-susfs/kernel/setup.sh \
+            | bash -s dev-susfs
+          cd KernelSU-Next
+          rm -rf .git
+          KSU_VERSION=$(expr $(curl -sI \
+            "https://api.github.com/repos/KernelSU-Next/KernelSU-Next/commits?sha=dev&per_page=1" \
+            | grep -i "link:" | sed -n 's/.*page=\([0-9]*\)>; rel="last".*/\1/p') + 30000)
+          echo "KSUVER=$KSU_VERSION" >> $GITHUB_ENV
+          sed -i "s/KSU_VERSION_FALLBACK := 1/KSU_VERSION_FALLBACK := $KSU_VERSION/" kernel/Kbuild
+          KSU_TAG=$(curl -s https://api.github.com/repos/KernelSU-Next/KernelSU-Next/tags \
+            | grep -o '"name": *"[^"]*"' | head -n1 | cut -d'"' -f4)
+          sed -i "s/KSU_VERSION_TAG_FALLBACK := v0.0.1/KSU_VERSION_TAG_FALLBACK := $KSU_TAG/" kernel/Kbuild
+          echo "🎉 Pershoot KernelSU-Next Setup Complete"
+       
+        elif [ "${{ github.event.inputs.KSU }}" = "KernelSU-Next" ]; then
+          curl -LSs https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/refs/heads/dev/kernel/setup.sh \
+            | bash -s dev
+          cd KernelSU-Next
+          rm -rf .git
+          KSU_VERSION=$(expr $(curl -sI \
+            "https://api.github.com/repos/KernelSU-Next/KernelSU-Next/commits?sha=dev&per_page=1" \
+            | grep -i "link:" | sed -n 's/.*page=\([0-9]*\)>; rel="last".*/\1/p') + 30000)
+          echo "KSUVER=$KSU_VERSION" >> $GITHUB_ENV
+          sed -i "s/KSU_VERSION_FALLBACK := 1/KSU_VERSION_FALLBACK := $KSU_VERSION/" kernel/Kbuild
+          KSU_TAG=$(curl -s https://api.github.com/repos/KernelSU-Next/KernelSU-Next/tags \
+            | grep -o '"name": *"[^"]*"' | head -n1 | cut -d'"' -f4)
+          sed -i "s/KSU_VERSION_TAG_FALLBACK := v0.0.1/KSU_VERSION_TAG_FALLBACK := $KSU_TAG/" kernel/Kbuild
+          echo "🎉 KernelSU-Next Setup Complete" 
+        else
+          echo "⚠️ KSU Setup Disabled"  
+        fi
+
+    # =========================
+    # SUSFS GKI
+    # =========================
+    - name: SUSFS GKI
+      if: ${{ github.event.inputs.SUSFS == 'SUSFS-GKI' }}
+      run: |
+        WORKSPACE="${{ env.WORKSPACE }}"
+        KDIR="${{ env.KDIR }}"
+        
+        cd "$WORKSPACE"
+
+        git clone --depth=1 -b gki-android15-6.6 \
+          https://gitlab.com/simonpunk/susfs4ksu.git susfs4ksu
+
+        SUSDIR="$WORKSPACE/$KDIR"
+
+        if [ ! -f "$SUSDIR/.susfs_done" ]; then
+          cp -r susfs4ksu/kernel_patches/fs/* "$SUSDIR/fs/"
+          cp -r susfs4ksu/kernel_patches/include/linux/* "$SUSDIR/include/linux/"
+
+          patch -d "$SUSDIR" -p1 --forward --ignore-whitespace < \
+            susfs4ksu/kernel_patches/50_add_susfs_in_gki-android15-6.6.patch \
+            || echo "SUSFS patch warnings"
+
+          touch "$SUSDIR/.susfs_done"
+        fi
+
+    # =========================
+    # SUSFS OKI
+    # =========================
+    - name: SUSFS OKI
+      if: ${{ github.event.inputs.SUSFS == 'SUSFS-OKI' }}
+      run: |
+        WORKSPACE="${{ env.WORKSPACE }}"
+        KDIR="${{ env.KDIR }}"
+       
+        cd "$WORKSPACE"
+
+        git clone --depth=1 -b oki-android15-6.6 \
+          https://github.com/cctv18/susfs4oki.git susfs4ksu
+
+        SUSDIR="$WORKSPACE/$KDIR"
+
+        if [ ! -f "$SUSDIR/.susfs_done" ]; then
+          cp -r susfs4ksu/kernel_patches/fs/* "$SUSDIR/fs/"
+          cp -r susfs4ksu/kernel_patches/include/linux/* "$SUSDIR/include/linux/"
+
+          patch -d "$SUSDIR" -p1 --forward --ignore-whitespace < \
+            susfs4ksu/kernel_patches/50_add_susfs_in_gki-android15-6.6.patch \
+            || echo "SUSFS patch warnings"
+
+          touch "$SUSDIR/.susfs_done"
+        fi
+
+    - name: Apply WildKernels Patches
+      run: |
+        WORKSPACE="${{ env.WORKSPACE }}" 
+        KDIR="${{ env.KDIR }}"
+       
+        cd "$WORKSPACE/$KDIR/KernelSU-Next"
+
+        echo "📥 Cloning WildKernels Patches..."
+        git clone https://github.com/Liam314839/wildpatches
+
+        PATCHDIR="wildpatches"
+
+        if [ ! -d "$PATCHDIR" ]; then
+          echo "⚠️ Patch Directory Not Found!"
+          exit 0
+        fi
+
+        echo "🔧 Applying WildKernels Patches with Auto-Detect Patch Level..."
+
+        for patch in "$PATCHDIR"/*.patch; do
+          echo "📦 Applying $patch"
+
+          applied=false
+
+          for level in 0 1 2; do
+            if patch -p$level --dry-run < "$patch" >/dev/null 2>&1; then
+              echo "✔ Detected Patch Level: -p$level"
+
+              if patch -p$level < "$patch"; then
+                echo "🔧 Applied with Level $level"
+                applied=true
+                break
+              fi
+            fi
+          done
+
+          if [ "$applied" = false ]; then
+            echo "⚠️ Skipped $patch (No Matching Patch Level or Failed Apply)"
+          fi
+        done
+
+        echo "🎉 WildKernels Patches Process Finished"
+   
+    # =========================
+    # Build Kernel
+    # =========================
+    - name: Build Kernel
+      run: |
+        WORKSPACE="${{ env.WORKSPACE }}"
+        KDIR="${{ env.KDIR }}"
+       
+        cd "$WORKSPACE/$KDIR"
+
+        export ARCH=arm64
+        export SUBARCH=arm64
+        export HEADER_ARCH=arm64
+        export PATH="$GITHUB_WORKSPACE/kernel_workspace/clang-aosp/bin:$PATH"
+
+        export KBUILD_BUILD_HOST="Github-Action"
+        export KBUILD_BUILD_USER="$(echo "${{ github.actor }}" | tr '[:upper:]' '[:lower:]')"
+
+        LTO=thin
+
+        AR_CMD="ARCH=${ARCH} SUBARCH=${SUBARCH} HEADER_ARCH=${HEADER_ARCH}"
+        CC_CMD="CC=clang CXX=clang++"
+       
+        LLVM_CMD="LD=ld.lld AR=llvm-ar NM=llvm-nm OBJCOPY=llvm-objcopy OBJDUMP=llvm-objdump READELF=llvm-readelf OBJSIZE=llvm-size STRIP=llvm-strip LLVM=1 LLVM_IAS=1"
+        DEFCONFIG="gki_defconfig vendor/sun_perf.config vendor/oplus/sun_perf.config"
+
+        echo "📌 Running Default Configuration..."
+        make O=out $AR_CMD $CC_CMD $LLVM_CMD $DEFCONFIG
+
+        echo "⚙️ Enforcing LTO Configuration..."
+        scripts/config --file out/.config \
+            -e LTO_CLANG \
+            -d LTO_NONE \
+            -e LTO_CLANG_THIN \
+            -d LTO_CLANG_FULL \
+            -e THINLTO
+
+        echo "🚀 Starting Kernel Build..."
+        make -j"$(nproc --all)" O=out $AR_CMD $CC_CMD $LLVM_CMD
+
+    # =========================
+    # Validate Output
+    # =========================
+    - name: Validate Output
+      run: |
+        WORKSPACE="${{ env.WORKSPACE }}"
+        KDIR="${{ env.KDIR }}"
+        if [ -f "$WORKSPACE/$KDIR/out/arch/arm64/boot/Image" ]; then
+          echo "IMAGEPATH=true" >> $GITHUB_ENV
+        else
+          echo "Kernel Build Failed"
+          exit 1
+        fi
+
+    # =========================
+    # Package AnyKernel3
+    # =========================
+    - name: Package AnyKernel3
+      if: env.IMAGEPATH == 'true'
+      run: |
+        WORKSPACE="${{ env.WORKSPACE }}"
+        KDIR="${{ env.KDIR }}"
+        cd "$WORKSPACE"
+
+        git clone --depth=1 https://github.com/AndreiMikh/AnyKernel3
+        rm -rf AnyKernel3/.git
+
+        cp "$KDIR/out/arch/arm64/boot/Image" AnyKernel3/
+
+    # =========================
+    # Upload Kernel Image
+    # =========================
+    - name: Upload Kernel Image
+      if: env.IMAGEPATH == 'true'
+      uses: actions/upload-artifact@v7
+      with:
+        name: Boot-Image-Dodge-${{ github.event.inputs.AOSPBUILD }}-${{ env.FULLVERSION }}-${{ github.event.inputs.KSU }}
+        path: kernel_workspace/kernel/oneplus/sm8750/out/arch/arm64/boot/Image
+        compression-level: 0
+
+    # =========================
+    # Upload AnyKernel3
+    # =========================
+    - name: Upload AnyKernel3
+      if: env.IMAGEPATH == 'true'
+      uses: actions/upload-artifact@v7
+      with:
+        name: AnyKernel3-Dodge-${{ github.event.inputs.AOSPBUILD }}-${{ env.FULLVERSION }}-${{ github.event.inputs.KSU }}
+        path: kernel_workspace/AnyKernel3/*
+        compression-level: 0
