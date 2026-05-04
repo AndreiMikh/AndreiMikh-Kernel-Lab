@@ -937,6 +937,7 @@ jobs:
       - name: 🔧 Release Cache Restoration
         id: cache-restoration
         if: ${{ env.BUILDCCACHE != 'Disabled' }}
+        shell: bash
         run: |
           set -euo pipefail
 
@@ -945,61 +946,75 @@ jobs:
           echo "------------------------------"
           echo ""
 
+          # Initialize Output Early
+          # Ensures Fallback Logic Always has a Defined Value
+          echo "cache-restored=false" >> "$GITHUB_OUTPUT"
+
+          # Define Release Tag and Cache File
           TAG="${{ env.CPU }}"
           FILE="CCache-${{ env.MANIFESTBASEFILE }}-${{ runner.os }}.tar.zst"
           URL="https://github.com/${{ github.repository }}/releases/download/${TAG}/${FILE}"
 
           echo "📩 Download URL: $URL"
 
+          # Ensure Cache Directory Exists with Proper Permissions
           mkdir -p "${{ env.CCACHE_DIR }}"
           chmod -R 775 "${{ env.CCACHE_DIR }}"
 
           # Download Cache
+          # If Download Fails → Fallback to Local Cache
           if ! curl -L --fail --retry 3 --retry-delay 2 -o "$FILE" "$URL"; then
             echo "⚠️ Cache Not Found in Release"
-            echo "cache-restored=false" >> $GITHUB_OUTPUT
             exit 0
           fi
 
           echo "🔥 Cache Downloaded, Extracting..."
 
-          # Extract
-          if [ -s "$FILE" ]; then
-            tar -I zstd -xf "$FILE" -C "${{ env.CCACHE_DIR }}"
-          else
-            echo "⚠️ Empty Archive"
-            echo "cache-restored=false" >> $GITHUB_OUTPUT
+          # ------------------------------
+          # Validate Downloaded File
+          # ------------------------------
+          # Prevent extracting empty/corrupt archive
+          if [ ! -s "$FILE" ]; then
+            echo "⚠️ Downloaded file is empty"
             exit 0
           fi
-
-          # Validate
+      
+          echo "🔥 Cache Downloaded, Extracting..."
+      
+          # Extract Cache
+          # Prevent Step Crash from Breaking Fallback Logic
+          if ! tar -I zstd -xf "$FILE" -C "${{ env.CCACHE_DIR }}"; then
+            echo "⚠️ Extraction failed"
+            exit 0
+          fi
+      
+          # Validate Extracted Cache
           if [ -d "${{ env.CCACHE_DIR }}" ] && [ "$(ls -A "${{ env.CCACHE_DIR }}")" ]; then
             echo "👾 Cache Restored Successfully"
-            ls -la "${{ env.CCACHE_DIR }}"
-            echo "cache-restored=true" >> $GITHUB_OUTPUT
+            echo "cache-restored=true" >> "$GITHUB_OUTPUT"
           else
-            echo "⚠️ Cache Extraction Failed"
-            echo "cache-restored=false" >> $GITHUB_OUTPUT
+            echo "⚠️ Cache Extraction Produced Empty Directory"
           fi
-
+      
           echo ""
-          echo "🎉 Cache Restored and Extracted from Release"
-
+          echo "🎉 Release Cache Step Completed"
    
       # ==============================
-      # Local Cache Restoration
+      # Local Cache Restoration (Fallback)
       # ==============================
-      - name: 🔧 Local Cache Restoration
+      - name: 🔧 Local Cache Restoration (Fallback)
         id: ccache-restore
-        if: ${{ env.BUILDCCACHE != 'Disabled' }}
+        if: ${{ env.BUILDCCACHE != 'Disabled' && steps.cache-restoration.outputs.cache-restored == 'false' }}
         uses: actions/cache@v5
         with:
           path: ${{ env.CCACHE_DIR }}
-          key: CCache-${{ runner.os }}-${{ env.MANIFESTBASEFILE }}-${{ env.CPUD }}-${{ github.ref_name }}
+          
+          key: CCache-${{ runner.os }}-${{ env.MANIFESTBASEFILE }}-${{ env.CPU }}-${{ github.ref_name }}
 
+          # Restore Hierarchy for Partial Cache Reuse
           restore-keys: |
-            CCache-${{ runner.os }}-${{ env.MANIFESTBASEFILE }}-${{ env.CPUD }}-${{ github.ref_name }}
-            CCache-${{ runner.os }}-${{ env.MANIFESTBASEFILE }}-${{ env.CPUD }}-
+            CCache-${{ runner.os }}-${{ env.MANIFESTBASEFILE }}-${{ env.CPU }}-${{ github.ref_name }}
+            CCache-${{ runner.os }}-${{ env.MANIFESTBASEFILE }}-${{ env.CPU }}-
             CCache-${{ runner.os }}-${{ env.MANIFESTBASEFILE }}-
             CCache-${{ runner.os }}-
             CCache-
@@ -1032,6 +1047,7 @@ jobs:
           # Set Cache Size 
           ccache -M "${{ env.CCACHE_MAXSIZE }}"
 
+          # Export Environment Configuration
           export CCACHE_COMPILERCHECK="${{ env.CCACHE_COMPILERCHECK }}" || echo "⚠️ Compiler Check Not Found"
           export CCACHE_BASEDIR="${{ env.CCACHE_BASEDIR }}" || echo "⚠️ Base Directory Not Found"
           export CCACHE_NOHASHDIR="${{ env.CCACHE_NOHASHDIR }}" || echo "⚠️ NoHash Directory Not Found"
@@ -1058,7 +1074,7 @@ jobs:
         if: ${{ env.BUILDCCACHE != 'Disabled' }}
         run: |
           echo "🚀 Cache Debug Information..."
-          echo "Key: CCache-${{ runner.os }}-${{ env.FILE_BASE }}-${{ env.CPUD }}-${{ github.ref_name }}-${{ github.run_id }}"
+          echo "Key="CCache-${{ runner.os }}-${{ env.MANIFESTBASEFILE }}-${{ env.CPU }}-${{ github.ref_name }}""
 
           LOCAL="${{ steps.ccache-restore.outputs.cache-hit }}"
           RELEASE="${{ steps.cache-restoration.outputs.cache-restored }}"
@@ -4374,18 +4390,25 @@ jobs:
       # ==============================
       - name: 🔧 Fast Build
         if: ${{ github.event.inputs.FASTBUILD == 'true' }}
-        id: fast_build
+        id: fastbuild
         run: |
           set -Eeuo pipefail
-          on_error() {
+          error() {
             local line="$1"
             local code="$2"
 
             echo "⚠️ Fast Build Failed at Line $line (Exit Code $code)"
-            exit 1
+
+            if [[ -z "${FALLBACKSET:-}" ]]; then
+              echo "fallbackreason=unexpectederror" >> "$GITHUB_OUTPUT"
+              echo "fallback=true" >> "$GITHUB_OUTPUT"
+              export FALLBACKSET=1
+            fi
+
+            exit 0
           }
 
-          trap 'on_error $LINENO $?' ERR
+          trap 'error $LINENO $?' ERR
 
           echo "------------------------------"
           echo "🚀 Fast Kernel Build Processing..."
@@ -4409,7 +4432,7 @@ jobs:
           echo "------------------------------"
           echo ""
 
-          FAST_BUILD_START=$(date +%s)
+          FASTBUILDSTART=$(date +%s)
           
           cd kernel_workspace/kernel_platform || { echo "⚠️ Kernel Platform Not Found"; exit 1; }
           
@@ -4430,7 +4453,10 @@ jobs:
 
           if [[ -z "$CLANG_PREBUILT_BIN" ]]; then
             echo "⚠️ Clang Prebuilt Bin Not Found. Falling Back to Official Build Script"
-            exit 1
+            echo "fallbackreason=missingclangprebuiltbin" >> "$GITHUB_OUTPUT"
+            echo "fallback=true" >> "$GITHUB_OUTPUT"
+            export FALLBACKSET=1
+            exit 0
           fi
 
           # Clang Version Detection
@@ -4468,7 +4494,10 @@ jobs:
           if [[ -z "$CLANG_VERSION" ]]; then
             echo "⚠️ Unable to Determine Clang Version"          
             echo "⚠️ Exiting Build Due to Missing Clang Version Detection"
-            exit 1
+            echo "fallbackreason=missingclangversion" >> "$GITHUB_OUTPUT"
+            echo "fallback=true" >> "$GITHUB_OUTPUT"
+            export FALLBACKSET=1
+            exit 0
           fi
 
           # Final Clang Version Confirmation
@@ -4499,7 +4528,10 @@ jobs:
             echo ""
             echo "🔍 Debug: Listing Directory Contents..."
             ls -lah "$(dirname "$CLANG_FULL_PATH")" || true      
-            exit 1
+            echo "fallbackreason=missingclang" >> "$GITHUB_OUTPUT"
+            echo "fallback=true" >> "$GITHUB_OUTPUT"
+            export FALLBACKSET=1
+            exit 0
           fi
 
           # Lock Compiler Identity for Cache
@@ -4616,7 +4648,10 @@ jobs:
           echo ">> 🚀 Running GKI Default Configuration"
           if ! make O=out ARCH=arm64 "${MAKE_ARGS[@]}" gki_defconfig; then
             echo "⚠️ GKI Default Configuration Failed"
-            exit 1
+            echo "fallbackreason=gkidefconfigfailed" >> "$GITHUB_OUTPUT"
+            echo "fallback=true" >> "$GITHUB_OUTPUT"
+            export FALLBACKSET=1
+            exit 0
           fi
           
           # Link Time Optimization (LTO) Configuration
@@ -4685,7 +4720,10 @@ jobs:
           echo ">> 🚀 Running Old Default Configuration"
           if ! make O=out "${MAKE_ARGS[@]}" olddefconfig; then
             echo "⚠️ Old Default Configuration Failed"
-            exit 1
+            echo "fallbackreason=olddefconfigfailed" >> "$GITHUB_OUTPUT"
+            echo "fallback=true" >> "$GITHUB_OUTPUT"
+            export FALLBACKSET=1
+            exit 0
           fi
           
           # System Resource Information
@@ -4696,20 +4734,23 @@ jobs:
           echo ">> 🧾 Compiling Kernel with $(nproc) Threads"
           if ! make -j"$(nproc)" O=out "${MAKE_ARGS[@]}"; then
             echo "⚠️ Kernel Compilation Failed"
-            exit 1
+            echo "fallbackreason=compilefailed" >> "$GITHUB_OUTPUT"
+            echo "fallback=true" >> "$GITHUB_OUTPUT"
+            export FALLBACKSET=1
+            exit 0
           fi
           
           echo "📊 Compiler Cache Statistics"
           ccache -s || true
 
-          FAST_BUILD_END=$(date +%s)
-          FAST_BUILD_TIME=$((FAST_BUILD_END - FAST_BUILD_START))
+          FASTBUILDEND=$(date +%s)
+          FASTBUILDTIME=$((FASTBUILDEND - FASTBUILDSTART))
 
-          echo "fast_build_time=$FAST_BUILD_TIME" >> "$GITHUB_OUTPUT"
+          echo "fastbuildtime=$FASTBUILDTIME" >> "$GITHUB_OUTPUT"
 
-          echo "⏱️ Fast Build Time: ${FAST_BUILD_TIME}s"
+          echo "⏱️ Fast Build Time: ${FASTBUILDTIME}s"
 
-          echo "fast_build_status=success" >> "$GITHUB_OUTPUT"
+          echo "fastbuildstatus=success" >> "$GITHUB_OUTPUT"
 
           echo ""
           echo "🎉 Fast Build Completed Successfully"
@@ -4718,11 +4759,11 @@ jobs:
       # Fallback to Build Kernel
       # ==============================
       - name: 🔧 Fallback to Build Kernel
-        if: ${{ github.event.inputs.FASTBUILD != 'true' }}
+        if: ${{ steps.fastbuild.outputs.fallback == 'true' || github.event.inputs.FASTBUILD != 'true' }}
         run: |
           set -Eeuo pipefail
       
-          FALLBACK_START=$(date +%s)
+          FALLBACKSTART=$(date +%s)
       
           # Navigate
           cd kernel_workspace/kernel_platform || {
@@ -4742,10 +4783,19 @@ jobs:
           echo "📁 Method   : $METHOD"
           echo "📁 Version  : $GKIV"
           echo "------------------------------"
-          echo ""      
+          echo ""
+
+          echo "⚠️ Fallback Reason: ${{ steps.fastbuild.outputs.fallbackreason || 'Unknown' }}"
+
+          if [[ -n "${{ steps.fastbuild.outputs.fastbuildtime }}" ]]; then
+            echo "⏱️ Fast Build Ran For: ${{ steps.fastbuild.outputs.fastbuildtime }}s (Before Fallback)"
+          fi
+          echo ""
       
           # Restore Fast Build Cache
           echo "📥 Restoring Fast Build Cache..."
+
+          mkdir -p out
       
           if [[ -d ../cache ]]; then
             [[ -f ../cache/.config ]] && cp -f ../cache/.config out/.config
@@ -4783,11 +4833,11 @@ jobs:
             exit 1
           fi
       
-          FALLBACK_END=$(date +%s)
-          FALLBACK_TIME=$((FALLBACK_END - FALLBACK_START))
+          FALLBACKEND=$(date +%s)
+          FALLBACKTIME=$((FALLBACKEND - FALLBACKSTART))
       
           echo ""
-          echo "⏱️ Fallback Build Time: ${FALLBACK_TIME}s"
+          echo "⏱️ Fallback Build Time: ${FALLBACKTIME}s"
           echo "🎉 Build Done"
       
           echo ""
@@ -4796,14 +4846,39 @@ jobs:
           echo "📊 Build Time Summary"
           echo "------------------------------"
       
-          if [[ -n "${{ steps.fast_build.outputs.fast_build_time }}" ]]; then
-            echo "⚡ Fast Build : ${{ steps.fast_build.outputs.fast_build_time }}s"
+          FASTBUILDTIME="${{ steps.fastbuild.outputs.fastbuildtime }}"
+          
+          if [[ -n "$FASTBUILDTIME" ]]; then
+            echo "⏱️ Fast Build Ran For: ${FASTBUILDTIME}s (Before Fallback)"
           else
             echo "⚡ Fast Build : Skipped"
           fi
       
           echo ""
-          echo "🐢 Fallback Build : ${FALLBACK_TIME}s"
+          echo "🐢 Fallback Build : ${FALLBACKTIME}s"
+
+          # GitHub Step Summary (Dashboard)
+          FASTBUILDTIME="${{ steps.fastbuild.outputs.fastbuildtime }}"
+          FASTBUILDTIME="${FASTBUILDTIME:-0}"
+          
+          TOTALTIME=$((FALLBACKTIME + FASTBUILDTIME))
+          
+          {
+            echo "## 📊 Kernel Build Summary"
+            echo ""
+            echo "### ⚡ Build Performance"
+            echo "- **Fast Build:** ${FASTBUILDTIME}s"
+            echo "- **Fallback Build:** ${FALLBACKTIME}s"
+            echo "- **Total Time:** ${TOTALTIME}s"
+            echo ""
+            echo "### 🧾 Build Info"
+            echo "- CPU: $CPU"
+            echo "- Method: $METHOD"
+            echo "- Version: $GKIV"
+            echo ""
+            echo "### ⚠️ Fallback Reason"
+            echo "- ${{ steps.fastbuild.outputs.fallbackreason || 'Unknown' }}"
+          } >> "$GITHUB_STEP_SUMMARY"
 
       # ==============================
       # Compiler Cache Performance Summary
@@ -4894,7 +4969,7 @@ jobs:
         uses: actions/cache@v5
         with:
           path: ${{ env.CCACHE_DIR }}
-          key: CCache-${{ runner.os }}-${{ env.MANIFESTBASEFILE }}-${{ env.CPUD }}-${{ github.ref_name }}
+          key: CCache-${{ runner.os }}-${{ env.MANIFESTBASEFILE }}-${{ env.CPU }}-${{ github.ref_name }}
 
       # ==============================
       # Create Cache (Tar ZST)
