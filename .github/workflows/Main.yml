@@ -954,59 +954,95 @@ jobs:
           # Default output (always defined for fallback logic)
           echo "cache-restored=false" >> "$GITHUB_OUTPUT"
       
+
           # Variables
           TAG="${{ env.CPU }}"
           FILE="CCache-${{ env.MANIFESTBASEFILE }}-${{ runner.os }}.tar.zst"
-      
+          REPO="${{ github.repository }}"
+
           echo "📦 Release Tag: $TAG"
           echo "📁 Expected File: $FILE"
-      
+
           # Prepare Cache Directory
           mkdir -p "${{ env.CCACHE_DIR }}"
           chmod -R 775 "${{ env.CCACHE_DIR }}"
-      
-          # Download Release Asset
-          echo "📩 Downloading Cache from GitHub Releases..."
-      
-          if ! gh release download "$TAG" \
-            --repo "${{ github.repository }}" \
-            --pattern "$FILE" \
-            --output "$FILE"; then
-      
+
+          echo "📩 Fetching Release Asset Metadata..."
+
+          # Get Asset API URL
+          ASSET=$(curl -s \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/$REPO/releases/tags/$TAG" \
+            | jq -r ".assets[] | select(.name == \"$FILE\") | .url")
+
+          if [[ -z "$ASSET" || "$ASSET" == "null" ]]; then
             echo "⚠️ Cache Not Found in Release: $TAG"
             echo "➡️ Continuing Without Release Cache"
             exit 0
           fi
-      
+
+          echo "🌐 Downloading Cache (Mozilla)..."
+
+          # Retry Download (Robust Against GitHub Hiccups)
+          for i in 1 2 3; do
+            echo "⬇️ Attempt $i..."
+
+            if curl -L \
+              -H "Authorization: Bearer $GH_TOKEN" \
+              -H "Accept: application/octet-stream" \
+              -A "Mozilla/5.0" \
+              "$ASSET" \
+              -o "$FILE"; then
+              break
+            fi
+
+            echo "⚠️ Download Failed, Retrying..."
+            sleep 2
+          done
+
           echo "📦 Download Completed"
-      
-          # Validate file
+
+          # File Validation
           if [[ ! -s "$FILE" ]]; then
             echo "⚠️ Downloaded Cache is Empty or Invalid"
+            rm -f "$FILE"
             exit 0
           fi
-      
-          echo "🔍 Cache archive validated"
-      
-          # Extract Cache
+
+          # 🔍 File Size Debug
+          echo "📊 File Size:"
+          ls -lh "$FILE"
+
+          echo "🔍 Testing Archive Integrity..."
+
+          if ! zstd -t "$FILE"; then
+            echo "⚠️ Archive is Corrupted"
+            rm -f "$FILE"
+            exit 0
+          fi
+
           echo "📦 Extracting Cache..."
-      
-          if ! tar -I zstd -xf "$FILE" -C "${{ env.CCACHE_DIR }}"; then
+    
+          if ! tar --use-compress-program=unzstd -xf "$FILE" -C "${{ env.CCACHE_DIR }}"; then
             echo "⚠️ Cache Extraction Failed"
+            rm -f "$FILE"
             exit 0
           fi
-      
-          # Validate Extraction
-          if find "${{ env.CCACHE_DIR }}" -type f | read; then
+
+          echo "🔎 Validating extraction..."
+
+          if [[ -n "$(ls -A "${{ env.CCACHE_DIR }}" 2>/dev/null)" ]]; then
             echo "👾 Cache Restored Successfully"
             echo "cache-restored=true" >> "$GITHUB_OUTPUT"
           else
             echo "⚠️ Cache Directory is Empty After Extraction"
+            rm -rf "${{ env.CCACHE_DIR }}"
           fi
-      
+
           echo ""
           echo "🎉 Release Cache Step Completed"
-   
+    
       # ==============================
       # Local Cache Restoration (Fallback)
       # ==============================
