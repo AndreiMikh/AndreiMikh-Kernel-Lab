@@ -3561,117 +3561,115 @@ jobs:
           # Paths
           TARGETPATH="kernel_workspace/kernel_platform/common"
           SCHEDFILE="$TARGETPATH/include/linux/sched.h"
+          GHOSTPATCHDIR="kernel_workspace/Action-Build"
+          PATCHPATH="$GHOSTPATCHDIR/patches"
+          GHOSTPATCH="$PATCHPATH/ghost-task-for-midas.patch"
 
-          # Validation
-          if [[ ! -d "$TARGETPATH" ]]; then
-            echo "⚠️ Kernel Directory Missing:"
-            echo "   $TARGETPATH"
-            exit 1
+          # Ensure Ghost Patch Directory Exists
+          if [[ ! -d "$GHOSTPATCHDIR" ]]; then
+            echo "📦 Action-Build Not Found, Cloning..."
+
+            git clone https://github.com/Numbersf/Action-Build.git "$GHOSTPATCHDIR"
           fi
 
-          if [[ ! -f "$SCHEDFILE" ]]; then
-            echo "⚠️ Missing Scheduler Header:"
-            echo "   $SCHEDFILE"
+          # Validate kernel tree
+          [[ -d "$TARGETPATH" ]] || {
+            echo "⚠️ Kernel Directory Missing: $TARGETPATH"
             exit 1
-          fi
+          }
 
-          # Navigate
+          [[ -f "$SCHEDFILE" ]] || {
+            echo "⚠️ Missing Scheduler Header File: $SCHEDFILE"
+            exit 1
+          }
+
+          [[ -f "$GHOSTPATCH" ]] || {
+            echo "⚠️ Missing Patch File: $GHOSTPATCH"
+            exit 1
+          }
+
           cd "$TARGETPATH"
 
-          echo "📂 Current Directory:"
-          pwd
+          echo "📂 Kernel Directory OK"
+          echo "📦 Patch Directory: $PATCHPATH"
           echo ""
 
           # Backup
-          echo "🛟 Creating Safety Backup..."
           cp -af "$SCHEDFILE" "${SCHEDFILE}.bak"
 
           rollback() {
-            echo ""
-            echo "⚠️ Injection Failed"
-            echo "♻️ Restoring Original sched.h..."
+            echo "⚠️ Injection Failed — Restoring Original Scheduler Header File"
             cp -af "${SCHEDFILE}.bak" "$SCHEDFILE"
           }
 
           trap rollback ERR
 
-          # Existing Injection Detection
-          if grep -qE "sysvsem|sysvshm" "$SCHEDFILE"; then
-            echo "ℹ️ Existing System V IPC Injection Detected"
-            echo "➡️ Skipping Duplicate Injection"
-
+          # Idempotency Check
+          if grep -q "sysvsem" "$SCHEDFILE" && grep -q "sysvshm" "$SCHEDFILE"; then
+            echo "ℹ️ Already Injected — Skipping Safely"
             rm -f "${SCHEDFILE}.bak"
             trap - ERR
             exit 0
           fi
 
-          echo "🔎 Detecting Compatible Kernel ABI Layout..."
+          echo "🔎 Detecting Kernel ABI Layout..."
           echo ""
 
-          # Modern Android Common Kernel
-          # Android 15/16 GKI 6.6+
+          # Modern GKI Kernel
           if grep -q "sched_dl_entity.*\*dl_server" "$SCHEDFILE"; then
 
-            echo "📌 Modern GKI Layout Detected"
-            echo "🎰 Applying Packed Union Injection"
+            echo "📌 Modern GKI Kernel Detected"
 
             sed -i \
-            's|\tstruct sched_entity\t\tse;|#ifdef CONFIG_SYSVIPC\n\tunion {\n\t\tchar __droidspaces_reserved0;\n\t\tstruct sysv_sem\t\t\tsysvsem;\n\t} __attribute__((packed));\n\tunion {\n\t\tchar __droidspaces_reserved1;\n\t\tstruct sysv_shm\t\t\tsysvshm;\n\t} __attribute__((packed));\n#endif\n\n\tstruct sched_entity\t\tse;|' \
+            's|\tstruct sched_entity\t\tse;|#ifdef CONFIG_SYSVIPC\n\tunion {\n\t\tchar __droidspaces_reserved0;\n\t\tstruct sysv_sem sysvsem;\n\t} __attribute__((packed));\n\tunion {\n\t\tchar __droidspaces_reserved1;\n\t\tstruct sysv_shm sysvshm;\n\t} __attribute__((packed));\n#endif\n\n\tstruct sched_entity\t\tse;|' \
             "$SCHEDFILE"
 
-          # Modern Android Kernel ABI Layout
+          # Kernel ABI USE(1)
           elif grep -q "ANDROID_KABI_USE(1," "$SCHEDFILE"; then
 
-            echo "📌 Android Kernel ABI USE Layout Detected"
-            echo "🎰 Using Reserved Slots 6-7-8"
+            echo "📌 Kernel ABI USE Layout Detected"
 
-            sed -i \
-            -e '/ANDROID_KABI_RESERVE(6);/{N;N;s|\tANDROID_KABI_RESERVE(6);\n\tANDROID_KABI_RESERVE(7);\n\tANDROID_KABI_RESERVE(8);|#ifdef CONFIG_SYSVIPC\n\tANDROID_KABI_USE(6, struct sysv_sem sysvsem);\n\t_ANDROID_KABI_REPLACE(ANDROID_KABI_RESERVE(7); ANDROID_KABI_RESERVE(8), struct sysv_shm sysvshm);\n#else\n\tANDROID_KABI_RESERVE(6);\n\tANDROID_KABI_RESERVE(7);\n\tANDROID_KABI_RESERVE(8);\n#endif|;}' \
+            sed -i -e '/ANDROID_KABI_RESERVE(6);/{N;N;s|\tANDROID_KABI_RESERVE(6);\n\tANDROID_KABI_RESERVE(7);\n\tANDROID_KABI_RESERVE(8);|#ifdef CONFIG_SYSVIPC\n\tANDROID_KABI_USE(6, struct sysv_sem sysvsem);\n\t_ANDROID_KABI_REPLACE(ANDROID_KABI_RESERVE(7); ANDROID_KABI_RESERVE(8), struct sysv_shm sysvshm);\n#else\n\tANDROID_KABI_RESERVE(6);\n\tANDROID_KABI_RESERVE(7);\n\tANDROID_KABI_RESERVE(8);\n#endif|;}' \
             "$SCHEDFILE"
 
-          # Legacy Android Kernel ABI Layout
+          # Legacy Kernel ABI
           elif grep -q "ANDROID_KABI_RESERVE(1);" "$SCHEDFILE"; then
 
-            echo "📌 Legacy Android Kernel ABI Layout Detected"
-            echo "🎰 Using Reserved Slots 1-2-3"
+            echo "📌 Legacy Kernel ABI detected"
 
-            sed -i \
-            -e '/ANDROID_KABI_RESERVE(1);/{N;N;N;N;N;N;N;s|\tANDROID_KABI_RESERVE(1);\n\tANDROID_KABI_RESERVE(2);\n\tANDROID_KABI_RESERVE(3);\n\tANDROID_KABI_RESERVE(4);\n\tANDROID_KABI_RESERVE(5);\n\tANDROID_KABI_RESERVE(6);\n\tANDROID_KABI_RESERVE(7);\n\tANDROID_KABI_RESERVE(8);|#ifdef CONFIG_SYSVIPC\n\tANDROID_KABI_USE(1, struct sysv_sem sysvsem);\n\t_ANDROID_KABI_REPLACE(ANDROID_KABI_RESERVE(2); ANDROID_KABI_RESERVE(3), struct sysv_shm sysvshm);\n#else\n\tANDROID_KABI_RESERVE(1);\n\tANDROID_KABI_RESERVE(2);\n\tANDROID_KABI_RESERVE(3);\n#endif\n\tANDROID_KABI_RESERVE(4);\n\tANDROID_KABI_RESERVE(5);\n\tANDROID_KABI_RESERVE(6);\n\tANDROID_KABI_RESERVE(7);\n\tANDROID_KABI_RESERVE(8);|;}' \
+            sed -i -e '/ANDROID_KABI_RESERVE(1);/{N;N;N;N;N;N;N;s|\tANDROID_KABI_RESERVE(1);\n\tANDROID_KABI_RESERVE(2);\n\tANDROID_KABI_RESERVE(3);\n\tANDROID_KABI_RESERVE(4);\n\tANDROID_KABI_RESERVE(5);\n\tANDROID_KABI_RESERVE(6);\n\tANDROID_KABI_RESERVE(7);\n\tANDROID_KABI_RESERVE(8);|#ifdef CONFIG_SYSVIPC\n\tANDROID_KABI_USE(1, struct sysv_sem sysvsem);\n\t_ANDROID_KABI_REPLACE(ANDROID_KABI_RESERVE(2); ANDROID_KABI_RESERVE(3), struct sysv_shm sysvshm);\n#else\n\tANDROID_KABI_RESERVE(1);\n\tANDROID_KABI_RESERVE(2);\n\tANDROID_KABI_RESERVE(3);\n#endif\n\tANDROID_KABI_RESERVE(4);\n\tANDROID_KABI_RESERVE(5);\n\tANDROID_KABI_RESERVE(6);\n\tANDROID_KABI_RESERVE(7);\n\tANDROID_KABI_RESERVE(8);|;}' \
             "$SCHEDFILE"
 
-          # Fallback Android Kernel ABI Layout
+          # Fallback Kernel ABI
           elif grep -q "ANDROID_KABI_RESERVE(3);" "$SCHEDFILE"; then
 
-            echo "📌 Fallback Android Kernel ABI Layout Detected"
-            echo "🎰 Using Reserved Slots 3-4-5"
+            echo "📌 Fallback Kernel ABI Detected"
 
-            sed -i \
-            -e '/ANDROID_KABI_RESERVE(3);/{N;N;N;s|\tANDROID_KABI_RESERVE(3);\n\tANDROID_KABI_RESERVE(4);\n\tANDROID_KABI_RESERVE(5);\n\tANDROID_KABI_RESERVE(6);|#ifdef CONFIG_SYSVIPC\n\tANDROID_KABI_USE(3, struct sysv_sem sysvsem);\n\t_ANDROID_KABI_REPLACE(ANDROID_KABI_RESERVE(4); ANDROID_KABI_RESERVE(5), struct sysv_shm sysvshm);\n#else\n\tANDROID_KABI_RESERVE(3);\n\tANDROID_KABI_RESERVE(4);\n\tANDROID_KABI_RESERVE(5);\n#endif\n\tANDROID_KABI_RESERVE(6);|;}' \
+            sed -i -e '/ANDROID_KABI_RESERVE(3);/{N;N;N;s|\tANDROID_KABI_RESERVE(3);\n\tANDROID_KABI_RESERVE(4);\n\tANDROID_KABI_RESERVE(5);\n\tANDROID_KABI_RESERVE(6);|#ifdef CONFIG_SYSVIPC\n\tANDROID_KABI_USE(3, struct sysv_sem sysvsem);\n\t_ANDROID_KABI_REPLACE(ANDROID_KABI_RESERVE(4); ANDROID_KABI_RESERVE(5), struct sysv_shm sysvshm);\n#else\n\tANDROID_KABI_RESERVE(3);\n\tANDROID_KABI_RESERVE(4);\n\tANDROID_KABI_RESERVE(5);\n#endif\n\tANDROID_KABI_RESERVE(6);|;}' \
             "$SCHEDFILE"
 
           else
             echo "⚠️ Unsupported Kernel ABI Layout"
-            echo "⚠️ Injection Aborted to Prevent Android Kernel ABI Corruption"
             exit 1
           fi
 
           # Verification
           echo ""
-          echo "🔎 Verifying Injected Fields..."
+          echo "🔎 Verifying Injection..."
 
-          if ! grep -q "sysvsem" "$SCHEDFILE"; then
-            echo "⚠️ System V SEM Injection Failed"
-            exit 1
-          fi
+          grep -q "sysvsem" "$SCHEDFILE" || { echo "⚠️ System V SEM Missing"; exit 1; }
+          grep -q "sysvshm" "$SCHEDFILE" || { echo "⚠️ System V SHM Missing"; exit 1; }
 
-          if ! grep -q "sysvshm" "$SCHEDFILE"; then
-            echo "⚠️ System V SHM Injection Failed"
-            exit 1
-          fi
-
-          echo ""
           echo "📋 Injected Entries:"
           grep -nE "sysvsem|sysvshm" "$SCHEDFILE"
+
+          # Ghost Task Patch
+          echo ""
+          echo "👻 Applying Ghost-Task-for-Midas Patch..."
+
+          patch -p1 --forward < "$GHOSTPATCH"
+
+          echo "✔ Patch Applied Successfully"
 
           # Cleanup
           rm -f "${SCHEDFILE}.bak"
