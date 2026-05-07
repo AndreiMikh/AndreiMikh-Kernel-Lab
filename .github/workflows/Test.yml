@@ -1,7 +1,7 @@
 # ===========================
 # OnePlus Kernel Build
 # ===========================
-name: ☘️ Main
+name: ☘️ Test
 on:
   workflow_dispatch:
     inputs:
@@ -3554,78 +3554,131 @@ jobs:
           set -euo pipefail
 
           echo "------------------------------"
-          echo "🚀 DroidSpacesLXC System V IPC Inject Setup..."
+          echo "🚀 DroidSpacesLXC IPC Injection"
           echo "------------------------------"
           echo ""
 
-          # Enter Kernel Directory
+          # Paths
           TARGETPATH="kernel_workspace/kernel_platform/common"
+          SCHEDFILE="$TARGETPATH/include/linux/sched.h"
 
-          if [ ! -d "$TARGETPATH" ]; then
-            echo "⚠️ Directory Not Found: $TARGETPATH"
+          # Validation
+          if [[ ! -d "$TARGETPATH" ]]; then
+            echo "⚠️ Kernel Directory Missing:"
+            echo "   $TARGETPATH"
             exit 1
           fi
 
+          if [[ ! -f "$SCHEDFILE" ]]; then
+            echo "⚠️ Missing Scheduler Header:"
+            echo "   $SCHEDFILE"
+            exit 1
+          fi
+
+          # Navigate
           cd "$TARGETPATH"
 
-          # Verify Scheduler Header File Exists Before Modifying
-          SCHEDFILE="include/linux/sched.h"
+          echo "📂 Current Directory:"
+          pwd
+          echo ""
 
-          if [ ! -f "$SCHEDFILE" ]; then
-            echo "⚠️ Missing Scheduler Header File: $SCHEDFILE"
-            exit 1
+          # Backup
+          echo "🛟 Creating Safety Backup..."
+          cp -af "$SCHEDFILE" "${SCHEDFILE}.bak"
+
+          rollback() {
+            echo ""
+            echo "⚠️ Injection Failed"
+            echo "♻️ Restoring Original sched.h..."
+            cp -af "${SCHEDFILE}.bak" "$SCHEDFILE"
+          }
+
+          trap rollback ERR
+
+          # Existing Injection Detection
+          if grep -qE "sysvsem|sysvshm" "$SCHEDFILE"; then
+            echo "ℹ️ Existing System V IPC Injection Detected"
+            echo "➡️ Skipping Duplicate Injection"
+
+            rm -f "${SCHEDFILE}.bak"
+            trap - ERR
+            exit 0
           fi
 
-          # Backup for Safety
-          cp -f "$SCHEDFILE" "${SCHEDFILE}.bak"
-          
-          # Auto Rollback on Failure
-          trap 'echo "⚠️ Injection Failed — Restoring Original Scheduler Header File"; cp -f "${SCHEDFILE}.bak" "$SCHEDFILE"' ERR
+          echo "🔎 Detecting Compatible Kernel ABI Layout..."
+          echo ""
 
-          # Disable Original System V IPC Fields (Prevent Duplicate Definitions)
-          echo "⚙️ Disabling Original System V IPC Struct Fields in Scheduler Header File..."
-
-          for field in sysvsem sysvshm; do
-            sed -i "s/struct sysv_.*\s*$field;/\/\/ struct sysv_.*\t\t\t$field;/g" "$SCHEDFILE"
-          done
-
-          # Detect Kernel ABI Struct Layout + Inject
-          echo "🔎 Inspecting Scheduler Header File for Compatible Struct Layout..."
-
+          # Modern Android Common Kernel
+          # Android 15/16 GKI 6.6+
           if grep -q "sched_dl_entity.*\*dl_server" "$SCHEDFILE"; then
-            echo "♻️ Detected DL Server Pointer — 🎰 Applying Packed Union Strategy (Modern Kernels)"
 
-            sed -i 's|\tstruct sched_entity\t\tse;|#ifdef CONFIG_SYSVIPC\n\tunion {\n\t\tchar __kabi_ignored_0;\n\t\tstruct sysv_sem\t\t\tsysvsem;\n\t} __attribute__((packed));\n\tunion {\n\t\tchar __kabi_ignored_1;\n\t\tstruct sysv_shm\t\t\tsysvshm;\n\t} __attribute__((packed));\n#endif\n\n\tstruct sched_entity\t\tse;|' "$SCHEDFILE"
+            echo "📌 Modern GKI Layout Detected"
+            echo "🎰 Applying Packed Union Injection"
 
+            sed -i \
+            's|\tstruct sched_entity\t\tse;|#ifdef CONFIG_SYSVIPC\n\tunion {\n\t\tchar __droidspaces_reserved0;\n\t\tstruct sysv_sem\t\t\tsysvsem;\n\t} __attribute__((packed));\n\tunion {\n\t\tchar __droidspaces_reserved1;\n\t\tstruct sysv_shm\t\t\tsysvshm;\n\t} __attribute__((packed));\n#endif\n\n\tstruct sched_entity\t\tse;|' \
+            "$SCHEDFILE"
+
+          # Modern Android Kernel ABI Layout
           elif grep -q "ANDROID_KABI_USE(1," "$SCHEDFILE"; then
-            echo "♻️ Detected Android Kernel ABI Use(1) — 🎰 Utilizing Reserved Slots 6 – 7 – 8"
 
-            sed -i -e '/ANDROID_KABI_RESERVE(6);/{N;N;s|\tANDROID_KABI_RESERVE(6);\n\tANDROID_KABI_RESERVE(7);\n\tANDROID_KABI_RESERVE(8);|#ifdef CONFIG_SYSVIPC\n\tANDROID_KABI_USE(6, struct sysv_sem sysvsem);\n\t_ANDROID_KABI_REPLACE(ANDROID_KABI_RESERVE(7); ANDROID_KABI_RESERVE(8), struct sysv_shm sysvshm);\n#else\n\tANDROID_KABI_RESERVE(6);\n\tANDROID_KABI_RESERVE(7);\n\tANDROID_KABI_RESERVE(8);\n#endif|;}' "$SCHEDFILE"
+            echo "📌 Android Kernel ABI USE Layout Detected"
+            echo "🎰 Using Reserved Slots 6-7-8"
 
+            sed -i \
+            -e '/ANDROID_KABI_RESERVE(6);/{N;N;s|\tANDROID_KABI_RESERVE(6);\n\tANDROID_KABI_RESERVE(7);\n\tANDROID_KABI_RESERVE(8);|#ifdef CONFIG_SYSVIPC\n\tANDROID_KABI_USE(6, struct sysv_sem sysvsem);\n\t_ANDROID_KABI_REPLACE(ANDROID_KABI_RESERVE(7); ANDROID_KABI_RESERVE(8), struct sysv_shm sysvshm);\n#else\n\tANDROID_KABI_RESERVE(6);\n\tANDROID_KABI_RESERVE(7);\n\tANDROID_KABI_RESERVE(8);\n#endif|;}' \
+            "$SCHEDFILE"
+
+          # Legacy Android Kernel ABI Layout
           elif grep -q "ANDROID_KABI_RESERVE(1);" "$SCHEDFILE"; then
-            echo "♻️ Detected Legacy Kernel ABI Layout — 🎰 Utilizing Slots 1 – 2 – 3"
 
-            sed -i -e '/ANDROID_KABI_RESERVE(1);/{N;N;N;N;N;N;N;s|\tANDROID_KABI_RESERVE(1);\n\tANDROID_KABI_RESERVE(2);\n\tANDROID_KABI_RESERVE(3);\n\tANDROID_KABI_RESERVE(4);\n\tANDROID_KABI_RESERVE(5);\n\tANDROID_KABI_RESERVE(6);\n\tANDROID_KABI_RESERVE(7);\n\tANDROID_KABI_RESERVE(8);|#ifdef CONFIG_SYSVIPC\n\tANDROID_KABI_USE(1, struct sysv_sem sysvsem);\n\t_ANDROID_KABI_REPLACE(ANDROID_KABI_RESERVE(2); ANDROID_KABI_RESERVE(3), struct sysv_shm sysvshm);\n#else\n\tANDROID_KABI_RESERVE(1);\n\tANDROID_KABI_RESERVE(2);\n\tANDROID_KABI_RESERVE(3);\n#endif\n\tANDROID_KABI_RESERVE(4);\n\tANDROID_KABI_RESERVE(5);\n\tANDROID_KABI_RESERVE(6);\n\tANDROID_KABI_RESERVE(7);\n\tANDROID_KABI_RESERVE(8);|;}' "$SCHEDFILE"
+            echo "📌 Legacy Android Kernel ABI Layout Detected"
+            echo "🎰 Using Reserved Slots 1-2-3"
 
+            sed -i \
+            -e '/ANDROID_KABI_RESERVE(1);/{N;N;N;N;N;N;N;s|\tANDROID_KABI_RESERVE(1);\n\tANDROID_KABI_RESERVE(2);\n\tANDROID_KABI_RESERVE(3);\n\tANDROID_KABI_RESERVE(4);\n\tANDROID_KABI_RESERVE(5);\n\tANDROID_KABI_RESERVE(6);\n\tANDROID_KABI_RESERVE(7);\n\tANDROID_KABI_RESERVE(8);|#ifdef CONFIG_SYSVIPC\n\tANDROID_KABI_USE(1, struct sysv_sem sysvsem);\n\t_ANDROID_KABI_REPLACE(ANDROID_KABI_RESERVE(2); ANDROID_KABI_RESERVE(3), struct sysv_shm sysvshm);\n#else\n\tANDROID_KABI_RESERVE(1);\n\tANDROID_KABI_RESERVE(2);\n\tANDROID_KABI_RESERVE(3);\n#endif\n\tANDROID_KABI_RESERVE(4);\n\tANDROID_KABI_RESERVE(5);\n\tANDROID_KABI_RESERVE(6);\n\tANDROID_KABI_RESERVE(7);\n\tANDROID_KABI_RESERVE(8);|;}' \
+            "$SCHEDFILE"
+
+          # Fallback Android Kernel ABI Layout
           elif grep -q "ANDROID_KABI_RESERVE(3);" "$SCHEDFILE"; then
-            echo "♻️ Fallback Kernel ABI Struct Layout Detected — 🎰 Utilizing Slots 3 – 4 – 5"
 
-            sed -i -e '/ANDROID_KABI_RESERVE(3);/{N;N;N;s|\tANDROID_KABI_RESERVE(3);\n\tANDROID_KABI_RESERVE(4);\n\tANDROID_KABI_RESERVE(5);\n\tANDROID_KABI_RESERVE(6);|#ifdef CONFIG_SYSVIPC\n\tANDROID_KABI_USE(3, struct sysv_sem sysvsem);\n\t_ANDROID_KABI_REPLACE(ANDROID_KABI_RESERVE(4); ANDROID_KABI_RESERVE(5), struct sysv_shm sysvshm);\n#else\n\tANDROID_KABI_RESERVE(3);\n\tANDROID_KABI_RESERVE(4);\n\tANDROID_KABI_RESERVE(5);\n#endif\n\tANDROID_KABI_RESERVE(6);|;}' "$SCHEDFILE"
+            echo "📌 Fallback Android Kernel ABI Layout Detected"
+            echo "🎰 Using Reserved Slots 3-4-5"
+
+            sed -i \
+            -e '/ANDROID_KABI_RESERVE(3);/{N;N;N;s|\tANDROID_KABI_RESERVE(3);\n\tANDROID_KABI_RESERVE(4);\n\tANDROID_KABI_RESERVE(5);\n\tANDROID_KABI_RESERVE(6);|#ifdef CONFIG_SYSVIPC\n\tANDROID_KABI_USE(3, struct sysv_sem sysvsem);\n\t_ANDROID_KABI_REPLACE(ANDROID_KABI_RESERVE(4); ANDROID_KABI_RESERVE(5), struct sysv_shm sysvshm);\n#else\n\tANDROID_KABI_RESERVE(3);\n\tANDROID_KABI_RESERVE(4);\n\tANDROID_KABI_RESERVE(5);\n#endif\n\tANDROID_KABI_RESERVE(6);|;}' \
+            "$SCHEDFILE"
 
           else
-            echo "⚠️ Unable to Determine Compatible Kernel ABI Struct Layout — 🔧 Aborting to Prevent ABI Corruption"
+            echo "⚠️ Unsupported Kernel ABI Layout"
+            echo "⚠️ Injection Aborted to Prevent Android Kernel ABI Corruption"
             exit 1
           fi
 
           # Verification
+          echo ""
           echo "🔎 Verifying Injected Fields..."
-          grep -n "sysv_sem\|sysv_shm" "$SCHEDFILE" || {
-            echo "⚠️ Injection Verification Failed!"
+
+          if ! grep -q "sysvsem" "$SCHEDFILE"; then
+            echo "⚠️ System V SEM Injection Failed"
             exit 1
-          }
+          fi
+
+          if ! grep -q "sysvshm" "$SCHEDFILE"; then
+            echo "⚠️ System V SHM Injection Failed"
+            exit 1
+          fi
 
           echo ""
-          echo "🎉 System V IPC Inject Integration Completed Successfully"
+          echo "📋 Injected Entries:"
+          grep -nE "sysvsem|sysvshm" "$SCHEDFILE"
+
+          # Cleanup
+          rm -f "${SCHEDFILE}.bak"
+          trap - ERR
+
+          echo ""
+          echo "🎉 DroidSpacesLXC IPC Injection Completed Successfully"
 
       # ==============================
       # DroidSpacesLXC WildKernels Patch
