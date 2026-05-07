@@ -3559,33 +3559,71 @@ jobs:
           echo ""
 
           # Paths
-          PDIR="${GITHUB_WORKSPACE}/kernel_workspace/AndreiMikh-Kernel-Lab/patches"
+          WORKSPACE="${GITHUB_WORKSPACE:-$(pwd)}"
+          PDIR="${WORKSPACE}/kernel_workspace/AndreiMikh-Kernel-Lab/patches"
           TARGETPATH="kernel_workspace/kernel_platform/common"
-
-          if [ ! -d "$TARGETPATH" ]; then
-            echo "⚠️ Directory Not Found: $TARGETPATH"
-            exit 1
-          fi
-
-          cd "$TARGETPATH"
-
+          
           SCHEDFILE="include/linux/sched.h"
           USERFILE="include/linux/sched/user.h"
 
-          if [ ! -f "$SCHEDFILE" ]; then
-            echo "⚠️ Missing Scheduler Header File: $SCHEDFILE"
+          # Safety Checks
+          if [ ! -d "$TARGETPATH" ]; then
+            echo "⚠️ Missing Target Path: $TARGETPATH"
             exit 1
           fi
-
-          # Backup for Safety
-          cp -f "$SCHEDFILE" "${SCHEDFILE}.bak"
-          cp -f "$USERFILE" "${USERFILE}.bak"
           
-          trap 'echo "⚠️ Failure — Restoring"; cp -f "${SCHEDFILE}.bak" "$SCHEDFILE"; cp -f "${USERFILE}.bak" "$USERFILE"' ERR
+          cd "$TARGETPATH"
+          
+          if [ ! -f "$SCHEDFILE" ] || [ ! -f "$USERFILE" ]; then
+            echo "⚠️ Required Kernel Headers Missing"
+            exit 1
+          fi
+          
+          # Backup System
+          BACKUPDIR="${WORKSPACE}/.kabi"
+          mkdir -p "$BACKUPDIR"
+          
+          cp -f "$SCHEDFILE" "$BACKUPDIR/sched.h.bak"
+          cp -f "$USERFILE" "$BACKUPDIR/user.h.bak"
+          
+          restore() {
+            echo "⚠️ Failure Detected — Restoring Original Kernel Headers..."
+            cp -f "$BACKUPDIR/sched.h.bak" "$SCHEDFILE" || true
+            cp -f "$BACKUPDIR/user.h.bak" "$USERFILE" || true
+          }
+          
+          trap restore ERR
+          
+          # Patch Helper (Idempotent)
+          applypatch() {
+            local patchfile="$1"
+          
+            if [ ! -f "$patchfile" ]; then
+              echo "⚠️ Patch Not Found: $patchfile"
+              return 1
+            fi
+          
+            # 1. Check if Already Applied (Reverse Check)
+            if patch -p1 -R --dry-run < "$patchfile" >/dev/null 2>&1; then
+              echo "☘️ Patch Already Applied (Detected via Reverse Dry-Run): $(basename "$patchfile")"
+              return 0
+            fi
+          
+            # 2. Check if it can be Applied Cleanly
+            if patch -p1 --dry-run < "$patchfile" >/dev/null 2>&1; then
+              echo "🔧 Applying patch: $(basename "$patchfile")"
+              patch -p1 < "$patchfile"
+              echo "☘️ Patch Applied"
+              return 0
+            fi
+          
+            echo "ℹ️ Patch Skipped (Not Applicable or Conflicts Detected): $(basename "$patchfile")"
+            return 0
+          }
 
-          echo "⚙️ Disabling Original System V IPC Struct Fields..."
-          sed -i 's/^\(\t\)struct sysv_sem\b.*sysvsem;/\1\/\/ struct sysv_sem\t\t\tsysvsem;/' "$SCHEDFILE"
-          sed -i 's/^\(\t\)struct sysv_shm\b.*sysvshm;/\1\/\/ struct sysv_shm\t\t\tsysvshm;/' "$SCHEDFILE"
+          echo "⚙️ Disabling / Neutralizing Original System V IPC Struct Fields..."
+          sed -i 's/^\(\t\)struct sysv_sem\b.*sysvsem;/\1\/\/ struct sysv_sem\t\t\tsysvsem;/' "$SCHEDFILE" || true
+          sed -i 's/^\(\t\)struct sysv_shm\b.*sysvshm;/\1\/\/ struct sysv_shm\t\t\tsysvshm;/' "$SCHEDFILE" || true
 
           # Android 12-5.10 Special Handling
           if [ "${KMI:-}" = "android12-5.10" ]; then
@@ -3618,19 +3656,13 @@ jobs:
 
           # Verification
           echo "🔎 Verifying Injection..."
-          grep -n "sysv_sem\|sysv_shm" "$SCHEDFILE" || {
-            echo "⚠️ Injection Verification Failed"
-            exit 1
-          }
+          
+          grep -q "sysv_sem" "$SCHEDFILE" || { echo "⚠️ System V SEM Missing"; exit 1; }
+          grep -q "sysv_shm" "$SCHEDFILE" || { echo "⚠️ System V SHM Missing"; exit 1; }
 
-          # Restore MIDAS Fix
-          echo "🔧 Applying Ghost Task Fix for OPlus BSP Midas..."
-
-          if patch -p1 --forward < "${PDIR}/ghost-task-for-midas.patch"; then
-            echo "🚀 Ghost-Task-for-Midas Patch Applied Successfully"
-          else
-            echo "⚠️ Ghost-Task-for-Midas Patch Failed or Already Applied (Skipping)"
-          fi
+          # Restore Ghost Task Fix for OPlus BSP Midas Fix Patch
+          echo "🔧 Applying MIDAS patch"
+          applypatch "$PDIR/ghost-task-for-midas.patch"
         
           echo ""
           echo "🎉 DroidSpaces System V IPC Injection Completed Successfully"
