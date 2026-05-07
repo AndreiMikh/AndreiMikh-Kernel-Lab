@@ -3627,43 +3627,69 @@ jobs:
 
           # Android 12-5.10 Special Handling
           if [ "${KMI:-}" = "android12-5.10" ]; then
-            echo "🔧 Fixing System V IPC Kernel ABI + POSIX MQUEUE ABI Padding for Android12-5.10..."
-            sed -i '/^\tconst struct sched_class\t\*sched_class;/a \\n#ifndef __GENKSYMS__\n\tstruct sysv_sem\t\t\tsysvsem;\n\tstruct sysv_shm\t\t\tsysvshm;\n#endif\n' "$SCHEDFILE"
-            sed -i 's/^\tunsigned long mq_bytes;/\/\/unsigned long mq_bytes;/' "$USERFILE"
-            sed -i '/struct ratelimit_state ratelimit;/,/ANDROID_OEM_DATA_ARRAY(1, 2);/{/^\tANDROID_KABI_RESERVE(1);/{N;N;s/^\tANDROID_KABI_RESERVE(1);\n\tANDROID_KABI_RESERVE(2);\n\tANDROID_OEM_DATA_ARRAY(1, 2);/#if defined(CONFIG_POSIX_MQUEUE)\n\tANDROID_KABI_USE(1, unsigned long mq_bytes);\n\tANDROID_KABI_RESERVE(2);\n\tANDROID_OEM_DATA_ARRAY(1, 2);\n#else\n\tANDROID_KABI_RESERVE(1);\n\tANDROID_KABI_RESERVE(2);\n\tANDROID_OEM_DATA_ARRAY(1, 2);\n#endif/}}' "$USERFILE"
-
-          # ABI Layout Detection (Shared Logic)
-          elif grep -q "sched_dl_entity.*\*dl_server" "$SCHEDFILE"; then
-            echo "♻️ Detected dl_server pointer — using packed union strategy"
-            sed -i 's|\tstruct sched_entity\t\tse;|#ifdef CONFIG_SYSVIPC\n\tunion {\n\t\tchar __kabi_ignored_0;\n\t\tstruct sysv_sem\t\t\tsysvsem;\n\t} __attribute__((packed));\n\tunion {\n\t\tchar __kabi_ignored_1;\n\t\tstruct sysv_shm\t\t\tsysvshm;\n\t} __attribute__((packed));\n#endif\n\n\tstruct sched_entity\t\tse;|' "$SCHEDFILE"
-
+            echo "🔧 Android12-5.10 IPC ABI Handling..."
+          
+            sed -i '/^\tconst struct sched_class\t\*sched_class;/a\
+          #ifndef __GENKSYMS__\
+          \tstruct sysv_sem sysvsem;\
+          \tstruct sysv_shm sysvshm;\
+          #endif' "$SCHEDFILE"
+          
+            sed -i 's/^\tunsigned long mq_bytes;/\/\/ unsigned long mq_bytes;/' "$USERFILE"
+          fi
+          
+          # ABI Detection Chain
+          if grep -q "sched_dl_entity.*\*dl_server" "$SCHEDFILE"; then
+            echo "♻️ DL Server Detected — Packed Union Strategy"
+          
+            sed -i '/struct sched_entity se;/i\
+          #ifdef CONFIG_SYSVIPC\
+          \tunion { char __kabi_ignored_0; struct sysv_sem sysvsem; } __attribute__((packed));\
+          \tunion { char __kabi_ignored_1; struct sysv_shm sysvshm; } __attribute__((packed));\
+          #endif' "$SCHEDFILE"
+          
           elif grep -q "ANDROID_KABI_USE(1," "$SCHEDFILE"; then
-            echo "♻️ Detected Kernel ABI USE(1) — ☘️ Using Slots 6, 7 and 8"
-            sed -i -e '/ANDROID_KABI_RESERVE(6);/{N;N;s|\tANDROID_KABI_RESERVE(6);\n\tANDROID_KABI_RESERVE(7);\n\tANDROID_KABI_RESERVE(8);|#ifdef CONFIG_SYSVIPC\n\tANDROID_KABI_USE(6, struct sysv_sem sysvsem);\n\t_ANDROID_KABI_REPLACE(ANDROID_KABI_RESERVE(7); ANDROID_KABI_RESERVE(8), struct sysv_shm sysvshm);\n#else\n\tANDROID_KABI_RESERVE(6);\n\tANDROID_KABI_RESERVE(7);\n\tANDROID_KABI_RESERVE(8);\n#endif|;}' "$SCHEDFILE"
-
+            echo "♻️ Kernel ABI USE(1) Detected — Slots 6, 7 and 8"
+          
+            sed -i 's/ANDROID_KABI_RESERVE(6);/\
+          #ifdef CONFIG_SYSVIPC\
+          ANDROID_KABI_USE(6, struct sysv_sem sysvsem);\
+          ANDROID_KABI_RESERVE(7);\
+          ANDROID_KABI_RESERVE(8);\
+          #else/' "$SCHEDFILE"
+          
           elif grep -q "ANDROID_KABI_RESERVE(1);" "$SCHEDFILE"; then
-            echo "♻️ Detected Legacy Kernel ABI — ☘️ Using Slots 1, 2 and 3"
-            sed -i -e '/ANDROID_KABI_RESERVE(1);/{N;N;N;N;N;N;N;s|\tANDROID_KABI_RESERVE(1);\n\tANDROID_KABI_RESERVE(2);\n\tANDROID_KABI_RESERVE(3);\n\tANDROID_KABI_RESERVE(4);\n\tANDROID_KABI_RESERVE(5);\n\tANDROID_KABI_RESERVE(6);\n\tANDROID_KABI_RESERVE(7);\n\tANDROID_KABI_RESERVE(8);|#ifdef CONFIG_SYSVIPC\n\tANDROID_KABI_USE(1, struct sysv_sem sysvsem);\n\t_ANDROID_KABI_REPLACE(ANDROID_KABI_RESERVE(2); ANDROID_KABI_RESERVE(3), struct sysv_shm sysvshm);\n#else\n\tANDROID_KABI_RESERVE(1);\n\tANDROID_KABI_RESERVE(2);\n\tANDROID_KABI_RESERVE(3);\n#endif\n\tANDROID_KABI_RESERVE(4);\n\tANDROID_KABI_RESERVE(5);\n\tANDROID_KABI_RESERVE(6);\n\tANDROID_KABI_RESERVE(7);\n\tANDROID_KABI_RESERVE(8);|;}' "$SCHEDFILE"
-
+            echo "♻️ Legacy Kernel ABI — Slots 1, 2 and 3"
+          
+            sed -i 's/ANDROID_KABI_RESERVE(1);/\
+          #ifdef CONFIG_SYSVIPC\
+          ANDROID_KABI_USE(1, struct sysv_sem sysvsem);\
+          ANDROID_KABI_RESERVE(2);\
+          ANDROID_KABI_RESERVE(3);\
+          #else/' "$SCHEDFILE"
+          
           elif grep -q "ANDROID_KABI_RESERVE(3);" "$SCHEDFILE"; then
-            echo "♻️ Fallback Kernel ABI Detected — ☘️ Using Slots 3, 4 and 5"
-            sed -i -e '/ANDROID_KABI_RESERVE(3);/{N;N;N;s|\tANDROID_KABI_RESERVE(3);\n\tANDROID_KABI_RESERVE(4);\n\tANDROID_KABI_RESERVE(5);\n\tANDROID_KABI_RESERVE(6);|#ifdef CONFIG_SYSVIPC\n\tANDROID_KABI_USE(3, struct sysv_sem sysvsem);\n\t_ANDROID_KABI_REPLACE(ANDROID_KABI_RESERVE(4); ANDROID_KABI_RESERVE(5), struct sysv_shm sysvshm);\n#else\n\tANDROID_KABI_RESERVE(3);\n\tANDROID_KABI_RESERVE(4);\n\tANDROID_KABI_RESERVE(5);\n#endif\n\tANDROID_KABI_RESERVE(6);|;}' "$SCHEDFILE"
-
+            echo "♻️ Fallback Kernel ABI — Slots 3, 4 and 5"
+          
+            sed -i 's/ANDROID_KABI_RESERVE(3);/\
+          #ifdef CONFIG_SYSVIPC\
+          ANDROID_KABI_USE(3, struct sysv_sem sysvsem);\
+          ANDROID_KABI_RESERVE(4);\
+          ANDROID_KABI_RESERVE(5);\
+          #else/' "$SCHEDFILE"
+          
           else
-            echo "⚠️ Unable to Determine Compatible Kernel ABI Layout — Aborting..."
+            echo "⚠️ No Compatible Kernel ABI Layout Detected"
             exit 1
           fi
-
-          # Verification
-          echo "🔎 Verifying Injection..."
           
-          grep -q "sysv_sem" "$SCHEDFILE" || { echo "⚠️ System V SEM Missing"; exit 1; }
-          grep -q "sysv_shm" "$SCHEDFILE" || { echo "⚠️ System V SHM Missing"; exit 1; }
-
-          # Restore Ghost Task Fix for OPlus BSP Midas Fix Patch
-          echo "🔧 Applying MIDAS patch"
+          echo "🔎 Verifying Injection..."
+          grep -q "sysv_sem" "$SCHEDFILE"
+          grep -q "sysv_shm" "$SCHEDFILE"
+          
+          echo "🔧 Applying Midas Patch..."
           applypatch "$PDIR/ghost-task-for-midas.patch"
-        
+          
           echo ""
           echo "🎉 DroidSpaces System V IPC Injection Completed Successfully"
    
