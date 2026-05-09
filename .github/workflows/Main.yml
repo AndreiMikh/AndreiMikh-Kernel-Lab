@@ -3575,6 +3575,24 @@ jobs:
 
           cd "$TARGETPATH"
 
+          # Function: Patch Apply
+          apply() {
+            local patchfile="$1"
+
+            if patch -R -p1 --dry-run < "$patchfile" >/dev/null 2>&1; then
+              echo "🎉 Already Applied: $(basename "$patchfile")"
+              return
+            fi
+
+            if patch -p1 --dry-run < "$patchfile" >/dev/null 2>&1; then
+              patch -p1 --forward < "$patchfile"
+              echo "✔️ Applied: $(basename "$patchfile")"
+            else
+              echo "⚠️ Failed Applying: $(basename "$patchfile")"
+              exit 1
+            fi
+          }
+
           SCHEDFILE="include/linux/sched.h"
           USERFILE="include/linux/sched/user.h"
 
@@ -3583,10 +3601,23 @@ jobs:
             exit 1
           fi
 
-          # Backup for Safety
-          cp -f "$SCHEDFILE" "${SCHEDFILE}.bak"
-          trap 'echo "⚠️ Failure Detected — ♻️ Restoring Original Scheduler Header File"; cp -f "${SCHEDFILE}.bak" "$SCHEDFILE"' ERR
+          # Backup and Rollback Protection
+          BACKUPDIR="$(mktemp -d)"
 
+          cp -af "$SCHEDFILE" "$BACKUPDIR/"
+          cp -af "$USERFILE" "$BACKUPDIR/"
+
+          RESTORE=1
+
+          cleanup() {
+            if [[ "$RESTORE" == "1" ]]; then
+              echo "⚠️ Failure Detected — ♻️ Restoring Original Files..."
+              cp -af "$BACKUPDIR/"* "$(dirname "$SCHEDFILE")/"
+            fi
+          }
+
+          trap cleanup EXIT
+       
           echo "⚙️ Disabling Original System V IPC Struct Fields..."
 
           sed -i 's/^\(\t\)struct sysv_sem\b.*sysvsem;/\1\/\/ struct sysv_sem\t\t\tsysvsem;/' "$SCHEDFILE"
@@ -3630,15 +3661,28 @@ jobs:
 
           # Verification
           echo "🔎 Verifying Injection..."
-          grep -n "sysv_sem\|sysv_shm" "$SCHEDFILE" || {
-            echo "⚠️ Injection Verification Failed"
+
+          grep -q "struct sysv_sem" "$SCHEDFILE" || {
+            echo "⚠️ Missing SYSVSEM Injection"
             exit 1
           }
 
+          grep -q "struct sysv_shm" "$SCHEDFILE" || {
+            echo "⚠️ Missing SYSVSHM Injection"
+            exit 1
+          }
+
+          grep -q "CONFIG_SYSVIPC" "$SCHEDFILE" || {
+            echo "⚠️ Missing Config SYSVIPC Guard"
+            exit 1
+          }
+
+          echo "✔️ Injection Verification Passed"
+
           # Restore MIDAS Fix
           echo "🔧 Applying Ghost Task Fix Patch for OPlus BSP Midas..."
-          patch -p1 --forward < "${PDIR}/001-Ghost-Task-Midas.patch" || true
-
+          apply "${PDIR}/001-Ghost-Task-Midas.patch"
+        
           echo ""
           echo "🎉 DroidSpaces System V IPC Injection Completed Successfully"
    
