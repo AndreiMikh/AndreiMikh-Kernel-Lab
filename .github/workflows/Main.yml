@@ -302,7 +302,7 @@ jobs:
       CCACHE_BASEDIR: ${{ github.workspace }}
       
       # Kernel Builds
-      CCACHE_COMPILERCHECK: "%compiler% -dumpmachine; %compiler% -dumpversion"
+      CCACHE_COMPILERCHECK: none
       CCACHE_NOHASHDIR: true
       CCACHE_NOHARDLINK: true
 
@@ -846,7 +846,7 @@ jobs:
           # Try Fallocate First, Fallback to DD
           if ! sudo fallocate -l "$SWAPSIZE" "$SWAPFILE"; then
             echo "⚠️ Fallocate Failed → Using DD"
-            sudo dd if=/dev/zero of="$SWAPFILE" bs=1M count=2048
+            sudo dd if=/dev/zero of="$SWAPFILE" bs=1M count=4096
           fi
           
           sudo chmod 600 "$SWAPFILE"
@@ -1055,7 +1055,7 @@ jobs:
       - name: 🔧 Local Cache Restoration (Fallback)
         id: ccache-restore
         if: ${{ env.BUILDCCACHE != 'Disabled' && (steps.cache-restoration.outputs.cache-restored || 'false') != 'true' }}
-        uses: actions/cache@v5
+        uses: actions/cache/restore@v5
         with:
           path: ${{ env.CCACHE_DIR }}
           
@@ -1171,49 +1171,84 @@ jobs:
           echo "$STATUS"
 
       # ==============================
-      # Install Repository Tool (Fallback and Cached)
+      # Install Repository Tool
       # ==============================
-      - name: 🔧 Install Repository Tool (Fallback and Cached)
+      - name: 🔧 Install Repository Tool
         shell: bash
         run: |
           set -euo pipefail
-      
-          BIN="/usr/local/bin/repo"
-          GOOGLE="https://storage.googleapis.com/git-repo-downloads/repo"
-          GITHUB="https://raw.githubusercontent.com/GerritCodeReview/git-repo/main/repo"
-      
+
           echo "------------------------------"
-          echo "🚀 Checking Repository Tool Installation..."
+          echo "🚀 Installing Repository Tool..."
           echo "------------------------------"
           echo ""
-      
-          if command -v repo &>/dev/null; then
-            echo "🎉 Repository Already Installed at $(command -v repo)"
+
+          # Already Installed
+          if command -v repo >/dev/null 2>&1; then
+            echo "🎉 Repository Tool Already Installed"
+            repo --version
+            exit 0
+          fi
+
+          # Primary Method: Pip
+          echo "📦 Attempting Installation via Pip..."
+
+          if python3 -m pip install --upgrade pip && \
+             python3 -m pip install git-repo; then
+
+            echo "🎉 Pip Installation Successful"
+
           else
+            echo "⚠️ Pip Installation Failed"
+            echo "🔄 Falling Back to Manual Download..."
+
+            BIN="/usr/local/bin/repo"
+
+            GOOGLE="https://storage.googleapis.com/git-repo-downloads/repo"
+            GITHUB="https://raw.githubusercontent.com/GerritCodeReview/git-repo/main/repo"
+
             download() {
-              echo "🔎 Downloading from $1 ..."
-              curl -fL --retry 3 --retry-delay 5 "$1" -o repo
+              local URL="$1"
+
+              echo "🌐 Downloading: $URL"
+
+              curl -fL \
+                --retry 5 \
+                --retry-delay 3 \
+                --connect-timeout 15 \
+                "$URL" -o repo
             }
-      
-            echo "🚀 Installing Repository Tool..."
+
+            # Google Source
             if download "$GOOGLE"; then
               echo "🎉 Downloaded from Google"
             else
-              echo "⚠️ Google Download Failed, Trying GitHub Mirror..."
-              download "$GITHUB" || { echo "⚠️ Failed to Download Repository Tool from All Sources"; exit 1; }
+              echo "⚠️ Google Download Failed"
+              echo "🔄 Trying GitHub Mirror..."
+
+              download "$GITHUB" || {
+                echo "⚠️ Failed to Download Repository Tool"
+                exit 1
+              }
             fi
-      
+
             chmod +x repo
             sudo mv repo "$BIN"
-            echo "🎉 Repository Installed at $BIN"
-          fi
-      
-          echo "🛠️ Verifying Installation..."
-          repo --version
-          
-          echo ""
-          echo "🎉 Repository Tool Installed Successfully"
 
+            echo "🎉 Fallback Installation Complete"
+          fi
+
+          echo ""
+          echo "📦 Repository Tool Path:"
+          command -v repo
+
+          echo ""
+          echo "📜 Repository Version:"
+          repo --version
+
+          echo ""
+          echo "🎉 Repository Tool Ready"
+   
       # ==============================
       # Initialize and Sync Repository
       # ==============================
@@ -5106,7 +5141,7 @@ jobs:
       # ==============================
       - name: 🔧 Save Compiler Cache
         if: ${{ env.BUILDCCACHE != 'Disabled' && (steps.cache-restoration.outputs.cache-restored || 'false') != 'true' && (steps.ccache-restore.outputs.cache-hit || 'false') != 'true' }}
-        uses: actions/cache@v5
+        uses: actions/cache/save@v5
         with:
           path: ${{ env.CCACHE_DIR }}
           key: CCache-${{ runner.os }}-${{ env.MANIFESTBASEFILE }}-${{ env.CPU }}-${{ github.ref_name }}
