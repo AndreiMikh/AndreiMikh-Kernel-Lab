@@ -4889,23 +4889,34 @@ jobs:
       # ==============================
       - name: 🔧 Fallback to Build Kernel
         if: ${{ steps.fastbuild.outputs.fallback == 'true' || github.event.inputs.FASTBUILD != 'true' }}
+        shell: bash
         run: |
           set -Eeuo pipefail
+      
+          trap 'echo "⚠️ Failure on line $LINENO"' ERR
       
           FALLBACKSTART=$(date +%s)
       
           # Navigate
           cd kernel_workspace/kernel_platform || {
-            echo "⚠️ Kernel Platform Not Found"
+            echo "⚠️ kernel_platform Directory Not Found"
             exit 1
           }
       
           # Environment Variables
-          FILEBASE="${{ env.MANIFESTBASEFILE }}"
-          CPU="${{ env.CPUD }}"
-          METHOD="${{ env.BUILDMETHOD }}"
-          GKIV="${{ env.ANDROIDVERSION }}-${{ env.KERNELVERSION }}"
-
+          FILEBASE="${FILEBASE:-${{ env.MANIFESTBASEFILE }}}"
+      
+          CPU="${CPU:-${{ env.CPUD }}}"
+          CPU="${CPU:-unknown}"
+      
+          METHOD="${METHOD:-${{ env.BUILDMETHOD }}}"
+          METHOD="${METHOD:-perf}"
+      
+          ANDROIDVERSION="${ANDROIDVERSION:-${{ env.ANDROIDVERSION }}}"
+          KERNELVERSION="${KERNELVERSION:-${{ env.KERNELVERSION }}}"
+      
+          GKIV="${ANDROIDVERSION}-${KERNELVERSION}"
+      
           # Fast Build Metadata
           FALLBACKREASON="${{ steps.fastbuild.outputs.fallbackreason }}"
           FASTBUILDTIME="${{ steps.fastbuild.outputs.fastbuildtime }}"
@@ -4913,18 +4924,19 @@ jobs:
           FALLBACKREASON="${FALLBACKREASON:-Unknown}"
           FASTBUILDTIME="${FASTBUILDTIME:-0}"
       
-          echo "-------- Kernel Build --------"
-          echo "📂 File     : ${FILEBASE}"
-          echo "📂 CPU      : ${CPU}"
-          echo "📁 Method   : ${METHOD}"
-          echo "📁 Version  : ${GKIV}"
+          echo "------------------------------"
+          echo "🚀 Kernel Fallback Build..."
           echo "------------------------------"
           echo ""
-      
-          echo "⚠️ Fallback Reason: ${FALLBACKREASON}"
+          echo "📂 Manifest : ${FILEBASE}"
+          echo "📱 Target   : ${CPU}"
+          echo "⚙️ Method   : ${METHOD}"
+          echo "🧩 Version  : ${GKIV}"
+          echo ""
+          echo "⚠️ Fallback Reason : ${FALLBACKREASON}"
       
           if [[ "${FASTBUILDTIME}" != "0" ]]; then
-            echo "⏱️ Fast Build Ran For: ${FASTBUILDTIME}s (Before Fallback)"
+            echo "⚡ Fast Build Runtime : ${FASTBUILDTIME}s"
           else
             echo "⚡ Fast Build : Skipped"
           fi
@@ -4941,21 +4953,42 @@ jobs:
             [[ -d ../cache/include ]] && cp -rf ../cache/include out/
             [[ -f ../cache/Module.symvers ]] && cp -f ../cache/Module.symvers out/
       
-            echo "✔ Cache Restored from Fast Build"
+            echo "💻 Cache Restored"
+      
           else
-            echo "⚠️ No Fast Build Cache Found (Full Rebuild)"
+            echo "⚠️ No Fast Build Cache Found"
+            echo "📌 Performing Full Rebuild"
           fi
       
           echo ""
       
-          # Clean Bazel
+          # Fix Recursive Symlink Issue
+          echo "🧹 Cleaning Recursive Symlink Loops..."
+      
+          BROKENLINKS=(
+            "common/out/source"
+            "msm-kernel/out/source"
+          )
+      
+          for link in "${BROKENLINKS[@]}"; do
+            if [[ -L "$link" ]]; then
+              echo "⚠️ Removing Symlink:"
+              echo "   $link"
+      
+              rm -f "$link"
+            fi
+          done
+      
+          echo ""
+      
+          # Clean Bazel State
           if command -v bazel >/dev/null 2>&1; then
-            echo "🔎 Bazel Detected, Cleaning Build..."
+            echo "🧹 Cleaning Bazel Build State..."
       
             bazel clean --async || \
-            echo "⚠️ Bazel Clean Failed (Ignored)"
+              echo "⚠️ Bazel Clean Failed (Ignored)"
           fi
-
+      
           echo ""
       
           # Build Flags
@@ -4963,7 +4996,7 @@ jobs:
           export BUILD_SYSTEM_DLKM="${BUILD_SYSTEM_DLKM:-0}"
           export SYSTEM_DLKM_RE_SIGN="${SYSTEM_DLKM_RE_SIGN:-0}"
       
-          # Auto Detect Build System
+          # Detect Build System
           BAZEL_SCRIPT=""
           OPLUS_SCRIPT=""
       
@@ -4979,9 +5012,11 @@ jobs:
       
           # Execute Build
           if [[ -n "${BAZEL_SCRIPT}" ]]; then
-            echo "🔎 Detected Bazel / KLeaf Build System"
-            echo "📄 Script: ${BAZEL_SCRIPT}"
+            echo "🔎 Detected Bazel / Kleaf Build System"
+            echo "📄 Script : ${BAZEL_SCRIPT}"
+            echo ""
       
+            # OPlus Variant Generator
             if [[ -f "oplus/bazel/oplus_modules_variant.sh" ]]; then
               chmod +x oplus/bazel/oplus_modules_variant.sh
       
@@ -4990,13 +5025,15 @@ jobs:
                 "${METHOD}"
             fi
       
+            # Build
             python3 "${BAZEL_SCRIPT}" \
               -t "${CPU}" \
               "${METHOD}"
       
           elif [[ -n "${OPLUS_SCRIPT}" ]]; then
             echo "🔎 Detected Legacy OPlus Build System"
-            echo "📄 Script: ${OPLUS_SCRIPT}"
+            echo "📄 Script : ${OPLUS_SCRIPT}"
+            echo ""
       
             chmod +x "${OPLUS_SCRIPT}"
       
@@ -5005,9 +5042,9 @@ jobs:
               "${METHOD}"
       
           else
-            echo "⚠️ ERROR: No Valid Build System Found"
-      
+            echo "⚠️ No Valid Build System Found"
             echo ""
+      
             echo "📂 Current Directory:"
             pwd
       
@@ -5025,26 +5062,16 @@ jobs:
       
           # Build Timing
           FALLBACKEND=$(date +%s)
-          FALLBACKTIME=$((FALLBACKEND - FALLBACKSTART))
       
+          FALLBACKTIME=$((FALLBACKEND - FALLBACKSTART))
           TOTALTIME=$((FALLBACKTIME + FASTBUILDTIME))
       
           echo ""
-          echo "⏱️ Fallback Build Time: ${FALLBACKTIME}s"
-          echo "🎉 Build Done"
-      
+          echo "------------------------------"
+          echo "🎉 Kernel Build Complete"
+          echo "------------------------------"
           echo ""
-          echo "🏁 Total CI Insight :"
-          echo "------------------------------"
-          echo "📊 Build Time Summary"
-          echo "------------------------------"
-      
-          if [[ "${FASTBUILDTIME}" != "0" ]]; then
-            echo "⚡ Fast Build : ${FASTBUILDTIME}s"
-          else
-            echo "⚡ Fast Build : Skipped"
-          fi
-      
+          echo "⚡ Fast Build     : ${FASTBUILDTIME}s"
           echo "🐢 Fallback Build : ${FALLBACKTIME}s"
           echo "🕒 Total Runtime  : ${TOTALTIME}s"
       
@@ -5054,12 +5081,12 @@ jobs:
             echo ""
       
             echo "### ⚡ Build Performance"
-            echo "- **Fast Build:** ${FASTBUILDTIME}s"
-            echo "- **Fallback Build:** ${FALLBACKTIME}s"
-            echo "- **Total Time:** ${TOTALTIME}s"
+            echo "- Fast Build: ${FASTBUILDTIME}s"
+            echo "- Fallback Build: ${FALLBACKTIME}s"
+            echo "- Total Runtime: ${TOTALTIME}s"
             echo ""
       
-            echo "### 🧾 Build Info"
+            echo "### 🧾 Build Information"
             echo "- CPU: ${CPU}"
             echo "- Method: ${METHOD}"
             echo "- Version: ${GKIV}"
@@ -5067,6 +5094,7 @@ jobs:
       
             echo "### ⚠️ Fallback Reason"
             echo "- ${FALLBACKREASON}"
+      
           } >> "${GITHUB_STEP_SUMMARY}"
 
       # ==============================
@@ -5079,10 +5107,10 @@ jobs:
           # Get Compiler Cache Stats
           STATS="$(ccache -s)"
     
-          echo "--------------------------------------"
-          echo "-------- Compiler Cache Stats --------"
+          echo "------------------------------"
+          echo "Compiler Cache Stats"
           echo "$STATS"
-          echo "--------------------------------------"
+          echo "------------------------------"
 
           # Extract Values 
           TOTAL=$(echo "$STATS" | grep -i "^Cacheable calls:" | sed 's/.*: *//' || true)
@@ -5186,9 +5214,9 @@ jobs:
         run: |
           set -euo pipefail
           
-          echo "--------------------------------------"
+          echo "------------------------------"
           echo "🚀 Maintaining Compiler Cache..."
-          echo "--------------------------------------"
+          echo "------------------------------"
           
           command -v ccache >/dev/null 2>&1 || {
             echo "⚠️ Compiler Cache Not Found, Skipping"
