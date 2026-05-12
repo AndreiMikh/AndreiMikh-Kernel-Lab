@@ -3731,213 +3731,112 @@ jobs:
         if: ${{ github.event.inputs.LXCDOCKERSUPPORT == 'DroidSpacesLXC-WildPatch' }}
         shell: bash
         run: |
-          set -euo pipefail
-          
+          set -Eeuo pipefail
+      
           echo "------------------------------"
           echo "🚀 DroidSpacesLXC Patch Setup..."
           echo "------------------------------"
           echo ""
-          
-          # Detect Correct Kernel Root Directory
+
+          # Variables
+          CPU="${CPU:-Unknown}"
+      
+          # Detect Kernel Root Directory
           echo "🔍 Detecting Kernel Root..."
-          
+      
           possiblekerneldirectories=(
             "${GITHUB_WORKSPACE}/kernel_workspace/kernel_platform/common"
             "${GITHUB_WORKSPACE}/kernel_workspace/kernel_platform"
             "${GITHUB_WORKSPACE}/kernel_workspace"
           )
-          
+      
           KCDIR=""
-          
+      
           for directory in "${possiblekerneldirectories[@]}"; do
             echo "🔎 Checking: $directory"
-          
+      
             if [[ -d "$directory" ]] && [[ -f "$directory/Makefile" ]]; then
               KCDIR="$directory"
               echo "📌 Kernel Root Detected: $KCDIR"
               break
             fi
           done
-          
-          if [[ -z "${KCDIR:-}" ]]; then
+      
+          # Fail if Kernel Root is Not Found
+          if [[ -z "${KCDIR}" ]]; then
             echo "⚠️ No Valid Kernel Root Found"
             exit 1
           fi
-
+      
+          # Move into Kernel Source Directory
+          cd "$KCDIR"
+      
+          echo ""
           echo "------------------------------"
-          echo "🚀 Kernel ABI Slot Layout Detection..."
+          echo "🔧 Applying SYS V IPC + Midas Patches"
           echo "------------------------------"
           echo ""
-          
-          # Kernel ABI Detector
-          echo "🧠 Detecting Kernel ABI Slot Layout..."          
-          echo "🔍 Locating Sched Header..."
-          
-          SCHED=$(find "$KCDIR" -path "*/include/linux/sched.h" | head -n 1 || true)
-          
-          if [[ -z "$SCHED" ]] || [[ ! -f "$SCHED" ]]; then
-            echo "⚠️ Sched Header Not Found in Kernel Tree..."
-            exit 1
-          fi
-          
-          echo "📌 Using Sched Header: $SCHED"
-
-          # Normalize Whitespace for Consistent Matching
-          CLEANSCHED=$(mktemp)          
-          tr -s '[:space:]' ' ' < "$SCHED" > "$CLEANSCHED"
-
-          # Kernel ABI Layout Detection for Sched
-          USESCHED=$(grep -c "ANDROID_KABI_USE(" "$SCHED" || true)
-          RESERVESCHED=$(grep -c "ANDROID_KABI_RESERVE(" "$SCHED" || true)
-
-          # Kernel ABI Layout Detection for Temporary Clean Sched
-          USECLEANSCHED=$(grep -c "ANDROID_KABI_USE(" "$CLEANSCHED" || true)
-          RESERVECLEANSCHED=$(grep -c "ANDROID_KABI_RESERVE(" "$CLEANSCHED" || true)
-
-          if [[ "$USESCHED" -eq 0 && "$RESERVESCHED" -eq 0 && "$USECLEANSCHED" -eq 0 && "$RESERVECLEANSCHED" -eq 0 ]]; then
-            echo "⚠️ No Kernel ABI Layout Markers Found in Sched or Temporary Clean Sched"
-            exit 1
-          fi
-
-          echo "------------------------------"
-          echo "🧠 Kernel ABI Layout Detection Debug Info"
-          echo "------------------------------"
-
-          echo "Sched: USE=$USESCHED, RESERVE=$RESERVESCHED"
-          echo "Temporary Clean Sched: USE=$USECLEANSCHED, RESERVE=$RESERVECLEANSCHED"
-
-          # Cached Pattern Flags for Sched
-          USE1SCHED=$(grep -q "ANDROID_KABI_USE(1," "$SCHED" && echo 1 || echo 0)
-          RES3SCHED=$(grep -q "ANDROID_KABI_RESERVE(3)" "$SCHED" && echo 1 || echo 0)
-          RES1SCHED=$(grep -q "ANDROID_KABI_RESERVE(1)" "$SCHED" && echo 1 || echo 0)
-
-          # Cached Pattern Flags for Temporary Clean Sched
-          USE1CLEANSCHED=$(grep -q "ANDROID_KABI_USE(1," "$CLEANSCHED" && echo 1 || echo 0)
-          RES3CLEANSCHED=$(grep -q "ANDROID_KABI_RESERVE(3)" "$CLEANSCHED" && echo 1 || echo 0)
-          RES1CLEANSCHED=$(grep -q "ANDROID_KABI_RESERVE(1)" "$CLEANSCHED" && echo 1 || echo 0)
-
-          # Checking for patterns in both Sched and Temporary Clean Sched
-          echo "🔎 Pattern Checks in Sched:"
-          [[ "$USE1SCHED" == 1 ]] && echo "✔ Matched: Android Kernel ABI Use(1) in Sched" || echo "✖ No Match: Android Kernel ABI Use(1) in Sched"
-          [[ "$RES3SCHED" == 1 ]] && echo "✔ Matched: Android Kernel ABI Reserve(3) in Sched" || echo "✖ No Match: Android Kernel ABI Reserve(3) in Sched"
-          [[ "$RES1SCHED" == 1 ]] && echo "✔ Matched: Android Kernel ABI Reserve(1) in Sched" || echo "✖ No Match: Android Kernel ABI Reserve(1) in Sched"
-
-          echo "🔎 Pattern Checks in Temporary Clean Sched:"
-          [[ "$USE1CLEANSCHED" == 1 ]] && echo "✔ Matched: Android Kernel ABI Use(1) in Temporary Clean Sched" || echo "✖ No Match: Android Kernel ABI Use(1) in Temporary Clean Sched"
-          [[ "$RES3CLEANSCHED" == 1 ]] && echo "✔ Matched: Android Kernel ABI Reserve(3) in Temporary Clean Sched" || echo "✖ No Match: Android Kernel ABI Reserve(3) in Temporary Clean Sched"
-          [[ "$RES1CLEANSCHED" == 1 ]] && echo "✔ Matched: Android Kernel ABI Reserve(1) in Temporary Clean Sched" || echo "✖ No Match: Android Kernel ABI Reserve(1) in Temporary Clean Sched"
-
-          # Kernel ABI Auto-Detection Logic
-          KABI=""
-
-          # Primary Kernel ABI Detection Signals (Using Both Sched and Temporary Clean Sched)
-          if [[ "$USE1SCHED" == 1 || "$USE1CLEANSCHED" == 1 || "$USESCHED" -gt 0 || "$USECLEANSCHED" -gt 0 ]]; then
-            echo "📌 Kernel ABI Slot Layout Detected — 6, 7 and 8"
-            KABI="6_7_8"
-          elif [[ "$RES3SCHED" == 1 || "$RES3CLEANSCHED" == 1 ]]; then
-            echo "📌 Kernel ABI Slot Layout Detected — 3, 4 and 5"
-            KABI="3_4_5"
-          elif [[ "$RES1SCHED" == 1 || "$RES1CLEANSCHED" == 1 ]]; then
-            echo "📌 Kernel ABI Slot Layout Detected — 1, 2 and 3"
-            KABI="1_2_3"
-          else
-            # Fallback for Unspecified Kernel ABI Layouts
-            if [[ "$RESERVESCHED" -ge 3 || "$RESERVECLEANSCHED" -ge 3 ]]; then
-              echo "📌 Kernel ABI Slot Layout Detected — 3, 4 and 5"
-              KABI="3_4_5"
-            elif [[ "$RESERVESCHED" -eq 1 || "$RESERVECLEANSCHED" -eq 1 ]]; then
-              echo "📌 Kernel ABI Slot Layout Detected — 1, 2 and 3"
-              KABI="1_2_3"
-            else
-              echo "⚠️ Unknown ABI Layout — Defaulting to Safe Mode — 3, 4 and 5"
-              KABI="3_4_5"
-            fi
-          fi
-
-          # Debug Output for Detected Kernel ABI
-          echo "🔍 Detected Kernel ABI Layout: $KABI"
-          
-          # Final Validation for Kernel ABI Detection
-          if [[ -z "${KABI}" ]]; then
-            echo "⚠️ Unable to Detect Kernel ABI Layout..."
-  
-            # Debug Output: Show the Kernel ABI Search Results from Both Sched and Temporary Clean Sched
-            echo "📜 Debug Sample from Sched:"
-            grep -n "KABI" "$SCHED" | head -n 20 || true
-
-            echo "📜 Debug Sample from Temporary Clean Sched:"
-            grep -n "KABI" "$CLEANSCHED" | head -n 20 || true
-  
-            # Show Preview of the First 40 Lines from Both Files for Context
-            echo "📄 Sched Headers Preview:"
-            head -n 40 "$SCHED" || true
-
-            echo "📄 Temporary Clean Sched Headers Preview:"
-            head -n 40 "$CLEANSCHED" || true
-  
-            exit 1
-          fi
-
-          # Cleanup Temporary File
-          rm -f "$CLEANSCHED"          
-          
-          # Selected Patch (WildKernels Kernel Patches Repository)
-          echo "📦 Selecting Kernel ABI Patch..."
-
-          # Download Patch 
-          URL="https://raw.githubusercontent.com/WildKernels/kernel_patches/main/common/droidspaces/fix_sysvipc_kabi_${KABI}.patch"
-          PATCHF="$GITHUB_WORKSPACE/fix_sysvipc_kabi_${KABI}.patch"
-          
-          echo "📩 Downloading Patch:"
-          echo "   $URL"
-          
-          STATUS="Unknown"
-          
-          if ! curl -fsSL --retry 3 --retry-delay 2 --connect-timeout 10 "$URL" -o "$PATCHF"; then
-            echo "⚠️ Patch Download Failed → Skipping..."
-            STATUS="Missing"
-          else
-          
-            # Apply Patch
-            echo ""
-            echo "🔧 Applying Patch..."
-          
-            cd "$KCDIR"
-          
-            for pathprefix in 0 1 2; do
-              echo "🔍 Trying Path-${pathprefix}"
-          
-              if patch -p$pathprefix --forward --dry-run < "$PATCHF" > /dev/null 2>&1; then
-                patch -p$pathprefix --forward < "$PATCHF"
-                echo "📌 Patch Applied"
-              
-                # Verify After Apply
-                if ! patch -p$pathprefix --forward --dry-run < "$PATCHF" > /dev/null 2>&1; then
-                  echo "✔️ Patch State Verified"
-                fi
-              
-                STATUS="Applied"
-                break
+      
+          # Patch Base Directory
+          DSPATCHES="${GITHUB_WORKSPACE}/kernel_workspace/AndreiMikh-Kernel-Lab/patches"
+      
+          # CPU-Based Patch Selection
+          echo "🔧 Applying SYS V IPC Kernel ABI Fixes..."
+          echo "📌 CPU Target: ${CPU}"
+      
+          case "${CPU}" in
+      
+            # High-End Snapdragon (SM88xx)
+            sm8850|sm8845)
+              echo "📌 High-End CPU Branch Detected"
+              patch -p1 --forward < \
+                "$DSPATCHES/SYSVIPC-KABI-Android16-6.12.patch"
+              ;;
+      
+            # Mid-Range Snapdragon (85xx / 75xx)
+            sm8550|sm7550)
+              echo "📌 Mid-Range CPU Branch Detected"
+              patch -p1 --forward < \
+                "$DSPATCHES/SYSVIPC-KABI-1-2-3.patch"
+              ;;
+      
+            # Mixed SoC Group (MediaTek / Older Snapdragon)
+            sm8450|sm8475|mt6895|mt6983|mt6789)
+              echo "📌 Mixed SoC CPU Branch Detected"
+      
+              # Special Legacy Android 12 + Kernel 5.10 Handling
+              if [[ "${ANDROIDVERSION}" == "android12" && "${KERNELVERSION}" == "5.10" ]]; then
+                echo "📌 Legacy Android 12 + Kernel 5.10 Detected"
+      
+                patch -p1 --forward < \
+                  "$DSPATCHES/SYSVIPC-Bypass-Android16-6.12-Below.patch.patch"
+      
+                patch -p1 --forward < \
+                  "$DSPATCHES/KABI-Padding-Posix-Mqueue.patch"
+      
+              else
+                echo "📌 Standard Kernel ABI Layout Patch Applied"
+                patch -p1 --forward < \
+                  "$DSPATCHES/SYSVIPC-KABI-6-7-8.patch"
               fi
-          
-              if patch -R -p$pathprefix --dry-run < "$PATCHF" > /dev/null 2>&1; then
-                echo "📊 Patch Already Applied"
-                STATUS="Already-Applied"
-                break
-              fi
-            done
-          
-            if [[ "$STATUS" == "Unknown" ]]; then
-              echo "⚠️ Patch Incompatible with Kernel..."
-              exit 1
-            fi
-          
-            echo "🧹 Cleanup Kernel ABI Patch File(s)..."
-            rm -f "$PATCHF"
-          fi
-          
+              ;;
+      
+            # Default Fallback Patch
+            *)
+              echo "📌 Unknown CPU → Applying Default Kernel ABI Layout Patch"
+              patch -p1 --forward < \
+                "$DSPATCHES/SYSVIPC-KABI-6-7-8.patch"
+              ;;
+          esac
+      
+          # Midas / OPlus Kernel Fix Patch
           echo ""
-          echo "📊 Patch Status: $STATUS"
+          echo "🧠 Applying Midas Ghost Task Fix..."
+      
+          patch -p1 --forward < \
+            "$DSPATCHES/001-Ghost-Task-Midas.patch"
+      
+          echo ""
           echo "🎉 DroidSpacesLXC Patch Complete!"
           
       # ==============================
