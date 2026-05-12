@@ -4953,23 +4953,24 @@ jobs:
           GKIV="${{ env.ANDROIDVERSION }}-${{ env.KERNELVERSION }}"
       
           echo "-------- Kernel Build --------"
-          echo "📂 File     : $FILEBASE"
-          echo "📂 CPU      : $CPU"
-          echo "📁 Method   : $METHOD"
-          echo "📁 Version  : $GKIV"
+          echo "📂 File     : ${FILEBASE}"
+          echo "📂 CPU      : ${CPU}"
+          echo "📁 Method   : ${METHOD}"
+          echo "📁 Version  : ${GKIV}"
           echo "------------------------------"
           echo ""
-
-          echo "⚠️ Fallback Reason: ${{ steps.fastbuild.outputs.fallbackreason || 'Unknown' }}"
-
-          if [[ -n "${{ steps.fastbuild.outputs.fastbuildtime }}" ]]; then
-            echo "⏱️ Fast Build Ran For: ${{ steps.fastbuild.outputs.fastbuildtime }}s (Before Fallback)"
+      
+          echo "⚠️ Fallback Reason: ${FALLBACK_REASON}"
+      
+          if [[ "${FASTBUILDTIME}" != "0" ]]; then
+            echo "⏱️ Fast Build Ran For: ${FASTBUILDTIME}s (Before Fallback)"
           fi
+      
           echo ""
       
           # Restore Fast Build Cache
           echo "📥 Restoring Fast Build Cache..."
-
+      
           mkdir -p out
       
           if [[ -d ../cache ]]; then
@@ -4980,36 +4981,88 @@ jobs:
             echo "✔ Cache Restored from Fast Build"
           else
             echo "⚠️ No Fast Build Cache Found (Full Rebuild)"
-          fi  
-            
+          fi
+      
+          echo ""
+      
+          # Clean Bazel
           if command -v bazel >/dev/null 2>&1; then
             echo "🔎 Bazel Detected, Cleaning Build..."
-            bazel clean --expunge || echo "⚠️ Bazel Clean Failed (Ignored)"
+      
+            bazel clean --async || \
+            echo "⚠️ Bazel Clean Failed (Ignored)"
           fi
       
           # Build Flags
-          export KMI_SYMBOL_LIST_STRICT_MODE=${KMI_SYMBOL_LIST_STRICT_MODE:-0}
-          export BUILD_SYSTEM_DLKM=${BUILD_SYSTEM_DLKM:-0}
-          export SYSTEM_DLKM_RE_SIGN=${SYSTEM_DLKM_RE_SIGN:-0}
+          export KMI_SYMBOL_LIST_STRICT_MODE="${KMI_SYMBOL_LIST_STRICT_MODE:-0}"
+          export BUILD_SYSTEM_DLKM="${BUILD_SYSTEM_DLKM:-0}"
+          export SYSTEM_DLKM_RE_SIGN="${SYSTEM_DLKM_RE_SIGN:-0}"
       
-          # Build System Detection
-          if [[ -n "${BAZEL_SCRIPT:-}" && -f "${BAZEL_SCRIPT:-}" ]]; then
+          # Auto Detect Build System
+          BAZEL_SCRIPT=""
+          OPLUS_SCRIPT=""
+      
+          if [[ -f "build_with_bazel.py" ]]; then
+            BAZEL_SCRIPT="build_with_bazel.py"
+      
+          elif [[ -f "build/build_with_bazel.py" ]]; then
+            BAZEL_SCRIPT="build/build_with_bazel.py"
+      
+          elif [[ -f "oplus/build/oplus_build_kernel.sh" ]]; then
+            OPLUS_SCRIPT="oplus/build/oplus_build_kernel.sh"
+          fi
+      
+          # Execute Build
+          if [[ -n "${BAZEL_SCRIPT}" ]]; then
             echo "🔎 Detected Bazel / KLeaf Build System"
+            echo "📄 Script: ${BAZEL_SCRIPT}"
       
-            ./kernel_platform/oplus/bazel/oplus_modules_variant.sh "$CPU" "$METHOD"
-            python3 "$BAZEL_SCRIPT" -t "$CPU" "$METHOD"
+            if [[ -f "oplus/bazel/oplus_modules_variant.sh" ]]; then
+              chmod +x oplus/bazel/oplus_modules_variant.sh
       
-          elif [[ -n "${OPLUS_SCRIPT:-}" && -f "${OPLUS_SCRIPT:-}" ]]; then
+              ./oplus/bazel/oplus_modules_variant.sh \
+                "${CPU}" \
+                "${METHOD}"
+            fi
+      
+            python3 "${BAZEL_SCRIPT}" \
+              -t "${CPU}" \
+              "${METHOD}"
+      
+          elif [[ -n "${OPLUS_SCRIPT}" ]]; then
             echo "🔎 Detected Legacy OPlus Build System"
-            "$OPLUS_SCRIPT" "$CPU" "$METHOD"
+            echo "📄 Script: ${OPLUS_SCRIPT}"
+      
+            chmod +x "${OPLUS_SCRIPT}"
+      
+            bash "${OPLUS_SCRIPT}" \
+              "${CPU}" \
+              "${METHOD}"
       
           else
             echo "⚠️ ERROR: No Valid Build System Found"
+      
+            echo ""
+            echo "📂 Current Directory:"
+            pwd
+      
+            echo ""
+            echo "📄 Available Build Files:"
+            find . -maxdepth 4 \( \
+              -name "*.py" -o \
+              -name "*.sh" -o \
+              -name "WORKSPACE" -o \
+              -name "MODULE.bazel" \
+            \)
+      
             exit 1
           fi
       
+          # Build Timing
           FALLBACKEND=$(date +%s)
           FALLBACKTIME=$((FALLBACKEND - FALLBACKSTART))
+      
+          TOTALTIME=$((FALLBACKTIME + FASTBUILDTIME))
       
           echo ""
           echo "⏱️ Fallback Build Time: ${FALLBACKTIME}s"
@@ -5021,39 +5074,35 @@ jobs:
           echo "📊 Build Time Summary"
           echo "------------------------------"
       
-          FASTBUILDTIME="${{ steps.fastbuild.outputs.fastbuildtime }}"
-          
-          if [[ -n "$FASTBUILDTIME" ]]; then
-            echo "⏱️ Fast Build Ran For: ${FASTBUILDTIME}s (Before Fallback)"
+          if [[ "${FASTBUILDTIME}" != "0" ]]; then
+            echo "⚡ Fast Build : ${FASTBUILDTIME}s"
           else
             echo "⚡ Fast Build : Skipped"
           fi
       
-          echo ""
           echo "🐢 Fallback Build : ${FALLBACKTIME}s"
-
-          # GitHub Step Summary (Dashboard)
-          FASTBUILDTIME="${{ steps.fastbuild.outputs.fastbuildtime }}"
-          FASTBUILDTIME="${FASTBUILDTIME:-0}"
-          
-          TOTALTIME=$((FALLBACKTIME + FASTBUILDTIME))
-          
+          echo "🕒 Total Runtime  : ${TOTALTIME}s"
+      
+          # GitHub Step Summary
           {
             echo "## 📊 Kernel Build Summary"
             echo ""
+      
             echo "### ⚡ Build Performance"
             echo "- **Fast Build:** ${FASTBUILDTIME}s"
             echo "- **Fallback Build:** ${FALLBACKTIME}s"
             echo "- **Total Time:** ${TOTALTIME}s"
             echo ""
+      
             echo "### 🧾 Build Info"
-            echo "- CPU: $CPU"
-            echo "- Method: $METHOD"
-            echo "- Version: $GKIV"
+            echo "- CPU: ${CPU}"
+            echo "- Method: ${METHOD}"
+            echo "- Version: ${GKIV}"
             echo ""
+      
             echo "### ⚠️ Fallback Reason"
-            echo "- ${{ steps.fastbuild.outputs.fallbackreason || 'Unknown' }}"
-          } >> "$GITHUB_STEP_SUMMARY"
+            echo "- ${FALLBACK_REASON}"
+          } >> "${GITHUB_STEP_SUMMARY}"
 
       # ==============================
       # Compiler Cache Performance Summary
