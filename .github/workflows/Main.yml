@@ -5148,16 +5148,20 @@ jobs:
         if: ${{ env.BUILDCCACHE != 'Disabled' }}
         run: |
           set -euo pipefail
-      
+
+          # Variables
+          CCACHE_DIR="${{ env.CCACHE_DIR }}"
           TAR="CCache-${{ env.MANIFESTBASEFILE }}-${{ runner.os }}.tar.zst"
+          TMPTAR="${TAR}.tmp"
+          
           echo "TAR=$TAR" >> $GITHUB_ENV
       
           echo "------------------------------"
-          echo "🚀 Cache System Starting..."
+          echo "🚀 Compiler Cache System Starting..."
           echo "------------------------------"
           echo ""
       
-          # Build Fingerprint
+          # Generate Build Fingerprint
           echo "🔍 Generating Environment Delta Key..."
       
           KERNELSHA=$(git rev-parse HEAD 2>/dev/null || echo "no-git")
@@ -5169,8 +5173,9 @@ jobs:
       
           echo "DELTAKEY=$DELTAKEY" >> $GITHUB_ENV
           echo "📦 Delta Key: $DELTAKEY"
+          echo ""
       
-          # Restore Validation
+          # Existing Restored Cache Validation
           echo "🧪 Validating Restored Cache (if Exists)..."
       
           RESTOREDDELTAFILE="${{ env.CCACHE_DIR }}/.deltakey"
@@ -5183,17 +5188,24 @@ jobs:
             echo "⚠️ No Delta Key Found in Cache"
           fi
       
-          if [ "$RESTOREDDELTA" != "" ] && [ "$RESTOREDDELTA" != "$DELTAKEY" ]; then
-            echo "⚠️ Delta Mismatch → Invalid Cache"
-            echo "🧨 Wiping Cache Directory..."
-            rm -rf "${{ env.CCACHE_DIR }}"/*
-            mkdir -p "${{ env.CCACHE_DIR }}"
+          # Detect Invalid Cache
+          if [ -n "$RESTOREDDELTA" ] && [ "$RESTOREDDELTA" != "$DELTAKEY" ]; then
+            echo "⚠️ Delta Mismatch Detected"
+            echo "🧨 Cache Environment Changed"
+            echo "🧹 Wiping Old Cache..."
+            echo ""
+
+            rm -rf "${CCACHE_DIR:?}/"*
+
+            mkdir -p "$CCACHE_DIR"
+
             RESTOREDDELTA=""
           else
             echo "🚀 Delta Okay or Fresh Cache"
+            echo ""
           fi
       
-          # Hit Rate Analysis
+          # Compiler Cache Hit Rate Analysis
           echo "📊 Checking Compiler Cache Hit Rate..."
       
           STATS=$(ccache -s || true)
@@ -5208,7 +5220,8 @@ jobs:
       
           HITS=$((DIRECT_HITS + PRE_HITS))
           TOTAL=$((HITS + MISSES))
-      
+
+          # Prevent Divide by Zero
           [ "$TOTAL" -eq 0 ] && TOTAL=1
       
           HIT_RATE=$((100 * HITS / TOTAL))
@@ -5224,46 +5237,113 @@ jobs:
       
           # Decide to Save or Not Based on Hit Rate
           CCACHESAVE=false
-      
+
           if [ "$DELTAKEY" != "$RESTOREDDELTA" ]; then
-            echo "🔁 Environment Changed → Force Cache Update"
+            echo "🔁 Environment Changed"
+            echo "💾 Cache Update Required"
             CCACHESAVE=true
+
+          # Refresh Cache if Hit Rate too Low
           elif [ "$HIT_RATE" -lt 90 ]; then
-            echo "📉 Low Hit Rate (<90%) → Update Cache"
+            echo "📉 Hit Rate Below 90%"
+            echo "💾 Refreshing Cache"
             CCACHESAVE=true
+
+          # Skip Unnecessary Cache Upload
           else
-            echo "⏭️ Cache Healthy → Skipping Save"
+            echo "📥 Cache Healthy"
+            echo "⏭️ Skipping Cache Save"
             CCACHESAVE=false
           fi
-      
-          echo "CCACHESAVE=$CCACHESAVE" >> $GITHUB_ENV
-      
-          # Only Save Cache if Needed
+
+          echo ""
+          echo "CCACHESAVE=$CCACHESAVE" >> "$GITHUB_ENV"
+
+          # Save Cache
           if [ "$CCACHESAVE" = "true" ]; then
+
+            echo ""
             echo "💾 Creating Tar ZST Cache..."
-      
-            # Build Fingerprint Inside Cache
-            FPFILE="${{ env.CCACHE_DIR }}/.fpccache"
-      
+            echo ""
+
+            # Store Fingerprint Metadata
+            FPFILE="${CCACHE_DIR}/.fpccache"
+
             {
-              echo "manifest=${{ env.MANIFESTBASEFILE }}"
-              echo "os=${{ runner.os }}"
-              echo "kernel=${{ env.KERNELVERSION }}"
-              echo "android=${{ env.ANDROIDVERSION }}"
-              echo "delta=$DELTAKEY"
+              echo "Manifest=${{ env.MANIFESTBASEFILE }}"
+              echo "Runner OS=${{ runner.os }}"
+              echo "Kernel=${{ env.KERNELVERSION }}"
+              echo "Android=${{ env.ANDROIDVERSION }}"
+              echo "Delta=${DELTAKEY}"
+
+              echo ""
+              echo "------ Clang ------"
               clang --version || true
+
+              echo ""
+              echo "------ CCache ------"
               ccache -V || true
+
             } > "$FPFILE"
-      
-            echo "$DELTAKEY" > "${{ env.CCACHE_DIR }}/.deltakey"      
-            sync     
-            tar -cf - -C "${{ env.CCACHE_DIR }}" . | zstd -T0 -19 -o "$TAR"
+
+            # Save Delta Fingerprint
+            echo "$DELTAKEY" > "${CCACHE_DIR}/.deltakey"
+
+            sync
+
+            # Remove Old Archives
+            if [ -f "$TAR" ]; then
+              echo "⚠️ Existing Archive Found"
+              echo "🧹 Removing Old Archive..."
+              rm -f "$TAR"
+            fi
+
+            if [ -f "$TMPTAR" ]; then
+              rm -f "$TMPTAR"
+            fi
+
+            echo ""
+
+            # Compress Cache
+            echo "📦 Compressing Cache Directory..."
+
+            tar -cf - -C "$CCACHE_DIR" . \
+              | zstd -T0 -19 -f -o "$TMP_TAR"
+
+            sync
+
+            # Finalize Archive
+            echo "🔄 Finalizing Archive..."
+
+            mv -f "$TMPTAR" "$TAR"
+
+            sync
+
+            # Verify Archive
+            echo ""
             echo "🔍 Verifying Archive..."
+            echo ""
+
+            if [ ! -f "$TAR" ]; then
+              echo "⚠️ Cache Archive Missing"
+              exit 1
+            fi
+
             ls -lah "$TAR"
-            tar -I zstd -tf "$TAR" | head
-            echo "🚀 Cache Saved Successfully"      
+
+            echo ""
+            echo "📂 Archive Preview:"
+            tar -I zstd -tf "$TAR" | head -20
+
+            echo ""
+            echo "📃 Cache Saved Successfully"
+            echo ""
+  
           else
-            echo "⏭️ Cache Save Skipped (Delta-Aware Optimization)"
+            echo ""
+            echo "⏭️ Cache Save Skipped"
+            echo "🚀 Delta-Aware Optimization Active"
+            echo ""
           fi
    
       # ==============================
