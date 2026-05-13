@@ -129,10 +129,9 @@ jobs:
         wait
 
         CONFIG="${{ env.KDIR }}/arch/arm64/configs/vendor/oplus/sun_perf.config"
-
+        
+        grep -q "^CONFIG_DODGE_DTB=y" "$CONFIG" || \
         echo "CONFIG_DODGE_DTB=y" >> "$CONFIG"
-        echo "CONFIG_KSU=y" >> "$CONFIG"
-        echo "CONFIG_KSU_SUSFS=y" >> "$CONFIG"
 
     # =========================
     # Lineage Kernel Sources
@@ -153,10 +152,9 @@ jobs:
         wait
 
         CONFIG="${{ env.KDIR }}/arch/arm64/configs/vendor/oplus/sun_perf.config"
-
+        
+        grep -q "^CONFIG_DODGE_DTB=y" "$CONFIG" || \
         echo "CONFIG_DODGE_DTB=y" >> "$CONFIG"
-        echo "CONFIG_KSU=y" >> "$CONFIG"
-        echo "CONFIG_KSU_SUSFS=y" >> "$CONFIG"
 
     # =========================
     # Kernel Version Setup
@@ -459,11 +457,50 @@ jobs:
         AR_CMD="ARCH=${ARCH} SUBARCH=${SUBARCH} HEADER_ARCH=${HEADER_ARCH}"
         CC_CMD="CC=clang CXX=clang++"
        
-        LLVM_CMD="LD=ld.lld AR=llvm-ar NM=llvm-nm OBJCOPY=llvm-objcopy OBJDUMP=llvm-objdump READELF=llvm-readelf OBJSIZE=llvm-size STRIP=llvm-strip LLVM=1 LLVM_IAS=1"
-        DEFCONFIG="gki_defconfig vendor/sun_perf.config vendor/oplus/sun_perf.config"
-
-        echo "📌 Running Default Configuration..."
-        make O=out $AR_CMD $CC_CMD $LLVM_CMD $DEFCONFIG
+        LLVM_CMD="LD=ld.lld \
+        AR=llvm-ar \
+        NM=llvm-nm \
+        OBJCOPY=llvm-objcopy \
+        OBJDUMP=llvm-objdump \
+        READELF=llvm-readelf \
+        OBJSIZE=llvm-size \
+        STRIP=llvm-strip \
+        LLVM=1 \
+        LLVM_IAS=1"
+        
+        echo "📌 Running Base Defconfig..."
+        make O=out $AR_CMD $CC_CMD $LLVM_CMD gki_defconfig
+        
+        echo "📌 Merging Vendor Configs..."
+        ARCH=arm64 ./scripts/kconfig/merge_config.sh -m \
+            out/.config \
+            arch/arm64/configs/vendor/sun_perf.config \
+            arch/arm64/configs/vendor/oplus/sun_perf.config
+        
+        echo "📌 Applying KernelSU + SUSFS Configs..."
+        
+        # KernelSU Enable
+        if grep -q "CONFIG_KSU" "$KDIR/Makefile" 2>/dev/null || [ -d "$KDIR/KernelSU-Next" ]; then
+          echo "📌 KernelSU Detected"
+          scripts/config --file out/.config -e KSU || true
+        else
+          echo "📂 KernelSU Not Detected, Skipping"
+        fi
+    
+        # SUSFS safe enable
+        if find "$KDIR" -type f | grep -qi "susfs"; then
+          echo "📌 SUSFS Detected"
+          scripts/config --file out/.config \
+              -e KSU_SUSFS \
+              -e KSU_SUSFS_HAS_MAGIC_MOUNT \
+              -e KSU_SUSFS_SUS_PATH \
+              -e KSU_SUSFS_SUS_MOUNT || true
+        else
+          echo "📂 SUSFS Not Detected, Skipping"
+        fi
+        
+        echo "📌 Finalizing Config..."
+        make O=out $AR_CMD $CC_CMD $LLVM_CMD olddefconfig
 
         echo "⚙️ Enforcing LTO Configuration..."
         scripts/config --file out/.config \
@@ -483,10 +520,27 @@ jobs:
       run: |
         WORKSPACE="${{ env.WORKSPACE }}"
         KDIR="${{ env.KDIR }}"
-        if [ -f "$WORKSPACE/$KDIR/out/arch/arm64/boot/Image" ]; then
+    
+        echo "📂 Boot Output Contents:"
+        find "$WORKSPACE/$KDIR/out/arch/arm64/boot" -maxdepth 1 -type f
+    
+        if [ -f "$WORKSPACE/$KDIR/out/arch/arm64/boot/Image.gz" ]; then
+          echo "📌 Found Image.gz"
           echo "IMAGEPATH=true" >> $GITHUB_ENV
+          echo "KERNEL_IMAGE=Image.gz" >> $GITHUB_ENV
+    
+        elif [ -f "$WORKSPACE/$KDIR/out/arch/arm64/boot/Image.gz-dtb" ]; then
+          echo "📌 Found Image.gz-dtb"
+          echo "IMAGEPATH=true" >> $GITHUB_ENV
+          echo "KERNEL_IMAGE=Image.gz-dtb" >> $GITHUB_ENV
+    
+        elif [ -f "$WORKSPACE/$KDIR/out/arch/arm64/boot/Image" ]; then
+          echo "📌 Found raw Image"
+          echo "IMAGEPATH=true" >> $GITHUB_ENV
+          echo "KERNEL_IMAGE=Image" >> $GITHUB_ENV
+    
         else
-          echo "Kernel Build Failed"
+          echo "⚠️ Kernel Build Failed"
           exit 1
         fi
 
@@ -503,7 +557,7 @@ jobs:
         git clone --depth=1 https://github.com/AndreiMikh/AnyKernel3
         rm -rf AnyKernel3/.git
 
-        cp "$KDIR/out/arch/arm64/boot/Image" AnyKernel3/
+        cp "$KDIR/out/arch/arm64/boot/Image.gz" AnyKernel3/
 
     # =========================
     # Upload Kernel Image
