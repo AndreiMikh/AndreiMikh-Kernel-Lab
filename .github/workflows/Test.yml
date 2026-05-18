@@ -1462,104 +1462,155 @@ jobs:
       # Kernel Version Setup
       # ==============================
       - name: 🔧 Kernel Version Setup
+        shell: bash
         run: |
+          set -Eeuo pipefail
+      
           echo "------------------------------"
-          echo "🚀 Determining Android and Kernel Branch Versions..."
+          echo "🚀 Determining Kernel Information..."
           echo "------------------------------"
           echo ""
-
+      
           cd kernel_workspace/kernel_platform
-
-          echo "📂 Current Directory: $(pwd)"
-
-          # Resolve Kernel Common Path
+      
+          echo "📂 Working Directory: $(pwd)"
+          echo ""
+      
+          # Resolve Kernel Common Directory
+          echo "🔍 Locating Kernel Common Directory..."
+      
           if [[ -f "./common/Makefile" ]]; then
-            KCDIR="./common"
+            KCDIR="./common"      
           elif [[ -f "./kernel_platform/common/Makefile" ]]; then
-            KCDIR="./kernel_platform/common"
+            KCDIR="./kernel_platform/common"     
           else
-            echo "⚠️ ERROR: Cannot Find Kernel Common Makefile"
-            echo "📁 Directory Dump:"      
-            find . -maxdepth 4 -name Makefile | head -20
+            echo "⚠️ ERROR: Kernel Common Makefile Not Found"
+            echo ""
+      
+            echo "📂 Nearby Makefiles:"
+            find . -maxdepth 4 -name Makefile | head -20      
             exit 1
           fi
-
+      
           COMMONMAKEFILE="$KCDIR/Makefile"
-          echo "📌 Using Makefile: $COMMON_MAKEFILE"
-
-          BRANCH=""
-
-          # Try Build Configuration Files
-          for cfg in ./common/build.config.constants ./common/build.config.common; do
+      
+          echo "🚀 Kernel Common Directory Found"
+          echo "📌 Using Makefile: $COMMONMAKEFILE"
+          echo ""
+      
+          # Detect KMI Branch
+          echo "🔍 Detecting KMI Branch..."
+      
+          KMI=""
+      
+          # Try Standard Build Configurations
+          for cfg in \
+            "$KCDIR/build.config.constants" \
+            "$KCDIR/build.config.common"; do
+      
             if [[ -f "$cfg" ]]; then
-              BRANCH=$(grep -m1 '^BRANCH=' "$cfg" | cut -d= -f2)
-              [[ -n "$BRANCH" ]] && break
+              TMPBRANCH=$(grep -m1 '^BRANCH=' "$cfg" | cut -d= -f2 || true)   
+              if [[ -n "${TMPBRANCH:-}" ]]; then
+                KMI="$TMPBRANCH"
+                break
+              fi
             fi
           done
-
-          # Fallback: ACK SHA
-          if [[ -z "$BRANCH" && -n "${KERNELREPOSITORY:-}" && -f "./$KERNELREPOSITORY/android/ACK_SHA" ]]; then
-            BRANCH=$(sed -n '2p' "./$KERNELREPOSITORY/android/ACK_SHA" | awk -F'-' '{print $1"-"$2}')
+      
+          # Fallback Using ACK SHA
+          if [[ -z "${KMI:-}" && -n "${KERNELREPOSITORY:-}" \
+            && -f "./$KERNELREPOSITORY/android/ACK_SHA" ]]; then      
+            KMI=$(sed -n '2p' "./$KERNELREPOSITORY/android/ACK_SHA" \
+              | awk -F'-' '{print $1"-"$2}')
           fi
-
-          # Parse Android / Kernel Version
-          if [[ -n "$BRANCH" ]]; then
-            ANDROIDVERSION="${BRANCH%-*}"
-            KERNELVERSION="${BRANCH#*-}"
-
-            echo "ANDROIDVERSION=$ANDROIDVERSION" >> $GITHUB_ENV
-            echo "KERNELVERSION=$KERNELVERSION" >> $GITHUB_ENV
-
-            echo "🔎 Branch Found: $BRANCH"
+      
+          # Parse KMI Information
+          if [[ -n "${KMI:-}" ]]; then
+      
+            ANDROIDVERSION="${KMI%-*}"
+            KERNELBRANCH="${KMI#*-}"
+      
+            echo "🚀 KMI Detected"
+            echo "📌 KMI             : $KMI"
+            echo "📌 Android Version : $ANDROIDVERSION"
+            echo "📌 Kernel Branch   : $KERNELBRANCH"
+      
           else
-            echo "⚠️ No Branch Found in Build Configuration or ACK SHA"
+            echo "⚠️ Unable to Detect KMI"
+      
+            KMI="Unknown"
             ANDROIDVERSION="Unknown"
-            KERNELVERSION="Unknown"
-
-            echo "ANDROIDVERSION=$ANDROIDVERSION" >> $GITHUB_ENV
-            echo "KERNELVERSION=$KERNELVERSION" >> $GITHUB_ENV
+            KERNELBRANCH="Unknown"
           fi
-
-          # Read Original Kernel Version
-          echo "🧾 Reading Original Kernel Version..."
-
-          OGVERSION=$(awk '/^VERSION =/ {v=$3} /^PATCHLEVEL =/ {p=$3} /^SUBLEVEL =/ {s=$3} END {print v"."p"."s}' "$COMMONMAKEFILE")
-
+      
+          echo ""
+      
+          # Read Actual Kernel Version
+          echo "🧾 Reading Real Kernel Version..."
+      
+          VERSION=$(awk '/^VERSION =/ {print $3}' "$COMMONMAKEFILE")
+          PATCHLEVEL=$(awk '/^PATCHLEVEL =/ {print $3}' "$COMMONMAKEFILE")
+          SUBLEVEL=$(awk '/^SUBLEVEL =/ {print $3}' "$COMMONMAKEFILE")
+      
+          OGVERSION="${VERSION}.${PATCHLEVEL}.${SUBLEVEL}"
+      
           echo "📌 Original Kernel Version: $OGVERSION"
-
-          # Update Sublevel if Provided
+          echo ""
+      
+          # Optional Sublevel Override
           INPUTSUBLEVEL="${{ github.event.inputs.SUBLEVEL }}"
-
-          if [[ -n "$INPUTSUBLEVEL" ]]; then
-            echo "🧾 Updating Sublevel to: $INPUTSUBLEVEL"
-            sed -i "s/^\(SUBLEVEL[[:space:]]*=[[:space:]]*\).*/\1$INPUTSUBLEVEL/" "$COMMONMAKEFILE"
+      
+          if [[ -n "${INPUTSUBLEVEL:-}" ]]; then      
+            echo "🛠️ Updating Kernel Sublevel..."
+            echo "📌 New Sublevel: $INPUTSUBLEVEL"      
+            sed -i \
+              "s/^\(SUBLEVEL[[:space:]]*=[[:space:]]*\).*/\1$INPUTSUBLEVEL/" \
+              "$COMMONMAKEFILE"      
           else
-            echo "📌 No Sublevel Input Provided ⚙️ Keeping Default"
+            echo "📌 No Custom Sublevel Provided"
           fi
-
-          # New Kernel Version
-          NEWVERSION=$(awk '/^VERSION =/ {v=$3} /^PATCHLEVEL =/ {p=$3} /^SUBLEVEL =/ {s=$3} END {print v"."p"."s}' "$COMMONMAKEFILE")
-
-          echo "📊 New Kernel Version: $NEWVERSION"
-
+      
+          echo ""
+      
+          # Read Updated Kernel Version
+          NEWVERSION=$(awk '
+            /^VERSION =/ {v=$3}
+            /^PATCHLEVEL =/ {p=$3}
+            /^SUBLEVEL =/ {s=$3}
+            END {print v "." p "." s}
+          ' "$COMMONMAKEFILE")
+      
+          echo "📊 Final Kernel Version: $NEWVERSION"
+      
           if [[ "$OGVERSION" != "$NEWVERSION" ]]; then
-            echo "⚙️ Kernel Version Changed: $OGVERSION -> $NEWVERSION"
-            echo "FULLVERSION=$NEWVERSION" >> $GITHUB_ENV
+            echo "⚙️ Kernel Version Modified"
+            echo "📌 $OGVERSION → $NEWVERSION"
           else
-            echo "✔️ Kernel Version Unchanged: $OGVERSION"
-            echo "FULLVERSION=$OGVERSION" >> $GITHUB_ENV
+            echo "✔️ Kernel Version Unchanged"
           fi
-
-          # Export Version Information
-          KV_TMP="${KERNELVERSION}"
-
-          echo "KV1=$(echo "$KV_TMP" | cut -d. -f1)" >> $GITHUB_ENV
-          echo "KV2=$(echo "$KV_TMP" | tr -d '.')" >> $GITHUB_ENV
-          echo "KV3=$(echo "$NEWVERSION" | tr -d '.')" >> $GITHUB_ENV
-
-          echo "KSHORTVERSION=$(echo $NEWVERSION | cut -d. -f1,2)" >> $GITHUB_ENV
-          echo "KSHORTPATCHVERSION=$(echo $NEWVERSION | cut -d. -f1,2 | tr '.' '_')" >> $GITHUB_ENV
-
+      
+          echo ""
+      
+          # Export Environment Variables
+          echo "📤 Exporting Environment Variables..."
+      
+          {
+            echo "KMI=$KMI"
+            echo "ANDROIDVERSION=$ANDROIDVERSION"
+            echo "KERNELBRANCH=$KERNELBRANCH"
+      
+            echo "FULLVERSION=$NEWVERSION"
+      
+            echo "KV1=$(echo "$KERNELBRANCH" | cut -d. -f1)"
+            echo "KV2=$(echo "$KERNELBRANCH" | tr -d '.')"
+            echo "KV3=$(echo "$NEWVERSION" | tr -d '.')"
+      
+            echo "KSHORTVERSION=$(echo "$NEWVERSION" | cut -d. -f1,2)"
+            echo "KSHORTPATCHVERSION=$(echo "$NEWVERSION" | cut -d. -f1,2 | tr '.' '_')"
+          } >> "$GITHUB_ENV"
+      
+          echo "🚀 Environment Variables Exported"
+      
           echo ""
           echo "🎉 Kernel Version Setup Complete"
   
@@ -2297,6 +2348,7 @@ jobs:
           ANDROIDVERSION: ${{ env.ANDROIDVERSION }}
           KERNELVERSION: ${{ env.KERNELVERSION }}
           XUS: ${{ env.XUS }}
+          KMI: ${{ env.KMI }}
           KV2: ${{ env.KV2 }}
           KV3: ${{ env.KV3 }}
         run: |
@@ -3671,6 +3723,8 @@ jobs:
       - name: 🔧 DroidSpacesLXC Injection
         if: ${{ github.event.inputs.LXCDOCKERSUPPORT == 'DroidSpacesLXC-Inject' }}
         shell: bash
+        env:
+          KMI: ${{ env.KMI }}
         run: |
           set -euo pipefail
 
@@ -4988,6 +5042,7 @@ jobs:
       
           CPU="${CPU:-${{ env.CPUD }}}"
           CPU="${CPU:-unknown}"
+          KMI="${{ env.KMI }}"
       
           METHOD="${METHOD:-${{ env.BUILDMETHOD }}}"
           METHOD="${METHOD:-perf}"
