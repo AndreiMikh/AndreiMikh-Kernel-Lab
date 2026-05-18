@@ -5707,22 +5707,27 @@ jobs:
           set -Eeuo pipefail
       
           echo "------------------------------"
-          echo "🚀 Detecting ROM Base..."
+          echo "🚀 Regional Variant Detection..."
           echo "------------------------------"
           echo ""
       
-          # Init Variables
+          # Init
           IMAGEPATH="AnyKernel3/Image"
-
-          # Scoring System (Heuristic-Based)
+          DTBPATH="AnyKernel3/dtb"
+          BOOTCONFIGPATH="bootconfig"
+      
           SCORECOLOR=0
           SCOREOXYGEN=0
-
-          # Final Outputs
+      
           ROMBASE="Unknown"
           CONFIDENCE="Low"
       
-          # Manifest Analysis (Primary Source)
+          # Helper: Safe Grep Function
+          match() {
+            echo "$1" | grep -qi "$2"
+          }
+      
+          # Manifest Layer
           INFOMANIFEST="$(
             printf "%s %s %s" \
               "${MANIFESTBRANCH:-}" \
@@ -5731,117 +5736,108 @@ jobs:
             | tr '[:upper:]' '[:lower:]'
           )"
       
-          echo "🔎 Manifest Information:"
+          echo "🔎 Manifest Layer:"
           echo "$INFOMANIFEST"
           echo ""
       
-          # ColorOS / China Indicators
-          grep -qiE "coloros|cn|china" <<< "$INFOMANIFEST" \
-            && ((SCORECOLOR+=6))
+          match "$INFOMANIFEST" "coloros|cn|china" && ((SCORECOLOR+=4))
+          match "$INFOMANIFEST" "oxygen|oneplus|global|eu|india" && ((SCOREOXYGEN+=4))
       
-          # OxygenOS / Global Indicators
-          grep -qiE "oxygen|oneplus|global|eu|india" <<< "$INFOMANIFEST" \
-            && ((SCOREOXYGEN+=6))
-      
-          # Generic OPlus Hint
-          # OPlus generic signal (Shared Base)
-          # NOTE: Affects Both ROMs
-          grep -qi "oplus" <<< "$INFOMANIFEST" && {
+          # OPlus Shared Base
+          match "$INFOMANIFEST" "oplus" && {
             ((SCORECOLOR+=1))
             ((SCOREOXYGEN+=1))
           }
       
-          # Kernel Image Analysis
-          # (Fallback / Supplemental)
-          # Only Used if Manifest Signals are Weak or Incomplete
-          if [[ -f "$IMAGEPATH" ]]; then
-            echo "✔ Found Kernel Image: $IMAGEPATH"
-
-            # Extract Raw Strings from Kernel Image
-            OUTPUTSTRINGS="$(
-              strings "$IMAGEPATH" 2>/dev/null || true
-            )"
-
-            # Lowercase Version for Easier Matching
-            LOWERSTRINGS="$(
-              printf "%s" "$OUTPUTSTRINGS" \
-                | tr '[:upper:]' '[:lower:]'
-            )"
-
-            # Debug Preview (Top 15 Matches)
-            echo "🔎 Debug Matches (Top 15 Relevant Lines):"
+          # Boot Configuration / Cmdline Layer
+          BOOTINFO=""
       
-            {
-              grep -iE \
-                "androidboot|fingerprint|oplus|oneplus|coloros|oxygen|hwc|region|country|build" \
-                <<< "$OUTPUTSTRINGS" \
-                | sed -n '1,15p'
-            } || true
-      
-            echo "------------------------------"
-            echo "🧠 Analyzing Kernel Strings..."
-            echo "------------------------------"
-            echo ""
-
-            # Strong ColorOS Signals
-            # Direct ROM Branding
-            grep -qi "coloros" <<< "$LOWERSTRINGS" \
-              && ((SCORECOLOR+=4))
-
-            # China Region Hardware Configuration
-            grep -qiE "hwc=cn|region=cn|country=cn|china" <<< "$LOWERSTRINGS" \
-              && ((SCORECOLOR+=6))
-      
-            # Strong OxygenOS Indicators
-            # Direct ROM Branding
-            grep -qi "oxygen" <<< "$LOWERSTRINGS" \
-              && ((SCOREOXYGEN+=4))
-         
-            # Global Region Hardware Configuration
-            grep -qiE "hwc=global|hwc=eu|hwc=india" <<< "$LOWERSTRINGS" \
-              && ((SCOREOXYGEN+=6))
-
-            # Extra Weak Regional Hints
-            grep -qiE "global|europe|india" <<< "$LOWERSTRINGS" \
-              && ((SCOREOXYGEN+=2))
-
-            # Shared Vendor Signal
-            # OPlus Appears in Both ROM Eco-Systems
-            grep -qi "oneplus" <<< "$LOWERSTRINGS" \
-              && ((SCOREOXYGEN+=1))
-      
-            grep -qi "oplus" <<< "$LOWERSTRINGS" && {
-              ((SCORECOLOR+=1))
-              ((SCOREOXYGEN+=1))
-            }
-      
-          else
-            # If kernel Image is Missing, Rely Entirely on Manifest
-            echo "⚠️ Kernel Image Not Found"
-            echo "⚠️ Using Manifest-Only Detection"
-            echo ""
-      
+          # Kernel Cmdline
+          if [[ -r /proc/cmdline ]]; then
+            BOOTINFO+=" $(cat /proc/cmdline)"
           fi
       
-          # Final Decision Logic
+          # Boot Configuration File (Android 12+ / GKI)
+          if [[ -f "$BOOTCONFIGPATH" ]]; then
+            BOOTINFO+=" $(cat "$BOOTCONFIGPATH")"
+          fi
+      
+          BOOTINFOLOW="$(echo "$BOOTINFO" | tr '[:upper:]' '[:lower:]')"
+      
+          echo "🔎 Boot Layer (Cmdline + Boot Configuration):"
+          echo "$BOOTINFO"
+          echo ""
+      
+          # Strongest Modern Indicators
+          match "$BOOTINFOLOW" "androidboot.hwc=cn|region=cn|country=cn" && ((SCORECOLOR+=8))
+          match "$BOOTINFOLOW" "androidboot.hwc=global|hwc=eu|hwc=india" && ((SCOREOXYGEN+=8))
+      
+          # RO.BOOT.* Properties
+          match "$BOOTINFOLOW" "ro.boot.hwc=cn" && ((SCORECOLOR+=8))
+          match "$BOOTINFOLOW" "ro.boot.hwc=global|ro.boot.hwc=eu|ro.boot.hwc=india" && ((SCOREOXYGEN+=8))
+      
+          # ROM Branding Hints
+          match "$BOOTINFOLOW" "coloros" && ((SCORECOLOR+=6))
+          match "$BOOTINFOLOW" "oxygen" && ((SCOREOXYGEN+=6))
+      
+          # DTB / Device Tree Layer
+          if [[ -f "$DTBPATH" ]]; then      
+            echo "✔ DTB Found, Extracting Strings..."   
+            DTBSTRINGS="$(strings "$DTBPATH" 2>/dev/null || true)"
+            DTBLOW="$(echo "$DTBSTRINGS" | tr '[:upper:]' '[:lower:]')"      
+            echo "🔎 DTB Hints (Top 15):"
+            echo "$DTBSTRINGS" | grep -iE "hwc|region|oplus|oneplus|coloros|oxygen|china|global" | head -n 15 || true   
+            match "$DTBLOW" "hwc=cn|china|cn" && ((SCORECOLOR+=6))
+            match "$DTBLOW" "hwc=global|eu|india" && ((SCOREOXYGEN+=6))      
+            match "$DTBLOW" "coloros" && ((SCORECOLOR+=4))
+            match "$DTBLOW" "oxygen" && ((SCOREOXYGEN+=4))      
+          else
+            echo "⚠️ DTB Not Found (Skipping Device Tree Layer)"
+          fi
+      
+          # Kernel Image Layer
+          if [[ -f "$IMAGEPATH" ]]; then      
+            echo "✔ Kernel Image Found"      
+            KSTRINGS="$(strings "$IMAGEPATH" 2>/dev/null || true)"
+            KLOW="$(echo "$KSTRINGS" | tr '[:upper:]' '[:lower:]')"      
+            match "$KLOW" "hwc=cn|china" && ((SCORECOLOR+=3))
+            match "$KLOW" "hwc=global|eu|india" && ((SCOREOXYGEN+=3))      
+            match "$KLOW" "coloros" && ((SCORECOLOR+=2))
+            match "$KLOW" "oxygen" && ((SCOREOXYGEN+=2))      
+            match "$KLOW" "oplus" && {
+              ((SCORECOLOR+=1))
+              ((SCOREOXYGEN+=1))
+            }      
+          else
+            echo "⚠️ Kernel Image Missing"
+          fi
+      
+          # Final Decision Engine      
+          echo "------------------------------"
+          echo "📊 FINAL SCORING"
+          echo "------------------------------"
+          echo "ColorOS : $SCORECOLOR"
+          echo "OxygenOS: $SCOREOXYGEN"
+          echo "------------------------------"
+      
           if (( SCORECOLOR > SCOREOXYGEN )); then
             ROMBASE="ColorOS"
-            MAXSCORE=$SCORECOLOR
+            MAXSCORE=$SCORECOLOR      
           elif (( SCOREOXYGEN > SCORECOLOR )); then
             ROMBASE="OxygenOS"
-            MAXSCORE=$SCOREOXYGEN
-          elif (( SCORECOLOR >= 4 && SCOREOXYGEN >= 4 )); then
-            # Only Treat as Tie if Both have Signals
+            MAXSCORE=$SCOREOXYGEN      
+          elif (( SCORECOLOR >= 6 && SCOREOXYGEN >= 6 )); then
             ROMBASE="ColorOS / OxygenOS"
-            MAXSCORE=$SCORECOLOR
+            MAXSCORE=$SCORECOLOR      
           else
             ROMBASE="Unknown"
             MAXSCORE=0
           fi
       
-          # Confidence Level Calculation
-          # Higher Score = Stronger Certainty
-          if (( MAXSCORE >= 10 )); then
+          # Confidence Engine
+          if (( MAXSCORE >= 14 )); then
+            CONFIDENCE="Very High"
+          elif (( MAXSCORE >= 9 )); then
             CONFIDENCE="High"
           elif (( MAXSCORE >= 5 )); then
             CONFIDENCE="Medium"
@@ -5850,24 +5846,18 @@ jobs:
           fi
       
           # Output
-          echo "------------------------------"
-          echo "📊 Score Breakdown"
-          echo "------------------------------"
-          echo "🇨🇳 ColorOS : $SCORECOLOR"
-          echo "🇺🇸 OxygenOS: $SCOREOXYGEN"
-          echo "------------------------------"
-          echo "📌 Final ROM Base : $ROMBASE"
-          echo "🎯 Confidence     : $CONFIDENCE"
-          echo "------------------------------"
-
-          # Export Results to GitHub Actions Environment
+          echo ""
+          echo "📌 ROM Base    : $ROMBASE"
+          echo "🎯 Confidence  : $CONFIDENCE"
+          echo ""
+      
           {
             echo "ROMBASE=$ROMBASE"
             echo "ROMCONFIDENCE=$CONFIDENCE"
           } >> "$GITHUB_ENV"
-      
+
           echo ""
-          echo "🎉 Regional Detection Complete!"
+          echo "🎉 AI-Grade Regional Variant Detection Complete"
 
       # ==============================
       # KernelPatch-Module Injection Engine
