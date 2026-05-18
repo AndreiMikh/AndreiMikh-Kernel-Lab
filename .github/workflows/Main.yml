@@ -948,106 +948,163 @@ jobs:
         if: ${{ env.BUILDCCACHE != 'Disabled' }}
         shell: bash
         env:
-          GH_TOKEN: ${{ github.token }} 
+          GH_TOKEN: ${{ github.token }}
         run: |
-          set -euo pipefail
+          set -Eeuo pipefail
       
           echo "------------------------------"
           echo "🚀 Attempting to Restore Release Cache..."
           echo "------------------------------"
           echo ""
       
-          # Default output (always defined for fallback logic)
+          # Default Output
+          # Always Define the Output so Later Workflow
+          # Steps can Safely Check the Restoration State
           echo "cache-restored=false" >> "$GITHUB_OUTPUT"
       
-
           # Variables
           TAG="${{ env.CPU }}"
           FILE="CCache-${{ env.MANIFESTBASEFILE }}-${{ runner.os }}.tar.zst"
           REPO="${{ github.repository }}"
-
-          echo "📦 Release Tag: $TAG"
-          echo "📁 Expected File: $FILE"
-
+          CACHE_DIR="${{ env.CCACHE_DIR }}"
+      
+          echo "📦 Release Tag : $TAG"
+          echo "📁 Cache File  : $FILE"
+          echo "📂 Cache Path  : $CACHE_DIR"
+          echo ""
+      
           # Prepare Cache Directory
-          mkdir -p "${{ env.CCACHE_DIR }}"
-          chmod -R 775 "${{ env.CCACHE_DIR }}"
-
+          echo "📂 Preparing Cache Directory..."
+      
+          mkdir -p "$CACHE_DIR"
+          chmod -R 775 "$CACHE_DIR"
+      
+          # Fetch Release Asset Metadata
           echo "📩 Fetching Release Asset Metadata..."
-
-          # Get Asset API URL
-          ASSET=$(curl -s \
+      
+          ASSETJSON=$(curl -fsSL \
             -H "Authorization: Bearer $GH_TOKEN" \
             -H "Accept: application/vnd.github+json" \
-            "https://api.github.com/repos/$REPO/releases/tags/$TAG" \
-            | jq -r ".assets[] | select(.name == \"$FILE\") | .url")
-
-          if [[ -z "$ASSET" || "$ASSET" == "null" ]]; then
-            echo "⚠️ Cache Not Found in Release: $TAG"
+            "https://api.github.com/repos/$REPO/releases/tags/$TAG") || {
+              echo "⚠️ Failed to Fetch Release Metadata"
+              exit 0
+            }
+      
+          ASSETURL=$(echo "$ASSETJSON" | jq -r \
+            ".assets[] | select(.name == \"$FILE\") | .url")
+      
+          # Validate Asset Existence
+          if [[ -z "${ASSETURL:-}" || "$ASSETURL" == "null" ]]; then
+            echo "⚠️ Cache Asset Not Found"
             echo "➡️ Continuing Without Release Cache"
             exit 0
           fi
-
-          echo "🌐 Downloading Cache (Mozilla)..."
-
-          # Retry Download (Robust Against GitHub Hiccups)
-          for i in 1 2 3; do
-            echo "⬇️ Attempt $i..."
-
-            if curl -L \
+      
+          echo "🚀 Cache Asset Located"
+          echo ""
+      
+          # Download Cache Archive
+          echo "🌐 Downloading Cache Archive..."
+      
+          DLSUCCESS=false
+      
+          for ATTEMPT in 1 2 3; do
+            echo "⬇️ Download Attempt: $ATTEMPT"
+      
+            if curl -fL \
               -H "Authorization: Bearer $GH_TOKEN" \
               -H "Accept: application/octet-stream" \
               -A "Mozilla/5.0" \
-              "$ASSET" \
+              --retry 3 \
+              --retry-delay 3 \
+              --connect-timeout 30 \
+              "$ASSETURL" \
               -o "$FILE"; then
+      
+              DLSUCCESS=true
               break
             fi
-
-            echo "⚠️ Download Failed, Retrying..."
+      
+            echo "⚠️ Download Attempt Failed"
             sleep 2
           done
-
+      
+          # Validate Download Result
+          if [[ "$DLSUCCESS" != "true" ]]; then
+            echo "⚠️ Failed to Download Cache Archive"
+            rm -f "$FILE"
+            exit 0
+          fi
+      
+          echo ""
           echo "📦 Download Completed"
-
-          # File Validation
+      
+          # Validate File Existence
+          if [[ ! -f "$FILE" ]]; then
+            echo "⚠️ Downloaded File Does Not Exist"
+            exit 0
+          fi
+      
           if [[ ! -s "$FILE" ]]; then
-            echo "⚠️ Downloaded Cache is Empty or Invalid"
+            echo "⚠️ Downloaded File is Empty"
             rm -f "$FILE"
             exit 0
           fi
-
-          # 🔍 File Size Debug
-          echo "📊 File Size:"
+      
+          # File Information
+          echo "📊 Archive Information:"
           ls -lh "$FILE"
-
+      
+          # Verify Archive Integrity
           echo "🔍 Testing Archive Integrity..."
-
-          if ! zstd -t "$FILE"; then
-            echo "⚠️ Archive is Corrupted"
+      
+          if ! zstd --long=30 -t "$FILE"; then
+            echo "⚠️ Archive Integrity Test Failed"
+            echo "🗑️ Removing Corrupted Archive"
+      
             rm -f "$FILE"
             exit 0
           fi
-
-          echo "📦 Extracting Cache..."
-    
-          if ! tar --use-compress-program=unzstd -xf "$FILE" -C "${{ env.CCACHE_DIR }}"; then
+      
+          echo "🚀 Archive Integrity Verified"
+      
+          # Extract Cache Archive
+          echo "📦 Extracting Cache Archive..."
+      
+          if ! tar \
+            --use-compress-program="unzstd --long=30" \
+            -xf "$FILE" \
+            -C "$CACHE_DIR"; then
+      
             echo "⚠️ Cache Extraction Failed"
+            echo "🗑️ Removing Invalid Archive"
+      
             rm -f "$FILE"
             exit 0
           fi
-
-          echo "🔎 Validating extraction..."
-
-          if [[ -n "$(ls -A "${{ env.CCACHE_DIR }}" 2>/dev/null)" ]]; then
+      
+          echo "🚀 Cache Extraction Completed"
+      
+          # Validate Extracted Cache
+          echo "🔎 Validating Extracted Cache..."
+      
+          if [[ -n "$(find "$CACHE_DIR" -mindepth 1 -print -quit 2>/dev/null)" ]]; then
             echo "👾 Cache Restored Successfully"
             echo "cache-restored=true" >> "$GITHUB_OUTPUT"
           else
             echo "⚠️ Cache Directory is Empty After Extraction"
-            rm -rf "${{ env.CCACHE_DIR }}"
+            echo "🗑️ Cleaning Cache Directory"
+      
+            rm -rf "$CACHE_DIR"
+            mkdir -p "$CACHE_DIR"
           fi
-
+      
+          # Cleanup Archive
+          echo "🧹 Cleaning Temporary Archive..."
+          rm -f "$FILE"
+      
           echo ""
-          echo "🎉 Release Cache Step Completed"
+          echo "🎉 Release Cache Restoration Completed"
     
       # ==============================
       # Local Cache Restoration (Fallback)
