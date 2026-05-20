@@ -2597,64 +2597,85 @@ jobs:
                 sed -i '/#include <linux\/cpufreq_times.h>/a #include <linux\/dma-buf.h>' ./fs/proc/base.c
               fi
 
-              # Add Missing ZSwap Header
-              if [[ "${{ github.event.inputs.SUSFSVARIANT }}" == "GKI" ]]; then
-              
-                if ! grep -qxF '#include <linux/zswap.h>' \
-                  ./mm/memory.c; then              
+              # SUSFS Tree Compatibility Fixes
+              # Required for GKI + OKI Trees
+              if [[ "$SUSFSVARIANT" == "GKI" || \
+                    "$SUSFSVARIANT" == "OGKI" ]]; then          
+                # Inject Missing ZSwap Header
+                if ! grep -qxF \
+                  '#include <linux/zswap.h>' \
+                  ./mm/memory.c; then          
                   echo "⚠️ Missing ZSwap Header Detected"
                   echo "🔧 Injecting Required Header"
-              
+          
                   sed -i \
                     '/#include <linux\/sched\/sysctl\.h>/a #include <linux\/zswap.h>' \
-                    ./mm/memory.c
-              
+                    ./mm/memory.c          
                   fake_patched_swap=1
                 fi
               
                 # Add Missing Trace / Hooks / FS Header
-                if ! grep -qxF '#include <trace/hooks/fs.h>' ./fs/namespace.c \
-                  && ! grep -qxF 'susfs_def.h' ./fs/namespace.c; then              
-                  echo "⚠️ Missing Trace / Hooks / FS Header Detected"
+                if ! grep -qxF \
+                  '#include <trace/hooks/fs.h>' \
+                  ./fs/namespace.c \
+                  && ! grep -qF \
+                  'susfs_def.h' \
+                  ./fs/namespace.c; then          
+                  echo "⚠️ Missing Trace Hooks Header Detected"
                   echo "🔧 Injecting Required Header"
-              
+          
                   sed -i \
                     '/#include <trace\/hooks\/blk\.h>/a #include <trace\/hooks\/fs.h>' \
-                    ./fs/namespace.c
-              
+                    ./fs/namespace.c          
                   fake_patched_ns=1
                 fi
               
-                # Expand Single-Line if Block
-                # Required for SUSFS Pattern Matching
-                if grep -qF 'if (vma->vm_end > last_vma_end)' ./fs/proc/task_mmu.c \
-                  && ! grep -qF 'if (vma->vm_end > last_vma_end) {' ./fs/proc/task_mmu.c; then              
+                # Expand Compact OEM if Block
+                # Required for SUSFS Patch Hunk
+                # Matching Across OEM Kernels
+                if grep -qF \
+                  'if (vma->vm_end > last_vma_end)' \
+                  ./fs/proc/task_mmu.c \
+                  && ! grep -qF \
+                  'if (vma->vm_end > last_vma_end) {' \
+                  ./fs/proc/task_mmu.c; then
+          
                   echo "⚠️ Compact if Block Detected"
                   echo "🔧 Expanding Block for SUSFS Compatibility"
-              
-                  perl -i -0pe \
-                    's/\t\t\tif \(vma->vm_end > last_vma_end\)\n\t\t\t\tsmap_gather_stats\(vma, &mss, last_vma_end\);/\t\t\tif (vma->vm_end > last_vma_end) {\n\t\t\t\tsmap_gather_stats(vma, \&mss, last_vma_end);\n\t\t\t\tlast_vma_end = vma->vm_end;\n\t\t\t}/' \
-                    ./fs/proc/task_mmu.c
-              
+          
+                  perl -0777 -i -pe '
+                  s@if\s*\(vma->vm_end > last_vma_end\)\s*
+                  \s*smap_gather_stats\(vma,\s*&mss,\s*last_vma_end\);@
+                  if (vma->vm_end > last_vma_end) {
+          \t\t\t\tsmap_gather_stats(vma, \&mss, last_vma_end);
+          \t\t\t\tlast_vma_end = vma->vm_end;
+          \t\t\t}@
+                  gs
+                  ' ./fs/proc/task_mmu.c
+          
                   fake_patched_expand=1
-                fi              
+                fi
               fi
             fi
                     
             # Android 14 Kernel 6.1 Fix
             if [ "$KMI" = "android14-6.1" ]; then
-              # Detect Missing VMA Pages Support
-              if ! grep -qxF $'\tif (!vma_pages(vma))' ./fs/proc/task_mmu.c; then
+              # Detect Missing VMA Page Logic Support
+              if ! grep -qxF \
+                $'\tif (!vma_pages(vma))' \
+                ./fs/proc/task_mmu.c; then          
                 echo "⚠️ Missing VMA Pages Logic Detected"
-                echo "🔧 SUSFS Compatibility Workaround Enabled"
+                echo "🔧 SUSFS Compatibility Workaround Enabled"          
                 fake_patched=1
               fi
 
               # Add Missing DMA-BUF Header
-              if ! grep -qxF '#include <linux/dma-buf.h>' ./fs/proc/base.c; then
+              if ! grep -qxF \
+                '#include <linux/dma-buf.h>' \
+                ./fs/proc/base.c; then         
                 echo "⚠️ Missing DMA-BUF Header Detected"
-                echo "🔧 Injecting Required Header"        
-         
+                echo "🔧 Injecting Required Header"
+          
                 sed -i \
                   '/#include <linux\/cpufreq_times.h>/a #include <linux\/dma-buf.h>' \
                   ./fs/proc/base.c
@@ -2663,9 +2684,11 @@ jobs:
           
             # Android 12 / 5.10
             # Android 13 / 5.15
-            if [ "$KMI" = "android12-5.10" ] || \
-               [ "$KMI" = "android13-5.15" ]; then          
-              if ! grep -qxF $'\tif (!vma_pages(vma))' \
+            if [[ "$KMI" == "android12-5.10" || \
+                  "$KMI" == "android13-5.15" ]]; then
+          
+              if ! grep -qxF \
+                $'\tif (!vma_pages(vma))' \
                 ./fs/proc/task_mmu.c; then          
                 echo "⚠️ Missing VMA Pages Logic Detected"
                 echo "🔧 SUSFS Compatibility Workaround Enabled"          
@@ -2675,14 +2698,20 @@ jobs:
 
             # Android 13 / Kernel 5.15
             if [ "$KMI" = "android13-5.15" ]; then          
-              # Remove Conflicting Swap Slots Include
-              if grep -qxF '#include <linux/swap_slots.h>' ./mm/memory.c \
-                && ! grep -qxF '#include <linux/susfs_def.h>' ./mm/memory.c; then         
-                echo "⚠️ Conflicting Swap Slots Include Detected"
-                echo "🔧 Removing Conflicting Include Temporarily"          
-         
-                sed -i '/#include <linux\/swap_slots\.h>/d' \
-                  ./mm/memory.c          
+            
+              # Remove Conflicting Swap Slots Header Include
+              if grep -qxF \
+                '#include <linux/swap_slots.h>' \
+                ./mm/memory.c \
+                && ! grep -qxF \
+                '#include <linux/susfs_def.h>' \
+                ./mm/memory.c; then          
+                echo "⚠️ Conflicting swap_slots.h Include Detected"
+                echo "🔧 Removing Conflicting Include"
+          
+                sed -i \
+                  '/#include <linux\/swap_slots\.h>/d' \
+                  ./mm/memory.c        
                 fake_patched_dist=1
               fi
             fi
