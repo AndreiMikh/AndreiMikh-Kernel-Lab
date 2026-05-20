@@ -3346,56 +3346,73 @@ jobs:
           CPU: ${{ env.CPU }}
           CPUD: ${{ env.CPUD }}
         run: |
-          set -euo pipefail
+          set -Eeuo pipefail
       
           echo "------------------------------"
-          echo "🚀 Fengchi / Windspeed Scheduler..."
+          echo "🚀 Fengchi / Windspeed Scheduler"
           echo "------------------------------"
           echo ""
       
-          KCDIR="${GITHUB_WORKSPACE}/kernel_workspace/kernel_platform/common"
+          # Kernel Source Directory
+          KPDIR="${GITHUB_WORKSPACE}/kernel_workspace/kernel_platform"
+          KCDIR="${KPDIR}/common"
       
           # Validate Kernel Directory
           if [[ ! -d "$KCDIR" ]]; then
-              echo "⚠️ Kernel Directory Not Found:"
-              echo "$KCDIR"
-              exit 1
+            echo "⚠️ Kernel Directory Not Found:"
+            echo "$KCDIR"
+            exit 1
           fi
       
           cd "$KCDIR"
       
           # Detect Existing Scheduler
-          echo "🔎 Checking for Existing Fengchi / Windspeed Scheduler..."
+          echo "🔎 Checking Existing Fengchi / Windspeed Scheduler..."
       
-          if [[ -d "kernel/sched/hmbird" ]] || \
-             [[ -d "vendor/oplus/kernel/cpu/sched_ext/hmbird" ]]; then
+          if find kernel vendor -type d \( \
+            -iname "*hmbird*" -o \
+            -iname "*fengchi*" -o \
+            -iname "*windspeed*" \
+          \) 2>/dev/null | grep -q .; then
       
-              echo "🎉 Fengchi / Windspeed Scheduler Already Present"
-              echo "⏭️ Skipping Patch Stage"
-              exit 0
-          fi          
-          
-          # Validate Required Variables
+            echo "🎉 Fengchi / Windspeed Scheduler Already Present"
+            echo "⏭️ Skipping Patch Stage"
+            exit 0
+          fi
+      
+          # Validate Variables
           CPU="${CPU:-${CPUD:-}}"
-          
-          [[ -n "$CPU" ]] || { echo "🧾 CPU Branch Not Specified"; exit 11; }
-          [[ -n "${FILE:-}" ]] || { echo "🧾 File Input Not Specified"; exit 12; }
-
+      
+          [[ -n "$CPU" ]] || {
+            echo "⚠️ CPU Branch Not Specified"
+            exit 11
+          }
+      
+          [[ -n "${FILE:-}" ]] || {
+            echo "⚠️ Patch File Input Not Specified"
+            exit 12
+          }
+      
           echo ""
           echo "------------------------------"
           echo "📂 CPU Branch : $CPU"
           echo "📂 Patch File : $FILE"
           echo "------------------------------"
+          echo ""
       
           # Clone Patch Repository
           URLPATCH="https://github.com/AndreiMikh/Kernel-Hmbird-Patch.git"
           HMBIRDPATCHREPO="Kernel-Hmbird-Patch"
       
-          echo "📥 Cloning Fengchi / Windspeed Patch Repository..."
+          echo "📥 Cloning Fengchi Patch Repository..."
       
-          if ! git clone --depth=1 -b "$CPU" "$URLPATCH" "$HMBIRDPATCHREPO"; then
-              echo "⚠️ CPU Branch '$CPU' Not Found in Patch Repository"
-              exit 13
+          rm -rf "$HMBIRDPATCHREPO"
+      
+          if ! git clone --depth=1 -b "$CPU" \
+            "$URLPATCH" "$HMBIRDPATCHREPO"; then
+      
+            echo "⚠️ CPU Branch '$CPU' Not Found"
+            exit 13
           fi
       
           # Resolve Patch File
@@ -3404,40 +3421,77 @@ jobs:
           HMBIRDPATCHPATH="${HMBIRDPATCHREPO}/${HMBIRDPATCHFILE}"
       
           if [[ ! -f "$HMBIRDPATCHPATH" ]]; then
-              echo "⚠️ Patch File Not Found:"
-              echo "$HMBIRDPATCHPATH"
-              exit 14
+            echo "⚠️ Patch File Not Found :"
+            echo "$HMBIRDPATCHPATH"
+            exit 14
           fi
       
           cp "$HMBIRDPATCHPATH" .
       
           # Cleanup Handler
           cleanup() {
-              rm -f "$HMBIRDPATCHFILE" || true
-              rm -rf "$HMBIRDPATCHREPO" || true
+            rm -f "$HMBIRDPATCHFILE" || true
+            rm -rf "$HMBIRDPATCHREPO" || true
           }
+      
           trap cleanup EXIT
       
           # Normalize Patch Format
           echo "🔧 Normalizing Patch Format..."
           dos2unix "$HMBIRDPATCHFILE" 2>/dev/null || true
       
-          # Verify Patch Compatibility
-          echo "🔎 Checking Patch Compatibility..."
-
-          if ! git apply --check "$HMBIRDPATCHFILE"; then
-              echo "⚠️ Patch Check Failed (Kernel Mismatch or Already Applied)"
-              exit 15
+          # Detect Correct Patch Root
+          echo "🔎 Detecting Patch Base Directory..."      
+          PATCHPREFIX="$(grep -m1 '^--- ' "$HMBIRDPATCHFILE" | awk '{print $2}')"
+      
+          if [[ "$PATCHPREFIX" == a/common/* ]]; then
+            PATCHROOT="$KPDIR"
+          else
+            PATCHROOT="$KCDIR"
           fi
+      
+          echo "📂 Patch Root : $PATCHROOT"
+      
+          cd "$PATCHROOT"
+      
+          # Git Safe Directory
+          git config --global --add safe.directory "$PATCHROOT"
+      
+          # Verify Patch Compatibility
+          echo "🔎 Checking Patch Compatibility..."      
+          if ! git apply --check "$KCDIR/$HMBIRDPATCHFILE" 2>/dev/null; then      
+            echo "⚠️ Patch Compatibility Check Failed"
+      
+            if git apply --reverse --check \
+              "$KCDIR/$HMBIRDPATCHFILE" 2>/dev/null; then      
+              echo "🎉 Patch Already Applied"
+              exit 0
+            fi
+      
+            echo "⚠️ Kernel Source Incompatible With Patch"
+            echo "📋 Reject Report:"
+            find . -name "*.rej" -print || true      
+            exit 15
+          fi
+      
+          # Patch Statistics
+          echo "📊 Patch Statistics:"
+          git apply --stat "$KCDIR/$HMBIRDPATCHFILE" || true
       
           # Apply Patch
           echo "🚀 Applying Fengchi / Windspeed Scheduler Patch..."
       
-          git apply "$HMBIRDPATCHFILE"
+          if ! git apply --reject --whitespace=fix \
+            "$KCDIR/$HMBIRDPATCHFILE"; then
       
-          echo "✔️ Scheduler Patch Applied Successfully"
-
+            echo "⚠️ Patch Apply Failed"      
+            echo "📋 Reject Report:"
+            find . -name "*.rej" -print || true      
+            exit 16
+          fi
+      
           echo ""
+          echo "✔️ Scheduler Patch Applied Successfully"
           echo "🎉 Fengchi / Windspeed Scheduler Setup Completed"
     
       # ==============================
