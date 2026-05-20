@@ -5717,9 +5717,9 @@ jobs:
           key: CCache-${{ runner.os }}-${{ env.MANIFESTBASEFILE }}-${{ env.CPU }}-${{ github.ref_name }}
       
       # ==============================
-      # Create Cache Archive
+      # Create Compiler Cache Archive
       # ==============================
-      - name: 🔧 Create Cache Archive
+      - name: 🔧 Create Compiler Cache Archive
         if: ${{ env.BUILDCCACHE != 'Disabled' && env.CCACHESAVE == 'true' }}
         shell: bash
         run: |
@@ -5729,76 +5729,138 @@ jobs:
           echo "🚀 Creating Compiler Cache Archive..."
           echo "------------------------------"
           echo ""
-      
+
           # Variables
-          CCACHE_DIR="${{ env.CCACHE_DIR }}"
-      
+          CCACHE_DIR="${{ env.CCACHE_DIR }}"      
           TAR="CCache-${{ env.MANIFESTBASEFILE }}-${{ runner.os }}.tar.zst"
           TMPTAR="${TAR}.tmp"
       
           echo "TAR=$TAR" >> "$GITHUB_ENV"
       
-          # Fingerprint Metadata
-          FPFILE="${CCACHE_DIR}/.fpccache"
+          # ZSTD Configuration
+          ZSTDLEVEL=15
+          ZSTDLONG=30
       
+          # Sanity Checks
+          echo "📂 Cache Directory: $CCACHE_DIR"
+      
+          if [[ ! -d "$CCACHE_DIR" ]]; then
+            echo "⚠️ Cache Directory Missing"
+            exit 1
+          fi
+      
+          if [[ -z "$(find "$CCACHE_DIR" -mindepth 1 -print -quit 2>/dev/null)" ]]; then
+            echo "⚠️ Cache Directory Empty"
+            exit 1
+          fi
+      
+          # Fingerprint Metadata
+          echo "🧬 Generating Cache Fingerprint..."      
+          FPFILE="${CCACHE_DIR}/.fpccache"      
           {
             echo "Manifest=${{ env.MANIFESTBASEFILE }}"
             echo "RunnerOS=${{ runner.os }}"
             echo "Kernel=${{ env.KERNELVERSION }}"
             echo "Android=${{ env.ANDROIDVERSION }}"
+            echo "KMI=${{ env.KMI }}"
+            echo "CompilerProfile=${{ env.PROFILE }}"
+            echo "BuildMethod=${{ env.BUILDMETHOD }}"
             echo "Delta=${DELTAKEY}"
       
             echo ""
-            echo "------- Clang -------"
+            echo "========== Clang =========="
             clang --version || true
       
             echo ""
-            echo "------ C Cache ------"
+            echo "========== CCache =========="
             ccache -V || true
       
+            echo ""
+            echo "======== Time Stamp ========"
+            date -u || true      
           } > "$FPFILE"
       
           printf '%s\n' "$DELTAKEY" > "${CCACHE_DIR}/.deltakey"
       
           sync
       
-          # Cleanup Old Archives
+          # Cleanup Previous Archives
+          echo "🧹 Cleaning Old Archives..."      
           rm -f "$TAR" "$TMPTAR"
       
-          # Compress Cache
-          echo "📦 Compressing Compiler Cache..."
-          echo ""
+          # Display Cache Statistics
+          echo "📊 Cache Statistics:"      
+          du -sh "$CCACHE_DIR" || true      
+          ccache -s || true
       
-          tar -cf - -C "$CCACHE_DIR" . \
-            | zstd -T0 -15 --long=30 -f -o "$TMPTAR"
+          # Create Archive
+          echo "📦 Compressing Compiler Cache..."      
+          tar \
+            --sort=name \
+            --mtime='UTC 2025-01-01' \
+            --owner=0 \
+            --group=0 \
+            --numeric-owner \
+            -cf - \
+            -C "$CCACHE_DIR" . \
+            | zstd \
+                -T0 \
+                "-${ZSTDLEVEL}" \
+                "--long=${ZSTDLONG}" \
+                --force \
+                -o "$TMPTAR"
       
           sync
       
           # Finalize Archive
-          echo "🔄 Finalizing Archive..."
-          echo ""
-      
+          echo "🔄 Finalizing Archive..."      
           mv -f "$TMPTAR" "$TAR"
       
           sync
       
-          # Verify Archive
-          echo "🔍 Verifying Archive..."
-          echo ""
-      
+          # Verify Archive Exists
+          echo "🔍 Verifying Archive..."      
           if [[ ! -f "$TAR" ]]; then
             echo "⚠️ Cache Archive Missing"
             exit 1
           fi
       
+          if [[ ! -s "$TAR" ]]; then
+            echo "⚠️ Cache Archive Empty"
+            exit 1
+          fi
+      
           ls -lh "$TAR"
       
-          echo ""
+          # Integrity Test
+          echo "🧪 Running Integrity Test..."      
+          zstd --long=${ZSTDLONG} -t "$TAR"
+      
+          # Archive Preview
           echo "📂 Archive Preview:"
       
           set +o pipefail
-          tar -I zstd -tf "$TAR" | head -20
+      
+          tar \
+            --use-compress-program="zstd --long=${ZSTDLONG}" \
+            -tf "$TAR" \
+            | head -20
+      
           set -o pipefail
+
+          # Compression Summary
+          echo "📈 Compression Summary:"
+      
+          ORIGINALSIZE="$(du -sb "$CCACHE_DIR" | awk '{print $1}')"
+          ARCHIVESIZE="$(stat -c '%s' "$TAR")"
+      
+          echo "Original Size : $(numfmt --to=iec "$ORIGINALSIZE")"
+          echo "Archive Size  : $(numfmt --to=iec "$ARCHIVESIZE")"
+      
+          if [[ "$ORIGINALSIZE" -gt 0 ]]; then
+            RATIO="$(awk "BEGIN { printf \"%.2f\", ($ARCHIVESIZE / $ORIGINALSIZE) * 100 }")"
+            echo "Compression   : ${RATIO}%"
+          fi
       
           echo ""
           echo "🎉 Compiler Cache Archive Created Successfully"
