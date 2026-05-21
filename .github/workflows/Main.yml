@@ -1871,9 +1871,10 @@ jobs:
       # Configure Selected Root Engine
       # ==============================
       - name: 🔧 Configure Selected Root Engine
+        shell: bash
         run: |
-          set -euo pipefail
-      
+          set -Eeuo pipefail
+
           # Enter Kernel Workspace
           cd kernel_workspace/kernel_platform || exit 1
 
@@ -1889,6 +1890,14 @@ jobs:
           ROOTREPOSITORY="${{ steps.manager.outputs.ROOTREPOSITORY }}"
           ROOTREPOSITORYPATH="${{ steps.manager.outputs.ROOTREPOSITORYPATH }}"
 
+          # Safe Defaults
+          SUSFS="${SUSFS:--1}"
+
+          # Validation
+          [[ -n "$ROOTENGINE" ]] || { echo "⚠️ Selected Root is Empty"; exit 1; }
+          [[ -n "$ROOTREPOSITORY" ]] || { echo "⚠️ Root Repository is Empty"; exit 1; }
+          [[ -n "$MANAGERBRANCH" ]] || { echo "⚠️ Root Manager Branch is Empty"; exit 1; }
+
           # Kernel Paths
           KERNELROOT="${GITHUB_WORKSPACE}/kernel_workspace/kernel_platform"
           KERNELCOMMON="${KERNELROOT}/common"
@@ -1899,6 +1908,7 @@ jobs:
             echo ""
             echo "[$(date '+%H:%M:%S')] $*"
           }
+
           fail() {
             echo ""
             echo "⚠️ $*"
@@ -1909,17 +1919,24 @@ jobs:
           cleanup() {
             rm -f setup.sh
             rm -f ./*.patch
+            rm -rf .tmpksu
           }
+
           trap cleanup EXIT
 
           # Download Helper
           downloadfile() {
+
             local url="$1"
             local output="$2"
+
             log "Downloading: $url"
+
             for attempt in {1..5}; do
+
               echo "📥 Attempt $attempt/5"
-              if curl -fL \
+
+              if curl -fsSL \
                 --retry 3 \
                 --retry-delay 2 \
                 --connect-timeout 15 \
@@ -1927,62 +1944,95 @@ jobs:
                 "$url" \
                 -o "$output"; then
 
-                # Reject Empty File
+                # Reject Empty Files
                 [[ -s "$output" ]] || continue
 
                 # Reject HTML
                 if grep -qi "<html" "$output"; then
                   echo "⚠️ HTML Response Detected"
+                  rm -f "$output"
                   continue
                 fi
+
+                # Validate Shell Script
+                if [[ "$output" == "setup.sh" ]]; then
+                  if ! grep -qE '^#!/|^#|setup_kernelsu|KernelSU|ReSukiSU' "$output"; then
+                    echo "⚠️ Invalid Setup Script"
+                    rm -f "$output"
+                    continue
+                  fi
+                fi
+
                 return 0
               fi
+
               sleep $((attempt * 2))
             done
+
             return 1
           }
 
           # Download Setup Script
           downloadsetup() {
+
             local primary="$1"
             local fallback="${2:-}"
+
             if downloadfile "$primary" "setup.sh"; then
+
               echo "✔️ Primary Source Downloaded"
+
             elif [[ -n "$fallback" ]] && downloadfile "$fallback" "setup.sh"; then
+
               echo "✔️ Fallback Source Downloaded"
+
             else
-              fail "Failed to Download Setup Script"
+
+              fail "⚠️ Failed to Download Setup Script"
+
             fi
-         
+
             chmod +x setup.sh
+
             echo ""
             echo "------------------------------"
             echo "🚀 Executing Setup Script"
             echo "------------------------------"
-            bash setup.sh "$MANAGERBRANCH" "$MANAGERPATH"
+
+            bash setup.sh "$MANAGERBRANCH" "${MANAGERPATH:-}"
           }
 
-          # Generate KSU Version
+          # Generate Root Version
           generateversion() {
+
             local repository="$1"
             local branch="$2"
             local offset="$3"
+
             rm -rf .tmpksu
+
             git clone \
               --depth=1 \
               --branch "$branch" \
               "https://github.com/${repository}.git" \
-              .tmpksu >/dev/null 2>&1
+              .tmpksu >/dev/null 2>&1 \
+              || fail "Failed to Clone ${repository}:${branch}"
+
             local count
             count=$(git -C .tmpksu rev-list --count HEAD 2>/dev/null || echo 0)
+
             rm -rf .tmpksu
+
             echo $((count + offset))
           }
 
           # Resolve Latest Git Tag
           resolvetag() {
+
             local repository="$1"
+
             local tag
+
             tag=$(
               git ls-remote \
                 --tags \
@@ -1993,13 +2043,17 @@ jobs:
               | grep -v '\^{}' \
               | tail -n1
             )
+
             [[ -n "$tag" ]] || tag="v0.0.0"
+
             echo "$tag"
           }
 
           # Find Root Engine Directory
           rootenginedirectory() {
+
             local directory
+
             directory=$(
               find . \
                 -maxdepth 1 \
@@ -2011,26 +2065,37 @@ jobs:
                 \) \
                 | head -n1
             )
+
             [[ -n "$directory" ]] || fail "⚠️ Root Engine Directory Not Found"
+
             echo "$directory"
           }
 
           # Apply Patch Helper
           applypatch() {
+
             local patchfile="$1"
+
+            echo ""
             echo "🛠️ Applying Patch: $patchfile"
+
             local applied="false"
+
             for strip in 0 1 2 3; do
+
               if patch \
                 -p"$strip" \
                 --forward \
                 --dry-run \
                 < "$patchfile" >/dev/null 2>&1; then
+
                 patch \
                   -p"$strip" \
                   --forward \
                   < "$patchfile"
+
                 echo "✔️ Applied with -p$strip"
+
                 applied="true"
                 break
               fi
@@ -2043,61 +2108,74 @@ jobs:
 
           # Setup ReSukiSU
           if [[ "$ROOTENGINE" == "ReSukiSU" ]]; then
+
             log "🌐 Setting Up ReSukiSU"
-      
+
             downloadsetup \
               "https://raw.githubusercontent.com/${ROOTREPOSITORY}/${MANAGERBRANCH}/kernel/setup.sh"
 
             ROOTENGINEDIR="$(rootenginedirectory)"
-            cd "$ROOTENGINEDIR" || exit 1
+            cd "$ROOTENGINEDIR" || fail "Failed to Enter Root Engine Directory"
 
-            KSUVER=$(( $(git rev-list --count main 2>/dev/null || echo 114514) + 30700 ))
+            KSUVER=$(( $(git rev-list --count HEAD 2>/dev/null || echo 114514) + 30700 ))
+
             echo "KSUVER=$KSUVER" >> "$GITHUB_ENV"
-         
+
             sed -i '/CONFIG_KSU_FULL_NAME_FORMAT/d' "$DEFCONFIG"
+
             printf 'CONFIG_KSU_FULL_NAME_FORMAT="%%TAG_NAME%%"\n' >> "$DEFCONFIG"
-        
+
             log "🌐 ReSukiSU Setup Complete"
 
           # Setup KernelSU-Next
           elif [[ "$ROOTENGINE" == "KernelSU-Next" ]]; then
+
             log "🌐 Setting Up KernelSU-Next"
-          
+
             # Prefer Custom Fork Source
             if [[ -n "${ROOTREPOSITORYPATH:-}" && -n "${MANAGERPATH:-}" ]]; then
+
               URLCUSTOM="https://raw.githubusercontent.com/${ROOTREPOSITORYPATH}/${MANAGERPATH}/kernel/setup.sh"
+
               echo "🌐 Using Custom Fork Source"
               echo "🌐 URL: $URLCUSTOM"
-          
+
               downloadsetup \
                 "$URLCUSTOM" \
                 "https://raw.githubusercontent.com/${ROOTREPOSITORY}/${MANAGERBRANCH}/kernel/setup.sh"
+
             else
+
               URLOFFICIAL="https://raw.githubusercontent.com/${ROOTREPOSITORY}/${MANAGERBRANCH}/kernel/setup.sh"
+
               echo "🌐 Using Official Source"
               echo "🌐 URL: $URLOFFICIAL"
+
               downloadsetup "$URLOFFICIAL"
+
             fi
 
             ROOTENGINEDIR="$(rootenginedirectory)"
-            cd "$ROOTENGINEDIR" || exit 1
+            cd "$ROOTENGINEDIR" || fail "Failed to Enter Root Engine Directory"
 
             # Generate Version
             KSUVER="$(generateversion "$ROOTREPOSITORY" "$MANAGERBRANCH" 30000)"
             KSUTAG="$(resolvetag "$ROOTREPOSITORY")"
+
             echo "KSUVER=$KSUVER" >> "$GITHUB_ENV"
-          
-            # Update Kernel Build Metadata
+
+            # Update Build Metadata
             sed -ri \
               "s/^KSU_VERSION_FALLBACK := .*/KSU_VERSION_FALLBACK := $KSUVER/" \
               kernel/Kbuild
-        
+
             sed -ri \
               "s/^KSU_VERSION_TAG_FALLBACK := .*/KSU_VERSION_TAG_FALLBACK := $KSUTAG/" \
               kernel/Kbuild
 
             # Patch List
             PATCHBASE="https://raw.githubusercontent.com/WildKernels/kernel_patches/main/next/susfs_fix_patches/v2.1.0"
+
             PATCHES=(
               "multi_sepolicy_fix.patch"
               "multi_manager.patch"
@@ -2106,54 +2184,70 @@ jobs:
 
             # Apply Patches
             for patchname in "${PATCHES[@]}"; do
+
               PATCHURL="${PATCHBASE}/${patchname}"
+
+              echo ""
               echo "📥 Downloading Patch: $patchname"
+
               if ! downloadfile "$PATCHURL" "$patchname"; then
                 echo "⚠️ Failed to Download Patch"
                 continue
               fi
+
               applypatch "$patchname"
+
               rm -f "$patchname"
+
             done
 
             # SUSFS Hook Adjustment
             if [[ "$SUSFS" != "-1" && "$ROOTBRANCHSOURCE" != "KernelSU-Next-Dev-SUSFS" ]]; then
-              if ! grep -q "CONFIG_KSU_KPROBES_HOOK=n" "$DEFCONFIG"; then
+
+              if ! grep -q "^CONFIG_KSU_KPROBES_HOOK=n$" "$DEFCONFIG"; then
                 echo "CONFIG_KSU_KPROBES_HOOK=n" >> "$DEFCONFIG"
               fi
+
               echo "✔️ Disabled Kprobes Hook for SUSFS"
+
             else
+
               echo "ℹ️ Keeping Default Kprobes Hook"
+
             fi
-         
+
             log "🌐 KernelSU-Next Setup Complete"
 
           # Setup Official KernelSU
-          elif [[ "$ROOTENGINE" == "KernelSU" ]]; then           
+          elif [[ "$ROOTENGINE" == "KernelSU" ]]; then
+
             log "🌐 Setting Up Official KernelSU"
-           
+
             downloadsetup \
               "https://raw.githubusercontent.com/${ROOTREPOSITORY}/${MANAGERBRANCH}/kernel/setup.sh"
-         
+
             ROOTENGINEDIR="$(rootenginedirectory)"
-            cd "$ROOTENGINEDIR" || exit 1
-          
+            cd "$ROOTENGINEDIR" || fail "Failed to Enter Root Engine Directory"
+
             KSUVER="$(generateversion "$ROOTREPOSITORY" "$MANAGERBRANCH" 30000)"
-            echo "KSUVER=$KSUVER" >> "$GITHUB_ENV"      
+
+            echo "KSUVER=$KSUVER" >> "$GITHUB_ENV"
+
             sed -ri \
               "s/^KSU_VERSION_FALLBACK := .*/KSU_VERSION_FALLBACK := $KSUVER/" \
-              kernel/Kbuild        
-         
+              kernel/Kbuild
+
             sed -ri \
               "s/^DKSU_VERSION=.*/DKSU_VERSION=${KSUVER}/" \
-              kernel/Kbuild           
-        
+              kernel/Kbuild
+
             log "🌐 Official KernelSU Setup Complete"
 
           # No Selection
           else
-            echo "⚠️ No Supported Root Engine Selected"
-            exit 1
+
+            fail "No Supported Root Engine Selected"
+
           fi
 
           echo ""
