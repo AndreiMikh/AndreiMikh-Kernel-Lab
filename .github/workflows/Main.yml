@@ -4924,112 +4924,104 @@ jobs:
             USE_LLVM_IAS=true
           fi
 
-          # Locate Clang Prebuilt Binary
-          CLANG_PREBUILT_BIN="${CLANG_PREBUILT_BIN:-$(
-            grep -h '^CLANG_PREBUILT_BIN=' \
-              ./common/build.config.common \
-              ./"$KERNELREPOSITORY"/build.config.common 2>/dev/null \
-            | cut -d'=' -f2 \
-            | head -n1 || true
-          )}"
-
-          if [[ -z "$CLANG_PREBUILT_BIN" ]]; then
-            echo "⚠️ Clang Prebuilt Bin Not Found. Falling Back to Official Build Script"
-            echo "fallbackreason=missingclangprebuiltbin" >> "$GITHUB_OUTPUT"
-            echo "fallback=true" >> "$GITHUB_OUTPUT"
-            export FALLBACKSET=1
-            exit 0
-          fi
-
-          # Clang Version Detection
-          echo "🔍 Attempting to Detect Clang Version..."
-
-          # Initialize Clang Version as Empty
-          CLANG_VERSION=""
-
-          # Try to Detect Clang Version Using the Binary Name First
-          if [[ -n "$CLANG_PREBUILT_BIN" && "$CLANG_PREBUILT_BIN" =~ clang-([0-9]+(\.[0-9]+)+) ]]; then
-            CLANG_VERSION="${BASH_REMATCH[1]}"
-            echo "📌 Detected Clang Version from Binary Name: $CLANG_VERSION"
-
-          # If Clang Binary Name Doesn't Help, Try Finding it in the Build Configuration
-          elif [[ -f ./common/build.config.constants ]]; then
-            CLANG_VERSION=$(grep -m1 '^CLANG_VERSION=' ./common/build.config.constants 2>/dev/null | cut -d= -f2 || true)
-            if [[ -n "$CLANG_VERSION" ]]; then
-              echo "📌 Detected Clang Version from Build Configuration: $CLANG_VERSION"
-            fi
-
-          # If Still Couldn't Determine Version, Try Clang Version Fallback
-          elif [[ -z "$CLANG_VERSION" ]]; then
-            if [[ -n "$CLANG_FULL_PATH" && -x "$CLANG_FULL_PATH" ]]; then
-              CLANG_VERSION=$("$CLANG_FULL_PATH" --version 2>/dev/null \
-                | head -n1 \
-                | sed -E 's/.*clang version ([0-9.]+).*/\1/' || true)
-          
-              if [[ -n "$CLANG_VERSION" ]]; then
-                echo "📌 Detected Clang Version from Clang Version: $CLANG_VERSION"
-              fi
-            fi
-          fi
-          
-          # Final Validation
-          if [[ -z "$CLANG_VERSION" ]]; then
-            echo "⚠️ Unable to Determine Clang Version"          
-            echo "⚠️ Exiting Build Due to Missing Clang Version Detection"
-            echo "fallbackreason=missingclangversion" >> "$GITHUB_OUTPUT"
-            echo "fallback=true" >> "$GITHUB_OUTPUT"
-            export FALLBACKSET=1
-            exit 0
-          fi
-
-          # Final Clang Version Confirmation
+          # Resolve Clang Toolchain
           echo "------------------------------"
-          echo "📂 Clang Version: $CLANG_VERSION"
+          echo "🚀 Resolving Clang Toolchain..."
           echo "------------------------------"
           echo ""
 
-          # Replace Placeholder with Actual Clang Version
-          CLANG_PREBUILT_BIN=${CLANG_PREBUILT_BIN/\$\{CLANG_VERSION\}/$CLANG_VERSION}
+          CLANGROOT="prebuilts/clang/host/linux-x86"
 
-          # Clang Path Validation
-          CLANG_BASE="$GITHUB_WORKSPACE/kernel_workspace/kernel_platform/$CLANG_PREBUILT_BIN"
-          CLANG_FULL_PATH="$CLANG_BASE/clang"
+          if [[ ! -d "$CLANGROOT" ]]; then
+            echo "⚠️ Clang Root Directory Missing"
+            echo "📂 Expected: $CLANGROOT"
+            echo "fallbackreason=missingclangroot" >> "$GITHUB_OUTPUT"
+            echo "fallback=true" >> "$GITHUB_OUTPUT"
+            export FALLBACKSET=1
+            exit 0
+          fi
 
-          # Verify Clang Binary Exists
-          # Info: Ensures the Resolved Clang Prebuilt Bin Path Contains a Valid Clang Executable
-          # Info: Prevents Build from Continuing if Clang is Missing or Cache / Setup Failed
-          # Info: Avoids "Clang: Command Not Found" Errors Later in Compilation
+          # Dynamic Clang Discovery
+          CLANGDIR="$(
+            find "$CLANGROOT" \
+              -maxdepth 1 \
+              -type d \
+              -name 'clang-*' \
+              | sort -V \
+              | tail -n1
+          )"
+
+          if [[ -z "${CLANGDIR:-}" ]]; then
+            echo "⚠️ No Clang Toolchain Found"
+            echo "fallbackreason=missingclangdir" >> "$GITHUB_OUTPUT"
+            echo "fallback=true" >> "$GITHUB_OUTPUT"
+            export FALLBACKSET=1
+            exit 0
+          fi
+
+          CLANGBIN="$CLANGDIR/bin"
+          CLANG_FULL_PATH="$PWD/$CLANGBIN/clang"
+
+          echo "📂 Clang Directory : $CLANGDIR"
+          echo "📂 Clang Bin       : $CLANGBIN"
+
+          # Validate Clang Binary
           if [[ ! -x "$CLANG_FULL_PATH" ]]; then
-            echo "⚠️ Clang Binary Not Found!"
-            echo "📍 Expected Path: $CLANG_FULL_PATH"
-            echo "💡 Possible Causes:"
-            echo "   - Clang was Not Downloaded"
-            echo "   - Cache was Not Restored Properly"
-            echo "   - Clang Prebuilt Bin is Incorrect"
+            echo "⚠️ Clang Binary Missing"
+            echo "📂 Expected: $CLANG_FULL_PATH"
 
             echo ""
-            echo "🔍 Debug: Listing Directory Contents..."
-            ls -lah "$(dirname "$CLANG_FULL_PATH")" || true      
+            echo "🔍 Debug: Directory Contents"
+            ls -lah "$PWD/$CLANGBIN" || true
             echo "fallbackreason=missingclang" >> "$GITHUB_OUTPUT"
             echo "fallback=true" >> "$GITHUB_OUTPUT"
             export FALLBACKSET=1
             exit 0
           fi
 
-          # Lock Compiler Identity for Cache
+          # Extract Clang Version
+          CLANG_VERSION="$(
+            "$CLANG_FULL_PATH" --version \
+              | head -n1 \
+              | sed -E 's/.*clang version ([0-9.]+).*/\1/' \
+              || true
+          )"
+
+          if [[ -z "${CLANG_VERSION:-}" ]]; then
+            echo "⚠️ Failed to Detect Clang Version"
+            echo "fallbackreason=missingclangversion" >> "$GITHUB_OUTPUT"
+            echo "fallback=true" >> "$GITHUB_OUTPUT"
+            export FALLBACKSET=1
+            exit 0
+          fi
+
+          # Export Runtime Variables
+          export PATH="$PWD/$CLANGBIN:$PATH"
           export CCACHE_COMPILER="$(realpath "$CLANG_FULL_PATH")"
 
+          # Compatibility Variable
+          CLANG_PREBUILT_BIN="$CLANGBIN"
+
           # Extract Directory Information
-          CLANG_DIR=${CLANG_PREBUILT_BIN%%/*}
-          CLANG_PATH=${CLANG_PREBUILT_BIN%/*}
-          CLANG_PATH=${CLANG_PATH##*/}
+          CLANG_DIR="$(basename "$CLANGDIR")"
+          CLANG_PATH="$(basename "$CLANGBIN")"
 
           echo "------------------------------"
-          echo "📂 Clang Version     :$CLANG_VERSION"
-          echo "📂 Clang Directory   :$CLANG_DIR"
-          echo "📂 Clang Path        :$CLANG_PATH"
-          echo "📂 LLVM IAS          :$USE_LLVM_IAS"
+          echo "📂 Clang Version   : $CLANG_VERSION"
+          echo "📂 Clang Directory : $CLANG_DIR"
+          echo "📂 Clang Path      : $CLANG_PATH"
+          echo "📂 LLVM IAS        : $USE_LLVM_IAS"
           echo "------------------------------"
+          echo ""
+
+          clang --version | head -n1 || true
+
+          echo ""
+          echo "🔍 Toolchain Validation"
+          echo "📦 Clang   : $(command -v clang)"
+          echo "📦 LD.LLD  : $(command -v ld.lld)"
+          echo "📦 LLVM-AR : $(command -v llvm-ar)"
+          echo "📦 Pahole  : ${PAHOLE_BIN:-missing}"
           echo ""
 
           # Load Environment Script
@@ -5038,8 +5030,8 @@ jobs:
           set -u
 
           # Export Paths
-          export PATH="/usr/lib/ccache:$GITHUB_WORKSPACE/kernel_workspace/kernel_platform/$CLANG_PREBUILT_BIN:$PATH"
-
+          export PATH="/usr/lib/ccache:$PWD/$CLANGBIN:$PATH"
+        
           # Setup: Enables Compiler Caching to Speed Up Rebuilds
           # Compiler Cache Runtime Tuning
           export CCACHE_LOGFILE="${{ github.workspace }}/kernel_workspace/ccache.log" || echo "⚠️ Cache Log Not Found"
