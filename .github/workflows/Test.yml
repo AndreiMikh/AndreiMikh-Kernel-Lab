@@ -1634,117 +1634,108 @@ jobs:
         if: ${{ github.event.inputs.SUFFIX != '' }}
         id: inject
         continue-on-error: true
-        run: |        
+        shell: bash
+        run: |
+          set -euo pipefail
+      
           # Enter Kernel Workspace
           cd kernel_workspace
-
+      
           # Input Variables
           SUFFIX="${{ github.event.inputs.SUFFIX }}"
           ANDROIDVERSION="${{ env.ANDROIDVERSION }}"
-          echo "🚀 Injecting Custom Kernel Suffix: $SUFFIX"
-    
-          # Target setlocalversion Paths
+      
+          echo "🚀 Injecting Custom Kernel Version Suffix"
+          echo "📦 Android Version : $ANDROIDVERSION"
+          echo "🏷️ Custom Suffix   : $SUFFIX"
+      
+          # Target setlocalversion Script Paths
           for path in \
             kernel_platform/common/scripts/setlocalversion \
             kernel_platform/msm-kernel/scripts/setlocalversion \
-            kernel_platform/external/dtc/scripts/setlocalversion; do
-            # Skip Missing Paths
-            [ -f "$path" ] || continue
-            echo "📂 Processing: $path"
-         
-            # Remove Dirty Tags
-            # Removes "-dirty" from generated kernel versions
-            sed -i 's/ -dirty//g' "$path"
+            kernel_platform/external/dtc/scripts/setlocalversion
+          do      
+            # Skip Missing Files
+            if [[ ! -f "$path" ]]; then
+              echo "⚠️ Missing File: $path"
+              continue
+            fi
       
-            # Inject Additional Dirty Cleanup Logic
-            sed -i '$i res=$(echo "$res" | sed '\''s/-dirty//g'\'')' "$path"
-    
+            echo "📂 Processing: $path"      
+            # Remove Existing Dirty Tags
+            # Removes Literal "Dirty"
+            sed -i 's/ -dirty//g' "$path"      
+            # Inject Additional Dirty Cleanup
+            # Ensures Generated Version Never Contains:
+            # Dirty
+            sed -i '$i res=$(echo "$res" | sed '\''s/-dirty//g'\'')' "$path"      
             # New Android Common Kernel Format
-            if grep -q 'KERNELVERSION.*scm_version' "$path"; then
-              echo "📌 New Set Local Version Format Detected"
-              # Replace Original scm_version Output
+            if grep -q 'KERNELVERSION.*scm_version' "$path"; then      
+              echo "📌 New Setlocalversion Format Detected"      
+              # Replace SCM Version Output
               sed -i \
                 "s|echo \"\${KERNELVERSION}.*scm_version}\"|echo \"\${KERNELVERSION}-${ANDROIDVERSION}-${SUFFIX}\"|" \
-                "$path"
-     
+                "$path"      
             # Legacy / Old Kernel Format
-            elif grep -q 'echo "\$res"' "$path"; then
-              echo "📌 Old Set Local Version Format Detected"
-              # Bazel Warning
+            elif grep -q 'echo "\$res"' "$path"; then   
+              echo "📌 Old SetLocalVersion Format Detected"
+              echo "🛠️ Dynamically Injecting Version Suffix"      
+              # Bazel Compatibility Warning
               if [[ -f ./kernel_platform/build_with_bazel.py ]]; then
-                echo "⚠️ Note: Using Bazel may Limit Special Characters, Adjust Script if Compilation Fails"
-              fi
-              # Inject Custom Suffix into Existing res Variable
+                echo "⚠️ Bazel Build Detected"
+                echo "⚠️ Special Characters May Cause Build Issues"
+              fi      
+              # Replace Last Echo "$res"
               tac "$path" | \
                 sed "0,/echo \"\\\$res\"/s//res=\\\$(echo \\\$res | cut -d- -f1-2)-${SUFFIX}; echo \"\\\$res\";/" | \
-                tac > "$path.tmp"
+                tac > "$path.tmp"      
               # Replace Original File
-              mv "$path.tmp" "$path"
+              mv "$path.tmp" "$path"      
             # Unknown Format Fallback
-            else
-              echo "⚠️ Unknown Format: Appending Suffix Manually"
+            else      
+              echo "⚠️ Unknown SetLocalVersion Format"
+              echo "🩹 Applying Manual Fallback"     
               # Append Manual Echo Fallback
-              echo "echo \"\$res-${SUFFIX}\"" >> "$path"
-            fi
+              echo "echo \"\$res-${SUFFIX}\"" >> "$path"      
+            fi      
             # Ensure Script Remains Executable
-            chmod +x "$path"
+            chmod +x "$path"      
+            echo "🎉 Completed: $path"      
           done
-
+      
           # Commit Modifications
-          echo "⚙️ Committing Suffix Modifications..."
-          git add -A
-          git commit -m "🎉 Inject Custom Kernel Suffix and Remove Dirty Tags"
-                  sed -i '$i res=$(echo "$res" | sed '\''s/-dirty//g'\'')' "$path"
-                  if grep -q 'KERNELVERSION.*scm_version' "$path"; then
-                    echo "📌 New Set Local Version Format Detected"
-                    sed -i "s|echo \"\${KERNELVERSION}.*scm_version}\"|echo \"\${KERNELVERSION}-${ANDROIDVERSION}-${SUFFIX}\"|" "$path"
-                  elif grep -q 'echo "\$res"' "$path"; then
-                    echo "Old Set Local Version Format Detected"
-                    if [ "$FASTBUILD" = "true" ]; then
-                      echo "✔️ Fast Build Enabled: Setting Static Res Value"
-                      sed -i "s/^res=.*/res=\"-${ANDROIDVERSION}-${SUFFIX}\"/" "$path"
-                    else
-                      echo "🛠️ Standard Build: Dynamically Injecting Suffix"
-                      if [[ -f ./kernel_platform/build_with_bazel.py ]]; then
-                        echo "⚠️ Note: Using Bazel may Limit Special Characters, Adjust Script if Compilation Fails"
-                      fi
-                      tac "$path" | sed "0,/echo \"\\\$res\"/s//res=\\\$(echo \\\$res | cut -d- -f1-2)-${SUFFIX}; echo \"\\\$res\";/" | tac > "$path.tmp"
-                      mv "$path.tmp" "$path"
-                    fi
-                  else
-                    echo "⚠️ Unknown Format: Appending Suffix Manually"
-                    echo "echo \"\$res-${SUFFIX}\"" >> "$path"
-                  fi
-                  chmod +x "$path"
-                done
-                echo "⚙️ Committing Suffix Modifications..."
-                git add -A
-                git commit -m "🎉 Inject Custom Kernel Suffix and Remove Dirty Tags"
- 
-      # ==============================
-      # Fallback - Inject Local Kernel Version Suffix (Bazel-Safe)
-      # ==============================
-      - name: 🔧 Fallback - Inject Local Kernel Version Suffix (Bazel Safe)
-        if: ${{ steps.inject.conclusion == 'failure' && github.event.inputs.SUFFIX != '' }}
-        run: |
-          cd kernel_workspace
-
-          SUFFIX="${{ github.event.inputs.SUFFIX }}"
-          ANDROIDVERSION="${{ env.ANDROIDVERSION }}"
-          FINALSUFFIX="-${ANDROIDVERSION}-${SUFFIX}"
-          echo "⚠️ Fallback Triggered → Using Local Version: $FINALSUFFIX"
-          echo ""
-
-          # Persist to Next Steps
-          echo "LOCALVERSION=$FINALSUFFIX" >> $GITHUB_ENV
-          echo "KBUILDVERSION=$FINALSUFFIX" >> $GITHUB_ENV
-
-          # Also for Current Shell
-          export LOCALVERSION="$FINALSUFFIX"
-          export KBUILDVERSION="$FINALSUFFIX"
+          echo "⚙️ Committing Suffix Modifications..."      
+          git add -A      
+          git commit -m "🎉 Inject Custom Kernel Suffix and Remove Dirty Tags" || \
+            echo "ℹ️ No Changes Detected"
 
           echo ""
-          echo "🎉 Local Version is Set to: $LOCALVERSION"
+          echo "🎉 Kernel Version Suffix Injection Complete"
+       
+            # ==============================
+            # Fallback - Inject Local Kernel Version Suffix (Bazel-Safe)
+            # ==============================
+            - name: 🔧 Fallback - Inject Local Kernel Version Suffix (Bazel Safe)
+              if: ${{ steps.inject.conclusion == 'failure' && github.event.inputs.SUFFIX != '' }}
+              run: |
+                cd kernel_workspace
+      
+                SUFFIX="${{ github.event.inputs.SUFFIX }}"
+                ANDROIDVERSION="${{ env.ANDROIDVERSION }}"
+                FINALSUFFIX="-${ANDROIDVERSION}-${SUFFIX}"
+                echo "⚠️ Fallback Triggered → Using Local Version: $FINALSUFFIX"
+                echo ""
+      
+                # Persist to Next Steps
+                echo "LOCALVERSION=$FINALSUFFIX" >> $GITHUB_ENV
+                echo "KBUILDVERSION=$FINALSUFFIX" >> $GITHUB_ENV
+      
+                # Also for Current Shell
+                export LOCALVERSION="$FINALSUFFIX"
+                export KBUILDVERSION="$FINALSUFFIX"
+      
+                echo ""
+                echo "🎉 Local Version is Set to: $LOCALVERSION"
 
       # ==============================
       # Auto-Generated Kernel Suffix
