@@ -1324,13 +1324,18 @@ jobs:
           set -euo pipefail
       
           # Enter Kernel Workspace
-          cd kernel_workspace      
+          cd kernel_workspace
           # Input Variables
           SUFFIX="${{ github.event.inputs.SUFFIX }}"
-          ANDROIDVERSION="${{ env.ANDROIDVERSION }}"      
+          ANDROIDVERSION="${{ env.ANDROIDVERSION }}"
           echo "🚀 Injecting Custom Kernel Version Suffix"
           echo "📦 Android Version : $ANDROIDVERSION"
           echo "🏷️ Custom Suffix   : $SUFFIX"      
+          # Export Step Outputs
+          {
+            echo "suffix=$SUFFIX"
+            echo "androidversion=$ANDROIDVERSION"
+          } >> "$GITHUB_OUTPUT"      
           # Target setlocalversion Script Paths
           for path in \
             kernel_platform/common/scripts/setlocalversion \
@@ -1344,23 +1349,22 @@ jobs:
             fi      
             echo "📂 Processing: $path"      
             # Remove Existing Dirty Tags
-            # Removes Literal "Dirty"
+            # Removes "-dirty" from Generated Version
             sed -i 's/ -dirty//g' "$path"      
-            # Inject Additional Dirty Cleanup
-            # Ensures Generated Version Never Contains:
-            # Dirty
+            # Additional Dirty Cleanup
+            # Ensures Generated Version Never Contains: -dirty
             sed -i '$i res=$(echo "$res" | sed '\''s/-dirty//g'\'')' "$path"      
             # New Android Common Kernel Format
             if grep -q 'KERNELVERSION.*scm_version' "$path"; then      
-              echo "📌 New Setlocalversion Format Detected"      
+              echo "📌 New SetLocalVersion Format Detected"      
               # Replace SCM Version Output
               sed -i \
                 "s|echo \"\${KERNELVERSION}.*scm_version}\"|echo \"\${KERNELVERSION}-${ANDROIDVERSION}-${SUFFIX}\"|" \
-                "$path"      
+                "$path"   
             # Legacy / Old Kernel Format
-            elif grep -q 'echo "\$res"' "$path"; then   
+            elif grep -q 'echo \"\$res\"' "$path"; then      
               echo "📌 Old SetLocalVersion Format Detected"
-              echo "🛠️ Dynamically Injecting Version Suffix"      
+              echo "🔧 Dynamically Injecting Version Suffix"      
               # Bazel Compatibility Warning
               if [[ -f ./kernel_platform/build_with_bazel.py ]]; then
                 echo "⚠️ Bazel Build Detected"
@@ -1376,44 +1380,28 @@ jobs:
             else      
               echo "⚠️ Unknown SetLocalVersion Format"
               echo "🩹 Applying Manual Fallback"     
-              # Append Manual Echo Fallback
+              # Append manual fallback
               echo "echo \"\$res-${SUFFIX}\"" >> "$path"      
             fi      
             # Ensure Script Remains Executable
             chmod +x "$path"      
             echo "🎉 Completed: $path"      
-          done      
+          done
+      
           # Commit Modifications
           echo "⚙️ Committing Suffix Modifications..."      
-          git add -A      
+          # Only Add Modified SetLocalVersion Scripts
+          git add \
+            kernel_platform/common/scripts/setlocalversion \
+            kernel_platform/msm-kernel/scripts/setlocalversion \
+            kernel_platform/external/dtc/scripts/setlocalversion      
+          # Commit Changes
           git commit -m "🎉 Inject Custom Kernel Suffix and Remove Dirty Tags" || \
             echo "ℹ️ No Changes Detected"
-
+      
           echo ""
           echo "🎉 Kernel Version Suffix Injection Complete"
-       
-            - name: 🔧 Fallback - Inject Local Kernel Version Suffix (Bazel Safe)
-              if: ${{ steps.inject.conclusion == 'failure' && github.event.inputs.SUFFIX != '' }}
-              run: |
-                cd kernel_workspace
-      
-                SUFFIX="${{ github.event.inputs.SUFFIX }}"
-                ANDROIDVERSION="${{ env.ANDROIDVERSION }}"
-                FINALSUFFIX="-${ANDROIDVERSION}-${SUFFIX}"
-                echo "⚠️ Fallback Triggered → Using Local Version: $FINALSUFFIX"    
-                # Persist to Next Steps
-                echo "LOCALVERSION=$FINALSUFFIX" >> $GITHUB_ENV
-                echo "KBUILDVERSION=$FINALSUFFIX" >> $GITHUB_ENV      
-                # Also for Current Shell
-                export LOCALVERSION="$FINALSUFFIX"
-                export KBUILDVERSION="$FINALSUFFIX"
-      
-                echo ""
-                echo "🎉 Local Version is Set to: $LOCALVERSION"
 
-      # ==============================
-      # Auto-Generated Kernel Suffix
-      # ==============================
       - name: 🔧 Auto-Generated Kernel Suffix
         if: ${{ github.event.inputs.SUFFIX == '' }}
         run: |
@@ -3457,10 +3445,8 @@ jobs:
           
           # Navigate to the Correct Directory
           cd kernel_workspace/kernel_platform/common
-
           # Set the Path to the Configuration File
           DEFCONFIG=./arch/arm64/configs/gki_defconfig
-
           # Get Github Environment Variables and GitHub Actions Inputs        
           KERNEL="${{ env.KERNELVERSION }}"
           ROOT="${{ github.event.inputs.ROOTENGINE }}"
@@ -3476,7 +3462,6 @@ jobs:
           LXC="${{ github.event.inputs.LXCDOCKERSUPPORT }}"
           NTSYNC="${{ github.event.inputs.NTSYNC }}"
           CPU="${{ env.CPU }}"
-
           # Apply -O2 Compiler Optimization for Kernel 6.1 / 6.6
           if [[ ("$KERNEL" == "6.1" || "$KERNEL" == "6.6") && ! "$FILE" =~ aosp$|AOSP$ ]]; then
             echo "🔧 Enabling O2 Compiler Optimization for Kernel $KERNEL..."
@@ -3487,11 +3472,9 @@ jobs:
           else
             echo "☘️ O2 Optimization Disabled for Kernel $KERNEL"
           fi
-
           # Normalize Input: Uppercase and Remove Spaces
           SCHEDULERS="${SCHEDULERS// /}"  # Remove Spaces
-          IFS=',' read -ra SCHEDARRAY <<< "$(echo "$SCHEDULERS" | tr '[:lower:]' '[:upper:]')"
-          
+          IFS=',' read -ra SCHEDARRAY <<< "$(echo "$SCHEDULERS" | tr '[:lower:]' '[:upper:]')"          
           # Apply Each Scheduler Individually
           for SCHED in "${SCHEDARRAY[@]}"; do
             case "$SCHED" in
@@ -3536,7 +3519,6 @@ jobs:
                 ;;
             esac
           done
-
           # Re-Kernel Configuration
           echo "🚀 Enabling Re-Kernel Support (for Use with Freezer, NoActive and Etc to Improve Background App Freezing)..."
           # Use Underscore for Variable Name
@@ -3551,7 +3533,6 @@ jobs:
           else
             echo "☘️ ReKernel Disabled"
           fi
-
           # Check if KSU Meta Root Engine is ReSukiSU
           if [[ "$ROOT" == "ReSukiSU" ]]; then
             # Enable Multi-Manager Support if the Condition is True
@@ -3562,7 +3543,6 @@ jobs:
           else
             echo "☘️ Multi-Manager Support Not Enabled, as KSU Meta Root Engine is Not ReSukiSU"
           fi
-
           # SukiSU-Ultra KernelPatch-Module Configuration
           # Check if SukiSU-Ultra KernelPatch Input is KernelPatch-Next (KPN) or None, Disable KernelPatch-Module
           if [[ "$KERNELPATCH" == "KPN" || "$KERNELPATCH" == "None" ]]; then
@@ -3571,7 +3551,6 @@ jobs:
           EOF
             echo "☘️ SukiSU-Ultra KernelPatch-Module Disabled (KernelPatch-Next or None Selected)"
           fi
-
           # Check if SukiSU-Ultra KernelPatch-Module Input is SukiSU-Ultra KernelPatch-Module (KPM), Enable SukiSU-Ultra KernelPatch-Module
           if [[ "$KERNELPATCH" == "KPM" ]]; then
             cat >> "$DEFCONFIG" << EOF
@@ -3579,13 +3558,11 @@ jobs:
           EOF
             echo "🎉 SukiSU-Ultra KernelPatch-Module Enabled (Supported KSU Meta Root Engine: ReSukiSU and SukiSU-Ultra)"
           fi
-
           # KSU Meta Root Engine Configuration
           cat >> "$DEFCONFIG" << EOF
           CONFIG_KSU=y                    # Enable KSU Meta Root Engine Support
           CONFIG_KSU_SUSFS=y              # Enable SUSFS Meta Support
           EOF
-
           # Apply SUSFS Meta Core Configuration
           if [[ "$SUSFS" != "-1" && ! ("$FILE" =~ aosp$|AOSP$) ]]; then                      
             # Base SUSFS Meta Core Configuration Settings (Common)
@@ -3616,22 +3593,17 @@ jobs:
             else
               echo "🧩 SUSFS Meta Core Configuration Skipped for $FILE"
             fi
-          fi
-          
+          fi          
           # TMPFS Configuration (Mountify)
           echo "🚀 Applying TMPFS Configuration..."
-
           cat >> "$DEFCONFIG" << EOF
           CONFIG_TMPFS_XATTR=y
           CONFIG_TMPFS_POSIX_ACL=y
           EOF
-
           echo "🎉 TMPFS Configuration Applied"
-
           # Linux Container / Docker Kernel Configuration (Namespaces, IPC, CGroups, Networking, Device Support)
           if [[ "$LXC" == "TermuxLXC" ]]; then
             echo "🚀 Applying LXC/Docker Kernel Configurations..."
-
             # Append LXC / Docker specific configurations to the kernel config
             cat >> "$DEFCONFIG" <<EOF
           CONFIG_SYSVIPC=y
@@ -3641,30 +3613,24 @@ jobs:
           CONFIG_IPC_NS=y
           CONFIG_USER_NS=y
           CONFIG_NET_NS=y
-
           # CGroups
           CONFIG_CGROUP_DEVICE=y
-
           # Networking
           CONFIG_NETFILTER_XT_TARGET_CHECKSUM=y
           CONFIG_NETFILTER_XT_MATCH_ADDRTYPE=y
           CONFIG_IP6_NF_NAT=y
           CONFIG_IP6_NF_TARGET_MASQUERADE=y
-
           # Device Support
           CONFIG_DEVTMPFS=y
           CONFIG_NULL_TTY=y
           EOF
-
             echo "🎉 LXC / Docker Kernel Configurations Applied"
           else
             echo "☘️ LXC / DOCKER Disabled — Skipping Configuration..."
           fi
-
           # DroidspacesLXC Support Kernel Configuration
           if [[ "$LXC" == "DroidSpacesLXC-WildPatch" || "$LXC" == "DroidSpacesLXC-Inject" ]]; then
             echo "🚀 Applying DroidspacesLXC Support Kernel Configurations..."
-
             cat >> "$DEFCONFIG" <<EOF
           CONFIG_NTSYNC=y
           CONFIG_SYSVIPC=y
@@ -3677,16 +3643,13 @@ jobs:
           CONFIG_NETFILTER_XT_TARGET_LOG=y
           CONFIG_NETFILTER_XT_MATCH_RECENT=y
           EOF
-
             echo "🎉 DroidspacesLXC Support Core Configuration Applied"       
           else
             echo "☘️ DroidspacesLXC Support Disabled — Skipping Configuration..."
           fi
-
           # BBR + ECN Kernel Configuration with Brutal Default and Cubic Fallback
           if [[ "$TCP" == "BBR+ECN" || "$TCP" == "BBR+ECN+Brutal" ]]; then
-            echo "🚀 Applying BBR + ECN / Brutal Configurations..."
-          
+            echo "🚀 Applying BBR + ECN / Brutal Configurations..."         
             # Base BBR + ECN Settings (Always Applied)
             cat >> "$DEFCONFIG" << EOF
           CONFIG_TCP_CONG_BIC=n
@@ -3696,8 +3659,7 @@ jobs:
           CONFIG_TCP_ECN=y
           CONFIG_IPV6_ECN=y
           CONFIG_IP_NF_TARGET_ECN=y
-          EOF
-          
+          EOF          
               # Additional TCP Algorithms if Brutal is Selected
               if [[ "$TCP" == "BBR+ECN+Brutal" ]]; then
                 echo "🚀 Applying Brutal Specific Configurations..."
@@ -3719,13 +3681,11 @@ jobs:
           CONFIG_DEFAULT_TCP_CONG=cubic
           EOF
                 echo "🎉 BBR + ECN: Using Cubic as Default (Brutal Not Selected)"
-              fi
-          
+              fi         
           else
             echo "☘️ Congestion Control Disabled, Skipping BBR + ECN Configuration"
             echo "🧩 Default Congestion Control Remains Unchanged"
           fi
-
           # Linux Security Module Baseband Guard Configuration
           if [[ "$LSM" == "true" ]]; then
             cat >> "$DEFCONFIG" << EOF
@@ -3734,11 +3694,9 @@ jobs:
             echo "🎉 Linux Security Module Baseband Guard Configuration Applied"
           else
             echo "☘️ Linux Security Module Baseband Guard Disabled, Skipping..."
-          fi
-          
+          fi          
           # IPSet and IPv6 NAT Configuration
           if [[ "$CPU" == sm* && "$NET" == "true" ]]; then
-
             # BPF Stream Parser for Non-6.12 Kernels
             if [[ "$KERNEL" != "6.12" ]]; then
               cat >> "$DEFCONFIG" << EOF
@@ -3748,7 +3706,6 @@ jobs:
             else
               echo "☘️ BPF Stream Parser Disabled for Kernel $KERNEL, Skipping..."
             fi
-
             # Netfilter and IPSet Core Configuration
             cat >> "$DEFCONFIG" << EOF
           CONFIG_NETFILTER_XT_MATCH_ADDRTYPE=y
@@ -3774,12 +3731,10 @@ jobs:
           CONFIG_IP6_NF_NAT=y
           CONFIG_IP6_NF_TARGET_MASQUERADE=y
           EOF
-
             echo "🎉 Netfilter and IPSet Core Configuration Applied"
           else
             echo "☘️ Netfilter and IPSet Core Configuration Disabled, Skipping..."
           fi
-
           # NTSYNC Configuration
           if [[ "$NTSYNC" == "true" ]]; then
             cat >> "$DEFCONFIG" << EOF
@@ -3788,8 +3743,7 @@ jobs:
             echo "🎉 NTSync Configuration Applied"
           else
             echo "☘️ NTSync Disabled, Skipping..."
-          fi
-     
+          fi     
           # Apply Build Issues Fix
           # Disable BTF Debug info for Mediatek 6.1 Kernels
           if [[ "$KERNEL" == "6.1" && "$CPU" == mt* ]]; then
@@ -3799,7 +3753,6 @@ jobs:
           else
             echo "☘️ BTF Configuration Disabled, Only for Mediatek with Kernel 6.1, Skipping..."
           fi
-
           # Enable Rust Support if Requested
           if [[ "$ENABLERUSTC" == "true" ]]; then
             cat >> "$DEFCONFIG" << EOF
@@ -3809,90 +3762,65 @@ jobs:
             echo "🎉 Rust Support Request Applied and Granted"
           else
             echo "☘️ Rust Support Request Not Granted"
-          fi
-  
+          fi  
           # Remove Build Review
           sed -i 's/check_defconfig//' ./build.config.gki                    
 
-      # ==============================
-      # IPv6 NAT Fix Stage
-      # ==============================
       - name: 🔧 IPv6 NAT Fix Stage
         if: ${{ github.event.inputs.NETFILTER == 'true' }}
         shell: bash
         run: |
           set -euo pipefail
-      
-          echo "------------------------------"
-          echo "🚀 IPv6 NAT Fix Stage..."
-          echo "------------------------------"
-          echo ""
 
           # Paths
           PATCHDIRECTORY="${GITHUB_WORKSPACE}/kernel_workspace/AndreiMikh-Kernel-Lab/patches"
           KCDIR="${GITHUB_WORKSPACE}/kernel_workspace/kernel_platform/common"
-          IPV6PATCHFILE="${PATCHDIRECTORY}/IPv6.patch"
-      
-          echo "✔ NetFilter Enabled — 🔎 Checking IPv6 NAT Compatibility..."
-      
+          IPV6PATCHFILE="${PATCHDIRECTORY}/IPv6.patch"      
+          echo "✔ NetFilter Enabled — 🔎 Checking IPv6 NAT Compatibility..."      
           # Validate Target Directory
           if [[ ! -d "$KCDIR" ]]; then
-              echo "⚠️ Target Directory Not Found:"
-              echo "$KCDIR"
-              exit 1
-          fi
-      
-          cd "$KCDIR"
-      
+            echo "⚠️ Target Directory Not Found:"
+            echo "$KCDIR"
+            exit 1
+          fi      
+          cd "$KCDIR"      
           # Validate Patch File
           if [[ ! -f "$IPV6PATCHFILE" ]]; then
-              echo "⚠️ Patch File Not Found:"
-              echo "$IPV6PATCHFILE"
-              exit 1
-          fi
-      
+            echo "⚠️ Patch File Not Found:"
+            echo "$IPV6PATCHFILE"
+            exit 1
+          fi      
           # Check CPU Support
           if [[ "${CPU:-}" != sm* ]]; then
-              echo "⚠️ Device CPU Not Supported for IPv6 NAT Fix — Skipping"
-              exit 0
-          fi
-      
+            echo "⚠️ Device CPU Not Supported for IPv6 NAT Fix — Skipping"
+            exit 0
+          fi      
           echo "📊 Device CPU Supports IPv6 NAT Fix"
-
           # Check if Patch Already Applied
           if patch --dry-run -p1 < "$IPV6PATCHFILE" >/dev/null 2>&1; then
-              echo "🚀 Applying IPv6 NAT Compatibility Patch..."
-              patch -p1 -F3 < "$IPV6PATCHFILE"
-              echo "✔ IPv6 NAT Fix Applied Successfully"
+            echo "🚀 Applying IPv6 NAT Compatibility Patch..."
+            patch -p1 -F3 < "$IPV6PATCHFILE"
+            echo "✔ IPv6 NAT Fix Applied Successfully"
           else
-              echo "⚙️ IPv6 NAT Patch Already Applied or Not Needed"
+            echo "⚙️ IPv6 NAT Patch Already Applied or Not Needed"
           fi
 
           echo ""
           echo "🎉 IPv6 NAT Fix Stage Completed"
 
-      # ==============================
-      # Setup Custom Build Time
-      # ==============================
       - name: 🔧 Setup Custom Build Time
         shell: bash
         run: |
           set -euo pipefail
       
-          echo "------------------------------"
-          echo "🚀 Custom Build Time Setup..."
-          echo "------------------------------"
-          echo ""
-      
           # Determine Build Timestamp
-          TIMEINPUT="${{ github.event.inputs.BUILDTIME }}"
-      
+          TIMEINPUT="${{ github.event.inputs.BUILDTIME }}"      
           if [[ -n "$TIMEINPUT" && "$TIMEINPUT" != [Ff] ]]; then
-              DATESTR="$TIMEINPUT"
-              echo "🔎 Using Input Build Time: $DATESTR"
+            DATESTR="$TIMEINPUT"
+            echo "🔎 Using Input Build Time: $DATESTR"
           else
-              DATESTR="$(TZ='UTC' date +'%a %b %d %T %Z %Y')"
-              echo "🛠️ Using UTC Time as Fallback: $DATESTR"
+            DATESTR="$(TZ='UTC' date +'%a %b %d %T %Z %Y')"
+            echo "🛠️ Using UTC Time as Fallback: $DATESTR"
           fi
       
           # Export Kernel Build Environment Variables
