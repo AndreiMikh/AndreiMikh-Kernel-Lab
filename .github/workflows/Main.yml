@@ -141,6 +141,7 @@ on:
         options:
           - LZ4-1.10.0-Custom-Patch
           - LZ4-1.10.0-Patch
+          - LZ4-1.10.0-Patch-Update
           - None
         
       SUFFIX:
@@ -261,7 +262,8 @@ jobs:
 
           (
             github.event.inputs.ZRAMCUSTOMPATCH == 'LZ4-1.10.0-Custom-Patch' && 'LZ4+ZSTD ' ||
-            github.event.inputs.ZRAMCUSTOMPATCH == 'LZ4-1.10.0-Patch' && 'LZ4 ' || ''
+            github.event.inputs.ZRAMCUSTOMPATCH == 'LZ4-1.10.0-Patch' && 'LZ4 ' ||
+            github.event.inputs.ZRAMCUSTOMPATCH == 'LZ4-1.10.0-Patch-Update' && 'LZ4-Update ' || ''
           ),
           
           (
@@ -2241,11 +2243,32 @@ jobs:
           cd kernel_workspace
 
           # Clone Required Patch Repositories
-          echo "📥 Cloning Github Owner Patches, SukiSU Patches and LZ4 1.10.0 and ZSTD 1.5.7 Patches Dependencies..."      
-          git clone --depth=1 https://github.com/SukiSU-Ultra/SukiSU_patch.git
-          git clone --depth=1 https://github.com/AndreiMikh/AndreiMikh-Kernel-Lab.git
-          git clone --depth=1 https://github.com/cctv18/oppo_oplus_realme_sm8750.git
-          git clone --depth=1 https://github.com/Xiaomichael/kernel_patches.git
+          echo "📥 Cloning Patch Dependencies..."          
+          # SukiSU OPlus LZ4KD Patches
+          if [[ "$ZRAMSUKISU" == 1* ]]; then
+            git clone --depth=1 \
+              https://github.com/SukiSU-Ultra/SukiSU_patch.git
+          fi
+          
+          # Main Kernel Lab
+          git clone --depth=1 \
+            https://github.com/AndreiMikh/AndreiMikh-Kernel-Lab.git
+          
+          # LZ4 / ZSTD Patch Sources
+          case "$ZRAMPATCH" in
+            "LZ4-1.10.0-Custom-Patch")
+              git clone --depth=1 \
+                https://github.com/cctv18/oppo_oplus_realme_sm8750.git
+              ;;              
+            "LZ4-1.10.0-Patch")
+              git clone --depth=1 \
+                https://github.com/Xiaomichael/kernel_patches.git
+              ;;
+            "LZ4-1.10.0-Patch-Update")
+              git clone --depth=1 \
+                https://github.com/Numbersf/lz4_oplus.git
+              ;;
+          esac
              
           echo "✔️ Patch Repositories Cloned"
           echo
@@ -2838,125 +2861,176 @@ jobs:
       # ==============================
       - name: 🔧 LZ4 1.10.0 / ZSTD 1.5.7 Setup
         if: ${{ github.event.inputs.ZRAMCUSTOMPATCH != 'None' && github.event.inputs.ZRAMCUSTOMPATCH != '' }}
-        shell: bash 
+        shell: bash
         run: |
           set -euo pipefail
-          
-          # Set Environment Variables and Inputs
+      
+          # Inputs / Environment Variables      
+          # Selected Patch Type
           ZRAMPATCH="${{ github.event.inputs.ZRAMCUSTOMPATCH }}"
+      
+          # Kernel Version (6.1 / 6.6)
           KERNELVERSION="${{ env.KERNELVERSION }}"
-
-          # Cctv18 Source Dependency for LZ4 1.10.0 and ZSTD 1.5.7 Patches
+      
+          # Directory Paths     
+          # Main Kernel Common Directory
+          KCDIR="${GITHUB_WORKSPACE}/kernel_workspace/kernel_platform/common"
+      
+          # CCTV18 / Oplus Patch Source
           CUSTOMPATCH="${GITHUB_WORKSPACE}/kernel_workspace/oppo_oplus_realme_sm8750/zram_patch"
-
-          # Xiao Source Dependency for LZ4 1.10.0 and ZSTD 1.5.7 Patches
+      
+          # Xiaomichael Patch Source
           XMPATCH="${GITHUB_WORKSPACE}/kernel_workspace/kernel_patches/zram_patches"
-        
+      
+          # LZ4 Update Script Repository
+          LZ4_REPO="${GITHUB_WORKSPACE}/kernel_workspace/lz4_oplus"
+      
           echo "------------------------------"
-          echo "🚀 LZ4 1.10.0 / ZSTD 1.5.7 Setup..."
-          echo "📁 Kernel Version  : $KERNELVERSION"
+          echo "🚀 LZ4 1.10.0 / ZSTD 1.5.7 Setup"
+          echo "📦 Patch Type     : $ZRAMPATCH"
+          echo "📁 Kernel Version : $KERNELVERSION"
           echo "------------------------------"
           echo ""
-
-          # Navigate
-          KCDIR="${GITHUB_WORKSPACE}/kernel_workspace/kernel_platform/common"
-          if [ ! -d "$KCDIR" ]; then
-            echo "⚠️ Kernel Common Directory Not Found, Skipping Patch Step"
+      
+          # Validate Kernel Source Directory      
+          # Skip Step if Kernel Source does Not Exist
+          if [[ ! -d "$KCDIR" ]]; then
+            echo "⚠️ Kernel Common Directory Not Found"
             exit 0
           fi
       
+          # Move Into Kernel Source Directory
           cd "$KCDIR"
-
-          # LZ4 ARMv8 Source Injection
-          if [[ "$ZRAMPATCH" == "LZ4-1.10.0-Custom-Patch" && ( "$KERNELVERSION" == "6.6" || "$KERNELVERSION" == "6.1" ) ]]; then
-            echo "📦 Checking LZ4 ARMv8 Sources..."
-
-            # Target Path
-            F2FS="fs/f2fs/lz4armv8"
-
-            # Ensure Target Path Directory Exists
-            mkdir -p "$F2FS"
-
-            # Check if All Required Files Already Exist
-            if [[ -f "$F2FS/lz4accel.c" && \
-                  -f "$F2FS/lz4accel.h" && \
-                  -f "$F2FS/lz4armv8.S" ]]; then 
-              echo "✔️ LZ4 ARMv8 Sources Already Present, Skipping Source Injection..."      
-            else       
-              echo "⬇️ Downloading / Injecting Missing LZ4 ARMv8 Sources for Device ${{ env.MANIFESTBASEFILE }}..."
-     
-              curl -fL --retry 3 -o "$F2FS/lz4accel.c" \
-                https://raw.githubusercontent.com/AndreiMikh/AndreiMikh-Kernel-Lab/refs/heads/${GITHUB_REF_NAME}/lz4accel.c
-         
-              curl -fL --retry 3 -o "$F2FS/lz4accel.h" \
-                https://raw.githubusercontent.com/AndreiMikh/AndreiMikh-Kernel-Lab/refs/heads/${GITHUB_REF_NAME}/lz4accel.h
-          
-              curl -fL --retry 3 -o "$F2FS/lz4armv8.S" \
-                https://raw.githubusercontent.com/AndreiMikh/AndreiMikh-Kernel-Lab/refs/heads/${GITHUB_REF_NAME}/lz4armv8.S
-         
-              echo "✔️ LZ4 ARMv8 Sources Ready"         
+      
+          # Used For:
+          #   - Syncing Updated LZ4 Sources
+          #   - Updating Old Implementations
+          #   - Automated Source Refresh      
+          if [[ "$ZRAMPATCH" == "LZ4-1.10.0-Patch-Update" ]]; then
+            echo "🚀 Running LZ4 Patch Update Script..."     
+            # Ensure Updater Script Exists
+            if [[ -f "${LZ4_REPO}/apply_lz4_oplus.sh" ]]; then      
+              # Execute Updater Script
+              . "${LZ4_REPO}/apply_lz4_oplus.sh"      
+              echo "✔️ LZ4 Patch Update Script Completed"      
+            else
+              echo "⚠️ apply_lz4_oplus.sh Not Found"
             fi
           fi
-
-          # Function to Apply Patch and Ensure Directory Exists
-          apply() {
-            local PATCHFILE="$1"
-            local PATCHNAME
-            PATCHNAME=$(basename "$PATCHFILE")
-  
-            # Directory Where Patch Needs to be Applied
-            PATCHPATH=$(dirname "$PATCHFILE")
-
-            # Check if Directory Exists, if Not, Create
-            if [[ ! -d "$PATCHPATH" ]]; then
-              echo "⚠️ Directory $PATCHPATH Does Not Exist, Creating it Now..."
-              mkdir -p "$PATCHPATH"
-            fi
-
-            # Proceed with Patch Application
-            if [[ ! -f "$PATCHFILE" ]]; then
-              echo "⚠️ $PATCHNAME Not Found, Skipping..."
-              return
-            fi
-  
-            echo "⚙️ Applying Patch..."
-
-            # Skip if already applied (prevents CI re-run failure)
-            if git apply --check -p1 "$PATCHFILE" >/dev/null 2>&1; then
-              if git apply --ignore-whitespace -p1 "$PATCHFILE"; then
-                echo "✔️ $PATCHNAME Applied Successfully"
-              else
-                echo "⚠️ $PATCHNAME Apply Failed (Unexpected)"
-              fi
+      
+          # LZ4 ARMv8 Optimized Source Injection
+          # Purpose:
+          #   - ARMv8 Optimized LZ4 Acceleration
+          #   - Faster Decompression
+          #   - Improved ZRAM Performance      
+          if [[ "$ZRAMPATCH" == "LZ4-1.10.0-Custom-Patch" && \
+                ( "$KERNELVERSION" == "6.1" || "$KERNELVERSION" == "6.6" ) ]]; then      
+            echo "📦 Checking LZ4 ARMv8 Sources..."      
+            # Target F2FS ARMv8 Directory
+            F2FS="fs/f2fs/lz4armv8"    
+            # Create Directory if Missing
+            mkdir -p "$F2FS"     
+            # Check if Files Already Exist
+            if [[ -f "$F2FS/lz4accel.c" && \
+                  -f "$F2FS/lz4accel.h" && \
+                  -f "$F2FS/lz4armv8.S" ]]; then     
+              echo "✔️ LZ4 ARMv8 Sources Already Present"      
             else
-              echo "⚠️ $PATCHNAME Already Applied or Conflicts — Skipping"
+              echo "⬇️ Injecting Missing ARMv8 Sources..."                
+              # Base Download URL
+              BASE_URL="https://raw.githubusercontent.com/AndreiMikh/AndreiMikh-Kernel-Lab/refs/heads/${GITHUB_REF_NAME}"     
+              # Download
+              curl -fL --retry 3 \
+                -o "$F2FS/lz4accel.c" \
+                "${BASE_URL}/lz4accel.c"      
+              # Download
+              curl -fL --retry 3 \
+                -o "$F2FS/lz4accel.h" \
+                "${BASE_URL}/lz4accel.h"     
+              # Download ARMv8 Assembly Implementation
+              curl -fL --retry 3 \
+                -o "$F2FS/lz4armv8.S" \
+                "${BASE_URL}/lz4armv8.S"      
+              echo "✔️ ARMv8 Sources Ready"
+            fi
+          fi
+      
+          # Patch Apply Helper Function
+          # Features:
+          #   - Validates Patch Existence
+          #   - Prevents Duplicate Patching
+          #   - Ignores Whitespace Conflicts
+          #   - Avoids CI Rerun Failures      
+          applypatch() {
+            local PATCHFILE="$1"
+            local PATCHNAME     
+            # Extract Patch Filename
+            PATCHNAME="$(basename "$PATCHFILE")"      
+            # Ensure Patch Exists
+            if [[ ! -f "$PATCHFILE" ]]; then
+              echo "⚠️ $PATCHNAME Not Found"
+              return
+            fi      
+            
+            echo "⚙️ Applying $PATCHNAME..."
+      
+            # Validate Patch Before Applying
+            if git apply --check -p1 "$PATCHFILE" >/dev/null 2>&1; then     
+              # Apply Patch
+              git apply --ignore-whitespace -p1 "$PATCHFILE"      
+              echo "✔️ $PATCHNAME Applied Successfully"      
+            else
+              echo "⚠️ $PATCHNAME Already Applied or Conflicts"
             fi
           }
-
-          # Apply Patches Based on Kernel Version
-          case "${KERNELVERSION}:${ZRAMPATCH}" in
+      
+          # Patch Application Logic
+          # Matrix:
+          # Linux Kernel Version 6.1:
+          #   - LZ4 Patch
+          #   - ZSTD Patch
+          # Linux Kernel Version 6.6:
+          #   - LZ4 Patch
+          #   - Optional ZSTD Patch
+          case "${KERNELVERSION}:${ZRAMPATCH}" in      
+            # Kernel 6.1 + Xiaomichael Patch
             "6.1:LZ4-1.10.0-Patch")
-              apply "${XMPATCH}/001-lz4.patch"
-              apply "${XMPATCH}/002-zstd.patch"
+              applypatch "${XMPATCH}/001-lz4.patch"
+              applypatch "${XMPATCH}/002-zstd.patch"
               ;;
+            # Kernel 6.1 + CCTV18 Custom Patch
             "6.1:LZ4-1.10.0-Custom-Patch")
-              apply "${CUSTOMPATCH}/001-lz4.patch"
-              apply "${CUSTOMPATCH}/002-zstd.patch"
+              applypatch "${CUSTOMPATCH}/001-lz4.patch"
+              applypatch "${CUSTOMPATCH}/002-zstd.patch"
               ;;
+            # Kernel 6.6 + Xiaomichael Patch
             "6.6:LZ4-1.10.0-Patch")
-              apply "${XMPATCH}/001-lz4.patch"
+              applypatch "${XMPATCH}/001-lz4.patch"
               ;;
+            # Kernel 6.6 + CCTV18 Custom Patch
             "6.6:LZ4-1.10.0-Custom-Patch")
-              apply "${CUSTOMPATCH}/001-lz4.patch"
-              apply "${CUSTOMPATCH}/002-zstd.patch"
+              applypatch "${CUSTOMPATCH}/001-lz4.patch"
+              applypatch "${CUSTOMPATCH}/002-zstd.patch"
               ;;
+            # Patch Update Mode
+            "6.1:LZ4-1.10.0-Patch-Update")
+              echo "✔️ Patch Update Mode Completed"
+              ;;
+            "6.6:LZ4-1.10.0-Patch-Update")
+              echo "✔️ Patch Update Mode Completed"
+              ;;
+            # Unsupported Combination
             *)
-              echo "⚠️ Unsupported Combination: Kernel=${KERNELVERSION}, Patch=${ZRAMPATCH}"
+              echo "⚠️ Unsupported Combination"
+              echo "Kernel Version : $KERNELVERSION"
+              echo "Patch Type     : $ZRAMPATCH"
               ;;
           esac
-
+      
           echo ""
-          echo "🎉 LZ4 1.10.0 and ZSTD 1.5.7 Patch Setup Completed, Kernel: ${KERNELVERSION}"
+          echo "🎉 LZ4 / ZSTD Setup Completed"
+          echo "📦 Kernel Version : $KERNELVERSION"
+          echo "🧩 Patch Type     : $ZRAMPATCH"
     
       # ==============================
       # Scheduler Conversion
@@ -5906,6 +5980,7 @@ jobs:
           declare -A ZRAMPATCHMAP=(
             ["LZ4-1.10.0-Custom-Patch"]="-LZ4(1.10.0)+ZSTD(1.5.7)"
             ["LZ4-1.10.0-Patch"]="-LZ4(1.10.0)"
+            ["LZ4-1.10.0-Patch-Update"]="-LZ4(Update)"
           )
           
           SUFFIX+="${ZRAMPATCHMAP[$ZRAMPATCH]:-}"
@@ -5979,10 +6054,8 @@ jobs:
         with:
           # Artifact Name Composed of the Generated Suffix, Kernel Version, and KSU Meta Version
           name: "${{ env.FULLVERSION }}-${{ env.KSUVER }}-${{ env.MANIFESTBASEFILE }}-${{ steps.suffix.outputs.suffix }}"
-
           # Path to the Directory Containing the Flashable Kernel Files
           path: ./AnyKernel3/*
-
           # Retains Artifact Before Auto-Deletion
           retention-days: 30
 
@@ -6257,8 +6330,7 @@ jobs:
           # Variables
           CCACHE_DIR="${{ env.CCACHE_DIR }}"      
           TAR="CCache-${{ env.MANIFESTBASEFILE }}-${{ runner.os }}.tar.zst"
-          TMPTAR="${TAR}.tmp"
-      
+          TMPTAR="${TAR}.tmp"   
           echo "TAR=$TAR" >> "$GITHUB_ENV"
       
           # ZSTD Configuration
@@ -6442,7 +6514,6 @@ jobs:
           # Normalize Casing
           ALGORITHM=$(echo "$ALGORITHM" | tr '[:upper:]' '[:lower:]')
           UALGORITHM=$(echo "$ALGORITHM" | tr '[:lower:]' '[:upper:]')
-
           echo "🧩 Normalized ZRAM Algorithm Lowercase: $ALGORITHM (lowercase)"
           echo "🧩 Normalized ZRAM Uppercase: $UALGORITHM (uppercase)"      
           case "$ALGORITHM" in
@@ -6526,7 +6597,6 @@ jobs:
         with:
           # Artifact Name Includes Kernel Version, ZRAM Algorithm, and ZRAM Size
           name: "ZRAM-${{ env.FULLVERSION }}-${{ env.ZRAMALGORITHM }}-${{ env.ZRAMSIZE }}"
-
           # Path to ZRAM.ko File
           path: |
             kernel_workspace/**/zram.ko
@@ -6589,8 +6659,7 @@ jobs:
           echo ""
       
           REPO="${{ steps.manager.outputs.ROOTREPOSITORY }}"
-          BRANCH="${{ steps.manager.outputs.MANAGERBRANCH }}"
-      
+          BRANCH="${{ steps.manager.outputs.MANAGERBRANCH }}"      
           MANAGERAPKDIR="${GITHUB_WORKSPACE}/ManagerAPK"
           mkdir -p "$MANAGERAPKDIR"
           
@@ -6620,19 +6689,15 @@ jobs:
           fi
       
           echo "ℹ️ [Info] Found ${#runs[@]} Workflow Runs..."
-          echo "🔍 [Check] Scanning Runs for APK Artifacts..."
-      
+          echo "🔍 [Check] Scanning Runs for APK Artifacts..."      
           selectedrun=""
-          bestscore=0
-      
+          bestscore=0      
           for runid in "${runs[@]}"; do
             echo "------------------------------"
-            echo "🔍 [Check] Run ID: $runid"
-      
+            echo "🔍 [Check] Run ID: $runid"      
             artifactnames=$(gh api \
               "repos/$REPO/actions/runs/$runid/artifacts" \
-              --jq '.artifacts[].name' 2>/dev/null || true)
-      
+              --jq '.artifacts[].name' 2>/dev/null || true)      
             if [[ -z "$artifactnames" ]] || ! echo "$artifactnames" | grep -qiE 'apk|manager|release|build'; then
               echo "⚠️ [Skip] No Relevant Artifacts"
               continue
@@ -6675,16 +6740,13 @@ jobs:
           echo ""
 
           echo "🔍 [Verify] Checking Artifacts Inside Selected Run Before Download..."
-
           gh api repos/$REPO/actions/runs/$selectedrun/artifacts \
             --jq '.artifacts[].name' || true
           
           echo "------------------------------"
       
           echo "📩 [Step 3] Fetching Only Manager APK Artifacts..."
-
-          set +e    # Disable Strict Mode
-          
+          set +e    # Disable Strict Mode          
           artifacturls=$(gh api \
             "repos/$REPO/actions/runs/$selectedrun/artifacts" \
             --jq '.artifacts[]
@@ -6696,10 +6758,8 @@ jobs:
           echo "$artifacturls"
           echo "------------------------------"
           
-          artifactcount=$(echo "$artifacturls" | grep -c "api.github.com" || true)
-          
-          echo "📦 Manager Artifact Count: $artifactcount"
-          
+          artifactcount=$(echo "$artifacturls" | grep -c "api.github.com" || true)          
+          echo "📦 Manager Artifact Count: $artifactcount"          
           if [[ "$artifactcount" -eq 0 ]]; then
             echo "⚠️ No Manager APK Artifacts Found"
             exit 0
@@ -6709,11 +6769,9 @@ jobs:
           
           # Loop Safely (No Pipefail Breakage)
           while read -r url; do
-            [[ -z "$url" ]] && continue
-          
+            [[ -z "$url" ]] && continue          
             ((i++))
-            echo "⬇️ Downloading Artifact #$i"
-          
+            echo "⬇️ Downloading Artifact #$i"          
             zipfile="$MANAGERAPKDIR/artifact_$i.zip"
           
             # Curl (Never Fail Pipeline)
@@ -6738,20 +6796,13 @@ jobs:
             }
           
             unzip -o "$zipfile" -d "$MANAGERAPKDIR" >/dev/null 2>&1 || true
-            rm -f "$zipfile"
-          
+            rm -f "$zipfile"        
           done <<< "$artifacturls"
-
-          set -e    # Re-Enable Strict Mode
-      
-          echo "🧹 [Step 4] Cleaning Non-APK Files..."
-          
-          find "$MANAGERAPKDIR" -type f ! -name "*.apk" -delete || true
-          
-          echo "🔍 [Step 5] Verifying Output..."
-          
-          APKCOUNT=$(find "$MANAGERAPKDIR" -type f -name "*.apk" | wc -l || true)
-          
+          set -e    # Re-Enable Strict Mode      
+          echo "🧹 [Step 4] Cleaning Non-APK Files..."          
+          find "$MANAGERAPKDIR" -type f ! -name "*.apk" -delete || true          
+          echo "🔍 [Step 5] Verifying Output..."         
+          APKCOUNT=$(find "$MANAGERAPKDIR" -type f -name "*.apk" | wc -l || true)          
           echo "📦 APK Count: $APKCOUNT"
           
           if [[ "$APKCOUNT" -gt 0 ]]; then
@@ -6774,8 +6825,7 @@ jobs:
         run: |
           set -euo pipefail
       
-          echo "🔍 Checking Manager APK Directory..."
-      
+          echo "🔍 Checking Manager APK Directory..."     
           APKSOURCE="ManagerAPK"
           FLATDIR="FlatAPK"
       
@@ -6788,21 +6838,15 @@ jobs:
       
           if [[ "$APKCOUNT" -gt 0 ]]; then
             echo "APKMANAGER=true" >> "$GITHUB_ENV"
-            echo "APKCOUNT=$APKCOUNT" >> "$GITHUB_ENV"
-      
-            echo "📦 Flattening APKs..."
-      
+            echo "APKCOUNT=$APKCOUNT" >> "$GITHUB_ENV"    
+            echo "📦 Flattening APKs..."    
             mkdir -p "$FLATDIR"
-            find "$APKSOURCE" -type f -name "*.apk" -exec cp {} "$FLATDIR/" \;
-      
-            FLATCOUNT=$(find "$FLATDIR" -type f -name "*.apk" | wc -l || true)
-      
+            find "$APKSOURCE" -type f -name "*.apk" -exec cp {} "$FLATDIR/" \;     
+            FLATCOUNT=$(find "$FLATDIR" -type f -name "*.apk" | wc -l || true)      
             echo "------------------------------"
             echo "📦 Flat APK Count: $FLATCOUNT"
-            echo "------------------------------"
-      
-            echo "✔ APK Ready for Upload"
-      
+            echo "------------------------------"      
+            echo "✔ APK Ready for Upload"      
           else
             echo "APKMANAGER=false" >> "$GITHUB_ENV"
             echo "APKCOUNT=0" >> "$GITHUB_ENV"
