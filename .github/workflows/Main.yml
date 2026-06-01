@@ -87,9 +87,10 @@ on:
         required: true
         default: ReSukiSU
         options:
-         - ReSukiSU
          - KernelSU-Next
          - KernelSU
+         - ReSukiSU
+         - SukiSU-Ultra
          
       ROOTBRANCHSOURCE:
         type: choice
@@ -97,11 +98,12 @@ on:
         required: true
         default: ReSukiSU-Main
         options:
-         - ReSukiSU-Main
-         - ReSukiSU-Main-Spoofed
          - KernelSU-Next-Dev
          - KernelSU-Next-Dev-SUSFS
          - KernelSU-Main
+         - ReSukiSU-Main
+         - ReSukiSU-Main-Spoofed
+         - SukiSU-Ultra-Main
 
       SUSFSREPOSITORY:
         type: string
@@ -1847,8 +1849,13 @@ jobs:
             ReSukiSU-Main-Spoofed)
               MANAGERBRANCH="main"
               MANAGERPATH="main"
-              MANAGERARTIFACT="Spoofed-Manager-release"
-              ;;          
+              MANAGERARTIFACT="Spoofed-Manager-release"              
+              ;;
+            SukiSU-Ultra-Main)
+              MANAGERBRANCH="main"
+              MANAGERPATH="main"
+              MANAGERARTIFACT="Manager-release"
+              ;;
             *)
               echo "⚠️ Unsupported Root Branch Source: $ROOTBRANCHSOURCE"
               exit 1
@@ -1856,17 +1863,20 @@ jobs:
           
           esac
 
-          # Re-Solve Actual Repository (Critical Fix)
+          # Resolve Actual Repository (Critical Fix)
           case "$ROOTENGINE" in
             KernelSU-Next)
               ROOTREPOSITORY="KernelSU-Next/KernelSU-Next"
               ROOTREPOSITORYPATH="pershoot/KernelSU-Next"
               ;;
+            KernelSU)
+              ROOTREPOSITORY="tiann/KernelSU"
+              ;;
             ReSukiSU)
               ROOTREPOSITORY="ReSukiSU/ReSukiSU"
               ;;
-            KernelSU)
-              ROOTREPOSITORY="tiann/KernelSU"
+            SukiSU-Ultra)
+              ROOTREPOSITORY="SukiSU-Ultra/SukiSU-Ultra"
               ;;              
             *)
               echo "⚠️ Unsupported KSU Meta: $ROOTENGINE"
@@ -2097,14 +2107,73 @@ jobs:
               echo "⚠️ Patch Not Compatible or Already Applied"
             fi
           }
+          
+          # Setup SukiSU-Ultra
+          if [[ "$ROOTENGINE" == "SukiSU-Ultra" ]]; then
+            log "🌐 Setting Up SukiSU-Ultra"
+            downloadsetup \
+              "https://raw.githubusercontent.com/${ROOTREPOSITORY}/${MANAGERBRANCH}/kernel/setup.sh"
+            ROOTENGINEDIR="$(rootenginedirectory)"
+            
+            cd "$ROOTENGINEDIR" || fail "⚠️ Failed to Enter Root Engine Directory"
+            
+            # Commit Hash
+            COMMITHASH="$(git rev-parse --short=8 HEAD)"
+            # Resolve API Version
+            KSUVER=""
+            for i in {1..3}; do
+              RAW=$(curl -fsSL \
+                "https://raw.githubusercontent.com/${ROOTREPOSITORY}/builtin/kernel/Makefile" \
+                2>/dev/null || true)
+              KSUVER=$(
+                echo "$RAW" \
+                | grep -m1 "KSU_VERSION_API" \
+                | cut -d '=' -f2 \
+                | tr -d '[:space:]'
+              )
+              [[ -n "$KSUVER" ]] && break
+              sleep 1
+            done
+            [[ -n "$KSUVER" ]] || KSUVER="3.1.7"
+            echo "KSUVER=$KSUVER" >> "$GITHUB_ENV"
+            VERSIONDEF=$'define get_ksu_version_full\nv\\$1-'${COMMITHASH}$'@Andrei\nendef\n\nKSU_VERSION_API := '${KSUVER}$'\nKSU_VERSION_FULL := v'${KSUVER}$'-'${COMMITHASH}$'@Andrei'
+            sed -i '/define get_ksu_version_full/,/endef/d' kernel/Makefile || true
+            sed -i '/KSU_VERSION_API :=/d' kernel/Makefile || true
+            sed -i '/KSU_VERSION_FULL :=/d' kernel/Makefile || true
 
+            awk -v def="$VERSIONDEF" '
+              /REPO_OWNER :=/ {
+                print
+                print def
+                inserted=1
+                next
+              }
+              { print }
+              END {
+                if (!inserted)
+                  print def
+              }
+            ' kernel/Makefile > kernel/Makefile.tmp
+            mv kernel/Makefile.tmp kernel/Makefile
+            KSUVER=$(( $(git rev-list --count HEAD 2>/dev/null || echo 114514) + 37185 ))
+            echo "KSUVER=$KSUVER" >> "$GITHUB_ENV"
+            # SUSFS Compatibility
+            if [[ "$SUSFS" != "-1" ]]; then
+              sed -i '/CONFIG_KSU_MANUAL_HOOK/d' "$DEFCONFIG"
+              echo "CONFIG_KSU_MANUAL_HOOK=n" >> "$DEFCONFIG"
+              echo "✔️ Disabled Manual Hook for SUSFS"
+            fi
+            log "🌐 SukiSU-Ultra Setup Complete"
+          
           # Setup ReSukiSU
-          if [[ "$ROOTENGINE" == "ReSukiSU" ]]; then
+          elif [[ "$ROOTENGINE" == "ReSukiSU" ]]; then
             log "🌐 Setting Up ReSukiSU"
             downloadsetup \
               "https://raw.githubusercontent.com/${ROOTREPOSITORY}/${MANAGERBRANCH}/kernel/setup.sh"
             ROOTENGINEDIR="$(rootenginedirectory)"
-            cd "$ROOTENGINEDIR" || fail "Failed to Enter Root Engine Directory"
+            
+            cd "$ROOTENGINEDIR" || fail "⚠️ Failed to Enter Root Engine Directory"
+            
             KSUVER=$(( $(git rev-list --count HEAD 2>/dev/null || echo 114514) + 30700 ))
             echo "KSUVER=$KSUVER" >> "$GITHUB_ENV"
             sed -i '/CONFIG_KSU_FULL_NAME_FORMAT/d' "$DEFCONFIG"
@@ -2130,7 +2199,9 @@ jobs:
             fi
 
             ROOTENGINEDIR="$(rootenginedirectory)"
-            cd "$ROOTENGINEDIR" || fail "Failed to Enter Root Engine Directory"
+            
+            cd "$ROOTENGINEDIR" || fail "⚠️ Failed to Enter Root Engine Directory"
+            
             # Generate Version
             KSUVER="$(generateversion "$ROOTREPOSITORY" "$MANAGERBRANCH" 30000)"
             KSUTAG="$(resolvetag "$ROOTREPOSITORY")"
@@ -2180,7 +2251,9 @@ jobs:
             downloadsetup \
               "https://raw.githubusercontent.com/${ROOTREPOSITORY}/${MANAGERBRANCH}/kernel/setup.sh"
             ROOTENGINEDIR="$(rootenginedirectory)"
-            cd "$ROOTENGINEDIR" || fail "Failed to Enter Root Engine Directory"
+            
+            cd "$ROOTENGINEDIR" || fail "⚠️ Failed to Enter Root Engine Directory"
+            
             KSUVER="$(generateversion "$ROOTREPOSITORY" "$MANAGERBRANCH" 30000)"
             echo "KSUVER=$KSUVER" >> "$GITHUB_ENV"
             sed -ri \
@@ -4222,7 +4295,7 @@ jobs:
             echo "⚠️ Repository Already Exists"
           fi
 
-          # Re-Solve Source Directory
+          # Resolve Source Directory
           RKSRCDIR="$RKREPODIR"
           [[ -d "$RKREPODIR/LKM-Source" ]] && RKSRCDIR="$RKREPODIR/LKM-Source"
           echo "📂 Source: $RKSRCDIR"
