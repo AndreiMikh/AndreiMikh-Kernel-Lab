@@ -132,3 +132,59 @@ No Non-Sense
 <div align="center">
   <img width="0" height="0" src="https://count.getloli.com/get/@:AndreiMikh" />
 </div>
+
+# Kernel Manifest Appendix
+
+This is an additional build manifest designed to support most OnePlus MediaTek and realme devices. It will be continuously maintained and updated as new devices and changes become available.
+
+If you encounter any issues or discover compatibility problems, please report them so they can be addressed promptly.
+
+## MediaTek Device Adaptation
+
+For MediaTek-based devices, only the following repositories are required:
+
+* `kernel`
+* `vendor` (`kernel_modules_and_devicetree`)
+
+### Example
+
+Replace the original kernel project entry:
+
+```xml
+<project remote="origin" name="android_kernel_XXXXX_mtXXXX" path="kernel-<kernel-version>" revision="XXXX">
+    <linkfile dest="kernel_platform/common" src="."/>
+</project>
+```
+
+With:
+
+```xml
+<project remote="origin" name="android_kernel_XXXXX_mtXXXX" path="kernel-<kernel-version>" revision="XXXX">
+    <linkfile dest="kernel/kernel-6.1" src="."/>
+</project>
+
+<project remote="origin" name="android_kernel_modules_and_devicetree_oneplus_mtXXXX" path="./" revision="XXXX"/>
+```
+
+> Replace the original `kernel_platform/common` link path with the appropriate `kernel/kernel-<version>` path for your target kernel version.
+
+## Build Instructions
+
+```bash
+./kernel_platform/oplus/build/oplus_build_kernel.sh <cpu_codename> gki
+```
+
+### Parameters
+
+| Parameter      | Description         |
+| -------------- | ------------------- |
+| CPU Code Name | Device CPU Code Name |
+
+For All MediaTek Devices, Use:
+
+```bash
+./kernel_platform/oplus/build/oplus_build_kernel.sh unknown gki
+```
+
+In other words, set the CPU codename to `unknown` when building kernels for MediaTek-based devices.
+
