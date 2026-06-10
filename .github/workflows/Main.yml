@@ -455,7 +455,8 @@ jobs:
         run: |
           set -euo pipefail
 
-          command -v jq >/dev/null || { echo "⚠️ ERROR: JQ Not Installed"; exit 1; }          
+          command -v jq >/dev/null || { echo "⚠️ ERROR: JQ Not Installed"; exit 1; }
+          
           cd "$GITHUB_WORKSPACE"
           
           echo "------------------------------"
@@ -479,145 +480,169 @@ jobs:
             s/^realme/RealMe/;
             s/^oppo/Oppo/
           ')
+
           mkdir -p ".repo/manifests_fallback"
           XMLPATH=".repo/manifests_fallback/${FILE}.xml"
           READMEPATH=".repo/manifests_fallback/README.md"
           echo "FILE=$FILE"
           echo "MANIFESTFILECONFIG=$MANIFESTFILECONFIG"
           echo "MANIFESTBASEFILE=$MANIFESTBASEFILE"
+
           {
             echo "MANIFESTFILECONFIG=$MANIFESTFILECONFIG"
             echo "MANIFESTBASEFILE=$MANIFESTBASEFILE"
           } >> "$GITHUB_ENV"
+
+          # Repository Priority:
+          # 1. AndreiMikh/kernel_manifest
+          # 2. AndreiMikh/Kernel_Manifest_Appendix
+          # 3. User Defined Dynamic Repository
           
           declare -A REPOS          
           REPOS["AndreiMikh"]="AndreiMikh|kernel_manifest"
+          REPOS["Appendix"]="AndreiMikh|Kernel_Manifest_Appendix"
+
           # Only Register the Dynamic Repository if Input is Not Empty
           if [[ -n "$GITREPOSITORYINPUT" ]]; then            
             # Remove https://github.com/ if User Pasted Full URL
             GITREPOSITORYINPUT="${GITREPOSITORYINPUT#https://github.com/}"
-            GITREPOSITORYINPUT="${GITREPOSITORYINPUT%/}"              
+            GITREPOSITORYINPUT="${GITREPOSITORYINPUT%/}"
+              
             if [[ "$GITREPOSITORYINPUT" =~ ^[^/]+/[^/]+$ ]]; then
+              echo "🚀 Dynamic Repository Detected: $GITREPOSITORYINPUT"
               OWNER="${GITREPOSITORYINPUT%%/*}"
-              REPOSITORYNAME="${GITREPOSITORYINPUT##*/}"          
-              echo "🚀 Dynamic Repository Detected"
-              echo "📂 Repository : ${OWNER}/${REPOSITORYNAME}"          
-              REPOS["Dynamic"]="${OWNER}|${REPOSITORYNAME}"
+              REPO="${GITREPOSITORYINPUT##*/}"
+              REPOS["Dynamic"]="$OWNER|$REPO"
             else
-              echo "⚠️ Invalid Dynamic Repository Format"
-              echo "Expected : owner/repository"
-              echo "Provided : $GITREPOSITORYINPUT"
-              echo "➡️ Skipping Dynamic Repository"
+              echo "Information  : ⚠️ Invalid Dynamic Repository Format - Skipping..."
+              echo "Expected     : ✔️ Dynamic Owner / Repository"
+              echo "Provided     : 🔎 $GITREPOSITORYINPUT"
+              echo "⚠️ Skipping Dynamic Repository Instead of Failing..."
             fi
           fi
 
           # Export Keys and Values for Parallel Jobs
           export REPOSKEYS="${!REPOS[@]}"
           export REPOSVALUES="${REPOS[@]}"
+
           MANIFESTFOUNDREPO=""
           MANIFESTFOUNDREPONAME=""
           MANIFESTFOUNDBRANCH=""
-          # Search Manifest Repositories          
-          FOUNDTMP="$(mktemp)"
-          INFOTMP="$(mktemp)"          
-          rm -f "$FOUNDTMP" "$INFOTMP"          
-          pids=()          
-          for KEY in "${!REPOS[@]}"; do
-          (
-            ENTRY="${REPOS[$KEY]}"         
-            OWNER="${ENTRY%%|*}"
-            REPOSITORYNAME="${ENTRY##*|}"
-            echo "🔎 Searching ${OWNER}/${REPOSITORYNAME}"          
-            BRANCHES=""
-         
-            # Authenticated GitHub API
+
+          # Function: Check Repository for XML
+          check_repo() {
+            local ENTRY="$1"
+            [[ -z "$ENTRY" ]] && return 1
+            local OWNER="${ENTRY%%|*}"
+            local REPOSITORYNAME="${ENTRY##*|}"
+
+            echo ""
+            echo "🔎 Checking ${OWNER}/${REPOSITORYNAME}"
+            local BRANCHES=""      
+            # 1️⃣ Try GitHub API (Authenticated if Token Exists)
             if [[ -n "${GITHUB_TOKEN:-}" ]]; then
-              BRANCHES=$(
-                curl \
-                  --connect-timeout 10 \
-                  --max-time 20 \
-                  -fsSL \
-                  -H "Authorization: token ${GITHUB_TOKEN}" \
-                  -H "Accept: application/vnd.github.v3+json" \
-                  "https://api.github.com/repos/${OWNER}/${REPOSITORYNAME}/branches?per_page=100" \
-                  | jq -r '.[].name? // empty' 2>/dev/null || true
-              )
+            BRANCHES=$(curl --connect-timeout 10 --max-time 20 -fsSL \
+                        -H "Authorization: token $GITHUB_TOKEN" \
+                        -H "Accept: application/vnd.github.v3+json" \
+                        "https://api.github.com/repos/${OWNER}/${REPOSITORYNAME}/branches?per_page=100" \
+                        | jq -r '.[].name? // empty' 2>/dev/null || true)
             fi
-          
-            # Public GitHub API
+            # 2️⃣ Fallback to Unauthenticated API if Empty
             if [[ -z "$BRANCHES" ]]; then
-              BRANCHES=$(
-                curl \
-                  --connect-timeout 10 \
-                  --max-time 20 \
-                  -fsSL \
-                  "https://api.github.com/repos/${OWNER}/${REPOSITORYNAME}/branches?per_page=100" \
-                  | jq -r '.[].name? // empty' 2>/dev/null || true
-              )
+              BRANCHES=$(curl --connect-timeout 10 --max-time 20 -fsSL \
+                          "https://api.github.com/repos/${OWNER}/${REPOSITORYNAME}/branches?per_page=100" \
+                          | jq -r '.[].name? // empty' 2>/dev/null || true)
             fi
-          
-            # Git Fallback
+            # 3️⃣ Fallback to Git LS-Remote
             if [[ -z "$BRANCHES" ]]; then
-              echo "⚠️ API Failed, Using Git LS-Remote"          
-              BRANCHES=$(
-                git ls-remote --heads \
-                "https://github.com/${OWNER}/${REPOSITORYNAME}.git" \
-                2>/dev/null |
-                sed 's|.*refs/heads/||' ||
-                true
-              )
+              echo "⚠️ API Failed, Falling Back to Git LS-Remote..."
+              BRANCHES=$(git ls-remote --heads https://github.com/${OWNER}/${REPOSITORYNAME}.git 2>/dev/null | sed 's|.*refs/heads/||' || true)      
             fi
-          
-            [[ -z "$BRANCHES" ]] && exit 0          
-            for BRANCH in $BRANCHES; do          
-              [[ -f "$FOUNDTMP" ]] && exit 0          
+            [[ -z "$BRANCHES" ]] && { echo "No Branches Found for ${OWNER}/${REPOSITORYNAME}, Skipping..."; return 1; }
+            # Try Each Branch Until XML File is Found
+            for BRANCH in $BRANCHES; do
+              echo "  → 📃 Trying Branch: $BRANCH"            
               XMLURL="https://raw.githubusercontent.com/${OWNER}/${REPOSITORYNAME}/${BRANCH}/${FILE}.xml"
-              READMEURL="https://raw.githubusercontent.com/${OWNER}/${REPOSITORYNAME}/${BRANCH}/README.md"          
-              if curl -sf --head "$XMLURL" >/dev/null; then          
-                [[ -f "$FOUNDTMP" ]] && exit 0         
+              READMEURL="https://raw.githubusercontent.com/${OWNER}/${REPOSITORYNAME}/${BRANCH}/README.md"            
+              if curl -sf --head "$XMLURL" >/dev/null; then
+                echo "🔎 Found ${FILE}.xml in ${OWNER}/${REPOSITORYNAME} (Branch: $BRANCH)"            
                 TMPXML="${XMLPATH}.${OWNER}.${REPOSITORYNAME}.${BRANCH}.tmp"
-                TMPREADME="${READMEPATH}.${OWNER}.${REPOSITORYNAME}.${BRANCH}.tmp"          
-                curl -fsSL -o "$TMPXML" "$XMLURL" || exit 0
-                mv "$TMPXML" "$XMLPATH"         
+                TMPREADME="${READMEPATH}.${OWNER}.${REPOSITORYNAME}.${BRANCH}.tmp"            
+                curl -fsSL -o "$TMPXML" "$XMLURL" || { rm -f "$TMPXML"; continue; }
+                mv "$TMPXML" "$XMLPATH"           
                 curl -fsSL -o "$TMPREADME" "$READMEURL" 2>/dev/null || true
-          
-                if [[ -f "$TMPREADME" ]]; then
-                  mv "$TMPREADME" "$READMEPATH"
-                fi
-          
-                echo "${OWNER}|${REPOSITORYNAME}|${BRANCH}" > "$INFOTMP"         
+                [[ -f "$TMPREADME" ]] && mv "$TMPREADME" "$READMEPATH"            
+                echo "$OWNER|$REPOSITORYNAME|$BRANCH" > "$INFOTMP"
                 touch "$FOUNDTMP"
-          
-                echo "✅ Found ${FILE}.xml"
-                echo "📂 Repository : ${OWNER}/${REPOSITORYNAME}"
-                echo "🌿 Branch     : ${BRANCH}"          
-                exit 0
+            
+                return 0
               fi
-            done          
-          ) &
-          pids+=($!)
+            done
+
+            echo "⚠️ No Branch Contains ${FILE}.xml in ${OWNER}/${REPOSITORYNAME}, Skipping..."
+            return 1
+          }
+
+          # Parallel Repository Check
+          FOUNDTMP="/tmp/manifest_found.lock"
+          INFOTMP="/tmp/manifest_info.txt"
+          # Remove Old Markers
+          rm -f "$FOUNDTMP" "$INFOTMP"
+          pids=()
+          for key in $REPOSKEYS; do
+            value="${REPOS[$key]-}"
+            [[ -z "$value" ]] && continue          
+            (
+              OWNER="${value%%|*}"
+              REPOSITORYNAME="${value##*|}"          
+                echo "🔎 Checking $OWNER/$REPOSITORYNAME"          
+                # Stop Immediately if Another Worker Already Found a Match
+                [[ -f "$FOUNDTMP" ]] && exit 0          
+                # Get Branches (GitHub API)
+                BRANCHES=$(curl -s "https://api.github.com/repos/$OWNER/$REPOSITORYNAME/branches?per_page=100" \
+                  | jq -r '.[].name? // empty' 2>/dev/null || true)          
+                # Fallback to Git if API Fails
+                if [[ -z "$BRANCHES" ]]; then
+                  BRANCHES=$(git ls-remote --heads "https://github.com/${OWNER}/${REPOSITORYNAME}.git" \
+                    2>/dev/null | sed 's|.*refs/heads/||' || true)
+                fi
+                [[ -z "$BRANCHES" ]] && exit 0          
+                for BRANCH in $BRANCHES; do          
+                  # Stop if Already Found by Another Process
+                  [[ -f "$FOUNDTMP" ]] && exit 0       
+                  XMLURL="https://raw.githubusercontent.com/$OWNER/$REPOSITORYNAME/$BRANCH/${FILE}.xml"
+                  READMEURL="https://raw.githubusercontent.com/$OWNER/$REPOSITORYNAME/$BRANCH/README.md"        
+                  if curl -sf --head "$XMLURL" >/dev/null; then          
+                    # Double-Check Race Condition Before Writing
+                    [[ -f "$FOUNDTMP" ]] && exit 0          
+                    curl -fsSL -o "$XMLPATH" "$XMLURL"
+                    curl -fsSL -o "$READMEPATH" "$READMEURL" || true          
+                    echo "$OWNER|$REPOSITORYNAME|$BRANCH" > "$INFOTMP"
+                    touch "$FOUNDTMP"          
+                    exit 0
+                  fi
+                done
+            ) &
+            pids+=($!)
           done
-          
+
+          # Wait for All Jobs
           for pid in "${pids[@]}"; do
-            wait "$pid" || true
+            wait $pid || true
           done
-          
-          if [[ -f "$FOUNDTMP" && -s "$INFOTMP" ]]; then          
-            IFS='|' read -r \
-              MANIFESTFOUNDREPO \
-              MANIFESTFOUNDREPONAME \
-              MANIFESTFOUNDBRANCH < "$INFOTMP"         
-            echo "✔️ Manifest Successfully Found"
+
+          # Read Results from Temporary File
+          if [[ -f "$FOUNDTMP" && -s "$INFOTMP" ]]; then
+            IFS='|' read -r MANIFESTFOUNDREPO MANIFESTFOUNDREPONAME MANIFESTFOUNDBRANCH < "$INFOTMP"
+            echo "✔️ Manifest Successfully Found: $MANIFESTFOUNDREPO/$MANIFESTFOUNDREPONAME (Branch: $MANIFESTFOUNDBRANCH)"
           else
-            echo "⚠️ ${FILE}.xml Not Found In Any Repository"
+            echo "⚠️ WARNING: ${FILE}.xml Not Found in Any Repository"
             exit 1
           fi
-          
-          rm -f "$FOUNDTMP" "$INFOTMP"
 
           # Final Safe Validation
           if [[ -z "$MANIFESTFOUNDREPO" || ! -s "$XMLPATH" ]]; then
-            echo "⚠️ WARNING: ${FILE}.XML Not Found in Any Repository"
+            echo "⚠️ WARNING: ${FILE}.xml Not Found in Any Repository"
             exit 1  # Safe, Workflow Continues
           fi
 
@@ -1365,33 +1390,32 @@ jobs:
             rm -f "$directory/android/abi_gki_protected_exports_"* || true
           done
 
-          # Disable Defconfig Checks
+          # Disable Default Config Checks
           echo "🧹 Disabling Defconfig Checks..."
 
-          # Remove all Defconfig Checks references from Buildconfig GKI
-          # Prevents CI or Build Failures Caused by Defconfig Validation
+          # Remove all Default Config Checks references from Build Config GKI
+          # Prevents CI or Build Failures Caused by Default Config Validation
           find . -type f -name "build.config.gki" \
             -exec grep -q "check_defconfig" {} \; \
             -exec sed -i '/check_defconfig/d' {} \; \
             2>/dev/null || true
 
-          # Patch Kleaf Configuration, Convert Defconfig Checks into an Explicit Disabled State
+          # Patch KLeaf Configuration, Convert Default Config Checks into an Explicit Disabled State
           find . -type f -name "common_kernels.bzl" \
             -exec sed -i \
             's/check_defconfig *= *None,/check_defconfig = "disabled",/g' {} + \
             2>/dev/null || true
 
-          # Disable the Kleaf Conditional Check Entirely
-          # Original: if Defconfig Checks is None
-          # Patched: if Defconfig Checks is False
+          # Disable the KLeaf Conditional Check Entirely
+          # Original: if Default Config Checks is None
+          # Patched: if Default Config Checks is False
           find . -type f -name "common_kernels.bzl" \
             -exec sed -i \
             's/if check_defconfig == None:/if False:  # Disabled by CI/g' {} + \
             2>/dev/null || true
-
-          echo "🎉 Defconfig Checks Disabled"
-      
+          
           echo ""
+          echo "🎉 Default Config Checks Disabled"    
           echo "🎉 Kernel Repository Pipeline Complete"
 
       # ==============================
@@ -1418,16 +1442,13 @@ jobs:
           elif [[ -f "./kernel_platform/common/Makefile" ]]; then
             KCDIR="./kernel_platform/common"     
           else
-            echo "⚠️ ERROR: Kernel Common Makefile Not Found"
-            echo ""
-      
+            echo "⚠️ ERROR: Kernel Common Makefile Not Found"   
             echo "📂 Nearby Makefiles:"
             find . -maxdepth 4 -name Makefile | head -20      
             exit 1
           fi
       
-          COMMONMAKEFILE="$KCDIR/Makefile"
-      
+          COMMONMAKEFILE="$KCDIR/Makefile"      
           echo "🚀 Kernel Common Directory Found"
           echo "📌 Using Makefile: $COMMONMAKEFILE"
           echo ""
@@ -1480,8 +1501,7 @@ jobs:
           echo "📌 Original Kernel Version: $OGVERSION"
       
           # Optional Sublevel Override
-          SUBLVLINPUT="${{ github.event.inputs.SUBLEVEL }}"
-      
+          SUBLVLINPUT="${{ github.event.inputs.SUBLEVEL }}"    
           if [[ -n "${SUBLVLINPUT:-}" ]]; then      
             echo "🛠️ Updating Kernel Sublevel..."
             echo "📌 New Sublevel: $SUBLVLINPUT"      
@@ -1500,8 +1520,7 @@ jobs:
             END {print v "." p "." s}
           ' "$COMMONMAKEFILE")
       
-          echo "📊 Final Kernel Version: $NEWVERSION"
-      
+          echo "📊 Final Kernel Version: $NEWVERSION"      
           if [[ "$OGVERSION" != "$NEWVERSION" ]]; then
             echo "⚙️ Kernel Version Modified"
             echo "📌 $OGVERSION → $NEWVERSION"
@@ -1715,18 +1734,14 @@ jobs:
       
           for path in "${FILES[@]}"; do
             [[ -f "$path" ]] || continue
-            echo "⚙️ Processing: $path"
-      
+            echo "⚙️ Processing: $path"      
             # Ensure Executable
-            chmod +x "$path"
-      
+            chmod +x "$path"      
             # Remove Dirty Markers
-            sed -i 's/ -dirty//g' "$path"
-      
+            sed -i 's/ -dirty//g' "$path"      
             # Append Suffix Logic in a Safe Way (No Rewriting Core Logic)
             if ! grep -q "Kernel Auto Suffix Injection" "$path"; then
-              cat >> "$path" <<EOF
-              
+              cat >> "$path" <<EOF              
               # Kernel Auto Suffix Injection
               if [ -n "\$res" ]; then
                 case "\$res" in
@@ -1765,7 +1780,8 @@ jobs:
               ARTIFACT="manager"
               ;;
             SukiSU-Ultra-Builtin)
-              BRANCH="builtin"
+              BRANCH="main"
+              BRANCHPATH="builtin"
               ARTIFACT="manager"
               ;;
             KernelSU-Next-Dev-SUSFS)
@@ -1930,51 +1946,45 @@ jobs:
             echo "🚀 Setting Up SukiSU-Ultra..."      
             # Download and Run Setup Script (Official Source)
             echo "🌐 Using Official Source"
-            echo "🌐 URL: https://raw.githubusercontent.com/${KSUREPO}/${MANAGERBRANCH}/kernel/setup.sh"
+            echo "🌐 URL: https://raw.githubusercontent.com/${KSUREPO}/${BRANCHPATH}/kernel/setup.sh"
             downloadsetup \
-              "https://raw.githubusercontent.com/${KSUREPO}/${MANAGERBRANCH}/kernel/setup.sh"
+              "https://raw.githubusercontent.com/${KSUREPO}/${BRANCHPATH}/kernel/setup.sh"
               
             cd KernelSU || exit 1
       
             # Get Current Git Commit Short Commit Hash (8 Characters)
             GIT_COMMIT_HASH=$(git rev-parse --short=8 HEAD)
-            echo "📃 Commit Hash: $GIT_COMMIT_HASH"
-      
+            echo "📃 Commit Hash: $GIT_COMMIT_HASH"      
             # Fetch KSU API Version (Retry Up to 3 Times)
             for i in {1..3}; do
-              RAW=$(curl -s "https://raw.githubusercontent.com/${KSUREPO}/builtin/kernel/Makefile")
+              RAW=$(curl -s "https://raw.githubusercontent.com/${KSUREPO}/${BRANCHPATH}/kernel/Makefile")
               # Extract KSU API Version from Remote Makefile
               # Remove All Whitespace and Extract the Value After the Equals Sign              
               KSU_API_VERSION=$(echo "$RAW" | grep -m1 "KSU_VERSION_API" | cut -d '=' -f2 | tr -d '[:space:]' || true)
-              echo "Fetched API version: ${KSU_API_VERSION:-EMPTY}"
-              
+              echo "Fetched API Version: ${KSU_API_VERSION:-EMPTY}"             
               # If Version is Obtained, Break Loop, Otherwise Wait 1 Second and Retry
               [ -n "$KSU_API_VERSION" ] && break || sleep 1
             done
       
             # Fallback if Failed
             [ -z "$KSU_API_VERSION" ] && KSU_API_VERSION="3.1.7"      
-            echo "KSU_API_VERSION=$KSU_API_VERSION" >> $GITHUB_ENV
-      
+            echo "KSU_API_VERSION=$KSU_API_VERSION" >> $GITHUB_ENV      
             # Define Version Format
             VERSION_DEFINITIONS=$'define get_ksu_version_full\nv\\$1-'"$GIT_COMMIT_HASH"$'@Andrei\nendef\n\nKSU_VERSION_API := '"$KSU_API_VERSION"$'\nKSU_VERSION_FULL := v'"$KSU_API_VERSION"$'-'"$GIT_COMMIT_HASH"$'@Andrei'      
             # Clean Old Definitions
             sed -i '/define get_ksu_version_full/,/endef/d' kernel/Makefile || true
             sed -i '/KSU_VERSION_API :=/d' kernel/Makefile || true
-            sed -i '/KSU_VERSION_FULL :=/d' kernel/Makefile || true
-      
+            sed -i '/KSU_VERSION_FULL :=/d' kernel/Makefile || true      
             # Insert New Definitions safely
             awk -v def="$VERSION_DEFINITIONS" '
               /REPO_OWNER :=/ {print; print def; inserted=1; next}
               1
               END {if (!inserted) print def}
             ' kernel/Makefile > kernel/Makefile.tmp || true
-            mv kernel/Makefile.tmp kernel/Makefile || true
-    
+            mv kernel/Makefile.tmp kernel/Makefile || true    
             # Generate Custom Version Number (Based on Commit Count) Fallback
             KSUVERSION=$(( $(git rev-list --count main 2>/dev/null || echo 114514) + 37185 ))
-            echo "KSUVERSION=$KSUVERSION" >> $GITHUB_ENV
-      
+            echo "KSUVERSION=$KSUVERSION" >> $GITHUB_ENV      
             # Verify (Non-Fatal)
             echo "Checking Repo Owner Section..."
             grep -A10 "REPO_OWNER" kernel/Makefile || echo "⚠️ ${ROOTENGINE} Repository Owner Not Found"            
