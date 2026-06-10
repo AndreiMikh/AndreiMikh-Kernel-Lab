@@ -455,8 +455,7 @@ jobs:
         run: |
           set -euo pipefail
 
-          command -v jq >/dev/null || { echo "⚠️ ERROR: JQ Not Installed"; exit 1; }
-          
+          command -v jq >/dev/null || { echo "⚠️ ERROR: JQ Not Installed"; exit 1; }          
           cd "$GITHUB_WORKSPACE"
           
           echo "------------------------------"
@@ -480,169 +479,145 @@ jobs:
             s/^realme/RealMe/;
             s/^oppo/Oppo/
           ')
-
           mkdir -p ".repo/manifests_fallback"
           XMLPATH=".repo/manifests_fallback/${FILE}.xml"
           READMEPATH=".repo/manifests_fallback/README.md"
           echo "FILE=$FILE"
           echo "MANIFESTFILECONFIG=$MANIFESTFILECONFIG"
           echo "MANIFESTBASEFILE=$MANIFESTBASEFILE"
-
           {
             echo "MANIFESTFILECONFIG=$MANIFESTFILECONFIG"
             echo "MANIFESTBASEFILE=$MANIFESTBASEFILE"
           } >> "$GITHUB_ENV"
-
-          # Repository Priority:
-          # 1. AndreiMikh/kernel_manifest
-          # 2. AndreiMikh/Kernel_Manifest_Appendix
-          # 3. User Defined Dynamic Repository
           
           declare -A REPOS          
           REPOS["AndreiMikh"]="AndreiMikh|kernel_manifest"
-          REPOS["Appendix"]="AndreiMikh|Kernel_Manifest_Appendix"
-
           # Only Register the Dynamic Repository if Input is Not Empty
           if [[ -n "$GITREPOSITORYINPUT" ]]; then            
             # Remove https://github.com/ if User Pasted Full URL
             GITREPOSITORYINPUT="${GITREPOSITORYINPUT#https://github.com/}"
-            GITREPOSITORYINPUT="${GITREPOSITORYINPUT%/}"
-              
+            GITREPOSITORYINPUT="${GITREPOSITORYINPUT%/}"              
             if [[ "$GITREPOSITORYINPUT" =~ ^[^/]+/[^/]+$ ]]; then
-              echo "🚀 Dynamic Repository Detected: $GITREPOSITORYINPUT"
               OWNER="${GITREPOSITORYINPUT%%/*}"
-              REPO="${GITREPOSITORYINPUT##*/}"
-              REPOS["Dynamic"]="$OWNER|$REPO"
+              REPOSITORYNAME="${GITREPOSITORYINPUT##*/}"          
+              echo "🚀 Dynamic Repository Detected"
+              echo "📂 Repository : ${OWNER}/${REPOSITORYNAME}"          
+              REPOS["Dynamic"]="${OWNER}|${REPOSITORYNAME}"
             else
-              echo "Information  : ⚠️ Invalid Dynamic Repository Format - Skipping..."
-              echo "Expected     : ✔️ Dynamic Owner / Repository"
-              echo "Provided     : 🔎 $GITREPOSITORYINPUT"
-              echo "⚠️ Skipping Dynamic Repository Instead of Failing..."
+              echo "⚠️ Invalid Dynamic Repository Format"
+              echo "Expected : owner/repository"
+              echo "Provided : $GITREPOSITORYINPUT"
+              echo "➡️ Skipping Dynamic Repository"
             fi
           fi
 
           # Export Keys and Values for Parallel Jobs
           export REPOSKEYS="${!REPOS[@]}"
           export REPOSVALUES="${REPOS[@]}"
-
           MANIFESTFOUNDREPO=""
           MANIFESTFOUNDREPONAME=""
           MANIFESTFOUNDBRANCH=""
-
-          # Function: Check Repository for XML
-          check_repo() {
-            local ENTRY="$1"
-            [[ -z "$ENTRY" ]] && return 1
-            local OWNER="${ENTRY%%|*}"
-            local REPOSITORYNAME="${ENTRY##*|}"
-
-            echo ""
-            echo "🔎 Checking ${OWNER}/${REPOSITORYNAME}"
-            local BRANCHES=""      
-            # 1️⃣ Try GitHub API (Authenticated if Token Exists)
+          # Search Manifest Repositories          
+          FOUNDTMP="$(mktemp)"
+          INFOTMP="$(mktemp)"          
+          rm -f "$FOUNDTMP" "$INFOTMP"          
+          pids=()          
+          for KEY in "${!REPOS[@]}"; do
+          (
+            ENTRY="${REPOS[$KEY]}"         
+            OWNER="${ENTRY%%|*}"
+            REPOSITORYNAME="${ENTRY##*|}"
+            echo "🔎 Searching ${OWNER}/${REPOSITORYNAME}"          
+            BRANCHES=""
+         
+            # Authenticated GitHub API
             if [[ -n "${GITHUB_TOKEN:-}" ]]; then
-            BRANCHES=$(curl --connect-timeout 10 --max-time 20 -fsSL \
-                        -H "Authorization: token $GITHUB_TOKEN" \
-                        -H "Accept: application/vnd.github.v3+json" \
-                        "https://api.github.com/repos/${OWNER}/${REPOSITORYNAME}/branches?per_page=100" \
-                        | jq -r '.[].name? // empty' 2>/dev/null || true)
+              BRANCHES=$(
+                curl \
+                  --connect-timeout 10 \
+                  --max-time 20 \
+                  -fsSL \
+                  -H "Authorization: token ${GITHUB_TOKEN}" \
+                  -H "Accept: application/vnd.github.v3+json" \
+                  "https://api.github.com/repos/${OWNER}/${REPOSITORYNAME}/branches?per_page=100" \
+                  | jq -r '.[].name? // empty' 2>/dev/null || true
+              )
             fi
-            # 2️⃣ Fallback to Unauthenticated API if Empty
+          
+            # Public GitHub API
             if [[ -z "$BRANCHES" ]]; then
-              BRANCHES=$(curl --connect-timeout 10 --max-time 20 -fsSL \
-                          "https://api.github.com/repos/${OWNER}/${REPOSITORYNAME}/branches?per_page=100" \
-                          | jq -r '.[].name? // empty' 2>/dev/null || true)
+              BRANCHES=$(
+                curl \
+                  --connect-timeout 10 \
+                  --max-time 20 \
+                  -fsSL \
+                  "https://api.github.com/repos/${OWNER}/${REPOSITORYNAME}/branches?per_page=100" \
+                  | jq -r '.[].name? // empty' 2>/dev/null || true
+              )
             fi
-            # 3️⃣ Fallback to Git LS-Remote
+          
+            # Git Fallback
             if [[ -z "$BRANCHES" ]]; then
-              echo "⚠️ API Failed, Falling Back to Git LS-Remote..."
-              BRANCHES=$(git ls-remote --heads https://github.com/${OWNER}/${REPOSITORYNAME}.git 2>/dev/null | sed 's|.*refs/heads/||' || true)      
+              echo "⚠️ API Failed, Using Git LS-Remote"          
+              BRANCHES=$(
+                git ls-remote --heads \
+                "https://github.com/${OWNER}/${REPOSITORYNAME}.git" \
+                2>/dev/null |
+                sed 's|.*refs/heads/||' ||
+                true
+              )
             fi
-            [[ -z "$BRANCHES" ]] && { echo "No Branches Found for ${OWNER}/${REPOSITORYNAME}, Skipping..."; return 1; }
-            # Try Each Branch Until XML File is Found
-            for BRANCH in $BRANCHES; do
-              echo "  → 📃 Trying Branch: $BRANCH"            
+          
+            [[ -z "$BRANCHES" ]] && exit 0          
+            for BRANCH in $BRANCHES; do          
+              [[ -f "$FOUNDTMP" ]] && exit 0          
               XMLURL="https://raw.githubusercontent.com/${OWNER}/${REPOSITORYNAME}/${BRANCH}/${FILE}.xml"
-              READMEURL="https://raw.githubusercontent.com/${OWNER}/${REPOSITORYNAME}/${BRANCH}/README.md"            
-              if curl -sf --head "$XMLURL" >/dev/null; then
-                echo "🔎 Found ${FILE}.xml in ${OWNER}/${REPOSITORYNAME} (Branch: $BRANCH)"            
+              READMEURL="https://raw.githubusercontent.com/${OWNER}/${REPOSITORYNAME}/${BRANCH}/README.md"          
+              if curl -sf --head "$XMLURL" >/dev/null; then          
+                [[ -f "$FOUNDTMP" ]] && exit 0         
                 TMPXML="${XMLPATH}.${OWNER}.${REPOSITORYNAME}.${BRANCH}.tmp"
-                TMPREADME="${READMEPATH}.${OWNER}.${REPOSITORYNAME}.${BRANCH}.tmp"            
-                curl -fsSL -o "$TMPXML" "$XMLURL" || { rm -f "$TMPXML"; continue; }
-                mv "$TMPXML" "$XMLPATH"           
+                TMPREADME="${READMEPATH}.${OWNER}.${REPOSITORYNAME}.${BRANCH}.tmp"          
+                curl -fsSL -o "$TMPXML" "$XMLURL" || exit 0
+                mv "$TMPXML" "$XMLPATH"         
                 curl -fsSL -o "$TMPREADME" "$READMEURL" 2>/dev/null || true
-                [[ -f "$TMPREADME" ]] && mv "$TMPREADME" "$READMEPATH"            
-                echo "$OWNER|$REPOSITORYNAME|$BRANCH" > "$INFOTMP"
-                touch "$FOUNDTMP"
-            
-                return 0
-              fi
-            done
-
-            echo "⚠️ No Branch Contains ${FILE}.xml in ${OWNER}/${REPOSITORYNAME}, Skipping..."
-            return 1
-          }
-
-          # Parallel Repository Check
-          FOUNDTMP="/tmp/manifest_found.lock"
-          INFOTMP="/tmp/manifest_info.txt"
-          # Remove Old Markers
-          rm -f "$FOUNDTMP" "$INFOTMP"
-          pids=()
-          for key in $REPOSKEYS; do
-            value="${REPOS[$key]-}"
-            [[ -z "$value" ]] && continue          
-            (
-              OWNER="${value%%|*}"
-              REPOSITORYNAME="${value##*|}"          
-                echo "🔎 Checking $OWNER/$REPOSITORYNAME"          
-                # Stop Immediately if Another Worker Already Found a Match
-                [[ -f "$FOUNDTMP" ]] && exit 0          
-                # Get Branches (GitHub API)
-                BRANCHES=$(curl -s "https://api.github.com/repos/$OWNER/$REPOSITORYNAME/branches?per_page=100" \
-                  | jq -r '.[].name? // empty' 2>/dev/null || true)          
-                # Fallback to Git if API Fails
-                if [[ -z "$BRANCHES" ]]; then
-                  BRANCHES=$(git ls-remote --heads "https://github.com/${OWNER}/${REPOSITORYNAME}.git" \
-                    2>/dev/null | sed 's|.*refs/heads/||' || true)
+          
+                if [[ -f "$TMPREADME" ]]; then
+                  mv "$TMPREADME" "$READMEPATH"
                 fi
-                [[ -z "$BRANCHES" ]] && exit 0          
-                for BRANCH in $BRANCHES; do          
-                  # Stop if Already Found by Another Process
-                  [[ -f "$FOUNDTMP" ]] && exit 0       
-                  XMLURL="https://raw.githubusercontent.com/$OWNER/$REPOSITORYNAME/$BRANCH/${FILE}.xml"
-                  READMEURL="https://raw.githubusercontent.com/$OWNER/$REPOSITORYNAME/$BRANCH/README.md"        
-                  if curl -sf --head "$XMLURL" >/dev/null; then          
-                    # Double-Check Race Condition Before Writing
-                    [[ -f "$FOUNDTMP" ]] && exit 0          
-                    curl -fsSL -o "$XMLPATH" "$XMLURL"
-                    curl -fsSL -o "$READMEPATH" "$READMEURL" || true          
-                    echo "$OWNER|$REPOSITORYNAME|$BRANCH" > "$INFOTMP"
-                    touch "$FOUNDTMP"          
-                    exit 0
-                  fi
-                done
-            ) &
-            pids+=($!)
+          
+                echo "${OWNER}|${REPOSITORYNAME}|${BRANCH}" > "$INFOTMP"         
+                touch "$FOUNDTMP"
+          
+                echo "✅ Found ${FILE}.xml"
+                echo "📂 Repository : ${OWNER}/${REPOSITORYNAME}"
+                echo "🌿 Branch     : ${BRANCH}"          
+                exit 0
+              fi
+            done          
+          ) &
+          pids+=($!)
           done
-
-          # Wait for All Jobs
+          
           for pid in "${pids[@]}"; do
-            wait $pid || true
+            wait "$pid" || true
           done
-
-          # Read Results from Temporary File
-          if [[ -f "$FOUNDTMP" && -s "$INFOTMP" ]]; then
-            IFS='|' read -r MANIFESTFOUNDREPO MANIFESTFOUNDREPONAME MANIFESTFOUNDBRANCH < "$INFOTMP"
-            echo "✔️ Manifest Successfully Found: $MANIFESTFOUNDREPO/$MANIFESTFOUNDREPONAME (Branch: $MANIFESTFOUNDBRANCH)"
+          
+          if [[ -f "$FOUNDTMP" && -s "$INFOTMP" ]]; then          
+            IFS='|' read -r \
+              MANIFESTFOUNDREPO \
+              MANIFESTFOUNDREPONAME \
+              MANIFESTFOUNDBRANCH < "$INFOTMP"         
+            echo "✔️ Manifest Successfully Found"
           else
-            echo "⚠️ WARNING: ${FILE}.xml Not Found in Any Repository"
+            echo "⚠️ ${FILE}.xml Not Found In Any Repository"
             exit 1
           fi
+          
+          rm -f "$FOUNDTMP" "$INFOTMP"
 
           # Final Safe Validation
           if [[ -z "$MANIFESTFOUNDREPO" || ! -s "$XMLPATH" ]]; then
-            echo "⚠️ WARNING: ${FILE}.xml Not Found in Any Repository"
+            echo "⚠️ WARNING: ${FILE}.XML Not Found in Any Repository"
             exit 1  # Safe, Workflow Continues
           fi
 
