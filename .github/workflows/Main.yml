@@ -168,7 +168,6 @@ on:
         options:
           - DroidSpacesLXC-WildPatch
           - DroidSpacesLXC-Inject
-          - TermuxLXC
           - None
         
       NETFILTER:
@@ -248,8 +247,7 @@ jobs:
           (github.event.inputs.TCPALGORITHM == 'BBR+ECN+Brutal' && 'BBR+ECN+Brutal ' ||
           github.event.inputs.TCPALGORITHM == 'BBR+ECN' && 'BBR+ECN ' || ''),
           (github.event.inputs.LXCDOCKERSUPPORT == 'DroidSpacesLXC-WildPatch' && 'DS-Wild ' ||
-          github.event.inputs.LXCDOCKERSUPPORT == 'DroidSpacesLXC-Inject' && 'DS-Inject ' ||
-          github.event.inputs.LXCDOCKERSUPPORT == 'TermuxLXC' && 'TermuxLXC ' || ''),
+          github.event.inputs.LXCDOCKERSUPPORT == 'DroidSpacesLXC-Inject' && 'DS-Inject ' || ''),
           (contains(github.event.inputs.FILE, '_aosp') && 'AOSP ' || ''),
 
           (
@@ -3300,155 +3298,6 @@ jobs:
           echo ""
           echo "🎉 Baseband Guard Fully Applied and Configured"
 
-      - name: 🔧 Termux LXC / Docker Auto Patch (Dynamic)
-        if: ${{ github.event.inputs.LXCDOCKERSUPPORT == 'TermuxLXC' }}
-        continue-on-error: true
-        shell: bash
-        run: |
-          set -euo pipefail   
-
-          echo "------------------------------"
-          echo "🚀 Starting Linux Container / Docker Patch Setup..."
-          echo "------------------------------"
-          echo ""
-
-          # Clone Patch Repository (Branch 'NEW')
-          PBASE="https://github.com/cyanmint/GKI_KernelSU_SUSFS.git"
-          PLOCALDIR="$GITHUB_WORKSPACE/REPO_LXC"
-
-          echo "📥 Cloning Patch Repository (Branch 'NEW')..."
-          rm -rf "$PLOCALDIR" || true
-          git clone --depth=1 -b new "$PBASE" "$PLOCALDIR" || echo "⚠️ Clone Failed, Continuing..."
-
-          # Navigate to Kernel Common Directory
-          KCDIR="kernel_workspace/kernel_platform/common"
-          if [ ! -d "$KCDIR" ]; then
-            echo "⚠️ Kernel Common Directory Not Found, Skipping Patch Step"
-            exit 0
-          fi
-          
-          cd "$KCDIR"
-
-          # Detect Kernel Version
-          KERNELVERSION=$(make kernelversion 2>/dev/null) || {
-            echo "⚠️ Failed to detect kernel version"
-            exit 1
-          }
-        
-          echo "🧾 Using Kernel Version: $KERNELVERSION"
-
-          KERNELMAJORMINOR=$(echo "$KERNELVERSION" | cut -d. -f1,2)
-          echo "📌 Kernel Base: $KERNELMAJORMINOR"
-
-          # Detect Android Version (From Environment)
-          if [ -n "${ANDROIDVERSION:-}" ]; then
-            ANDROIDV="$ANDROIDVERSION"
-            
-          else
-
-            # Fallback Default
-            ANDROIDV="android16"
-          fi
-
-          # Ensure it Matches Android 0-9+
-          if [[ ! "$ANDROIDV" =~ ^android[0-9]+$ ]]; then
-            echo "⚠️ Invalid Android Version → Forcing Android16"
-            ANDROIDV="android16"
-          fi
-
-          ANDROIDNUM="${ANDROIDV#android}"
-          echo "📊 Android Version: $ANDROIDV"
-
-          # Export for Downstream Steps
-          echo "VANDROID=${ANDROIDNUMBER}.0.0" >> $GITHUB_ENV
-          echo "ASHORTVERSION=${ANDROIDNUMBER}" >> $GITHUB_ENV
-          echo "ANDROIDVERSION=$ANDROIDV" >> $GITHUB_ENV
-
-          # Determine Patch Directory (Smart Matching)
-          PBASEPATCH="$PLOCALDIR/lxc_docker_patches"
-
-          # Gather All Candidate Patches for the Android Version
-          mapfile -t DIRS < <(
-            find "$PBASEPATCH" -maxdepth 1 -type d -name "a${ANDROIDNUMBER}-*" | sort -Vr
-          )
-          
-          KVER="$KERNELMAJORMINOR"
-          LXCTARGETPATCH=""
-          
-          bestversions=""
-          bestdirectories=""          
-          for directory in "${DIRS[@]}"; do
-            base="$(basename "$directory")"
-          
-            # Extract Version After First Dash: Android 16-6.6.12 -> 6.6.12
-            version="${base#a*-}"
-          
-            # Skip Invalid
-            [[ -z "$version" ]] && continue
-          
-            # Keep Only Versions <= Kernel Using True Semantic Compare
-            if [[ "$(printf '%s\n%s' "$version" "$KVER" | sort -V | head -n1)" == "$version" ]]; then
-              # Pick Highest Valid Match
-              if [[ -z "$bestversions" ]] || [[ "$(printf '%s\n%s' "$bestversions" "$version" | sort -V | head -n1)" == "$bestversions" ]]; then
-                bestversions="$version"
-                bestdirectories="$directory"
-              fi
-            fi
-          done
-          
-          LXCTARGETPATCH="$bestdirectories"
-
-          # If No Patch ≤ Current Kernel, Pick the Highest Available as Fallback
-          if [ -z "$LXCTARGETPATCH" ] && [ -n "$CANDIDATES" ]; then
-            LXCTARGETPATCH=$(echo "$CANDIDATES" | tail -n1)
-          fi
-
-          if [ -z "$LXCTARGETPATCH" ]; then
-            echo "⚠️ No Compatible Patch Found for Android${ANDROIDNUMBER}-${KERNELMAJORMINOR}"
-            exit 0
-          fi
-
-          echo "📂 Using Patch Directory: $LXCTARGETPATCH"
-
-          # Apply Patches
-          APPLIEDPATCHES=0
-          SKIPPEDPATCHES=0
-          FAILEDPATCHES=0
-          for patchfile in "$LXCTARGETPATCH"/*.patch; do
-            [ -f "$patchfile" ] || continue
-            patchname=$(basename "$patchfile")
-            echo "➡️ Applying: $patchname"
-
-            # Skip if Already Applied
-            if patch -R -p1 -s -f --dry-run < "$patchfile" >/dev/null 2>&1; then
-              echo "⏭️ Already Applied → Skipping..."
-              SKIPPEDPATCHES=$((SKIPPEDPATCHES+1))
-              continue
-            fi
-
-            # Apply Patch
-            if patch -p1 -F3 --forward < "$patchfile"; then
-              echo "✔️ Applied Successfully"
-              APPLIEDPATCHES=$((APPLIEDPATCHES+1))
-            else
-              echo "⚠️ Patch Failed"
-              FAILEDPATCHES=$((FAILEDPATCHES+1))
-            fi
-          done
-
-          echo "------------------------------"
-          echo "Patch Summary"
-          echo "------------------------------"
-          echo "✔️ Applied : $APPLIEDPATCHES"
-          echo "⚠️ Skipped : $SKIPPEDPATCHES"
-          echo "🚩 Failed  : $FAILEDPATCHES"
-
-          if [ "$FAILEDPATCHES" -gt 0 ]; then
-            echo "⚠️ Some Patches Failed → Continuing Build"
-          else
-            echo "🎉 Linux Container / Docker Patch Done"
-          fi
-
       - name: 🔧 ADIOS I/O Scheduler Support
         if: ${{ github.event.inputs.SCHEDULERS == 'ADIOS' }}
         shell: bash
@@ -4140,39 +3989,6 @@ jobs:
           EOF
 
           echo "🎉 TMPFS Configuration Applied"
-
-          # Linux Container / Docker Kernel Configuration (Namespaces, IPC, CGroups, Networking, Device Support)
-          if [[ "$LXC" == "TermuxLXC" ]]; then
-            echo "🚀 Applying LXC/Docker Kernel Configurations..."
-
-            # Append LXC / Docker specific configurations to the kernel config
-            cat >> "$DEFCONFIG" <<EOF
-          CONFIG_SYSVIPC=y
-          CONFIG_POSIX_MQUEUE=y
-          CONFIG_UTS_NS=y
-          CONFIG_PID_NS=y
-          CONFIG_IPC_NS=y
-          CONFIG_USER_NS=y
-          CONFIG_NET_NS=y
-
-          # CGroups
-          CONFIG_CGROUP_DEVICE=y
-
-          # Networking
-          CONFIG_NETFILTER_XT_TARGET_CHECKSUM=y
-          CONFIG_NETFILTER_XT_MATCH_ADDRTYPE=y
-          CONFIG_IP6_NF_NAT=y
-          CONFIG_IP6_NF_TARGET_MASQUERADE=y
-
-          # Device Support
-          CONFIG_DEVTMPFS=y
-          CONFIG_NULL_TTY=y
-          EOF
-
-            echo "🎉 LXC / Docker Kernel Configurations Applied"
-          else
-            echo "☘️ LXC / DOCKER Disabled — Skipping Configuration..."
-          fi
 
           # DroidspacesLXC Support Kernel Configuration
           if [[ "$LXC" == "DroidSpacesLXC-WildPatch" || "$LXC" == "DroidSpacesLXC-Inject" ]]; then
@@ -5599,7 +5415,6 @@ jobs:
           case "$LXC" in
             "DroidSpacesLXC-WildPatch") SUFFIX+="-DroidSpaces(Wild)" ;;
             "DroidSpacesLXC-Inject") SUFFIX+="-DroidSpaces(Inject)" ;;
-            "TermuxLXC")      SUFFIX+="-TermuxLXC" ;;
           esac
       
           [[ "$NETFILTER" == "true" ]] && SUFFIX+="-NetFilter"
