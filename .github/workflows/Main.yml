@@ -3117,74 +3117,106 @@ jobs:
           # Detect Patch Strip Level
           echo "🔎 Detecting Patch Strip Level..."
           PLVL=""
-      
+          PATCHTOOL=""
+          
           for level in 0 1 2 3; do
-            if git apply \
-              --check \
-              -p"$level" \
-              "$LOCALPATCH" 2>/dev/null; then
+            echo "🧪 Testing -p${level}..."
+          
+            if git apply --check -p"$level" "$LOCALPATCH" >/dev/null 2>&1; then
               PLVL="$level"
+              PATCHTOOL="git"
+              break
+            fi
+          
+            if patch --dry-run --silent -p"$level" < "$LOCALPATCH" >/dev/null 2>&1; then
+              PLVL="$level"
+              PATCHTOOL="patch"
               break
             fi
           done
-      
+          
           if [[ -z "$PLVL" ]]; then
-            echo "⚠️ Unable To Determine Patch Strip Level"
+            echo "⚠️ Unable To Determine Patch Strip Level"          
+            echo "===== Git Apply Output ====="
+            for level in 0 1 2 3; do
+              echo "--- -p$level ---"
+              git apply --check -p"$level" "$LOCALPATCH" || true
+            done
+          
+            echo "----- Patch Output -----"
+            for level in 0 1 2 3; do
+              echo "--- -p$level ---"
+              patch --dry-run -p"$level" < "$LOCALPATCH" || true
+            done
+          
+            echo "----- Patch Header -----"
+            head -40 "$LOCALPATCH" || true        
             exit 16
           fi
-      
-          echo "📂 Patch Strip Level : -p$PLVL"
+          
+          echo "📂 Patch Strip Level : -p${PLVL}"
+          echo "🛠️ Patch Tool        : ${PATCHTOOL}"
       
           # Detect Existing Patch
           echo "🔎 Checking Existing Patch State..."
-          if git apply \
-            --reverse \
-            --check \
-            -p"$PLVL" \
-            "$LOCALPATCH" 2>/dev/null; then
-            echo "🎉 Patch Already Applied"
-            exit 0
+          if [[ "$PATCHTOOL" == "git" ]]; then
+            if git apply --reverse --check -p"$PLVL" "$LOCALPATCH" >/dev/null 2>&1; then
+              echo "🎉 Patch Already Applied"
+              exit 0
+            fi
           fi
       
           # Patch Statistics
           echo "📊 Patch Statistics:"
-          git apply \
-            --stat \
-            -p"$PLVL" \
-            "$LOCALPATCH" || true
+          
+          if [[ "$PATCHTOOL" == "git" ]]; then
+            git apply \
+              --stat \
+              -p"$PLVL" \
+              "$LOCALPATCH" || true
+          else
+            echo "ℹ️ Standard Unified Patch Detected"
+          fi
       
           # Verify Patch Compatibility
           echo "🔎 Checking Patch Compatibility..."
-          if ! git apply \
-            --check \
-            -p"$PLVL" \
-            "$LOCALPATCH" 2>/dev/null; then
-            echo "⚠️ Kernel Source Incompatible With Patch"
-            echo "📋 Reject Report:"
-            find . \
-              -name "*.rej" \
-              -print || true
-            exit 17
+          
+          if [[ "$PATCHTOOL" == "git" ]]; then
+            if ! git apply \
+              --check \
+              -p"$PLVL" \
+              "$LOCALPATCH"; then
+              echo "⚠️ Kernel Source Incompatible With Patch"
+              exit 17
+            fi
+          else
+            if ! patch \
+              --dry-run \
+              --silent \
+              -p"$PLVL" \
+              < "$LOCALPATCH"; then
+              echo "⚠️ Kernel Source Incompatible With Patch"
+              exit 17
+            fi
           fi
       
           # Apply Patch
           echo "🚀 Applying Fengchi / Windspeed Scheduler Patch..."
           APPLIED=0
-      
-          # Primary Method
-          if git apply \
-            -p"$PLVL" \
-            --whitespace=fix \
-            "$LOCALPATCH"; then
-            APPLIED=1
+          
+          if [[ "$PATCHTOOL" == "git" ]]; then
+            if git apply \
+                -p"$PLVL" \
+                --whitespace=fix \
+                --recount \
+                "$LOCALPATCH"; then
+              APPLIED=1
+            fi
           else
-            echo "⚠️ Git Apply Failed"
-            echo "🔄 Trying GNU patch Fallback..."
             if patch \
-              -p"$PLVL" \
-              --forward \
-              --reject-file=- \
-              < "$LOCALPATCH"; then
+                -p"$PLVL" \
+                --forward \
+                < "$LOCALPATCH"; then
               APPLIED=1
             fi
           fi
