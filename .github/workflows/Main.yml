@@ -5011,127 +5011,167 @@ jobs:
 
       - name: 🔧 KernelSU-Next KernelPatch-Next
         if: ${{ github.event.inputs.KERNELPATCH == 'KPN' }}
+        shell: bash
         run: |
           set -euo pipefail
       
           echo "------------------------------"
-          echo "🚀 Starting KernelPatch-Next Patch..."
+          echo "🚀 Starting KernelPatch-Next"
           echo "------------------------------"
           echo ""
-
-          # Paths
-          OUTDIRECTORY="${GITHUB_WORKSPACE}/kernel_workspace/kernel_platform/out/Final-Image-Find"
-          AK3DIRECTORY="${GITHUB_WORKSPACE}/AnyKernel3"     
       
-          # Locate Kernel Image
-          IMAGEPATH=$(find "${GITHUB_WORKSPACE}/kernel_workspace" -type f -name Image -print -quit)      
-          [[ -z "${IMAGEPATH:-}" ]] && { echo "⚠️ Kernel Image Not Found"; exit 1; }      
-          OUTDIRECTORY=$(dirname "$IMAGEPATH")
-          
-          cd "$OUTDIRECTORY"
+          KPREPO="KernelSU-Next/KPatch-Next"
+          AK3DIR="${GITHUB_WORKSPACE}/AnyKernel3"
+          KPFALLBACK="https://raw.githubusercontent.com/AndreiMikh/AndreiMikh-Kernel-Lab/refs/heads/${GITHUB_REF_NAME}/patches"
       
-          [[ ! -f Image ]] && { echo "⚠️ Image Missing"; exit 1; }      
-          echo "📌 Using Image: $IMAGEPATH"
+          # Locate Kernel Image      
+          IMAGE=$(find "${GITHUB_WORKSPACE}/kernel_workspace" -type f -name Image -print -quit)
+      
+          if [[ -z "${IMAGE:-}" ]]; then
+            echo "⚠️ Kernel Image Not Found"
+            exit 1
+          fi
+      
+          OUTDIR="$(dirname "${IMAGE}")"
+          cd "${OUTDIR}"
+      
+          [[ -f Image ]] || {
+            echo "⚠️ Image File Missing"
+            exit 1
+          }
+      
+          echo "📌 Kernel Image"
+          echo "   ${IMAGE}"
           ls -lh Image
       
-          # Baseline Checksum
-          echo "💡 Creating Baseline Checksum..."
+          # Save Original Checksum
+          echo "📝 Saving Original Checksum..."
           sha256sum Image > Image.sha256
       
-          # Download KernelPatch-Next Tools 
-          echo "📥 Fetching Latest KernelPatch-Next Release..."
-          KPREPO="KernelSU-Next/KPatch-Next"
+          # Resolve Latest Release Tag      
+          echo "🌐 Resolving Latest KernelPatch-Next Release Tag..."
       
-          # Try Latest Release API
-          LATESTJSON=$(curl -s "https://api.github.com/repos/$KPREPO/releases/latest")        
-          TAG=$(echo "$LATESTJSON" | grep '"tag_name"' | head -n 1 | cut -d '"' -f 4)
-        
-          # Get Latest Tag
-          # Fallback: Releases List
-          if [[ -z "$TAG" || "$TAG" == "null" ]]; then
-            echo "⚠️ Releases Latest Failed or Cannot be Found → Falling Back to Full Releases List..."
-            TAG=$(curl -fsSL "https://api.github.com/repos/$KPREPO/releases" \
-              | grep '"tag_name"' \
-              | head -n 1 \
-              | cut -d '"' -f 4)
-          fi
-         
-          # Final Fallback Check
-          if [[ -z "$TAG" || "$TAG" == "null" ]]; then
-            echo "⚠️ Failed to Resolve Tag → Using Fallback Tag Version"
-            TAG="0.13.5-2"
-          fi
-
-          echo "🏷️ Using Tag : $TAG"
-
-          # Build Download URLs from Tag
-          BASE="https://github.com/$KPREPO/releases/download/$TAG"
-          URLKPTOOLS="$BASE/kptools-linux"
-          URLKPIMG="$BASE/kpimg-linux"
-          FALLKPTOOLS="https://raw.githubusercontent.com/AndreiMikh/AndreiMikh-Kernel-Lab/refs/heads/${GITHUB_REF_NAME}/patches/kptools-linux"
-          FALLKPIMG="https://raw.githubusercontent.com/AndreiMikh/AndreiMikh-Kernel-Lab/refs/heads/${GITHUB_REF_NAME}/patches/kpimg-linux"
-
-          echo "------------------------------"
-          echo "📦 KernelPatch-Next Latest Tag : $TAG"
-          echo "📦 KernelPatch-Next KPTools    : $URLKPTOOLS"
-          echo "📦 KernelPatch-Next KPImg      : $URLKPIMG"
-          echo "------------------------------"          
-          echo ""
-
-          # Download with Fallback
-          download() {
-            local primary="$1"
-            local fallback="$2"
-            local output="$3"
-         
-            echo "📥 Downloading $output..."
-            curl -L \
+          TAG="$(
+            curl -fsSL \
               -H "User-Agent: Mozilla/5.0" \
-              --fail \
               --retry 5 \
               --retry-all-errors \
               --retry-delay 3 \
-              -o "$output" "$primary" || {
-
-              echo "⚠️ Primary Failed → Switching to Fallback..."
-              curl -L \
+              "https://api.github.com/repos/${KPREPO}/releases/latest" \
+            | sed -n 's/.*"tag_name":[[:space:]]*"\([^"]*\)".*/\1/p' \
+            | head -n1 || true
+          )"
+      
+          if [[ -z "${TAG}" || "${TAG}" == "null" ]]; then
+            echo "⚠️ Latest release lookup failed."
+            echo "🔄 Falling Back to Releases List..."
+      
+            TAG="$(
+              curl -fsSL \
                 -H "User-Agent: Mozilla/5.0" \
-                --fail \
                 --retry 5 \
                 --retry-all-errors \
                 --retry-delay 3 \
-                -o "$output" "$fallback"
-            }
-            chmod +x "$output"
-          }
-
-          # Download Tools
-          download "$URLKPTOOLS" "$FALLKPTOOLS" "kptools-linux"
-          download "$URLKPIMG" "$FALLKPIMG" "kpimg-linux"
-          
-          # Apply patch
-          echo "⚙️ Patching Kernel Image..."      
-          ./kptools-linux -p -i Image -k kpimg-linux -o oImage      
-          [[ ! -s oImage ]] && { echo "⚠️ Patch Failed"; exit 1; }      
-          ls -lh oImage
-      
-          # Replace Image with Patched Image
-          echo "🔁 Replacing Image with Patched Image..."
-          mv -f oImage Image
-      
-          # Integrity Check (Expected Mismatch)
-          echo "🔍 Verifying Checksum Result..."
-          if sha256sum -c Image.sha256 >/dev/null 2>&1; then
-            echo "⚠️ WARNING: Image Unchanged (Unexpected)"
-          else
-            echo "🧩 Image Modified by KernelPatch-Next (Expected)"
+                "https://api.github.com/repos/${KPREPO}/releases" \
+              | sed -n 's/.*"tag_name":[[:space:]]*"\([^"]*\)".*/\1/p' \
+              | head -n1 || true
+            )"
           fi
       
-          # Copy and Sync to AnyKernel3      
-          [[ -d "$AK3DIRECTORY" ]] || { echo "⚠️ AnyKernel3 Not Found"; exit 1; }      
-          echo "📩 Copying to AnyKernel3..."
-          cp -f Image "$AK3DIRECTORY/Image"
+          if [[ -z "${TAG}" || "${TAG}" == "null" ]]; then
+            echo "⚠️ Unable to Determine Latest Release"
+            echo "📦 Using Built-in Fallback: 0.13.5-2"
+            TAG="0.13.5-2"
+          fi
       
+          BASE_URL="https://github.com/${KPREPO}/releases/download/${TAG}"
+      
+          echo
+          echo "📦 Release Information"
+          echo "------------------------------"
+          echo "Repository : ${KPREPO}"
+          echo "Tag        : ${TAG}"
+          echo "------------------------------"
+      
+          # Download Helper      
+          download() {
+            local file="$1"
+      
+            local primary="${BASE_URL}/${file}"
+            local fallback="${KPFALLBACK}/${file}"
+      
+            echo
+            echo "📥 Downloading ${file}"
+      
+            if ! curl -fsSL \
+                -H "User-Agent: Mozilla/5.0" \
+                --retry 5 \
+                --retry-all-errors \
+                --retry-delay 3 \
+                -o "${file}" \
+                "${primary}"
+            then
+              echo "⚠️ Primary Download Failed"
+              echo "🔄 Trying Fallback..."
+      
+              curl -fsSL \
+                -H "User-Agent: Mozilla/5.0" \
+                --retry 5 \
+                --retry-all-errors \
+                --retry-delay 3 \
+                -o "${file}" \
+                "${fallback}"
+            fi
+      
+            [[ -s "${file}" ]] || {
+              echo "⚠️ ${file} Download Failed"
+              exit 1
+            }
+      
+            chmod +x "${file}"
+      
+            echo "📥 ${file} Ready..."
+          }
+      
+          # Download Required Tools      
+          download kptools-linux
+          download kpimg-linux
+      
+          # Patch Kernel
+          echo "⚙️ Applying KernelPatch-Next..."
+      
+          ./kptools-linux \
+            -p \
+            -i Image \
+            -k kpimg-linux \
+            -o oImage
+      
+          [[ -s oImage ]] || {
+            echo "⚠️ Kernel Patch Failed"
+            exit 1
+          }
+      
+          mv -f oImage Image
+      
+          # Verify Modification
+          echo "🔍 Verifying Patched Image..."
+      
+          if sha256sum -c Image.sha256 >/dev/null 2>&1; then
+            echo "⚠️ Image Checksum is Unchanged"
+            echo "⚠️ KernelPatch may Not have been Applied"
+          else
+            echo "🎉 Kernel Image Successfully Modified"
+          fi
+      
+          # Copy to AnyKernel3      
+          [[ -d "${AK3DIR}" ]] || {
+            echo "⚠️ AnyKernel3 Directory Not Found"
+            exit 1
+          }
+      
+          cp -f Image "${AK3DIR}/Image"      
+          echo "📦 Patched Image Copied to AnyKernel3"
+
           echo ""
           echo "🎉 KernelPatch-Next Patch Completed"
 
