@@ -1514,9 +1514,12 @@ jobs:
           # Paths
           KDIR="kernel_workspace/kernel_platform"
           FCONFIG="${KDIR}/common/build.config.constants"
-          RUSTBIN="${KDIR}/prebuilts/rust/linux-x86/bin/rustc"      
-          RUSTCENABLED="false"
+          RUSTBIN="${KDIR}/prebuilts/rust/linux-x86/bin/rustc"
+      
+          # State
+          ENABLERUSTC="false"
           VERSIONRUSTC=""
+          RAWRUSTC=""
       
           # Validate Kernel Directory
           if [[ ! -d "$KDIR" ]]; then
@@ -1526,56 +1529,82 @@ jobs:
       
           cd "$KDIR"
       
-          # Detect Rust from Build Configuration Constants
+          # Detect RUST from Build Configuration Constants
           if [[ -f "$FCONFIG" ]]; then      
             echo "🔎 Checking Build Configuration Constants..."      
-            VERSIONRUSTC="$(awk -F= '/^VERSIONRUSTC=/{print $2}' "$FCONFIG" | tr -d '"' || true)"      
-            if [[ -n "$VERSIONRUSTC" ]]; then
-              echo "📌 Rust Version from Configuration: $VERSIONRUSTC"
-              RUSTCENABLED="true"
+            # Prefer Modern AOSP Key: RUSTC Version
+            RAWRUSTC="$(
+              awk -F= '/^RUSTC_VERSION=/{print $2}' "$FCONFIG" \
+              | tr -d '"' \
+              | head -n1
+            )"
+      
+            # Fallback to legacy/custom key: VERSIONRUSTC
+            if [[ -z "$RAWRUSTC" ]]; then
+              RAWRUSTC="$(
+                awk -F= '/^VERSIONRUSTC=/{print $2}' "$FCONFIG" \
+                | tr -d '"' \
+                | head -n1
+              )"
+            fi
+      
+            if [[ -n "$RAWRUSTC" ]]; then      
+              echo "📌 RUST Version from Configuration (Raw): $RAWRUSTC"      
+              # Extract Path-Safe Version (1.81.0 from 1.81.0-Google)
+              VERSIONRUSTC="$(
+                echo "$RAWRUSTC" \
+                | grep -oE '^[0-9]+\.[0-9]+\.[0-9]+'
+              )"
+      
+              # Fallback if Extraction Fails
+              [[ -z "$VERSIONRUSTC" ]] && VERSIONRUSTC="$RAWRUSTC"      
+              echo "📁 RUST Version for Paths: $VERSIONRUSTC"      
+              ENABLERUSTC="true"      
             else
-              echo "⚠️ No Rust Compiler Version Found in Configuration"
+              echo "⚠️ No RUST Compiler Version Found in Configuration"
             fi      
           else
             echo "⚠️ Missing Build Configuration Constants"
           fi
       
           # Fallback: Toolchain Detection
-          if [[ "$RUSTCENABLED" == "false" ]]; then      
-            if [[ -x "$RUSTBIN" ]]; then
-              echo "📦 Rust Toolchain Detected (Fallback)"
-              RUSTCENABLED="true"
+          if [[ "$ENABLERUSTC" == "false" ]]; then      
+            if [[ -x "$RUSTBIN" ]]; then      
+              echo "📦 Rust Toolchain Detected (Fallback)"      
+              RAWRUSTC="$("$RUSTBIN" --version | awk '{print $2}')"      
+              VERSIONRUSTC="$(
+                echo "$RAWRUSTC" \
+                | grep -oE '^[0-9]+\.[0-9]+\.[0-9]+'
+              )"
+      
+              [[ -z "$VERSIONRUSTC" ]] && VERSIONRUSTC="$RAWRUSTC"      
+              echo "🔍 Detected Rustc Version: $RAWRUSTC"
+              echo "📁 RUST Version for Paths: $VERSIONRUSTC"      
+              ENABLERUSTC="true"      
             else
-              echo "⚠️ Rust Toolchain Not Found"
-            fi      
+              echo "⚠️ RUST Toolchain Not Found"
+            fi
           fi
       
-          # Resolve Rust Version
-          if [[ "$RUSTCENABLED" == "true" ]]; then     
-            if [[ -z "$VERSIONRUSTC" ]]; then      
-              if [[ -x "$RUSTBIN" ]]; then
-                VERSIONRUSTC="$("$RUSTBIN" --version | awk '{print $2}')"
-                echo "🔍 Detected Rustc Version: $VERSIONRUSTC"
-              else
-                VERSIONRUSTC="Unknown"
-                echo "⚠️ Rust Enabled but Version Unknown"
-              fi      
-            fi     
-          else
+          # Final Defaults
+          if [[ "$ENABLERUSTC" != "true" ]]; then
             VERSIONRUSTC="None"
+            RAWRUSTC="None"
           fi
       
           # Export to GitHub Environment
-          echo "ENABLERUSTC=$RUSTCENABLED" >> "$GITHUB_ENV"
+          echo "ENABLERUSTC=$ENABLERUSTC" >> "$GITHUB_ENV"
           echo "VERSIONRUSTC=$VERSIONRUSTC" >> "$GITHUB_ENV"
+          echo "RAWRUSTC=$RAWRUSTC" >> "$GITHUB_ENV"
       
           # Final Summary
           echo ""
           echo "------------------------------"
-          echo "🦀 Rust Detection Result"
+          echo "🦀 RUST Detection Result"
           echo "------------------------------"
-          echo "Enabled : $RUSTCENABLED"
-          echo "Version : $VERSIONRUSTC"
+          echo "Enabled      : $ENABLERUSTC"
+          echo "Raw Version  : $RAWRUSTC"
+          echo "Path Version : $VERSIONRUSTC"
           echo "------------------------------"
           
       - name: 🔧 Inject Custom Kernel Version Suffix
