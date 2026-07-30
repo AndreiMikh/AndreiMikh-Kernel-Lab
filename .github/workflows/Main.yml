@@ -2433,6 +2433,16 @@ jobs:
                   '/#include <linux\/cpufreq_times.h>/a #include <linux\/dma-buf.h>' \
                   ./fs/proc/base.c
               fi
+
+              # VMA Pad Start Compatibility
+              if grep -q 'VMA_PAD_START(' ./fs/proc/task_mmu.c && \
+                 ! grep -Eq '#include <linux/pgsize_migration(_inline)?\.h>|define VMA_PAD_START' ./fs/proc/task_mmu.c; then          
+                echo "⚠️ Missing VMA Pad Start Definition Detected"
+                echo "🔧 Adding VMA Pad Start Fallback..."          
+                perl -0777 -i -pe '
+                  s@((?:^#include .*\\n)+)@$1\\n#ifndef VMA_PAD_START\\n#define VMA_PAD_START(vma) ((vma)->vm_end)\\n#endif\\n\\n@s
+                ' ./fs/proc/task_mmu.c
+              fi
             
               # Post Fix - Page Size Compat / Local Fold File Map Fixup Entry Compatibility
               TASKMMU="./fs/proc/task_mmu.c"
@@ -2453,14 +2463,6 @@ jobs:
                   # Header Missing or Does Not Declare Helper
                   echo "⚠️ Page Size Compat Headers Missing or Incomplete"
                   echo "🔧 Adding Local Fold File Map Fixup Entry Stub..."            
-                  awk '
-                  BEGIN { inserted=0 }
-                  {
-                    print
-                    if (!inserted && $0 ~ /^#include /) last=NR
-                  }
-                  END {}
-                  ' "$TASKMMU" >/dev/null           
                   perl -0777 -i -pe '
                     s@((?:^#include .*\\n)+)@$1\\n#ifndef __fold_filemap_fixup_entry\\nstatic inline void __fold_filemap_fixup_entry(struct vma_iterator *iter, unsigned long *end) { }\\n#endif /* __fold_filemap_fixup_entry */\\n\\n@s
                   ' "$TASKMMU"
@@ -2468,7 +2470,7 @@ jobs:
               fi
             
               # SUSFS Tree Compatibility Fixes
-              # Required for GKI + OKI Trees
+              # GKI / OGKI Tree Compatibility
               if [[ "$SUSFSVARIANT" == "GKI" || \
                     "$SUSFSVARIANT" == "OGKI" ]]; then           
                 # Inject Missing ZSwap Header
@@ -2509,59 +2511,78 @@ jobs:
               fi
             fi                
       
-            # Android 14 Kernel 6.1 Fix
-            if [ "$KERNELMODULE" = "android14-6.1" ]; then
-              # Detect Missing VMA Page Logic Support
-              if ! grep -qxF \
-                $'\tif (!vma_pages(vma))' \
-                ./fs/proc/task_mmu.c; then          
+            # Android 14 / Kernel 6.1
+            if [[ "$KERNELMODULE" == "android14-6.1" ]]; then          
+              if ! grep -qxF $'\tif (!vma_pages(vma))' ./fs/proc/task_mmu.c; then
                 echo "⚠️ Missing VMA Pages Logic Detected"
-                echo "🔧 SUSFS Compatibility Workaround Enabled..."          
+                echo "🔧 SUSFS Compatibility Workaround Enabled..."
                 fake_patched=1
               fi
-              # Add Missing DMA-BUF Header
-              if ! grep -qxF \
-                '#include <linux/dma-buf.h>' \
-                ./fs/proc/base.c; then         
+          
+              if ! grep -qxF '#include <linux/dma-buf.h>' ./fs/proc/base.c; then
                 echo "⚠️ Missing DMA-BUF Header Detected"
-                echo "🔧 Injecting Required Header..."          
-                sed -i \
-                  '/#include <linux\/cpufreq_times.h>/a #include <linux\/dma-buf.h>' \
-                  ./fs/proc/base.c
+                echo "🔧 Injecting Required Header..."         
+                sed -i '/#include <linux\/cpufreq_times.h>/a #include <linux\/dma-buf.h>' ./fs/proc/base.c
+              fi
+          
+              # Trace / Hooks / Sched Headers Fix (Sublevel < 25)
+              if [[ "${SUBLEVEL:-0}" -le 25 ]] && \
+                 ! grep -qxF '#include <trace/hooks/sched.h>' ./fs/proc/base.c; then          
+                echo "⚠️ Missing Trace / Hooks / Sched Headers Detected"
+                echo "🔧 Injecting Trace / Hooks / Sched Headers..."          
+                sed -i '/#include <trace\/events\/oom\.h>/a #include <trace\/hooks\/sched.h>' ./fs/proc/base.c
               fi
             fi          
           
-            # Android 12 / 5.10
-            # Android 13 / 5.15
-            if [[ "$KERNELMODULE" == *"5.10"* || \
-                  "$KERNELMODULE" == *"5.15"* ]]; then          
-              if ! grep -qxF \
-                $'\tif (!vma_pages(vma))' \
-                ./fs/proc/task_mmu.c; then          
+            # Android 12 / 5.10 and Android 13 / 5.15
+            if [[ "$KERNELMODULE" == *"5.10"* || "$KERNELMODULE" == *"5.15"* ]]; then          
+              if ! grep -qxF $'\tif (!vma_pages(vma))' ./fs/proc/task_mmu.c; then
                 echo "⚠️ Missing VMA Pages Logic Detected"
-                echo "🔧 SUSFS Compatibility Workaround Enabled..."          
+                echo "🔧 SUSFS Compatibility Workaround Enabled..."
                 fake_patched=1
               fi
             fi
-
+          
+            # Set Nameidata 4-Arg -> 3-Arg Fix for 5.10
+            if [[ "$KERNELMODULE" == *"5.10"* ]] && \
+               grep -q 'set_nameidata(nd, old_dfd, fake_filename, NULL)' ./fs/namei.c; then          
+              echo "⚠️ 5.10 Set Nameidata API Mismatch Detected"
+              echo "🔧 Converting 4-Arg Set Nameidata to 3-Arg..."          
+              sed -i \
+                's/set_nameidata(nd, old_dfd, fake_filename, NULL)/set_nameidata(nd, old_dfd, fake_filename)/g' \
+                ./fs/namei.c
+            fi
+          
             # Android 13 / Kernel 5.15
-            if [[ "$KERNELMODULE" == *"5.15"* ]]; then                      
-              # Remove Conflicting Swap Slots Header Include
-              if grep -qxF \
-                '#include <linux/swap_slots.h>' \
-                ./mm/memory.c \
-                && ! grep -qxF \
-                '#include <linux/susfs_def.h>' \
-                ./mm/memory.c; then          
-                echo "⚠️ Conflicting swap_slots.h Include Detected"
+            if [[ "$KERNELMODULE" == *"5.15"* ]]; then          
+              if grep -qxF '#include <linux/swap_slots.h>' ./mm/memory.c && \
+                 ! grep -qxF '#include <linux/susfs_def.h>' ./mm/memory.c; then          
+                echo "⚠️ Conflicting Swap Slots Headers Include Detected"
                 echo "🔧 Removing Conflicting Include..."          
-                sed -i \
-                  '/#include <linux\/swap_slots\.h>/d' \
-                  ./mm/memory.c        
+                sed -i '/#include <linux\/swap_slots\.h>/d' ./mm/memory.c
                 fake_patched_dist=1
               fi
             fi
-
+          
+            # Android 16 / Kernel 6.12
+            if [[ "$KERNELMODULE" == "android16-6.12" ]]; then          
+              # Remove DMA-BUF Include for Older 6.12 Baselines
+              if [[ "${SUBLEVEL:-0}" -le 27 ]] && \
+                 grep -qxF '#include <linux/dma-buf.h>' ./fs/exec.c; then          
+                echo "⚠️ Incompatible DMA-BUF Include Detected in FS / Exec"
+                echo "🔧 Removing Incompatible Include..."          
+                sed -i '/#include <linux\/dma-buf\.h>/d' ./fs/exec.c
+              fi
+          
+              # VMA Data Pages > VMA Pages Rename for Newer 6.12 Baselines
+              if [[ "${SUBLEVEL:-0}" -ge 69 ]] && \
+                 grep -q 'vma_data_pages' ./fs/proc/task_mmu.c; then          
+                echo "⚠️ VMA Data Pages API Mismatch Detected"
+                echo "🔧 Replacing VMA Data Pages with VMA Pages..."          
+                sed -i 's/vma_data_pages/vma_pages/g' ./fs/proc/task_mmu.c
+              fi
+            fi
+            
             # Revert Temporary Fake Patch
             if [[ "$fake_patched" == 1 ]]; then          
               echo "♻️ Reverting Temporary Fake Patch..."          
