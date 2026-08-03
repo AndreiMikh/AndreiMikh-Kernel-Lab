@@ -2094,33 +2094,45 @@ jobs:
           # Check for Patch Reject Files
           checkrejects() {
             local SEARCHDIR="${1:-.}"
-            local REJFILES         
-            REJFILES=$(find "$SEARCHDIR" -name "*.rej" 2>/dev/null)
-            [[ -z "$REJFILES" ]] && return 0
+            local FOUND=1      
           
-            while IFS= read -r REJFILE; do
+            while IFS= read -r -d '' REJFILE; do
+              FOUND=0
               local ORIGFILE="${REJFILE%.rej}"
-              ORIGFILE="${ORIGFILE#./}"          
+              ORIGFILE="${ORIGFILE#./}"                        
               local FAILEDHUNKS
-              FAILEDHUNKS=$(grep -c '^@@ ' "$REJFILE" 2>/dev/null)          
+              FAILEDHUNKS=$(grep -c '^@@ ' "$REJFILE" 2>/dev/null || true)
+              
               echo "⚠️ Patch Reject Detected"
               echo "📝 Reject File  : $REJFILE"
               echo "📄 Target File  : $ORIGFILE"
-              echo "⚠️ Failed Hunks : ${FAILEDHUNKS:-0}"
+              echo "⚠️ Failed Hunks : $FAILEDHUNKS"
               echo
+              
               cat "$REJFILE"
-            done <<< "$REJFILES"
+              done < <(find "$SEARCHDIR" -type f -name '*.rej' -print0 2>/dev/null)
+            return $FOUND
           }
           
           # Handle Patch Errors
           rejecthandler() {
-            local EXITCODE=$?          
+            local EXITCODE=$?
+            # Prevent Recursive ERR Traps
             trap - ERR          
             echo "⚠️ Patch Application Failed"
-            echo "🔍 Scanning for Reject Files..."          
-            checkrejects .          
+            
+            if find . -type f -name '*.rej' -print -quit 2>/dev/null | grep -q .; then
+            echo "🔍 Scanning for Reject Files..."              
+              checkrejects .
+            else
+              echo "ℹ️ No Reject Files Found, Failure may be Unrelated to Patch Rejects"
+            fi
+            
             exit "$EXITCODE"
           }
+
+          # Enable Automatic Reject Reporting
+          trap 'rejecthandler' ERR
       
           echo "------------------------------"
           echo "SUSFS Meta Patch Installation..."
@@ -2129,9 +2141,6 @@ jobs:
 
           # Build derived variables in bash (NOT GitHub expressions)
           GKIVERSION="${ANDROIDVERSION}-${KERNELVERSION}"
-          ROOTENGINE="${ROOTENGINE}"
-          SUSFSREPOSITORY="${SUSFSREPOSITORY}"
-          SUSFSVARIANT="${SUSFSVARIANT}"
 
           # Navigate to Kernel Directory
           cd kernel_workspace
