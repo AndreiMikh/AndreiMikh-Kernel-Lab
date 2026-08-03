@@ -180,11 +180,13 @@ on:
         type: choice
         description: "Network Optimization Algorithm (BBR + ECN)"
         required: true
-        default: BBR+ECN
+        default: BBRV1+BBRV3+ECN
         options:
-          - BBR+ECN              # Base BBR + ECN Settings, Safe Default
-          - BBR+ECN+Brutal       # Apply Brutal as Default + Cubic Fallback
-          - None                 # Skip BBR + ECN Configuration
+          - BBRV1+ECN
+          - BBRV1+BBRV3+ECN
+          - BBRV1+ECN+Brutal
+          - BBRV1+BBRV3+ECN+Brutal    
+          - None                 
         
       UNICODE:
         type: boolean
@@ -244,8 +246,10 @@ jobs:
 
           (github.event.inputs.FASTBUILD == 'true' && 'Fast ' || ''),
           (github.event.inputs.NTSYNC == 'true' && 'NTSync ' || ''),
-          (github.event.inputs.TCPALGORITHM == 'BBR+ECN+Brutal' && 'BBR+ECN+Brutal ' ||
-          github.event.inputs.TCPALGORITHM == 'BBR+ECN' && 'BBR+ECN ' || ''),
+          (github.event.inputs.TCPALGORITHM == 'BBRV1+ECN+Brutal' && 'BBRV1+ECN+Brutal ' ||
+          (github.event.inputs.TCPALGORITHM == 'BBRV1+BBRV3+ECN+Brutal' && 'BBRV1+BBRV1+ECN+Brutal ' ||
+          (github.event.inputs.TCPALGORITHM == 'BBRV1+BBRV3+ECN' && 'BBRV1+BBRV1+ECN ' ||
+          github.event.inputs.TCPALGORITHM == 'BBRV1+ECN' && 'BBRV1+ECN ' || ''),
           (github.event.inputs.LXCDOCKERSUPPORT == 'DroidSpacesLXC-WildPatch' && 'DS-Wild ' ||
           github.event.inputs.LXCDOCKERSUPPORT == 'DroidSpacesLXC-Inject' && 'DS-Inject ' || ''),
           (contains(github.event.inputs.FILE, '_aosp') && 'AOSP ' || ''),
@@ -3756,6 +3760,44 @@ jobs:
           echo ""
           echo "🎉 Re-Kernel Files and Directories Successfully Synced and Patched"
 
+      - name: TCP Congestion Control BBRV3
+        if: ${{ github.event.inputs.TCPALGORITHM == 'BBRV1+BBV3+ECN' && env.ANDROIDVERSION != 'android16' && env.KERNELVERSION != '6.12' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+      
+          # GKI Version Identifier
+          GKIVERSION="${{ env.ANDROIDVERSION }}-${{ env.KERNELVERSION }}"
+      
+          # Define Directories and Patch Files
+          PDIR="${GITHUB_WORKSPACE}/kernel_workspace/AndreiMikh-Kernel-Lab/patches/BBRV3"
+          KDIR="${GITHUB_WORKSPACE}/kernel_workspace/kernel_platform/common"
+          PFILE="${PDIR}/0001-net-tcp-backport-BBRv3-to-${GKIVERSION}.patch"
+      
+          # Change to Kernel Source Directory
+          cd "${KDIR}"
+      
+          # Apply Main BBRV3 Backport Patch for Selected GKI Version
+          echo "Applying BBRV3 Patch for ${GKIVERSION}..."
+          patch -p1 < "${PFILE}"
+      
+          # Android 12 (5.10) Kernels do Not Include PROC-DOU8VEC-MINMAX
+          # Apply Required Compatibility Patches Only if Function Not Already Present in Source
+          if [[ "${GKIVERSION}" == "android12-5.10" ]]; then
+            if ! grep -qF 'int proc_dou8vec_minmax(' include/linux/sysctl.h; then
+              echo "Applying PROC-DOU8VEC-MINMAX Compatibility Patches..."
+              patch -p1 < "${PDIR}/sysctl_add_proc_dou8vec_minmax.patch"
+              patch -p1 < "${PDIR}/sysctl_fix_data-races_in_proc_dou8vec_minmax.patch"
+            else
+              echo "🚀 PROC-DOU8VEC-MINMAX Already Exists, Skipping Compatibility Patches.."
+            fi
+          else
+            echo "☘️ Compatibility Patches are Not Required for ${GKIVERSION}"
+          fi
+
+          echo ""
+          echo "🎉BBRV3 Patches Applied Successfully"
+
       - name: 🔧 Kernel Configuration
         run: |
           set euo pipefail
@@ -3963,10 +4005,9 @@ jobs:
           fi
 
           # BBR + ECN Kernel Configuration with Brutal Default and Cubic Fallback
-          if [[ "$TCP" == "BBR+ECN" || "$TCP" == "BBR+ECN+Brutal" ]]; then
-            echo "🚀 Applying BBR + ECN / Brutal Configurations..."
-          
-            # Base BBR + ECN Settings (Always Applied)
+          if [[ "$TCP" != "None" ]]; then
+            echo "🚀 Applying BBR + ECN / Brutal Configurations..."          
+            # Base BBR + ECN Settings
             cat >> "$DEFCONFIG" << EOF
           CONFIG_TCP_CONG_BIC=n
           CONFIG_TCP_CONG_WESTWOOD=n
@@ -3978,11 +4019,11 @@ jobs:
           EOF
           
               # Additional TCP Algorithms if Brutal is Selected
-              if [[ "$TCP" == "BBR+ECN+Brutal" ]]; then
+              if [[ "$TCP" == "BBRV1+ECN+Brutal" || "$TCP" == "BBRV1+BBRV3+ECN+Brutal" ]]; then
                 echo "🚀 Applying Brutal Specific Configurations..."
                 cat >> "$DEFCONFIG" << EOF
-          CONFIG_TCP_CONG_BRUTAL=y      # Default Aggressive Algorithm
-          CONFIG_TCP_CONG_CUBIC=y       # Fallback
+          CONFIG_TCP_CONG_BRUTAL=y      
+          CONFIG_TCP_CONG_CUBIC=y       
           CONFIG_TCP_CONG_VEGAS=y
           CONFIG_TCP_CONG_NV=y
           EOF
@@ -3994,7 +4035,7 @@ jobs:
               else
                 # Not Brutal → Use Cubic as Safe Default
                 cat >> "$DEFCONFIG" << EOF
-          CONFIG_TCP_CONG_CUBIC=y         # Default Safe Algorithm
+          CONFIG_TCP_CONG_CUBIC=y        
           CONFIG_DEFAULT_TCP_CONG=cubic
           EOF
                 echo "🎉 BBR + ECN: Using Cubic as Default (Brutal Not Selected)"
@@ -4003,6 +4044,15 @@ jobs:
           else
             echo "☘️ Congestion Control Disabled, Skipping BBR + ECN Configuration"
             echo "🧩 Default Congestion Control Remains Unchanged"
+          fi
+
+          # Additional TCP Congestion Control Configuration for BBRV3
+          if [[ ("$TCP" == "BBRV1+BBRV3+ECN" || "$TCP" == "BBRV1+BBRV3+ECN+Brutal") &&
+                "$GKIVERSION" != "android16-6.12" ]]; then
+            echo "🚀 Applying BBRV3 Specific Configurations..."
+            cat >> "$DEFCONFIG" << EOF
+          CONFIG_TCP_CONG_BBR3=y
+          EOF
           fi
 
           # Linux Security Module Baseband Guard Configuration
@@ -5411,8 +5461,10 @@ jobs:
           [[ "$NTSYNC" == "true" ]] && SUFFIX+="-NTSync"
       
           case "$TCP" in
-            "BBR+ECN")         SUFFIX+="-BBR+ECN" ;;
-            "BBR+ECN+Brutal")  SUFFIX+="-BBR+ECN+Brutal" ;;
+            "BBRV1+ECN")         SUFFIX+="-BBRV1+ECN" ;;
+            "BBRV1+BBRV3+ECN")         SUFFIX+="-BBRV1+BBRV3+ECN" ;;
+            "BBRV1+ECN+Brutal")  SUFFIX+="-BBRV1+ECN+Brutal" ;;
+            "BBRV1+BBRV3+ECN+Brutal")  SUFFIX+="-BBRV1+BBRV3+ECN+Brutal" ;;
           esac
       
           # Final Branding Layer
