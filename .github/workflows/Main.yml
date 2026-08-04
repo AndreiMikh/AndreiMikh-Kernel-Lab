@@ -3849,12 +3849,49 @@ jobs:
           NTSYNC="${{ github.event.inputs.NTSYNC }}"
           CPU="${{ env.CPU }}"
 
+          MAKEFILE=./kernel/Makefile
+          declare -a HIDECONFIGS=()          
+          SETCONFIG() {
+            local value="$1"
+            local key="${value%%=*}"
+          
+              if grep -q "^${key}=" "$DEFCONFIG"; then
+                sed -i "s|^${key}=.*|${value}|" "$DEFCONFIG"
+              elif grep -q "^# ${key} is not set" "$DEFCONFIG"; then
+                sed -i "s|^# ${key} is not set|${value}|" "$DEFCONFIG"
+              else
+                echo "$value" >> "$DEFCONFIG"
+              fi
+          }
+          
+          HIDECONFIG() {
+            local value="$1"
+            local key="${value%%=*}"          
+            SETCONFIG "$value"
+            HIDECONFIGS+=("$key")
+          }          
+          FAKECONFIG() {          
+            [[ ${#HIDECONFIGS[@]} -eq 0 ]] && return          
+            local marker="# --- Fake Config Injector ---"          
+            if ! grep -qF "$marker" "$MAKEFILE"; then
+              cat >> "$MAKEFILE" <<'EOF'
+          
+          # Fake Config Injector
+          ifneq ($(strip $(DISABLEFAKECONFIG)),)
+          $(obj)/config_data: $(KCONFIG_CONFIG) FORCE
+          	$(Q)sed $(foreach opt,$(DISABLEFAKECONFIG),-e 's|^$(opt)=.*|# $(opt) is not set|') $(KCONFIG_CONFIG) > $@
+          endif
+          EOF
+            fi          
+            echo "DISABLEFAKECONFIG=${HIDECONFIGS[*]}" >> "$GITHUB_ENV"
+          }
+          
+          trap FAKECONFIG EXIT
+
           # Apply -O2 Compiler Optimization for Kernel 6.1 / 6.6
           if [[ ("$KERNEL" == "6.1" || "$KERNEL" == "6.6") && ! "$FILE" =~ aosp$|AOSP$ ]]; then
             echo "🔧 Enabling O2 Compiler Optimization for Kernel $KERNEL..."
-            cat >> "$DEFCONFIG" << EOF
-          CONFIG_CC_OPTIMIZE_FOR_PERFORMANCE=y
-          EOF
+            SETCONFIG "CONFIG_CC_OPTIMIZE_FOR_PERFORMANCE=y"
             echo "🎉 O2 Optimization Enabled for Kernel $KERNEL"
           else
             echo "☘️ O2 Optimization Disabled for Kernel $KERNEL"
@@ -3869,10 +3906,8 @@ jobs:
             case "$SCHED" in
               ADIOS)
                 if [[ "$KERNEL" == "6.6" ]]; then
-                  cat >> "$DEFCONFIG" << EOF
-          CONFIG_MQ_IOSCHED_ADIOS=y
-          CONFIG_MQ_IOSCHED_DEFAULT_ADIOS=y
-          EOF
+                  SETCONFIG "CONFIG_MQ_IOSCHED_ADIOS=y"
+                  SETCONFIG "CONFIG_MQ_IOSCHED_DEFAULT_ADIOS=y"
                   echo "🎉 ADIOS I/O Scheduler Enabled"
                 else
                   echo "🚩 ADIOS Requires Kernel 6.6"
@@ -3880,9 +3915,7 @@ jobs:
                 ;;
               BORE)
                 if [[ "$KERNEL" == "6.6" ]]; then
-                  cat >> "$DEFCONFIG" << EOF
-          CONFIG_SCHED_BORE=y
-          EOF
+                  SETCONFIG "CONFIG_SCHED_BORE=y"
                   echo "🎉 BORE CPU Scheduler Enabled"
                 else
                   echo "🚩 BORE Requires Kernel 6.6"
@@ -3890,10 +3923,8 @@ jobs:
                 ;;
               SSG)
                 if [[ "$KERNEL" == "6.1" ]]; then
-                  cat >> "$DEFCONFIG" << EOF
-          CONFIG_MQ_IOSCHED_SSG=y
-          CONFIG_MQ_IOSCHED_SSG_CGROUP=y
-          EOF
+                  SETCONFIG "CONFIG_MQ_IOSCHED_SSG=y"
+                  SETCONFIG "CONFIG_MQ_IOSCHED_SSG_CGROUP=y"
                   echo "🎉 SSG I/O Scheduler Enabled"
                 else
                   echo "🚩 SSG Requires Kernel 6.1"
@@ -3915,10 +3946,8 @@ jobs:
           REKERNEL="${REKERNEL:-false}"  # Default to False if Not Set
           if [[ "$REKERNEL" == "true" ]]; then
             echo "🎉 Enabling Re-Kernel Support..."
-            cat >> "$DEFCONFIG" << EOF
-          CONFIG_REKERNEL=y
-          CONFIG_REKERNEL_NETWORK=y
-          EOF
+            SETCONFIG "CONFIG_REKERNEL=y"
+            SETCONFIG "CONFIG_REKERNEL_NETWORK=y"
             echo "🎉 ReKernel Enabled"
           else
             echo "☘️ ReKernel Disabled"
@@ -3927,64 +3956,50 @@ jobs:
           # Check if KSU Root Engine is ReSukiSU
           if [[ "$ROOT" == "ReSukiSU" ]]; then
             # Enable Multi-Manager Support if the Condition is True
-            cat >> "$DEFCONFIG" << EOF
-          CONFIG_KSU_MULTI_MANAGER_SUPPORT=y
-          CONFIG_KSU_TOOLKIT_SUPPORT=y
-          EOF
+            SETCONFIG "CONFIG_KSU_MULTI_MANAGER_SUPPORT=y"
+            SETCONFIG "CONFIG_KSU_TOOLKIT_SUPPORT=y"
             echo "🎉 Multi-Manager Support Enabled for $ROOT"
           else
             echo "☘️ Multi-Manager Support Not Enabled, as KSU Meta Root Engine is Not ReSukiSU"
           fi
 
           # SukiSU-Ultra KernelPatch-Module Configuration
-          # Check if SukiSU-Ultra KernelPatch Input is KernelPatch-Next (KPN) or None, Disable KernelPatch-Module
-          if [[ "$KERNELPATCH" == "KPN" || "$KERNELPATCH" == "None" ]]; then
-            cat >> "$DEFCONFIG" << EOF
-          CONFIG_KPM=n
-          EOF
-            echo "☘️ SukiSU-Ultra KernelPatch-Module Disabled (KernelPatch-Next or None Selected)"
-          fi
-
           # Check if SukiSU-Ultra KernelPatch-Module Input is SukiSU-Ultra KernelPatch-Module (KPM), Enable SukiSU-Ultra KernelPatch-Module
           if [[ "$KERNELPATCH" == "KPM" && "$ROOT" == "SukiSU-Ultra" ]]; then
-            cat >> "$DEFCONFIG" << EOF
-          CONFIG_KPM=y
-          EOF
+            SETCONFIG "CONFIG_KPM=y"
             echo "🎉 SukiSU-Ultra KernelPatch-Module Enabled (Supported KSU Meta Root Engine: ReSukiSU and SukiSU-Ultra)"
           fi
 
-          # KSU Meta Root Engine Configuration
-          cat >> "$DEFCONFIG" << EOF
-          CONFIG_KSU=y                    # Enable KSU Meta Root Engine Support
-          CONFIG_KSU_SUSFS=y              # Enable SUSFS Meta Support
-          EOF
+          # Check if SukiSU-Ultra KernelPatch Input is KernelPatch-Next (KPN) or None, Disable KernelPatch-Module
+          if [[ "$KERNELPATCH" == "KPN" || "$KERNELPATCH" == "None" ]]; then
+            SETCONFIG "CONFIG_KPM=n"
+            echo "☘️ SukiSU-Ultra KernelPatch-Module Disabled (KernelPatch-Next or None Selected)"
+          fi
 
           # Apply SUSFS Meta Core Configuration
           if [[ "$SUSFS" != "-1" && ! ("$FILE" =~ aosp$|AOSP$) ]]; then                      
             # Base SUSFS Meta Core Configuration Settings (Common)
-            cat >> "$DEFCONFIG" << EOF
-          CONFIG_KSU_SUSFS_HAS_MAGIC_MOUNT=y
-          CONFIG_KSU_SUSFS_SUS_PATH=y
-          CONFIG_KSU_SUSFS_SUS_MOUNT=y
-          CONFIG_KSU_SUSFS_AUTO_ADD_SUS_KSU_DEFAULT_MOUNT=y
-          CONFIG_KSU_SUSFS_AUTO_ADD_SUS_BIND_MOUNT=y
-          CONFIG_KSU_SUSFS_SUS_KSTAT=y
-          CONFIG_KSU_SUSFS_TRY_UMOUNT=y
-          CONFIG_KSU_SUSFS_AUTO_ADD_TRY_UMOUNT_FOR_BIND_MOUNT=y
-          CONFIG_KSU_SUSFS_SPOOF_UNAME=y
-          CONFIG_KSU_SUSFS_ENABLE_LOG=y
-          CONFIG_KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS=y
-          CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG=y
-          CONFIG_KSU_SUSFS_OPEN_REDIRECT=y
-          CONFIG_KSU_SUSFS_SUS_MAP=y
-          EOF
+            SETCONFIG "CONFIG_KSU=y"
+            SETCONFIG "CONFIG_KSU_SUSFS=y"
+            SETCONFIG "CONFIG_KSU_SUSFS_HAS_MAGIC_MOUNT=y"
+            SETCONFIG "CONFIG_KSU_SUSFS_SUS_PATH=y"
+            SETCONFIG "CONFIG_KSU_SUSFS_SUS_MOUNT=y"
+            SETCONFIG "CONFIG_KSU_SUSFS_AUTO_ADD_SUS_KSU_DEFAULT_MOUNT=y"
+            SETCONFIG "CONFIG_KSU_SUSFS_AUTO_ADD_SUS_BIND_MOUNT=y"
+            SETCONFIG "CONFIG_KSU_SUSFS_SUS_KSTAT=y"
+            SETCONFIG "CONFIG_KSU_SUSFS_TRY_UMOUNT=y"
+            SETCONFIG "CONFIG_KSU_SUSFS_AUTO_ADD_TRY_UMOUNT_FOR_BIND_MOUNT=y"
+            SETCONFIG "CONFIG_KSU_SUSFS_SPOOF_UNAME=y"
+            SETCONFIG "CONFIG_KSU_SUSFS_ENABLE_LOG=y"
+            SETCONFIG "CONFIG_KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS=y"
+            SETCONFIG "CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG=y"
+            SETCONFIG "CONFIG_KSU_SUSFS_OPEN_REDIRECT=y"
+            SETCONFIG "CONFIG_KSU_SUSFS_SUS_MAP=y"            
             echo "🎉 SUSFS Meta Core Configuration Applied"       
           else
             # Block SUSFS Meta for oneplus_sm8750_lineage_aosp or Disabled SUSFS
             if [[ ! "$FILE" =~ aosp$|AOSP$ ]]; then
-              cat >> "$DEFCONFIG" << EOF
-          CONFIG_KSU_SUSFS=n
-          EOF
+              SETCONFIG "CONFIG_KSU_SUSFS=n"
               echo "☘️ SUSFS Meta Core Configuration Settings Disabled"
             else
               echo "🧩 SUSFS Meta Core Configuration Skipped for $FILE"
@@ -3993,32 +4008,24 @@ jobs:
           
           # TMPFS Configuration (Mountify)
           echo "🚀 Applying TMPFS Configuration..."
-
-          cat >> "$DEFCONFIG" << EOF
-          CONFIG_TMPFS_XATTR=y
-          CONFIG_TMPFS_POSIX_ACL=y
-          EOF
-
+          SETCONFIG "CONFIG_TMPFS_XATTR=y"
+          SETCONFIG "CONFIG_TMPFS_POSIX_ACL=y"
           echo "🎉 TMPFS Configuration Applied"
 
           # DroidspacesLXC Support Kernel Configuration
           if [[ "$LXC" == "DroidSpacesLXC-WildPatch" || "$LXC" == "DroidSpacesLXC-Inject" ]]; then
             echo "🚀 Applying DroidspacesLXC Support Kernel Configurations..."
-
-            cat >> "$DEFCONFIG" <<EOF
-          CONFIG_NTSYNC=y
-          CONFIG_SYSVIPC=y
-          CONFIG_DEVTMPFS=y
-          CONFIG_PID_NS=y
-          CONFIG_IPC_NS=y
-          CONFIG_USER_NS=y
-          CONFIG_NAMESPACES=y
-          CONFIG_POSIX_MQUEUE=y
-          CONFIG_NETFILTER_XT_TARGET_REJECT=y
-          CONFIG_NETFILTER_XT_TARGET_LOG=y
-          CONFIG_NETFILTER_XT_MATCH_RECENT=y
-          EOF
-
+            SETCONFIG "CONFIG_NTSYNC=y"
+            SETCONFIG "CONFIG_SYSVIPC=y"
+            SETCONFIG "CONFIG_DEVTMPFS=y"
+            SETCONFIG "CONFIG_PID_NS=y"
+            SETCONFIG "CONFIG_IPC_NS=y"
+            SETCONFIG "CONFIG_USER_NS=y"
+            SETCONFIG "CONFIG_NAMESPACES=y"
+            SETCONFIG "CONFIG_POSIX_MQUEUE=y"
+            SETCONFIG "CONFIG_NETFILTER_XT_TARGET_REJECT=y"
+            SETCONFIG "CONFIG_NETFILTER_XT_TARGET_LOG=y"
+            SETCONFIG "CONFIG_NETFILTER_XT_MATCH_RECENT=y"
             echo "🎉 DroidspacesLXC Support Core Configuration Applied"       
           else
             echo "☘️ DroidspacesLXC Support Disabled — Skipping Configuration..."
@@ -4028,39 +4035,28 @@ jobs:
           if [[ "$TCP" != "None" ]]; then
             echo "🚀 Applying BBR + ECN / Brutal Configurations..."          
             # Base BBR + ECN Settings
-            cat >> "$DEFCONFIG" << EOF
-          CONFIG_TCP_CONG_BIC=n
-          CONFIG_TCP_CONG_WESTWOOD=n
-          CONFIG_TCP_CONG_HTCP=n
-          CONFIG_IP_ECN=y
-          CONFIG_TCP_ECN=y
-          CONFIG_IPV6_ECN=y
-          CONFIG_IP_NF_TARGET_ECN=y
-          EOF
-          
-              # Additional TCP Algorithms if Brutal is Selected
-              if [[ "$TCP" == "BBRV1+ECN+Brutal" || "$TCP" == "BBRV1+BBRV3+ECN+Brutal" ]]; then
-                echo "🚀 Applying Brutal Specific Configurations..."
-                cat >> "$DEFCONFIG" << EOF
-          CONFIG_TCP_CONG_BRUTAL=y      
-          CONFIG_TCP_CONG_CUBIC=y       
-          CONFIG_TCP_CONG_VEGAS=y
-          CONFIG_TCP_CONG_NV=y
-          EOF
-                # Set Brutal as the Default Only if it's Compiled
-                cat >> "$DEFCONFIG" << EOF
-          CONFIG_DEFAULT_TCP_CONG=brutal
-          EOF
-                echo "🎉 BBR + ECN: Brutal Default Enabled (Cubic Fallback Included)"
-              else
-                # Not Brutal → Use Cubic as Safe Default
-                cat >> "$DEFCONFIG" << EOF
-          CONFIG_TCP_CONG_CUBIC=y        
-          CONFIG_DEFAULT_TCP_CONG=cubic
-          EOF
-                echo "🎉 BBR + ECN: Using Cubic as Default (Brutal Not Selected)"
-              fi
-          
+            SETCONFIG "CONFIG_TCP_CONG_BIC=n"
+            SETCONFIG "CONFIG_TCP_CONG_WESTWOOD=n"
+            SETCONFIG "CONFIG_TCP_CONG_HTCP=n"
+            SETCONFIG "CONFIG_IP_ECN=y"
+            SETCONFIG "CONFIG_TCP_ECN=y"
+            SETCONFIG "CONFIG_IPV6_ECN=y"
+            SETCONFIG "CONFIG_IP_NF_TARGET_ECN=y"          
+            # Additional TCP Algorithms if Brutal is Selected
+            if [[ "$TCP" == "BBRV1+ECN+Brutal" || "$TCP" == "BBRV1+BBRV3+ECN+Brutal" ]]; then
+              echo "🚀 Applying Brutal Specific Configurations..."
+              SETCONFIG "CONFIG_TCP_CONG_BRUTAL=y"
+              SETCONFIG "CONFIG_TCP_CONG_CUBIC=y"
+              SETCONFIG "CONFIG_TCP_CONG_VEGAS=y"
+              SETCONFIG "CONFIG_TCP_CONG_NV=y"
+              # Set Brutal as the Default Only if it's Compiled
+              SETCONFIG "CONFIG_DEFAULT_TCP_CONG=brutal"
+              echo "🎉 BBR + ECN: Brutal Default Enabled (Cubic Fallback Included)"
+            else
+              # Not Brutal → Use Cubic as Safe Default
+              SETCONFIG "CONFIG_DEFAULT_TCP_CONG=cubic"
+              echo "🎉 BBR + ECN: Using Cubic as Default (Brutal Not Selected)"
+            fi          
           else
             echo "☘️ Congestion Control Disabled, Skipping BBR + ECN Configuration"
             echo "🧩 Default Congestion Control Remains Unchanged"
@@ -4069,17 +4065,15 @@ jobs:
           # Additional TCP Congestion Control Configuration for BBRV3
           if [[ ("$TCP" == "BBRV1+BBRV3+ECN" || "$TCP" == "BBRV1+BBRV3+ECN+Brutal") &&
                 "$GKIVERSION" != "android16-6.12" ]]; then
+            HIDECONFIG "CONFIG_TCP_CONG_ADVANCED=y"
+            SETCONFIG "CONFIG_TCP_CONG_BBR=y"
+            SETCONFIG "CONFIG_TCP_CONG_BBR3=y"
             echo "🚀 Applying BBRV3 Specific Configurations..."
-            cat >> "$DEFCONFIG" << EOF
-          CONFIG_TCP_CONG_BBR3=y
-          EOF
           fi
 
           # Linux Security Module Baseband Guard Configuration
           if [[ "$LSM" == "true" ]]; then
-            cat >> "$DEFCONFIG" << EOF
-          CONFIG_BBG=y
-          EOF
+            SETCONFIG "CONFIG_BBG=y"
             echo "🎉 Linux Security Module Baseband Guard Configuration Applied"
           else
             echo "☘️ Linux Security Module Baseband Guard Disabled, Skipping..."
@@ -4087,61 +4081,53 @@ jobs:
           
           # IPSet and IPv6 NAT Configuration
           if [[ "$CPU" == sm* && "$NET" == "true" ]]; then
-
             # BPF Stream Parser for Non-6.12 Kernels
             if [[ "$KERNEL" != "6.12" ]]; then
-              cat >> "$DEFCONFIG" << EOF
-          CONFIG_BPF_STREAM_PARSER=y
-          EOF
+              SETCONFIG "CONFIG_BPF_STREAM_PARSER=y"
               echo "🎉 BPF Stream Parser Enabled for Kernel $KERNEL"
             else
               echo "☘️ BPF Stream Parser Disabled for Kernel $KERNEL, Skipping..."
             fi
+          fi
 
-            # Netfilter and IPSet Core Configuration
-            cat >> "$DEFCONFIG" << EOF
-          CONFIG_NETFILTER_XT_MATCH_ADDRTYPE=y
-          CONFIG_NETFILTER_XT_SET=y
-          CONFIG_IP_SET=y
-          CONFIG_IP_SET_MAX=65534
-          CONFIG_IP_SET_BITMAP_IP=y
-          CONFIG_IP_SET_BITMAP_IPMAC=y
-          CONFIG_IP_SET_BITMAP_PORT=y
-          CONFIG_IP_SET_HASH_IP=y
-          CONFIG_IP_SET_HASH_IPMARK=y
-          CONFIG_IP_SET_HASH_IPPORT=y
-          CONFIG_IP_SET_HASH_IPPORTIP=y
-          CONFIG_IP_SET_HASH_IPPORTNET=y
-          CONFIG_IP_SET_HASH_IPMAC=y
-          CONFIG_IP_SET_HASH_MAC=y
-          CONFIG_IP_SET_HASH_NETPORTNET=y
-          CONFIG_IP_SET_HASH_NET=y
-          CONFIG_IP_SET_HASH_NETNET=y
-          CONFIG_IP_SET_HASH_NETPORT=y
-          CONFIG_IP_SET_HASH_NETIFACE=y
-          CONFIG_IP_SET_LIST_SET=y
-          CONFIG_IP6_NF_NAT=y
-          CONFIG_IP6_NF_TARGET_MASQUERADE=y
-          CONFIG_NETFILTER_XT_TARGET_HL=y
-          CONFIG_IP_NF_TARGET_TTL=y
-          CONFIG_IP6_NF_TARGET_HL=y
-          CONFIG_NETFILTER_XT_MATCH_HL=y
-          CONFIG_IP_NF_MATCH_TTL=y
-          CONFIG_IP6_NF_MATCH_HL=y
-          CONFIG_IP_NF_MANGLE=y
-          CONFIG_IP6_NF_MANGLE=y
-          EOF
-
+          # Netfilter and IPSet Core Configuration
+          if [[ "$NET" == "true" ]]; then
+            SETCONFIG "CONFIG_NETFILTER_XT_MATCH_ADDRTYPE=y"
+            SETCONFIG "CONFIG_NETFILTER_XT_SET=y"
+            SETCONFIG "CONFIG_IP_SET=y"
+            SETCONFIG "CONFIG_IP_SET_MAX=65534"
+            SETCONFIG "CONFIG_IP_SET_BITMAP_IP=y"
+            SETCONFIG "CONFIG_IP_SET_BITMAP_IPMAC=y"
+            SETCONFIG "CONFIG_IP_SET_BITMAP_PORT=y"
+            SETCONFIG "CONFIG_IP_SET_HASH_IP=y"
+            SETCONFIG "CONFIG_IP_SET_HASH_IPMARK=y"
+            SETCONFIG "CONFIG_IP_SET_HASH_IPPORT=y"
+            SETCONFIG "CONFIG_IP_SET_HASH_IPPORTIP=y"
+            SETCONFIG "CONFIG_IP_SET_HASH_IPPORTNET=y"
+            SETCONFIG "CONFIG_IP_SET_HASH_IPMAC=y"
+            SETCONFIG "CONFIG_IP_SET_HASH_MAC=y"
+            SETCONFIG "CONFIG_IP_SET_HASH_NETPORTNET=y"
+            SETCONFIG "CONFIG_IP_SET_HASH_NET=y"
+            SETCONFIG "CONFIG_IP_SET_HASH_NETNET=y"
+            SETCONFIG "CONFIG_IP_SET_HASH_NETPORT=y"
+            SETCONFIG "CONFIG_IP_SET_HASH_NETIFACE=y"
+            SETCONFIG "CONFIG_IP_SET_LIST_SET=y"
+            HIDECONFIG "CONFIG_IP6_NF_NAT=y"
+            SETCONFIG "CONFIG_IP6_NF_TARGET_MASQUERADE=y"
+            SETCONFIG "CONFIG_NETFILTER_XT_TARGET_HL=y"
+            SETCONFIG "CONFIG_IP_NF_TARGET_TTL=y"
+            SETCONFIG "CONFIG_IP6_NF_TARGET_HL=y"
+            SETCONFIG "CONFIG_NETFILTER_XT_MATCH_HL=y"
+            SETCONFIG "CONFIG_IP_NF_MATCH_TTL=y"
+            SETCONFIG "CONFIG_IP6_NF_MATCH_HL=y"
+            SETCONFIG "CONFIG_IP_NF_MANGLE=y"
+            SETCONFIG "CONFIG_IP6_NF_MANGLE=y"
             echo "🎉 Netfilter and IPSet Core Configuration Applied"
-          else
-            echo "☘️ Netfilter and IPSet Core Configuration Disabled, Skipping..."
           fi
 
           # NT Synchronization (Primitives) Configuration
           if [[ "$NTSYNC" == "true" ]]; then
-            cat >> "$DEFCONFIG" << EOF
-          CONFIG_NTSYNC=y
-          EOF
+            SETCONFIG "CONFIG_NTSYNC=y"
             echo "🎉 NT Synchronization (Primitives) Configuration Applied"
           else
             echo "☘️ NT Synchronization (Primitives) Disabled, Skipping..."
@@ -4150,19 +4136,14 @@ jobs:
           # Apply Build Issues Fix
           # Disable BTF Debug info for Mediatek 6.1 Kernels
           if [[ "$KERNEL" == "6.1" && "$CPU" == mt* ]]; then
-            cat >> "$DEFCONFIG" << EOF
-          CONFIG_DEBUG_INFO_BTF=n
-            echo "🎉 BTF Configuration Applied"
-          else
+            SETCONFIG "CONFIG_DEBUG_INFO_BTF=n"
             echo "☘️ BTF Configuration Disabled, Only for Mediatek with Kernel 6.1, Skipping..."
           fi
 
           # Enable Rust Support if Requested
           if [[ "$ENABLERUSTC" == "true" ]]; then
-            cat >> "$DEFCONFIG" << EOF
-          CONFIG_RUST=y
-          CONFIG_ANDROID_BINDER_IPC_RUST=m
-          EOF
+            SETCONFIG "CONFIG_RUST=y"
+            SETCONFIG "CONFIG_ANDROID_BINDER_IPC_RUST=m"
             echo "🎉 Rust Support Request Applied and Granted"
           else
             echo "☘️ Rust Support Request Not Granted"
