@@ -2,7 +2,7 @@ name: ☘️ Dispatch & Fetch SM8750
 on:
   workflow_dispatch:
     inputs:
-      TARGET_WORKFLOW:
+      TARGETWORKFLOW:
         type: choice
         description: "Workflow to Trigger"
         required: true
@@ -13,7 +13,12 @@ on:
         type: boolean
         description: "Unique Identifier for Dispatch Run"
         required: false
-        default: true                       
+        default: true 
+      DISPATCHID:
+        type: string
+        description: "Unique Dispatch Identifier"
+        required: true
+        default: ""
       RELEASECHANNEL:
         type: choice
         description: "Release Channel (Stable / Beta / Nightly)"
@@ -169,12 +174,13 @@ on:
           - Balance+GitRelease
           - Experimental
           - Disable 
-
+concurrency:
+  group: sm8750-${{ github.event.inputs.RELEASECHANNEL }}
+  cancel-in-progress: false
 permissions:
   actions: write
   contents: write
   id-token: write
-
 jobs:
   matrix:
     runs-on: ubuntu-latest
@@ -193,7 +199,7 @@ jobs:
             oneplus_pad_3_b
           )
           echo "devices=$(printf '%s\n' "${DEVICES[@]}" | jq -R -s -c 'split("\n")[:-1]')" >> $GITHUB_OUTPUT
-
+  
   dispatch:
     needs: matrix
     runs-on: ubuntu-latest
@@ -274,7 +280,7 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          WORKFLOW="${{ github.event.inputs.TARGET_WORKFLOW }}"
+          WORKFLOW="${{ github.event.inputs.TARGETWORKFLOW }}"
           echo "🚀 Dispatching: $WORKFLOW for ${{ matrix.device }}"
           # Capture Timestamp Before Dispatch
           TIMESTART=$(date -u +"%Y-%m-%dT%H:%M:%SZ")          
@@ -303,7 +309,12 @@ jobs:
             -f SCHEDULERS="${{ github.event.inputs.SCHEDULERS }}" \
             -f SUSFSBRANCHDEV="${{ github.event.inputs.SUSFSBRANCHDEV }}" \
             -f REKERNEL="${{ github.event.inputs.REKERNEL }}" \
-            -f PROFILE="${{ github.event.inputs.PROFILE }}"
+            -f PROFILE="${{ github.event.inputs.PROFILE }}" \
+            -f UNIQUE="${{ github.event.inputs.UNIQUE }}" \
+            -f XUS="$XUS" \
+            -f UNICODE="$UNICODE" \
+            -f NTSYNC="$NTSYNC" \
+            -f DISPATCHID="$DISPATCHID"            
           echo "⏳ Waiting for Run to Register..."
           sleep 3
           # Fetch Latest Matching Run After Timestamp
@@ -638,7 +649,7 @@ jobs:
           🔨 Netfilter IP Set / IPv6 NAT  : ${{ github.event.inputs.NETFILTER }}
           🛜 TCP Congestion Control       : ${{ github.event.inputs.TCPALGORITHM }}
           ---   
-          🔠 Unicode Bypass               : ${{ github.event.inputs.UNICODE }}
+          🔠 Unicode Bypass               : ${{ env.UNICODE }}
           🚀 Hmbird / Windspeed           : ${{ github.event.inputs.WINDSPEED }}
           🗓️ Schedulers                   : ${{ github.event.inputs.SCHEDULERS }}
           ---   
@@ -697,22 +708,26 @@ jobs:
           EOF
           fi
 
-          # 5. Idempotent Check
-          set +e
-          gh release view "$TAG" >/dev/null 2>&1
-          EXISTS=$?
-          set -e
-          if [[ "$EXISTS" -eq 0 ]]; then
-            echo "♻️ Release Already Exists → Skipping"
-            exit 0
+          # 5. Idempotent Release Handling
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "♻️ Release Exists → Updating Assets"          
+            gh release upload "$TAG" \
+              --repo "$GITHUB_REPOSITORY" \
+              "${ASSETS[@]}" \
+              --clobber          
+            gh release edit "$TAG" \
+              --repo "$GITHUB_REPOSITORY" \
+              --title "$TITLE" \
+              --notes-file Release.txt \
+              --prerelease="$PRERELEASE" \
+              --latest="$LATEST"
+          else
+            echo "🚀 Release Does Not Exist → Creating Release"          
+            gh release create "$TAG" \
+              --repo "$GITHUB_REPOSITORY" \
+              --title "$TITLE" \
+              --notes-file Release.txt \
+              --prerelease="$PRERELEASE" \
+              --latest="$LATEST" \
+              "${ASSETS[@]}"
           fi
-
-          # 6. Create Release
-          echo "🚀 Creating Release: $TAG"
-          gh release create "$TAG" \
-            --repo "$GITHUB_REPOSITORY" \
-            --title "$TITLE" \
-            --notes-file Release.txt \
-            --prerelease=$PRERELEASE \
-            --latest=$LATEST \
-            "${ASSETS[@]}"
