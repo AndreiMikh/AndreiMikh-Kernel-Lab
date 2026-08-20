@@ -2918,6 +2918,38 @@ jobs:
         run: |
           set -Eeuo pipefail
 
+          # Check for Patch Reject Files
+          checkrejects() {
+            local SEARCHDIR="${1:-.}"
+            local REJFILES
+            REJFILES=$(find "$SEARCHDIR" -type f -name "*.rej" -print 2>/dev/null)
+            [[ -z "$REJFILES" ]] && return 0
+            while IFS= read -r REJFILE; do
+              local ORIGFILE="${REJFILE%.rej}"
+              ORIGFILE="${ORIGFILE#./}"
+              local FAILEDHUNKS
+              FAILEDHUNKS=$(grep -c '^@@ ' "$REJFILE" 2>/dev/null || true)
+              echo "⚠️ Patch Reject Detected"
+              echo "📝 Reject File  : $REJFILE"
+              echo "📄 Target File  : $ORIGFILE"
+              echo "⚠️ Failed Hunks : ${FAILEDHUNKS:-0}"
+              echo ""
+              cat "$REJFILE"
+              echo ""
+            done <<< "$REJFILES"
+            return 1
+          }
+
+          # Handle Patch Errors
+          rejecthandler() {
+            local EXITCODE=$?
+            trap - ERR
+            echo "⚠️ Patch Application Failed"
+            echo "🔍 Scanning for Reject Files..."
+            checkrejects . || true
+            exit "$EXITCODE"
+          }
+
           KCDIR="${GITHUB_WORKSPACE}/kernel_workspace/kernel_platform/common"
           PDIR="${GITHUB_WORKSPACE}/kernel_workspace/AndreiMikh-Kernel-Lab/patches"
           PATCHFILE="${PDIR}/drm-atomic.patch"
@@ -2952,7 +2984,6 @@ jobs:
           )
 
           cd "$KCDIR"
-
           echo "🔎 Validating DRM Atomic Target Files..."
           for TARGET in "${TARGETS[@]}"; do
             if [[ ! -f "$TARGET" ]]; then
@@ -2967,18 +2998,24 @@ jobs:
           echo "🧪 Checking Whether DRM Atomic Flicker Fix can be Applied..."
           if git apply --check "$PATCHFILE" >/dev/null 2>&1; then
             echo "🚀 Applying DRM Atomic Clone Validation Flicker Fix..."
+            trap rejecthandler ERR
             git apply "$PATCHFILE"
+            trap - ERR
             echo "✔️ DRM Atomic Flicker Fix Applied Successfully"
           elif git apply --reverse --check "$PATCHFILE" >/dev/null 2>&1; then
             echo "ℹ️ DRM Atomic Flicker Fix is Already Applied"
             echo "⏭️ Skipping..."
           else
-            echo "⚠️ DRM Atomic Patch is Imcompatible with this Kernel Source"
+            echo "⚠️ DRM Atomic Patch is Incompatible with this Kernel Source"
             echo ""
             echo "Patch Validation Failed"
             echo "The Build will Stop to Prevent an Unsafe / Partial DRM Modification"
             exit 1
           fi
+
+          # Verify Reject Files
+          echo "🔎 Checking for Patch Reject Files..."
+          checkrejects .
 
           echo ""
           echo "🎉 DRM Atomic Clone Validation Flicker Fix Completed"
