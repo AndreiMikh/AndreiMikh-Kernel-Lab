@@ -2005,6 +2005,11 @@ jobs:
           echo "📦 Version    : ${KSUVERSION:-Unknown}"
           echo "------------------------------"
           echo ""
+
+      - name: 🔧 Apply Fake Patches
+        if: ${{ github.event.inputs.SUSFSREPOSITORY != '-1' }}
+        run: |
+          kotlinc -script "$GITHUB_WORKSPACE/kernel_workspace/AndreiMikh-Kernel-Lab/scripts/PatchFakePatches.kts" apply "$GITHUB_WORKSPACE/kernel_workspace/kernel_platform/common"          
           
       - name: 🔧 SUSFS Patches (Auto Official / Fallback)and Kernel Compatibility Patches
         if: ${{ github.event.inputs.SUSFSREPOSITORY != '-1' }}
@@ -2329,268 +2334,6 @@ jobs:
 
           echo ""
           echo "🎉 SUSFS Patches Complete"
-
-          # Extract Sublevel
-          SUBLEVEL=$(grep '^SUBLEVEL *=' Makefile | head -n1 | cut -d= -f2 | tr -d ' ')          
-          # Fallback if Empty
-          SUBLEVEL="${SUBLEVEL:-0}"          
-          # Validate Numeric
-          if ! [[ "$SUBLEVEL" =~ ^[0-9]+$ ]]; then
-            echo "⚠️ Invalid Sublevel Detected: $SUBLEVEL — Forcing 0"
-            SUBLEVEL=0
-          fi
-          
-          echo "📂 Kernel Base   : $GKIVERSION"
-          echo "📂 Sublevel      : $SUBLEVEL"
-          echo ""
-
-          # TrustyOS Missing Fix (6.6)     
-          # Only Run if SUSFS is Enabled
-          if [[ "$SUSFSREPOSITORY" != "-1" ]]; then
-            # Only Apply for 6.6.x Kernel Series
-            if [[ "$KV2" == "66" && "$KV3" -le 6630 ]]; then
-              echo "🔧 Checking TrustyOS Requirement for Kernel 6.6.x..."
-              TRUSTYEXISTS=false
-              # Use Manifest Produced by Extract Manifest Step
-              MANIFESTFILE="$GITHUB_WORKSPACE/.repo/manifests_fallback/${FILE}.xml"
-              # Fallback (Sync Case)
-              if [[ ! -s "$MANIFESTFILE" ]]; then
-                MANIFESTFILE="$GITHUB_WORKSPACE/.repo/manifest.xml"
-              fi
-              # Detect Trusty Module in Manifest
-              if [[ -f "$MANIFESTFILE" ]] && grep -q "common-modules/trusty" "$MANIFESTFILE"; then
-                TRUSTYEXISTS=true
-              fi
-              # Apply Fix Only if Trusty is Missing          
-              if [[ "$TRUSTYEXISTS" == "false" ]]; then
-                echo "🛠 Applying TrustyOS Compatibility Fix (GKI 6.6)"
-                PATCHNAME="$(basename "${SUSFSPATCH:-}")"
-                if [[ -f "$PATCHNAME" ]]; then
-                 # Patch Adjustments
-                  sed -i \
-                    's/-32,12 +32,38/-32,11 +32,37/g' \
-                    "$PATCHNAME"
-                  sed -i \
-                    '/#include <trace\/hooks\/fs.h>/d' \
-                    "$PATCHNAME"
-                  echo "✔ TrustyOS Patch Adjusted"
-                else
-                  echo "⚠️ SUSFS Patch File Not Found, Skipping Trusty fix"
-                fi
-              else
-                echo "✔ TrustyOS Already Present in Manifest, Skipping Fix"
-              fi
-            fi
-          fi                    
-       
-          # SUSFS Meta Fake Patch Workaround
-          if [[ "$SUSFSREPOSITORY" != "-1" ]]; then          
-            # Patches are Applied Dynamically to Fix
-            # Mismatches Between SUSFS and Different Kernel Module
-            # Kernel Trees During Compilation
-            # → Fixes:
-            # → Add Missing Headers
-            # → Restore Expected Structures
-            # → Expand Code Blocks for Patch Matching
-            # → Remove Conflicting Includes
-            # → Lightweight and Safe for CI Environments   
-            fake_patched=0
-            fake_patched_dist=0
-            fake_patched_swap=0
-            fake_patched_ns=0
-            fake_patched_expand=0                                      
-            # Android 15 / Kernel 6.6 Postfix Compatibility Fixes
-            if [ "$KERNELMODULE" = "android15-6.6" ]; then
-              if [[ "$SUBLEVEL" -le 30 ]]; then
-              # Restore Missing NR Subpages Definition
-              # Required by Newer SUSFS Patches
-                if ! grep -qxF $'\tunsigned int nr_subpages = __PAGE_SIZE / PAGE_SIZE;' \
-                  ./fs/proc/task_mmu.c; then            
-                  echo "⚠️ Missing NR Subpages Definition Detected"
-                  echo "🔧 Applying Temporary Task MMU Compatibility Patch"            
-                  sed -i \
-                    -e '/int ret = 0, copied = 0;/a \\tunsigned int nr_subpages \= __PAGE_SIZE \/ PAGE_SIZE;' \
-                    -e '/int ret = 0, copied = 0;/a \\tpagemap_entry_t \*res = NULL;' \
-                    ./fs/proc/task_mmu.c           
-                  fake_patched=1
-                fi
-                        
-                # Add Missing Trace / Hooks / FS Header
-                if ! grep -qxF '#include <trace/hooks/fs.h>' ./fs/namespace.c && \
-                  ! grep -qF 'susfs_def.h' ./fs/namespace.c; then            
-                  echo "⚠️ Missing Trace Hooks Header Detected"
-                  echo "🔧 Injecting Required Header..."            
-                  sed -i \
-                    '/#include <trace\/hooks\/blk\.h>/a #include <trace\/hooks\/fs.h>' \
-                    ./fs/namespace.c            
-                  fake_patched_ns=1
-                fi
-            
-                # Expand Compact OEM if Block
-                # Required for SUSFS Patch Matching
-                if grep -qF 'if (vma->vm_end > last_vma_end)' ./fs/proc/task_mmu.c && \
-                   ! grep -qF 'if (vma->vm_end > last_vma_end) {' ./fs/proc/task_mmu.c; then            
-                  echo "⚠️ Compact if Block Detected"
-                  echo "🔧 Expanding Block for SUSFS Compatibility..."            
-                  perl -0777 -i -pe '
-                  s@if\\s*\\(vma->vm_end > last_vma_end\\)\\s*
-                  \\s*smap_gather_stats\\(vma,\\s*&mss,\\s*last_vma_end\\);@
-                  if (vma->vm_end > last_vma_end) {\\n\\t\\t\\t\\tsmap_gather_stats(vma, \\&mss, last_vma_end);\\n\\t\\t\\t}@
-                  gs
-                  ' ./fs/proc/task_mmu.c            
-                  fake_patched_expand=1
-                fi
-              fi
-
-              # SUSFS Tree Compatibility Fixes Sublevel 57
-              # GKI / OGKI Tree Compatibility
-              if (( SUBLEVEL <= 57 )); then           
-                # Inject Missing ZSwap Header
-                if ! grep -qxF '#include <linux/zswap.h>' ./mm/memory.c; then            
-                  echo "⚠️ Missing ZSwap Header Detected"
-                  echo "🔧 Injecting Required Header..."            
-                  sed -i \
-                    '/#include <linux\/sched\/sysctl\.h>/a #include <linux\/zswap.h>' \
-                    ./mm/memory.c            
-                  fake_patched_swap=1
-                fi
-              fi
-
-              # SUSFS Header Compatibility — Sublevel 89
-              if [[ "$SUBLEVEL" -eq 89 ]]; then
-                BASEC="./fs/proc/base.c"
-                SUSFSDEF="./include/linux/susfs_def.h"
-                if [[ ! -f "$BASEC" ]]; then
-                  echo "⚠️ Missing target file: $BASEC"
-                elif [[ ! -f "$SUSFSDEF" ]]; then
-                  echo "⚠️ Missing SUSFS header: $SUSFSDEF"
-                elif grep -qF '#include <linux/susfs_def.h>' "$BASEC"; then
-                  echo "☘️ SUSFS Header Already Present"
-                elif ! grep -qF '#include <linux/dma-buf.h>' "$BASEC"; then
-                  echo "⚠️ DMA-BUF Header Not Found"
-                  echo "⏭️ Skipping SUSFS Header Injection"
-                else
-                  echo "🔧 Applying SUSFS Header Compatibility Fix for Sublevel 89"
-                  sed -i '/^#include <linux\/dma-buf\.h>$/a\
-              #if defined(CONFIG_KSU_SUSFS_SUS_MAP) || defined(CONFIG_KSU_SUSFS_OPEN_REDIRECT)\
-              #include <linux/susfs_def.h>\
-              #endif' "$BASEC"
-
-                  if grep -qF '#include <linux/susfs_def.h>' "$BASEC"; then
-                    echo "☘️ SUSFS Header Successfully Injected"
-                  else
-                    echo "❌ SUSFS Header Injection Failed"
-                    exit 1
-                  fi
-                fi
-              fi
-
-              # Add Missing DMA-BUF Header
-              if [[ "$SUBLEVEL" -le 92 ]]; then
-                if ! grep -qxF '#include <linux/dma-buf.h>' \
-                  ./fs/proc/base.c; then            
-                  echo "⚠️ Missing DMA-BUF Header Detected"
-                  echo "🔧 Injecting Required Header"            
-                  sed -i \
-                    '/#include <linux\/cpufreq_times.h>/a #include <linux\/dma-buf.h>' \
-                    ./fs/proc/base.c
-                fi
-              fi
-            fi                
-      
-            # Android 14 / Kernel 6.1
-            if [[ "$KERNELMODULE" == "android14-6.1" ]]; then          
-              if ! grep -qxF $'\tif (!vma_pages(vma))' ./fs/proc/task_mmu.c; then
-                echo "⚠️ Missing VMA Pages Logic Detected"
-                echo "🔧 SUSFS Compatibility Workaround Enabled..."
-                fake_patched=1
-              fi
-          
-              if ! grep -qxF '#include <linux/dma-buf.h>' ./fs/proc/base.c; then
-                echo "⚠️ Missing DMA-BUF Header Detected"
-                echo "🔧 Injecting Required Header..."         
-                sed -i '/#include <linux\/cpufreq_times.h>/a #include <linux\/dma-buf.h>' ./fs/proc/base.c
-              fi
-          
-              # Trace / Hooks / Sched Headers Fix (Sublevel < 25)
-              if [[ "${SUBLEVEL:-0}" -le 25 ]] && \
-                 ! grep -qxF '#include <trace/hooks/sched.h>' ./fs/proc/base.c; then          
-                echo "⚠️ Missing Trace / Hooks / Sched Headers Detected"
-                echo "🔧 Injecting Trace / Hooks / Sched Headers..."          
-                sed -i '/#include <trace\/events\/oom\.h>/a #include <trace\/hooks\/sched.h>' ./fs/proc/base.c
-              fi
-            fi          
-          
-            # Android 12 / 5.10 and Android 13 / 5.15
-            if [[ "$KERNELMODULE" == *"5.10"* || "$KERNELMODULE" == *"5.15"* ]]; then          
-              if ! grep -qxF $'\tif (!vma_pages(vma))' ./fs/proc/task_mmu.c; then
-                echo "⚠️ Missing VMA Pages Logic Detected"
-                echo "🔧 SUSFS Compatibility Workaround Enabled..."
-                fake_patched=1
-              fi
-            fi
-          
-            # Set Nameidata 4-Arg -> 3-Arg Fix for 5.10
-            if [[ "$KERNELMODULE" == *"5.10"* ]] && \
-               grep -q 'set_nameidata(nd, old_dfd, fake_filename, NULL)' ./fs/namei.c; then          
-              echo "⚠️ 5.10 Set Nameidata API Mismatch Detected"
-              echo "🔧 Converting 4-Arg Set Nameidata to 3-Arg..."          
-              sed -i \
-                's/set_nameidata(nd, old_dfd, fake_filename, NULL)/set_nameidata(nd, old_dfd, fake_filename)/g' \
-                ./fs/namei.c
-            fi
-          
-            # Android 13 / Kernel 5.15
-            if [[ "$KERNELMODULE" == *"5.15"* ]]; then          
-              if grep -qxF '#include <linux/swap_slots.h>' ./mm/memory.c && \
-                 ! grep -qxF '#include <linux/susfs_def.h>' ./mm/memory.c; then          
-                echo "⚠️ Conflicting Swap Slots Headers Include Detected"
-                echo "🔧 Removing Conflicting Include..."          
-                sed -i '/#include <linux\/swap_slots\.h>/d' ./mm/memory.c
-                fake_patched_dist=1
-              fi
-            fi
-          
-            # Android 16 / Kernel 6.12
-            if [[ "$KERNELMODULE" == "android16-6.12" ]]; then          
-              # Remove DMA-BUF Include for Older 6.12 Baselines
-              if [[ "${SUBLEVEL:-0}" -le 27 ]] && \
-                 grep -qxF '#include <linux/dma-buf.h>' ./fs/exec.c; then          
-                echo "⚠️ Incompatible DMA-BUF Include Detected in FS / Exec"
-                echo "🔧 Removing Incompatible Include..."          
-                sed -i '/#include <linux\/dma-buf\.h>/d' ./fs/exec.c
-              fi
-          
-              # VMA Data Pages > VMA Pages Rename for Newer 6.12 Baselines
-              if [[ "${SUBLEVEL:-0}" -ge 69 ]] && \
-                 grep -q 'vma_data_pages' ./fs/proc/task_mmu.c; then          
-                echo "⚠️ VMA Data Pages API Mismatch Detected"
-                echo "🔧 Replacing VMA Data Pages with VMA Pages..."          
-                sed -i 's/vma_data_pages/vma_pages/g' ./fs/proc/task_mmu.c
-              fi
-            fi
-            
-            # Revert Temporary Fake Patch
-            if [[ "$fake_patched" == 1 ]]; then          
-              echo "♻️ Reverting Temporary Fake Patch..."          
-              if [[ "$KERNELMODULE" == "android15-6.6" ]]; then          
-                if grep -qxF $'\tunsigned int nr_subpages = __PAGE_SIZE / PAGE_SIZE;' ./fs/proc/task_mmu.c; then
-                  sed -i \
-                    -e '/unsigned int nr_subpages \= __PAGE_SIZE \/ PAGE_SIZE;/d' \
-                    -e '/pagemap_entry_t \*res = NULL;/d' \
-                    ./fs/proc/task_mmu.c
-                fi
-              fi
-          
-              if [[ "$KERNELMODULE" == "android12-5.10" || \
-                    "$KERNELMODULE" == "android13-5.15" || \
-                    "$KERNELMODULE" == "android14-6.1" ]]; then          
-                if grep -qxF $'\t\t\tgoto show_pad;' ./fs/proc/task_mmu.c; then
-                  sed -i 's/goto show_pad;/return 0;/' ./fs/proc/task_mmu.c
-                fi
-              fi
-            fi
-          fi
           
           # 5.15 Legacy Fix
           if [[ "$GKIVERSION" == "android13-5.15" && "$SUBLEVEL" -lt 123 ]]; then          
@@ -2623,6 +2366,12 @@ jobs:
 
           echo ""
           echo "🎉 Kernel Compatibility Fix Stage Completed"
+
+      - name: 🔧 Revert Fake Patches
+        if: ${{ github.event.inputs.SUSFSREPOSITORY != '-1' }}
+        run: |
+          kotlinc -script "$GITHUB_WORKSPACE/kernel_workspace/AndreiMikh-Kernel-Lab/scripts/PatchFakePatches.kts" postfix "$GITHUB_WORKSPACE/kernel_workspace/kernel_platform/common"
+          kotlinc -script "$GITHUB_WORKSPACE/kernel_workspace/AndreiMikh-Kernel-Lab/scripts/PatchFakePatches.kts" revert "$GITHUB_WORKSPACE/kernel_workspace/kernel_platform/common"  
 
       - name: 🔧 LZ4 1.10.0 / ZSTD 1.5.7 Setup
         if: ${{ github.event.inputs.ZRAMCUSTOMPATCH != 'None' && github.event.inputs.ZRAMCUSTOMPATCH != '' }}
