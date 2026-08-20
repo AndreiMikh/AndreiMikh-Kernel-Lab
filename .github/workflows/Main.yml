@@ -2912,106 +2912,76 @@ jobs:
           echo ""
           echo "🎉 Scheduler Conversion Stage Completed"
 
-      - name: 🔧 DRM Atomic Clone Validation Update
-        # Apply only to kernel 6.6.118 SM8750 builds.
+      - name: 🔧 DRM Atomic Clone Validation Flicker Fix
         if: ${{ env.FULLVERSION == '6.6.118' && startsWith(env.CPU, 'sm8750') }}
         shell: bash
         run: |
           set -Eeuo pipefail
 
           KCDIR="${GITHUB_WORKSPACE}/kernel_workspace/kernel_platform/common"
-          FILE="${KCDIR}/drivers/gpu/drm/drm_atomic_helper.c"
-          BACKUP="${FILE}.drm_atomic_backup"
+          PDIR="${GITHUB_WORKSPACE}/kernel_workspace/AndreiMikh-Kernel-Lab/patches"
+          PATCHFILE="${PDIR}/drm-atomic.patch"
 
-          echo "🔧 Updating DRM Atomic Clone Validation..."
-          echo "📄 Target: ${FILE}"
+          echo "------------------------------"
+          echo "🚀 DRM Atomic Clone Validation Flicker Fix"
+          echo "📂 CPU        : ${CPU:-Unknown}"
+          echo "📂 Kernel     : ${FULLVERSION:-Unknown}"
+          echo "📂 Kernel Dir : $KCDIR"
+          echo "📄 Patch      : $PATCHFILE"
+          echo "------------------------------"
 
-          # Verify the Target File Exists Before Modifying
-          if [[ ! -f "${FILE}" ]]; then
-            echo "⚠️ DRM Atomic Source File Not Found!"
+          # Validate Kernel Directory
+          if [[ ! -d "$KCDIR" ]]; then
+            echo "⚠️ Kernel Directory Not Found:"
+            echo "$KCDIR"
             exit 1
           fi
 
-          # Create a Temporary Backup for Automatic Restoration on Failure
-          cp -p "${FILE}" "${BACKUP}"
-
-          restorebackup() {
-            echo "⚠️ DRM Atomic Update Failed..."
-            echo "↩️ Restoring Original Source..."
-            cp -p "${BACKUP}" "${FILE}"
-            rm -f "${BACKUP}"
-          }
-
-          trap restorebackup ERR
-
-          # Verify the Expected DRM Block Exists Exactly Once
-          MATCHES=$(grep -F -c \
-            'if (!drm_enc->possible_clones) {' \
-            "${FILE}" || true)
-
-          if [[ "${MATCHES}" -eq 0 ]]; then
-            echo "⚠️ Expected DRM Atomic Possible Clones Block Was Not Found!"
+          # Validate Patch
+          if [[ ! -f "$PATCHFILE" ]]; then
+            echo "⚠️ DRM Atomic Patch Not Found:"
+            echo "$PATCHFILE"
             exit 1
           fi
 
-          if [[ "${MATCHES}" -gt 1 ]]; then
-            echo "⚠️ DRM Atomic Possible Clones Block Found ${MATCHES} Times!"
+          # Validate Target Files
+          TARGETS=(
+            "drivers/gpu/drm/drm_atomic_helper.c"
+            "drivers/gpu/drm/drm_mode_config.c"
+            "include/drm/drm_mode_config.h"
+          )
+
+          cd "$KCDIR"
+
+          echo "🔎 Validating DRM Atomic Target Files..."
+          for TARGET in "${TARGETS[@]}"; do
+            if [[ ! -f "$TARGET" ]]; then
+              echo "⚠️ Required DRM File Not Found:"
+              echo "$TARGET"
+              exit 1
+            fi
+
+            echo "✔️ Found: $TARGET"
+          done
+
+          echo "🧪 Checking Whether DRM Atomic Flicker Fix can be Applied..."
+          if git apply --check "$PATCHFILE" >/dev/null 2>&1; then
+            echo "🚀 Applying DRM Atomic Clone Validation Flicker Fix..."
+            git apply "$PATCHFILE"
+            echo "✔️ DRM Atomic Flicker Fix Applied Successfully"
+          elif git apply --reverse --check "$PATCHFILE" >/dev/null 2>&1; then
+            echo "ℹ️ DRM Atomic Flicker Fix is Already Applied"
+            echo "⏭️ Skipping..."
+          else
+            echo "⚠️ DRM Atomic Patch is Imcompatible with this Kernel Source"
+            echo ""
+            echo "Patch Validation Failed"
+            echo "The Build will Stop to Prevent an Unsafe / Partial DRM Modification"
             exit 1
           fi
 
-          # Replace the Old DRM Atomic Clone Validation
-          perl -0pi -e '
-            s{
-              drm_for_each_encoder_mask\s*\(
-              \s*drm_enc,\s*crtc->dev,\s*crtc_state->encoder_mask
-              \s*\)\s*\{
-              \s*if\s*\(\s*!drm_enc->possible_clones\s*\)\s*\{
-              \s*DRM_DEBUG\("enc%d possible_clones is 0\\n",\s*drm_enc->base.id\);
-              \s*continue;
-              \s*\}
-            }{
-              drm_for_each_encoder_mask(drm_enc, crtc->dev, crtc_state->encoder_mask) {
-              		if (!(crtc->dev->mode_config.encoder_clones_explicit &
-              		      drm_encoder_mask(drm_enc)))
-              			continue;
-            }x
-          ' "${FILE}"
-
-          # Verify the New Encoder Clones Explicit Implementation was Applied
-          if ! grep -Fq \
-            'crtc->dev->mode_config.encoder_clones_explicit' \
-            "${FILE}"; then
-            echo "⚠️ New Encoder Clones Explicit Check Was Not Found!"
-            exit 1
-          fi
-
-          # Verify DRM Encoder Mask was Added
-          if ! grep -Fq \
-            'drm_encoder_mask(drm_enc)' \
-            "${FILE}"; then
-            echo "⚠️ DRM Encoder Mask Was Not Found!"
-            exit 1
-          fi
-
-          # Verify the Old Possible Clones Implementation was Removed
-          if grep -Fq \
-            'if (!drm_enc->possible_clones)' \
-            "${FILE}"; then
-            echo "⚠️ Old Possible Clones Validation Is Still Present!"
-            exit 1
-          fi
-
-          # Update Succeeded, Remove the Temporary Backup
-          rm -f "${BACKUP}"
-          trap - ERR
-
-          echo "🚀 DRM Atomic Clone Validation Updated Successfully!"
-
-          echo
-          echo "🔍 Verified Result:"
-          grep -A6 -B2 \
-            'drm_for_each_encoder_mask(drm_enc, crtc->dev, crtc_state->encoder_mask)' \
-            "${FILE}"
+          echo ""
+          echo "🎉 DRM Atomic Clone Validation Flicker Fix Completed"
      
       - name: 🔧 Unicode Bypass
         if: ${{ github.event.inputs.UNICODE == 'true' }}
