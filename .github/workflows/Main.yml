@@ -2328,7 +2328,21 @@ jobs:
           checkrejects .
 
           echo ""
-          echo "🎉 SUSFS Patches Complete"  
+          echo "🎉 SUSFS Patches Complete"
+
+          # Extract Sublevel
+          SUBLEVEL=$(grep '^SUBLEVEL *=' Makefile | head -n1 | cut -d= -f2 | tr -d ' ')          
+          # Fallback if Empty
+          SUBLEVEL="${SUBLEVEL:-0}"          
+          # Validate Numeric
+          if ! [[ "$SUBLEVEL" =~ ^[0-9]+$ ]]; then
+            echo "⚠️ Invalid Sublevel Detected: $SUBLEVEL — Forcing 0"
+            SUBLEVEL=0
+          fi
+          
+          echo "📂 Kernel Base   : $GKIVERSION"
+          echo "📂 Sublevel      : $SUBLEVEL"
+          echo ""
 
           # TrustyOS Missing Fix (6.6)     
           # Only Run if SUSFS is Enabled
@@ -2400,79 +2414,51 @@ jobs:
                     ./fs/proc/task_mmu.c           
                   fake_patched=1
                 fi
-              fi
             
-              # Add Missing DMA-BUF Header
-              if (( SUBLEVEL <= 92 )); then
-                if ! grep -qxF '#include <linux/dma-buf.h>' \
-                  ./fs/proc/base.c; then            
-                  echo "⚠️ Missing DMA-BUF Header Detected"
-                  echo "🔧 Injecting Required Header"            
-                  sed -i \
-                    '/#include <linux\/cpufreq_times.h>/a #include <linux\/dma-buf.h>' \
-                    ./fs/proc/base.c
-                fi
-              fi
-
-              # VMA Pad Start Compatibility
-              if grep -q 'VMA_PAD_START(' ./fs/proc/task_mmu.c && \
-                 ! grep -Eq '#include <linux/pgsize_migration(_inline)?\.h>|define VMA_PAD_START' ./fs/proc/task_mmu.c; then          
-                echo "⚠️ Missing VMA Pad Start Definition Detected"
-                echo "🔧 Adding VMA Pad Start Fallback..."          
-                perl -0777 -i -pe '
-                  s@((?:^#include .*\\n)+)@$1\\n#ifndef VMA_PAD_START\\n#define VMA_PAD_START(vma) ((vma)->vm_end)\\n#endif\\n\\n@s
-                ' ./fs/proc/task_mmu.c
-              fi
-            
-              # Post Fix - Page Size Compat / Local Fold File Map Fixup Entry Compatibility
-              TASKMMU="./fs/proc/task_mmu.c"
-              PAGECOMPAT="./include/linux/page_size_compat.h"            
-              if grep -q '__fold_filemap_fixup_entry(' "$TASKMMU" && \
-                 ! grep -Eq 'static[[:space:]]+inline[[:space:]]+void[[:space:]]+__fold_filemap_fixup_entry' "$TASKMMU"; then            
-                if [[ -f "$PAGECOMPAT" ]] && \
-                   grep -q '__fold_filemap_fixup_entry' "$PAGECOMPAT"; then            
-                  # Header Provides Helper Include it if Missing
-                  if ! grep -qxF '#include <linux/page_size_compat.h>' "$TASKMMU"; then
-                    echo "⚠️ Missing Page Size Compat Headers Include Detected"
-                    echo "🔧 Injecting Page Size Compat Headers Include..."          
-                    sed -i \
-                      '/^#include /a #include <linux/page_size_compat.h>' \
-                      "$TASKMMU"
-                  fi            
-                else            
-                  # Header Missing or Does Not Declare Helper
-                  echo "⚠️ Page Size Compat Headers Missing or Incomplete"
-                  echo "🔧 Adding Local Fold File Map Fixup Entry Stub..."            
+                # VMA Pad Start Compatibility
+                if grep -q 'VMA_PAD_START(' ./fs/proc/task_mmu.c && \
+                   ! grep -Eq '#include <linux/pgsize_migration(_inline)?\.h>|define VMA_PAD_START' ./fs/proc/task_mmu.c; then          
+                  echo "⚠️ Missing VMA Pad Start Definition Detected"
+                  echo "🔧 Adding VMA Pad Start Fallback..."          
                   perl -0777 -i -pe '
-                    s@((?:^#include .*\\n)+)@$1\\n#ifndef __fold_filemap_fixup_entry\\nstatic inline void __fold_filemap_fixup_entry(struct vma_iterator *iter, unsigned long *end) { }\\n#endif /* __fold_filemap_fixup_entry */\\n\\n@s
-                  ' "$TASKMMU"
+                    s@((?:^#include .*\\n)+)@$1\\n#ifndef VMA_PAD_START\\n#define VMA_PAD_START(vma) ((vma)->vm_end)\\n#endif\\n\\n@s
+                  ' ./fs/proc/task_mmu.c
                 fi
-              fi
             
-              # SUSFS Tree Compatibility Fixes Sublevel 57
-              # GKI / OGKI Tree Compatibility
-              if (( SUBLEVEL <= 57 )); then           
-                # Inject Missing ZSwap Header
-                if ! grep -qxF '#include <linux/zswap.h>' ./mm/memory.c; then            
-                  echo "⚠️ Missing ZSwap Header Detected"
-                  echo "🔧 Injecting Required Header..."            
-                  sed -i \
-                    '/#include <linux\/sched\/sysctl\.h>/a #include <linux\/zswap.h>' \
-                    ./mm/memory.c            
-                  fake_patched_swap=1
+                # Post Fix - Page Size Compat / Local Fold File Map Fixup Entry Compatibility
+                TASKMMU="./fs/proc/task_mmu.c"
+                PAGECOMPAT="./include/linux/page_size_compat.h"            
+                if grep -q '__fold_filemap_fixup_entry(' "$TASKMMU" && \
+                   ! grep -Eq 'static[[:space:]]+inline[[:space:]]+void[[:space:]]+__fold_filemap_fixup_entry' "$TASKMMU"; then            
+                  if [[ -f "$PAGECOMPAT" ]] && \
+                     grep -q '__fold_filemap_fixup_entry' "$PAGECOMPAT"; then            
+                    # Header Provides Helper Include it if Missing
+                    if ! grep -qxF '#include <linux/page_size_compat.h>' "$TASKMMU"; then
+                      echo "⚠️ Missing Page Size Compat Headers Include Detected"
+                      echo "🔧 Injecting Page Size Compat Headers Include..."          
+                      sed -i \
+                        '/^#include /a #include <linux/page_size_compat.h>' \
+                        "$TASKMMU"
+                    fi            
+                  else            
+                    # Header Missing or Does Not Declare Helper
+                    echo "⚠️ Page Size Compat Headers Missing or Incomplete"
+                    echo "🔧 Adding Local Fold File Map Fixup Entry Stub..."            
+                    perl -0777 -i -pe '
+                      s@((?:^#include .*\\n)+)@$1\\n#ifndef __fold_filemap_fixup_entry\\nstatic inline void __fold_filemap_fixup_entry(struct vma_iterator *iter, unsigned long *end) { }\\n#endif /* __fold_filemap_fixup_entry */\\n\\n@s
+                    ' "$TASKMMU"
+                  fi
                 fi
             
                 # Add Missing Trace / Hooks / FS Header
-                if (( SUBLEVEL <= 30 )); then
-                  if ! grep -qxF '#include <trace/hooks/fs.h>' ./fs/namespace.c && \
-                     ! grep -qF 'susfs_def.h' ./fs/namespace.c; then            
-                    echo "⚠️ Missing Trace Hooks Header Detected"
-                    echo "🔧 Injecting Required Header..."            
-                    sed -i \
-                      '/#include <trace\/hooks\/blk\.h>/a #include <trace\/hooks\/fs.h>' \
-                      ./fs/namespace.c            
-                    fake_patched_ns=1
-                  fi
+                if ! grep -qxF '#include <trace/hooks/fs.h>' ./fs/namespace.c && \
+                  ! grep -qF 'susfs_def.h' ./fs/namespace.c; then            
+                  echo "⚠️ Missing Trace Hooks Header Detected"
+                  echo "🔧 Injecting Required Header..."            
+                  sed -i \
+                    '/#include <trace\/hooks\/blk\.h>/a #include <trace\/hooks\/fs.h>' \
+                    ./fs/namespace.c            
+                  fake_patched_ns=1
                 fi
             
                 # Expand Compact OEM if Block
@@ -2488,6 +2474,32 @@ jobs:
                   gs
                   ' ./fs/proc/task_mmu.c            
                   fake_patched_expand=1
+                fi
+              fi
+
+              # SUSFS Tree Compatibility Fixes Sublevel 57
+              # GKI / OGKI Tree Compatibility
+              if (( SUBLEVEL <= 57 )); then           
+                # Inject Missing ZSwap Header
+                if ! grep -qxF '#include <linux/zswap.h>' ./mm/memory.c; then            
+                  echo "⚠️ Missing ZSwap Header Detected"
+                  echo "🔧 Injecting Required Header..."            
+                  sed -i \
+                    '/#include <linux\/sched\/sysctl\.h>/a #include <linux\/zswap.h>' \
+                    ./mm/memory.c            
+                  fake_patched_swap=1
+                fi
+              fi
+
+              # Add Missing DMA-BUF Header
+              if (( SUBLEVEL <= 92 )); then
+                if ! grep -qxF '#include <linux/dma-buf.h>' \
+                  ./fs/proc/base.c; then            
+                  echo "⚠️ Missing DMA-BUF Header Detected"
+                  echo "🔧 Injecting Required Header"            
+                  sed -i \
+                    '/#include <linux\/cpufreq_times.h>/a #include <linux\/dma-buf.h>' \
+                    ./fs/proc/base.c
                 fi
               fi
             fi                
@@ -2585,20 +2597,6 @@ jobs:
               fi
             fi
           fi
-          
-          # Extract Sublevel
-          SUBLEVEL=$(grep '^SUBLEVEL *=' Makefile | head -n1 | cut -d= -f2 | tr -d ' ')          
-          # Fallback if Empty
-          SUBLEVEL="${SUBLEVEL:-0}"          
-          # Validate Numeric
-          if ! [[ "$SUBLEVEL" =~ ^[0-9]+$ ]]; then
-            echo "⚠️ Invalid Sublevel Detected: $SUBLEVEL — Forcing 0"
-            SUBLEVEL=0
-          fi
-          
-          echo "📂 Kernel Base   : $GKIVERSION"
-          echo "📂 Sublevel      : $SUBLEVEL"
-          echo ""
           
           # 5.15 Legacy Fix
           if [[ "$GKIVERSION" == "android13-5.15" && "$SUBLEVEL" -lt 123 ]]; then          
