@@ -1303,124 +1303,161 @@ jobs:
         shell: bash
         run: |
           set -Eeuo pipefail
-      
+
           cd kernel_workspace/kernel_platform
-      
+
           echo "📂 Working Directory: $(pwd)"
-      
+
           # Resolve Kernel Common Directory
-          echo "🔍 Locating Kernel Common Directory..."      
+          echo "🔍 Locating Kernel Common Directory..."
           if [[ -f "./common/Makefile" ]]; then
-            KCDIR="./common"      
+            KCDIR="./common"
           elif [[ -f "./kernel_platform/common/Makefile" ]]; then
-            KCDIR="./kernel_platform/common"     
+            KCDIR="./kernel_platform/common"
           else
-            echo "⚠️ ERROR: Kernel Common Makefile Not Found"   
+            echo "⚠️ ERROR: Kernel Common Makefile Not Found"
             echo "📂 Nearby Makefiles:"
-            find . -maxdepth 4 -name Makefile | head -20      
+            find . -maxdepth 4 -name Makefile | head -20
             exit 1
           fi
-      
-          COMMONMAKEFILE="$KCDIR/Makefile"      
+
+          COMMONMAKEFILE="$KCDIR/Makefile"
           echo "🚀 Kernel Common Directory Found"
           echo "📌 Using Makefile: $COMMONMAKEFILE"
           echo ""
-      
+
           # Detect Kernel Module Branch
-          echo "🔍 Detecting Kernel Module Branch..."      
-          KERNELMODULE=""      
-          # Try Standard Build Configurations
+          echo "🔍 Detecting Kernel Module Branch..."
+          KERNELMODULE=""
+
           for cfg in \
             "$KCDIR/build.config.constants" \
-            "$KCDIR/build.config.common"; do      
+            "$KCDIR/build.config.common"; do
             if [[ -f "$cfg" ]]; then
-              TMPBRANCH=$(grep -m1 '^BRANCH=' "$cfg" | cut -d= -f2 || true)   
+              TMPBRANCH=$(grep -m1 '^BRANCH=' "$cfg" | cut -d= -f2 || true)
+
               if [[ -n "${TMPBRANCH:-}" ]]; then
                 KERNELMODULE="$TMPBRANCH"
                 break
               fi
             fi
           done
-      
+
           # Fallback Using ACK SHA
           if [[ -z "${KERNELMODULE:-}" && -n "${KERNELREPOSITORY:-}" \
-            && -f "./$KERNELREPOSITORY/android/ACK_SHA" ]]; then      
+            && -f "./$KERNELREPOSITORY/android/ACK_SHA" ]]; then
             KERNELMODULE=$(sed -n '2p' "./$KERNELREPOSITORY/android/ACK_SHA" \
               | awk -F'-' '{print $1"-"$2}')
           fi
-      
+
           # Parse Kernel Module Information
-          if [[ -n "${KERNELMODULE:-}" ]]; then      
+          if [[ -n "${KERNELMODULE:-}" ]]; then
             ANDROIDVERSION="${KERNELMODULE%-*}"
-            KERNELVERSION="${KERNELMODULE#*-}"      
+            KERNELVERSION="${KERNELMODULE#*-}"
+
             echo "🚀 Kernel Module Detected"
             echo "📌 Kernel Module   : $KERNELMODULE"
             echo "📌 Android Version : $ANDROIDVERSION"
-            echo "📌 Kernel Branch   : $KERNELVERSION"      
+            echo "📌 Kernel Branch   : $KERNELVERSION"
           else
-            echo "⚠️ Unable to Detect Kernel Module"      
+            echo "⚠️ Unable to Detect Kernel Module"
+
             KERNELMODULE="Unknown"
             ANDROIDVERSION="Unknown"
             KERNELVERSION="Unknown"
           fi
-      
+
           # Read Actual Kernel Version
+          echo ""
           echo "🧾 Reading Real Kernel Version..."
-      
-          VERSION=$(awk '/^VERSION =/ {print $3}' "$COMMONMAKEFILE")
-          PATCHLEVEL=$(awk '/^PATCHLEVEL =/ {print $3}' "$COMMONMAKEFILE")
-          SUBLEVEL=$(awk '/^SUBLEVEL =/ {print $3}' "$COMMONMAKEFILE")      
-          OGVERSION="${VERSION}.${PATCHLEVEL}.${SUBLEVEL}"      
+
+          VERSION=$(grep '^VERSION[[:space:]]*=' "$COMMONMAKEFILE" \
+            | head -n1 | cut -d= -f2 | tr -d ' ')
+
+          PATCHLEVEL=$(grep '^PATCHLEVEL[[:space:]]*=' "$COMMONMAKEFILE" \
+            | head -n1 | cut -d= -f2 | tr -d ' ')
+
+          # Extract Sublevel
+          SUBLEVEL=$(grep '^SUBLEVEL[[:space:]]*=' "$COMMONMAKEFILE" \
+            | head -n1 | cut -d= -f2 | tr -d ' ')
+
+          # Fallback if Empty
+          VERSION="${VERSION:-0}"
+          PATCHLEVEL="${PATCHLEVEL:-0}"
+          SUBLEVEL="${SUBLEVEL:-0}"
+
+          # Validate Sublevel
+          if ! [[ "$SUBLEVEL" =~ ^[0-9]+$ ]]; then
+            echo "⚠️ Invalid Sublevel Detected: $SUBLEVEL — Forcing 0"
+            SUBLEVEL=0
+          fi
+
+          OGVERSION="${VERSION}.${PATCHLEVEL}.${SUBLEVEL}"
+
+          echo "📌 Kernel Version : $VERSION.$PATCHLEVEL"
+          echo "📌 Kernel Sublevel: $SUBLEVEL"
           echo "📌 Original Kernel Version: $OGVERSION"
-      
+
           # Optional Sublevel Override
-          SUBLVLINPUT="${{ github.event.inputs.SUBLEVEL }}"    
-          if [[ -n "${SUBLVLINPUT:-}" ]]; then      
+          SUBLVLINPUT="${{ github.event.inputs.SUBLEVEL }}"
+
+          if [[ -n "${SUBLVLINPUT:-}" ]]; then
+            echo ""
             echo "🛠️ Updating Kernel Sublevel..."
-            echo "📌 New Sublevel: $SUBLVLINPUT"      
+            echo "📌 New Sublevel: $SUBLVLINPUT"
+
+            if ! [[ "$SUBLVLINPUT" =~ ^[0-9]+$ ]]; then
+              echo "⚠️ Invalid Custom Sublevel: $SUBLVLINPUT"
+              exit 1
+            fi
+
             sed -i \
               "s/^\(SUBLEVEL[[:space:]]*=[[:space:]]*\).*/\1$SUBLVLINPUT/" \
-              "$COMMONMAKEFILE"      
+              "$COMMONMAKEFILE"
           else
             echo "📌 No Custom Sublevel Provided"
           fi
-      
+
           # Read Updated Kernel Version
           NEWVERSION=$(awk '
-            /^VERSION =/ {v=$3}
-            /^PATCHLEVEL =/ {p=$3}
-            /^SUBLEVEL =/ {s=$3}
+            /^VERSION[[:space:]]*=/ {v=$3}
+            /^PATCHLEVEL[[:space:]]*=/ {p=$3}
+            /^SUBLEVEL[[:space:]]*=/ {s=$3}
             END {print v "." p "." s}
           ' "$COMMONMAKEFILE")
-      
-          echo "📊 Final Kernel Version: $NEWVERSION"      
+
+          echo ""
+          echo "📊 Final Kernel Version: $NEWVERSION"
+
           if [[ "$OGVERSION" != "$NEWVERSION" ]]; then
             echo "⚙️ Kernel Version Modified"
             echo "📌 $OGVERSION → $NEWVERSION"
           else
             echo "✔️ Kernel Version Unchanged"
           fi
-      
+
           # Export Environment Variables
+          echo ""
           echo "📤 Exporting Environment Variables..."
-      
+
           {
+            echo "SUBLEVEL=$SUBLEVEL"
             echo "KERNELMODULE=$KERNELMODULE"
             echo "ANDROIDVERSION=$ANDROIDVERSION"
-            echo "KERNELVERSION=$KERNELVERSION"   
-            echo "FULLVERSION=$NEWVERSION"      
+            echo "KERNELVERSION=$KERNELVERSION"
+            echo "FULLVERSION=$NEWVERSION"
             echo "KV1=$(echo "$KERNELVERSION" | cut -d. -f1)"
             echo "KV2=$(echo "$KERNELVERSION" | tr -d '.')"
-            echo "KV3=$(echo "$NEWVERSION" | tr -d '.')"      
+            echo "KV3=$(echo "$NEWVERSION" | tr -d '.')"
             echo "KSHORTVERSION=$(echo "$NEWVERSION" | cut -d. -f1,2)"
             echo "KSHORTPATCHVERSION=$(echo "$NEWVERSION" | cut -d. -f1,2 | tr '.' '_')"
           } >> "$GITHUB_ENV"
-      
+
           echo "🚀 Environment Variables Exported"
-      
+
           echo ""
           echo "🎉 Kernel Version Setup Complete"
-  
+    
       - name: 🔧 Detect Rust Compiler Requirement
         shell: bash
         run: |
@@ -2013,25 +2050,6 @@ jobs:
           echo "📦 Version    : ${KSUVERSION:-Unknown}"
           echo "------------------------------"
           echo ""
-
-      - name: 🔧 Extract Kernel Sublevel
-        run: |
-          cd "$GITHUB_WORKSPACE/kernel_workspace/kernel_platform/common"
-
-          # Extract Sublevel
-          SUBLEVEL=$(grep '^SUBLEVEL *=' Makefile | head -n1 | cut -d= -f2 | tr -d ' ')
-
-          # Fallback if Empty
-          SUBLEVEL="${SUBLEVEL:-0}"
-
-          # Validate Numeric
-          if ! [[ "$SUBLEVEL" =~ ^[0-9]+$ ]]; then
-            echo "⚠️ Invalid Sublevel Detected: $SUBLEVEL — Forcing 0"
-            SUBLEVEL=0
-          fi
-
-          echo "SUBLEVEL=$SUBLEVEL" >> "$GITHUB_ENV"
-          echo "📌 Kernel Sublevel: $SUBLEVEL"
 
       - name: 🔧 Apply Fake Patches
         if: ${{ github.event.inputs.SUSFSREPOSITORY != '-1' }}
