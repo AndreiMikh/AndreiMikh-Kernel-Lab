@@ -3,8 +3,7 @@ name: Build Ace6 Kernel
 on:
   workflow_dispatch:      # MANUAL TRIGGER (MAIN ENTRY)
     inputs:
-      # ---------- KERNELSU ----------
-      ksu_type:
+      ksumeta:
         description: 'KernelSU variant (resukisu = built-in KSU, none = no KSU)'
         required: true
         type: choice
@@ -12,35 +11,31 @@ on:
         options:
           - 'resukisu'
           - 'none'
-      susfs_enable:
+      susfsmeta:
         description: 'SUSFS mount/root hiding (only takes effect when KernelSU is enabled above)'
         required: true
         type: boolean
         default: 'false'
-
-      # ---------- PERFORMANCE ----------
-      lz4_zstd:
+      neonlz4:
         description: 'Update kernel compression libraries to LZ4 1.10 + ZSTD 1.5.7 (ARM64 NEON, better ratio) - replaces in-tree LZ4/ZSTD'
         required: true
         type: boolean
         default: 'false'
-      lz4kd_enable:
+      lz4kd:
         description: 'Add LZ4KD ZRAM compressor (independent LZ4 variant) - appears in comp_algorithm and can be switched through sysfs'
         required: true
         type: boolean
         default: 'false'
-      show_all_algos:
+      showalgos:
         description: 'Compile all ZRAM compressors (including LZ4HC/842) - comp_algorithm lists all available algorithms'
         required: true
         type: boolean
         default: 'false'
-      zram_writeback:
+      zramwriteback:
         description: 'ZRAM writeback support (idle/incompressible pages -> backing device; requires runtime backing_dev configuration)'
         required: true
         type: boolean
         default: 'false'
-
-      # ---------- FEATURES ----------
       droidspaces:
         description: 'Droidspaces container (standard = +NTSYNC, extend = more features)'
         required: true
@@ -50,66 +45,62 @@ on:
           - 'false'
           - 'standard'
           - 'extend'
-      baseband_guard:
+      basebandguard:
         description: 'Kernel-level Baseband Guard (anti-format)'
         required: true
         type: boolean
         default: 'false'
-      cve_patch:
+      cvefixpatch:
         description: 'CVE security patches (GhostLock) - upstream lineage-23.2 already ships them'
         required: true
         type: boolean
         default: 'false'
-      better_net:
+      netfilter:
         description: 'Better networking (IPSET/IPTABLES)'
         required: true
         type: boolean
         default: 'false'
-      bbr_enable:
+      bbr:
         description: 'BBR TCP congestion control'
         required: true
         type: boolean
         default: 'false'
-      kpm_enable:
+      kpmodule:
         description: 'KPM/KPN support (KPatchNext; may conflict with ReSukiSU built-in KPM)'
         required: true
         type: boolean
         default: 'false'
-      rekernel_enable:
+      rekernel:
         description: 'Re:Kernel support (Freezer/NoActive binder hooks)'
         required: true
         type: boolean
         default: 'false'
-      kernel_suffix:
+      ksuffix:
         description: 'Kernel version suffix (e.g. perf; empty = real commit)'
         required: false
         type: string
         default: ''
-
-      # ---------- ATTRIBUTION ----------
-      attribution_enable:
+      attribute:
         description: 'Attribution (build tags/KSU version/AK3)'
         required: true
         type: boolean
         default: 'true'
-      build_user:
+      builduser:
         description: 'Attribution user'
         required: false
         type: string
         default: 'Lingguang'
-      build_host:
+      buildhost:
         description: 'Attribution host'
         required: false
         type: string
         default: 'kernel-builder'
-
-      # ---------- RELEASE ----------
-      release_enable:
+      enablerelease:
         description: 'Create GitHub Release'
         required: true
         type: boolean
         default: 'false'
-      artifact_mode:
+      artifactmode:
         description: 'Upload artifacts (ak3 or all: +Image+boot.img)'
         required: true
         type: choice
@@ -117,12 +108,12 @@ on:
         options:
           - 'ak3'
           - 'all'
-      ccache_update:
+      buildccacheupdate:
         description: 'Update public ccache (upload to Release)'
         required: true
         type: boolean
         default: 'false'
-      ccache_debug:
+      buildccachedebug:
         description: 'Upload ccache debug logs'
         required: true
         type: boolean
@@ -132,34 +123,30 @@ on:
         required: false
         type: string
         default: ''
-      build_time:
+      kbuildtime:
         description: 'Custom build time string (e.g. Sun Dec 01 08:10:00 UTC 2024); empty = current UTC time'
         required: false
         type: string
         default: ''
-      debug_skip_build:
+      debugskipbuild:
         description: 'Debug: skip kernel build, test packaging/upload only (creates dummy Image)'
         required: true
         type: boolean
         default: 'false'
-
 concurrency:
   group: build-kernel
   cancel-in-progress: false
-
 permissions:
-  contents: write         # GH RELEASE CREATE/UPLOAD FOR CCACHE + KERNEL RELEASES
-
+  contents: write
 jobs:
   build:
     runs-on: ubuntu-24.04
     timeout-minutes: 120
     outputs:
       ak3name: ${{ steps.package.outputs.ak3name }}
-      ksuver: ${{ steps.ksu_version.outputs.ksuver }}
+      ksuver: ${{ steps.ksuversion.outputs.ksuver }}
       kernelrel: ${{ steps.verify.outputs.kernelrel }}
       kernelver: ${{ steps.verify.outputs.kernelver }}
-
     steps:
       - uses: actions/checkout@v4
 
@@ -172,7 +159,6 @@ jobs:
           sudo apt-get install -y zip zstd patch bc flex bison \
             libssl-dev libncurses-dev libelf-dev dwarves python3 ccache mkbootimg
 
-          # DOWNLOAD OFFICIAL TOOLCHAIN FROM RELEASE
           gh release download "toolchain-AOSP-Clang-21.0.0-r563880c" \
             -p "clang-r563880c.tar.gz" \
             -R $GITHUB_REPOSITORY
@@ -181,63 +167,38 @@ jobs:
           tar xzf clang-r563880c.tar.gz -C clang
           echo "$PWD/clang/bin" >> "$GITHUB_PATH"
 
-          # MKBOOTIMG IMPORTS GKI.GENERATE_GKI_CERTIFICATE (AOSP GKI SIGNING
-          # MODULE); KERNEL/BUILD MAIN HAS REMOVED IT. PROVIDE A STUB:
-          # THE FUNCTION IS ONLY INVOKED WHEN --GKI_SIGNING_KEY IS PASSED,
-          # WHICH THIS WORKFLOW NEVER DOES.
           mkdir -p /tmp/gki
           printf 'def generate_gki_certificate(*args, **kwargs):\n    raise SystemExit("GKI SIGNING NOT SUPPORTED (STUB)")\n' \
             > /tmp/gki/generate_gki_certificate.py
           echo "PYTHONPATH=/tmp" >> "$GITHUB_ENV"
 
-      - name: ✅ Verify toolchain
+      - name: Verify Toolchain
         run: clang --version && clang -print-prog-name=ld.lld
 
-      # ---------- CCACHE ----------
-      - name: 🧹 Clean runner space (async, non-blocking)
+      - name: Clean Runner Space
         run: |
-          # DELETE RUNNER COMPONENTS IN THE BACKGROUND WITHOUT BLOCKING:
-          # - NO `WAIT`: THE STEP RETURNS IMMEDIATELY
-          # - STDOUT/STDERR ARE REDIRECTED TO /DEV/NULL
-          # - SETSID DETACHES THE PROCESSES FROM THE JOB PROCESS GROUP
           (setsid sudo rm -rf /usr/share/dotnet >/dev/null 2>&1 &)
           (setsid sudo rm -rf /usr/local/lib/android >/dev/null 2>&1 &)
           (setsid sudo rm -rf /opt/ghc >/dev/null 2>&1 &)
           (setsid sudo rm -rf /opt/hostedtoolcache/CodeQL >/dev/null 2>&1 &)
           df -h
 
-      - name: 💾 Configure ccache
+      - name: Configure CCache
         run: |
-          # USE CCACHE-ECS (SPECIALIZED KERNEL CACHE)
           sudo cp -f $GITHUB_WORKSPACE/lib/ccache-ecs /usr/local/bin/ccache
           sudo chmod +x /usr/local/bin/ccache
-
-          # CCACHE_DIR INSIDE THE WORKSPACE: ACTIONS/CACHE HANDLES
-          # WORKSPACE-RELATIVE PATHS CORRECTLY ON RESTORE. AN ABSOLUTE
-          # $HOME PATH CAN RESTORE TO THE WRONG LOCATION, SILENTLY
-          # DESTROYING THE CACHE HIT RATE.
           echo "CCACHE_DIR=$GITHUB_WORKSPACE/.ccache_ace6" >> "$GITHUB_ENV"
           echo "CCACHE_MAXSIZE=3G" >> "$GITHUB_ENV"
           echo "CCACHE_IS_KERNEL_COMPILING=true" >> "$GITHUB_ENV"
 
-          # RELAX CACHE MATCHING FOR CROSS-BUILD HITS
           mkdir -p "$GITHUB_WORKSPACE/.ccache_ace6"
           echo "sloppiness = file_stat_matches,include_file_ctime,include_file_mtime,pch_defines,file_macro,time_macros" \
             > "$GITHUB_WORKSPACE/.ccache_ace6/ccache.conf"
-
           ccache --version
 
-      - name: 🔑 Compute ccache fingerprint
+      - name: Compute CCache Fingerprint
         id: ccache-fp
         run: |
-          # EVERYTHING THAT CHANGES THE KERNEL .CONFIG MUST CHANGE THE CACHE KEY:
-          # FEATURE TOGGLES, SUFFIX, AND SOURCE COMMIT.
-          #
-          # OTHERWISE, A RESTORE-KEYS MATCH ON STALE PARAMETERS COULD SKIP THE
-          # RELEASE PULL AND FORCE A FULL REBUILD.
-          #
-          # BUILD_TIME IS INTENTIONALLY EXCLUDED BECAUSE IT ONLY TOUCHES
-          # TIMESTAMP FILES; SLOPPINESS TIME_MACROS HANDLES THE REST.
           SRC=$(curl -sL \
             "${{ vars.REPO_BASE || 'https://api.github.com' }}/repos/Ace6-Development/android_kernel_oneplus_sm8750/commits/lineage-23.2" \
             -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" |
@@ -245,44 +206,31 @@ jobs:
             head -1 |
             grep -oE '[0-9a-f]{40}' || true)
 
-          # SINGLE SOURCE OF TRUTH FOR PREPARE KERNEL SOURCES.
-          # THE FINGERPRINT IS GUARANTEED TO MATCH THE LOCALVERSION ACTUALLY USED.
           echo "SRC_COMMIT=$SRC" >> "$GITHUB_ENV"
 
           FP=$(printf '%s' \
-            "${{ inputs.ksu_type }}|${{ inputs.susfs_enable }}|${{ inputs.lz4_zstd }}|${{ inputs.lz4kd_enable }}|${{ inputs.show_all_algos }}|${{ inputs.zram_writeback }}|${{ inputs.droidspaces }}|${{ inputs.baseband_guard }}|${{ inputs.cve_patch }}|${{ inputs.better_net }}|${{ inputs.bbr_enable }}|${{ inputs.kpm_enable }}|${{ inputs.rekernel_enable }}|${{ inputs.kernel_suffix }}|$SRC" |
+            "${{ inputs.ksumeta }}|${{ inputs.susfsmeta }}|${{ inputs.neonlz4 }}|${{ inputs.lz4kd }}|${{ inputs.showalgos }}|${{ inputs.zramwriteback }}|${{ inputs.droidspaces }}|${{ inputs.basebandguard }}|${{ inputs.cvefixpatch }}|${{ inputs.netfilter }}|${{ inputs.bbr }}|${{ inputs.kpmodule }}|${{ inputs.rekernel }}|${{ inputs.ksuffix }}|$SRC" |
             md5sum |
             cut -d' ' -f1)
 
           echo "CCACHE_FP=$FP" >> "$GITHUB_ENV"
           echo "ccache fingerprint: $FP (src $SRC)"
 
-      - name: 💾 Load ccache cache
+      - name: Load CCache Cache
         uses: actions/cache/restore@v5
         id: ccache-restore
         with:
           path: .ccache_ace6
-          # FINGERPRINT KEY: AN EXACT HIT MEANS IDENTICAL PARAMETERS,
-          # SO THE RELEASE PULL CAN BE SKIPPED.
-          # RESTORE-KEYS ARE USED ONLY AS A STALE FALLBACK.
           key: ccache-ace6-O2-FT-${{ runner.os }}-${{ github.ref_name }}-${{ env.CCACHE_FP }}
           restore-keys: |
             ccache-ace6-O2-FT-${{ runner.os }}-${{ github.ref_name }}-
             ccache-ace6-O2-FT-${{ runner.os }}-
             ccache-ace6-O2-FT-
 
-      - name: 💾 Pull public ccache
+      - name: Pull Public CCache
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          # MERGE THE AUTHORITATIVE RELEASE CACHE INTO CCACHE_DIR.
-          # DO NOT TRUST A "LOCAL CACHE HIT" HERE: A NON-EMPTY DIRECTORY
-          # IS NOT PROOF THAT THE CACHE IS USABLE.
-          #
-          # DO NOT WIPE THE DIRECTORY EITHER. THE GITHUB CACHE MAY CONTAIN
-          # ENTRIES THAT THE RELEASE ARCHIVE DOES NOT.
-          # CCACHE ENTRY FILENAMES ARE CONTENT HASHES, SO OVERLAPPING FILES
-          # ARE IDENTICAL AND MERGING IS ALWAYS SAFE.
           if [ "${{ steps.ccache-restore.outputs.cache-hit }}" = "true" ]; then
             echo "GitHub cache hit (fingerprint match), skip public pull"
             exit 0
@@ -294,22 +242,19 @@ jobs:
             -p "ccache-ace6-O2-FT.tar.zst" \
             -R $GITHUB_REPOSITORY 2>/dev/null; then
 
-            echo "Public ccache downloaded, extracting (merge)..."
+            echo "Public CCache Downloaded, Extracting (Merge)..."
             tar -I zstd -xf ccache-ace6-O2-FT.tar.zst \
               -C "${{ env.CCACHE_DIR }}"
             echo "Public ccache merged!"
           else
-            echo "Public ccache absent (first build), skip"
+            echo "Public CCache Absent (First Build), Skip"
           fi
 
-      # ---------- PREPARE SOURCES ----------
-      - name: 📥 Prepare kernel sources
+      - name: Prepare Kernel Sources
         run: |
           set -e
           mkdir -p work
           cd work
-
-          # SOURCE COMMIT WAS ALREADY FETCHED BY THE CCACHE FINGERPRINT STEP.
           SRC_COMMIT="${SRC_COMMIT:-}"
           echo "SRC_COMMIT=$SRC_COMMIT" >> "$GITHUB_ENV"
           echo "Source commit: $SRC_COMMIT"
@@ -319,15 +264,12 @@ jobs:
             SRC_COMMIT=""
           }
 
-          # DOWNLOAD SOURCES IN PARALLEL
           curl -sL \
             "${{ vars.REPO_BASE || 'https://github.com' }}/Ace6-Development/android_kernel_oneplus_sm8750/archive/refs/heads/lineage-23.2.zip" \
             -o src.zip &
-
           curl -sL \
             "${{ vars.REPO_BASE || 'https://github.com' }}/Ace6-Development/android_kernel_oneplus_sm8750-modules/archive/refs/heads/lineage-23.2.zip" \
             -o modules.zip &
-
           curl -sL \
             "${{ vars.REPO_BASE || 'https://github.com' }}/LineageOS/android_kernel_oneplus_sm8750-devicetrees/archive/refs/heads/lineage-23.2.zip" \
             -o dt.zip &
@@ -345,7 +287,6 @@ jobs:
 
           rm -f src.zip modules.zip dt.zip
 
-          # VERIFY SYMLINK TARGETS
           for t in \
             src/drivers/base/kernelFwUpdate/Kconfig \
             src/arch/arm64/boot/dts/vendor; do
@@ -355,86 +296,80 @@ jobs:
             }
           done
 
-      # ---------- APPLY PATCHES ----------
-      - name: 🔧 Apply compile fixes
+      - name: 🔧 Apply Compile Fixes
         run: |
           patch -p1 -F3 --batch -f \
             < "$GITHUB_WORKSPACE/patches/split/07_compile_fixes.patch"
         working-directory: work/src
 
-      - name: 🔧 Apply KSU hooks
-        if: ${{ inputs.ksu_type != 'none' }}
+      - name: 🔧 Apply KSU Hooks
+        if: ${{ inputs.ksumeta != 'none' }}
         run: |
           patch -p1 -F3 --batch -f \
             < "$GITHUB_WORKSPACE/patches/split/00_ksu_hooks.patch"
         working-directory: work/src
 
-      - name: 🔧 Apply SUSFS main patch
-        if: ${{ inputs.susfs_enable && inputs.ksu_type != 'none' }}
+      - name: 🔧 Apply SUSFS Meta Patch
+        if: ${{ inputs.susfsmeta && inputs.ksumeta != 'none' }}
         run: |
           patch -p1 -F3 --batch -f \
             < "$GITHUB_WORKSPACE/patches/split/01_susfs_main.patch"
         working-directory: work/src
 
-      - name: 🔧 Apply LZ4 patch
-        if: inputs.lz4_zstd
+      - name: 🔧 Apply LZ4 Patch
+        if: inputs.neonlz4
         run: |
           patch -p1 -F3 --batch -f \
             < "$GITHUB_WORKSPACE/patches/split/02_lz4.patch"
         working-directory: work/src
 
-      - name: 🔧 Apply ZSTD patch
-        if: inputs.lz4_zstd
+      - name: 🔧 Apply ZSTD Patch
+        if: inputs.neonlz4
         run: |
           patch -p1 -F3 --batch -f \
             < "$GITHUB_WORKSPACE/patches/split/03_zstd.patch"
         working-directory: work/src
 
-      - name: 🔧 Apply LZ4KD patch
-        if: inputs.lz4kd_enable
+      - name: 🔧 Apply LZ4KD Patch
+        if: inputs.lz4kd
         run: |
           patch -p1 -F3 --batch -f \
             < "$GITHUB_WORKSPACE/patches/split/04_lz4kd.patch"
         working-directory: work/src
 
-      - name: 🔧 Apply Droidspaces patch
+      - name: 🔧 Apply Droidspaces Patch
         if: ${{ inputs.droidspaces != 'false' }}
         run: |
           patch -p1 -F3 --batch -f \
             < "$GITHUB_WORKSPACE/patches/split/05_droidspaces.patch"
         working-directory: work/src
 
-      - name: 🔧 Apply Baseband Guard patch
-        if: inputs.baseband_guard
+      - name: 🔧 Apply Baseband Guard Patch
+        if: inputs.basebandguard
         run: |
           patch -p1 -F3 --batch -f \
             < "$GITHUB_WORKSPACE/patches/split/06_baseband_guard.patch"
         working-directory: work/src
 
-      - name: ℹ️ CVE patch (already upstream, skipped)
-        if: inputs.cve_patch
+      - name: CVE Patch
+        if: inputs.cvefixpatch
         run: |
-          echo "GhostLock fixes (CVE-2026-43499, CVE-2026-53163) are already upstream in lineage-23.2; 08_cve.patch was removed."
+          echo "GhostLock Fixes (CVE-2026-43499, CVE-2026-53163) are Already Upstream in Lineage-23.2; 08_cve.patch was Removed"
         working-directory: work/src
 
-      - name: 🔧 Apply Re:Kernel patch
-        if: ${{ inputs.rekernel_enable }}
-        # SOURCE PATCH (BINDER/SIGNAL/NETLINK HOOKS, #IFDEF CONFIG_REKERNEL)
-        # MUST RUN BEFORE THE BUILD. IT WAS PREVIOUSLY APPLIED AFTER THE BUILD,
-        # WHICH SILENTLY PRODUCED KERNELS WITHOUT RE:KERNEL SUPPORT.
+      - name: Apply ReKernel Patch
+        if: ${{ inputs.rekernel }}
         run: |
           patch -p1 -F3 --batch -f \
             < "$GITHUB_WORKSPACE/patches/split/09_rekernel.patch"
         working-directory: work/src
 
-      # ---------- COPY EXTRA FILES ----------
-      - name: 📄 Copy extra files
+      - name: Copy Extra Files
         run: |
           set -e
-
           # SUSFS NEW FILES
-          if [ "${{ inputs.susfs_enable }}" = "true" ] &&
-             [ "${{ inputs.ksu_type }}" != "none" ]; then
+          if [ "${{ inputs.susfsmeta }}" = "true" ] &&
+             [ "${{ inputs.ksumeta }}" != "none" ]; then
             cp -r patches/extra/fs/susfs.c work/src/fs/
             cp -r patches/extra/include/linux/susfs.h \
                   patches/extra/include/linux/susfs_def.h \
@@ -442,12 +377,12 @@ jobs:
           fi
 
           # LZ4 1.10 NEW LIBRARY FILES
-          if [ "${{ inputs.lz4_zstd }}" = "true" ]; then
+          if [ "${{ inputs.neonlz4 }}" = "true" ]; then
             cp -r patches/extra/lib/lz4 work/src/lib/
           fi
 
           # ZSTD 1.5.7 NEW LIBRARY FILES
-          if [ "${{ inputs.lz4_zstd }}" = "true" ]; then
+          if [ "${{ inputs.neonlz4 }}" = "true" ]; then
             cp -r patches/extra/lib/zstd/common/allocations.h \
                   patches/extra/lib/zstd/common/bits.h \
                   work/src/lib/zstd/common/
@@ -458,7 +393,7 @@ jobs:
           fi
 
           # LZ4KD NEW FILES
-          if [ "${{ inputs.lz4kd_enable }}" = "true" ]; then
+          if [ "${{ inputs.lz4kd }}" = "true" ]; then
             cp -r patches/extra/crypto/lz4k.c \
                   patches/extra/crypto/lz4kd.c \
                   work/src/crypto/
@@ -484,22 +419,21 @@ jobs:
           fi
 
           # BASEBAND GUARD NEW FILES
-          if [ "${{ inputs.baseband_guard }}" = "true" ]; then
+          if [ "${{ inputs.basebandguard }}" = "true" ]; then
             cp -r patches/extra/Baseband-guard work/src/
             ln -sfn ../Baseband-guard \
               work/src/security/baseband-guard
           fi
 
-      # ---------- KERNELSU ----------
-      - name: 🔗 Integrate KernelSU
-        if: ${{ inputs.ksu_type != 'none' }}
+      - name: Integrate KernelSU
+        if: ${{ inputs.ksumeta != 'none' }}
         run: |
           set -e
           cd work/src
 
-          case "${{ inputs.ksu_type }}" in
+          case "${{ inputs.ksumeta }}" in
             resukisu)
-              KSU_REPO="https://github.com/ReSukiSU/ReSukiSU.git"
+              KSUREPO="https://github.com/ReSukiSU/ReSukiSU.git"
               ;;
             none)
               echo "NO KERNELSU"
@@ -508,7 +442,7 @@ jobs:
           esac
 
           rm -rf KernelSU drivers/kernelsu
-          git clone "$KSU_REPO" KernelSU
+          git clone "$KSUREPO" KernelSU
 
           ln -sfn ../KernelSU/kernel drivers/kernelsu
 
@@ -519,59 +453,52 @@ jobs:
             sed -i '/endmenu/i\source "drivers/kernelsu/Kconfig"' \
               drivers/Kconfig
         env:
-          KSU_REPO: ""
+          KSUREPO: ""
 
-      # ---------- KSU VERSION ----------
-      - name: 🔢 Compute KSU version
-        id: ksu_version
-        if: ${{ inputs.ksu_type != 'none' }}
+      - name: Compute KSU version
+        id: ksuversion
+        if: ${{ inputs.ksumeta != 'none' }}
         run: |
           COUNT=$(git -C work/src/KernelSU rev-list --count HEAD)
           VER=$((30000 + COUNT + 700))
           echo "ksuver=$VER" >> "$GITHUB_OUTPUT"
           echo "KSU version: $VER ($COUNT commits)"
 
-      # ---------- SUSFS KSU ADAPTATION ----------
-      - name: 🔧 Apply SUSFS KSU adaptation
-        if: ${{ inputs.susfs_enable && inputs.ksu_type != 'none' }}
+      - name: 🔧 Apply SUSFS KSU Adaptation
+        if: ${{ inputs.susfsmeta && inputs.ksumeta != 'none' }}
         run: |
           cd KernelSU
-
           git apply --check "$GITHUB_WORKSPACE/patches/02_ksu.patch" 2>/dev/null &&
             git apply "$GITHUB_WORKSPACE/patches/02_ksu.patch" ||
             echo "WARN: 02_KSU.PATCH WAS NOT APPLIED AUTOMATICALLY (KSU VERSION MAY HAVE CHANGED)" >&2
         working-directory: work/src
 
-      # ---------- ATTRIBUTION ----------
-      - name: ✍️ Configure attribution
+      - name: Configure Attribution
         run: |
-          if [ "${{ inputs.attribution_enable }}" = "true" ]; then
-            echo "BUILD_USER=${{ inputs.build_user }}" >> "$GITHUB_ENV"
-            echo "BUILD_HOST=${{ inputs.build_host }}" >> "$GITHUB_ENV"
+          if [ "${{ inputs.attribute }}" = "true" ]; then
+            echo "builduser=${{ inputs.builduser }}" >> "$GITHUB_ENV"
+            echo "buildhost=${{ inputs.buildhost }}" >> "$GITHUB_ENV"
 
-            # KSU VERSION ATTRIBUTION (REPO_NAME)
-            if [ "${{ inputs.ksu_type }}" != "none" ]; then
+            # KSU VERSION ATTRIBUTION
+            if [ "${{ inputs.ksumeta }}" != "none" ]; then
               sed -i \
-                "s/^REPO_NAME := .*/REPO_NAME := ${{ inputs.build_user }}/" \
+                "s/^REPO_NAME := .*/REPO_NAME := ${{ inputs.builduser }}/" \
                 work/src/KernelSU/kernel/Kbuild
             fi
           else
-            echo "BUILD_USER=" >> "$GITHUB_ENV"
-            echo "BUILD_HOST=" >> "$GITHUB_ENV"
+            echo "builduser=" >> "$GITHUB_ENV"
+            echo "buildhost=" >> "$GITHUB_ENV"
           fi
 
-      # ---------- CONFIG ----------
-      - name: ⚙️ Deploy config
+      - name: ⚙️ Deploy Config
         run: |
           set -e
           cd work/src
-
           cp "$GITHUB_WORKSPACE/config/config_ace6_final.config" .config
-
           # LOCALVERSION: CUSTOM SUFFIX OR REAL COMMIT
-          if [ -n "${{ inputs.kernel_suffix }}" ]; then
+          if [ -n "${{ inputs.ksuffix }}" ]; then
             ./scripts/config --file .config \
-              --set-str CONFIG_LOCALVERSION "-4k-${{ inputs.kernel_suffix }}"
+              --set-str CONFIG_LOCALVERSION "-4k-${{ inputs.ksuffix }}"
           else
             ./scripts/config --file .config \
               --set-str CONFIG_LOCALVERSION "-4k-g${SRC_COMMIT:0:12}"
@@ -580,15 +507,15 @@ jobs:
           ./scripts/config --file .config -d CONFIG_LOCALVERSION_AUTO
 
           # DISABLE KERNELSU WHEN NOT REQUESTED
-          if [ "${{ inputs.ksu_type }}" = "none" ]; then
+          if [ "${{ inputs.ksumeta }}" = "none" ]; then
             ./scripts/config --file .config \
               -d CONFIG_KSU \
               -d CONFIG_KSU_SUSFS
           fi
 
           # DISABLE SUSFS WHEN NOT REQUESTED OR WHEN KERNELSU IS DISABLED
-          if [ "${{ inputs.susfs_enable }}" != "true" ] ||
-             [ "${{ inputs.ksu_type }}" = "none" ]; then
+          if [ "${{ inputs.susfsmeta }}" != "true" ] ||
+             [ "${{ inputs.ksumeta }}" = "none" ]; then
             ./scripts/config --file .config -d CONFIG_KSU_SUSFS
           fi
 
@@ -607,7 +534,7 @@ jobs:
           fi
 
           # DISABLE LZ4K/LZ4KD WHEN NOT REQUESTED
-          if [ "${{ inputs.lz4kd_enable }}" != "true" ]; then
+          if [ "${{ inputs.lz4kd }}" != "true" ]; then
             ./scripts/config --file .config \
               -d CONFIG_LZ4K_COMPRESS \
               -d CONFIG_LZ4KD_COMPRESS \
@@ -616,76 +543,72 @@ jobs:
           fi
 
           # DISABLE BASEBAND GUARD WHEN NOT REQUESTED
-          if [ "${{ inputs.baseband_guard }}" != "true" ]; then
+          if [ "${{ inputs.basebandguard }}" != "true" ]; then
             ./scripts/config --file .config -d CONFIG_BBG
           fi
 
           # DISABLE BETTER NETWORKING WHEN NOT REQUESTED
-          if [ "${{ inputs.better_net }}" != "true" ]; then
+          if [ "${{ inputs.netfilter }}" != "true" ]; then
             ./scripts/config --file .config \
               -d CONFIG_IP_SET \
               -d CONFIG_BPF_STREAM_PARSER \
               -d CONFIG_IP6_NF_NAT
           fi
 
-          # ENABLE ALL ZRAM ALGORITHMS WHEN REQUESTED.
-          # LZ4HC/842 BACKENDS EXIST NATIVELY; THEY ONLY NEED THEIR
-          # CRYPTO CONFIGURATION.
-          # LZ4K/LZ4KD/DEFLATE COME FROM THE LZ4KD PATCH AND BASE CONFIG.
-          if [ "${{ inputs.show_all_algos }}" = "true" ]; then
+          # ENABLE ALL ZRAM ALGORITHMS WHEN REQUESTED
+          # LZ4HC/842 BACKENDS EXIST NATIVELY; THEY ONLY NEED THEIR CRYPTO CONFIGURATION
+          # LZ4K/LZ4KD/DEFLATE COME FROM THE LZ4KD PATCH AND BASE CONFIG
+          if [ "${{ inputs.showalgos }}" = "true" ]; then
             ./scripts/config --file .config \
               -e CONFIG_CRYPTO_LZ4HC \
               -e CONFIG_CRYPTO_842
           fi
 
           # ZRAM WRITEBACK: IDLE/INCOMPRESSIBLE PAGES TO A BACKING DEVICE
-          if [ "${{ inputs.zram_writeback }}" != "true" ]; then
+          if [ "${{ inputs.zramwriteback }}" != "true" ]; then
             ./scripts/config --file .config \
               -d CONFIG_ZRAM_WRITEBACK \
               -d CONFIG_ZRAM_MEMORY_TRACKING
           fi
 
           # BBR TCP CONGESTION CONTROL
-          if [ "${{ inputs.bbr_enable }}" = "true" ]; then
+          if [ "${{ inputs.bbr }}" = "true" ]; then
             ./scripts/config --file .config \
               -e CONFIG_TCP_CONG_ADVANCED \
               -e CONFIG_TCP_CONG_BBR
           fi
 
           # RE:KERNEL BINDER HOOKS
-          if [ "${{ inputs.rekernel_enable }}" = "true" ]; then
+          if [ "${{ inputs.rekernel }}" = "true" ]; then
             ./scripts/config --file .config -e CONFIG_REKERNEL
           fi
 
           export LLVM=1 LLVM_IAS=1
-
           make LLVM=1 LLVM_IAS=1 ARCH=arm64 olddefconfig
-
           grep -qE \
             'CONFIG_LOCALVERSION="-4k-(g[0-9a-f]{12}|[^"]+)"' \
             .config || exit 1
 
-      # ---------- BUILD ----------
-      - name: 🛠️ Build kernel
-        if: ${{ !inputs.debug_skip_build }}
+      - name: Build Kernel
+        if: ${{ !inputs.debugskipbuild }}
         run: |
           sudo sysctl -w vm.max_map_count=1048576
 
           export LLVM=1 LLVM_IAS=1
-          export KBUILD_BUILD_USER="$BUILD_USER"
+          export KBUILD_BUILD_USER="$builduser"
 
-          if [ "${{ inputs.ccache_debug }}" = "true" ]; then
+          if [ "${{ inputs.buildccachedebug }}" = "true" ]; then
             export CCACHE_LOGFILE="$GITHUB_WORKSPACE/ccache.log"
           fi
 
-          export KBUILD_BUILD_HOST="$BUILD_HOST"
+          export KBUILD_BUILD_HOST="$buildhost"
 
-          # CUSTOM BUILD TIME (KBUILD_BUILD_TIMESTAMP)
-          if [[ -n "${{ inputs.build_time }}" &&
-                "${{ inputs.build_time }}" != "N" &&
-                "${{ inputs.build_time }}" != "n" ]]; then
-            export KBUILD_BUILD_TIMESTAMP="${{ inputs.build_time }}"
-            echo "Build time: ${{ inputs.build_time }}"
+          # CUSTOM BUILD TIME
+          if [[ -n "${{ inputs.kbuildtime }}" &&
+                "${{ inputs.kbuildtime }}" != "N" &&
+                "${{ inputs.kbuildtime }}" != "n" ]]; then
+            export KBUILD_BUILD_TIMESTAMP="${{ inputs.kbuildtime }}"
+            echo "Build Time: ${{ inputs.kbuildtime }}"
           fi
 
           # FAKETIME TIME-FIXING FOR REPRODUCIBLE BUILDS
@@ -730,32 +653,24 @@ jobs:
 
           [ -f arch/arm64/boot/Image ] || exit 1
 
-      # ---------- DEBUG IMAGE ----------
-      - name: Debug - create dummy Image (skip build)
-        if: ${{ inputs.debug_skip_build }}
+      - name: Debug - Create Dummy Image
+        if: ${{ inputs.debugskipbuild }}
         run: |
           mkdir -p work/src/arch/arm64/boot
           echo "DEBUG DUMMY IMAGE" > work/src/arch/arm64/boot/Image
           echo "Dummy Image created (debug mode)"
 
-      # ---------- VERIFY ----------
-      - name: ✅ Verify artifacts
+      - name: Verify Artifacts
         id: verify
-        if: ${{ !inputs.debug_skip_build }}
+        if: ${{ !inputs.debugskipbuild }}
         run: |
           cd work/src
 
           strings arch/arm64/boot/Image |
             grep -q "Linux version 6.6.139" || exit 1
 
-          # GET THE REAL KERNEL IDENTITY FROM THE BUILD ARTIFACTS.
-          # KERNEL.RELEASE AND COMPILE INFORMATION ARE GENERATED SEPARATELY.
-          # ON THIS TREE, UTS_VERSION LIVES IN UTSVERSION.H.
-          # COMPILE.H ONLY CONTAINS UTS_MACHINE/BY/HOST/COMPILER.
-          # THE OLD COMPILE.H GREP THEREFORE MATCHED NOTHING AND KERNELVER
-          # WAS ALWAYS EMPTY.
+          # GET THE REAL KERNEL IDENTITY FROM THE BUILD ARTIFACTS
           REL=$(cat include/config/kernel.release 2>/dev/null || true)
-
           VER=$(grep -oE \
             '#[0-9]+ SMP[^"]*' \
             include/generated/utsversion.h 2>/dev/null |
@@ -772,12 +687,10 @@ jobs:
 
           ls -la arch/arm64/boot/Image
 
-      # ---------- KPM/KPN POST-BUILD BINARY PATCH ----------
-      - name: 🧩 Apply KPM patch
-        if: ${{ inputs.kpm_enable && !inputs.debug_skip_build }}
+      - name: Apply KPM Patch
+        if: ${{ inputs.kpmodule && !inputs.debugskipbuild }}
         run: |
           cd work/src/arch/arm64/boot
-
           wget -q \
             https://github.com/KernelSU-Next/KPatch-Next/releases/latest/download/kptools-linux
 
@@ -785,42 +698,35 @@ jobs:
             https://github.com/KernelSU-Next/KPatch-Next/releases/latest/download/kpimg-linux
 
           chmod +x kptools-linux
-
           ./kptools-linux \
             -p \
             -i ./Image \
             -k ./kpimg-linux \
             -o ./oImage
-
           rm -f Image
           mv oImage Image
 
-          echo "KPM patched"
+          echo "KPM Patched"
 
-      # ---------- SAVE CCACHE ----------
-      - name: 💾 Save ccache
-        if: ${{ inputs.ccache_update }}
+      - name: Save CCache
+        if: ${{ inputs.buildccacheupdate }}
         uses: actions/cache/save@v5
         with:
-          # WORKSPACE-RELATIVE PATH; THE SAME FINGERPRINT KEY IS USED.
-          # GITHUB ACTIONS SKIPS RE-UPLOADING AN IDENTICAL CACHE.
-          # NEW PARAMETERS CREATE A NEW CACHE ENTRY.
+          # WORKSPACE-RELATIVE PATH; THE SAME FINGERPRINT KEY IS USED
           path: .ccache_ace6
           key: ccache-ace6-O2-FT-${{ runner.os }}-${{ github.ref_name }}-${{ env.CCACHE_FP }}
 
-      - name: 📤 Upload public ccache
-        if: ${{ inputs.ccache_update }}
+      - name: Upload Public CCache
+        if: ${{ inputs.buildccacheupdate }}
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           # PACKAGE CCACHE AND UPLOAD IT TO A RELEASE
-          echo "Packaging public ccache ..."
-
+          echo "Packaging Public CCache ..."
           tar -I zstd \
             -cf ccache-ace6-O2-FT.tar.zst \
             -C "${{ env.CCACHE_DIR }}" .
-
-          echo "ccache size: $(du -sh ccache-ace6-O2-FT.tar.zst | cut -f1)"
+          echo "CCache Size: $(du -sh ccache-ace6-O2-FT.tar.zst | cut -f1)"
 
           # UPLOAD; CREATE THE RELEASE IF IT DOES NOT EXIST
           gh release create \
@@ -833,45 +739,40 @@ jobs:
             ccache-ace6-O2-FT.tar.zst \
             --clobber
 
-          echo "Public ccache uploaded!"
+          echo "Public CCache Oploaded!"
 
-      - name: 🔍 Upload ccache debug log
-        if: ${{ inputs.ccache_debug }}
+      - name: Upload CCache Debug Log
+        if: ${{ inputs.buildccachedebug }}
         uses: actions/upload-artifact@v4
         with:
           name: ccache-debug-log
           path: ccache.log
           if-no-files-found: ignore
 
-      # ---------- PACKAGE AK3 ----------
-      - name: 📦 Package AK3
+      - name: Package AK3
         id: package
         run: |
           set -e
-
           mkdir -p out pack
-
           [ -f work/src/arch/arm64/boot/Image ] || {
             echo "ERROR: Image not found"
             exit 1
           }
-
           cp -a ak3/. pack/
           cp work/src/arch/arm64/boot/Image pack/Image
 
           # VERIFY THAT IMAGE EXISTS AND IS NON-EMPTY
           SIZE=$(stat -c%s work/src/arch/arm64/boot/Image)
-          echo "Image size: $SIZE"
-
+          echo "Image Size: $SIZE"
           [ "$SIZE" -gt 0 ] || {
             echo "ERROR: Image is empty"
             exit 1
           }
 
           # AK3 ATTRIBUTION
-          if [ "${{ inputs.attribution_enable }}" = "true" ]; then
+          if [ "${{ inputs.attribute }}" = "true" ]; then
             sed -i \
-              "s#kernel.string=.*#kernel.string=Ace6 Kernel | Build by ${{ inputs.build_user }}#" \
+              "s#kernel.string=.*#kernel.string=Ace6 Kernel | Build by ${{ inputs.builduser }}#" \
               pack/anykernel.sh
           else
             sed -i \
@@ -880,22 +781,19 @@ jobs:
           fi
 
           STAMP=$(date +%Y%m%d)
-          KSUVER="${{ steps.ksu_version.outputs.ksuver }}"
-          ZIP="Kernel-Ace6-${{ inputs.build_user }}-ksu${KSUVER}-$STAMP.zip"
+          KSUVER="${{ steps.ksuversion.outputs.ksuver }}"
+          ZIP="Kernel-Ace6-${{ inputs.builduser }}-ksu${KSUVER}-$STAMP.zip"
 
           cd pack
-
           zip -r9 "../out/$ZIP" . -x "*.git*" >/dev/null
-
           echo "ak3name=$ZIP" >> "$GITHUB_OUTPUT"
           ls -lh "../out/$ZIP"
 
-          # ALL MODE: ALSO GENERATE IMAGE + BOOT.IMG
-          if [ "${{ inputs.artifact_mode }}" = "all" ]; then
+          # ALL MODE: ALSO GENERATE IMAGE + BOOT IMG
+          if [ "${{ inputs.artifactmode }}" = "all" ]; then
             cp "$GITHUB_WORKSPACE/work/src/arch/arm64/boot/Image" \
               ../out/Image
-
-            # BOOT.IMG WITH OFFICIAL PARAMETERS: HEADER V4
+            # BOOT IMG WITH OFFICIAL PARAMETERS: HEADER V4
             mkbootimg \
               --kernel "$GITHUB_WORKSPACE/work/src/arch/arm64/boot/Image" \
               --header_version 4 \
@@ -905,31 +803,29 @@ jobs:
               --base 0x80000000 \
               -o ../out/boot.img
 
-            echo "all mode: Image + boot.img generated"
+            echo "All Mode: Image + Boot Img Generated"
           fi
 
-      # ---------- UPLOAD ARTIFACTS ----------
-      - name: 📤 Upload artifacts
+      - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
           name: ${{ steps.package.outputs.ak3name }}
           path: out/*
           retention-days: 14
           if-no-files-found: error
-
   release:
     needs: build
-    if: ${{ inputs.release_enable }}
+    if: ${{ inputs.enablerelease }}
     runs-on: ubuntu-latest
 
     steps:
-      - name: 📥 Download artifacts
+      - name: Download artifacts
         uses: actions/download-artifact@v4
         with:
           name: ${{ needs.build.outputs.ak3name }}
           path: release_zips
 
-      - name: 🚀 Publish Release
+      - name: Publish Release
         run: |
           TAG="${{ inputs.tag }}"
 
@@ -938,9 +834,9 @@ jobs:
           fi
 
           cat <<EOF > release_notes.md
-          # ⚡ Ace6 Kernel Build
+          # ⚡ SM8750 Kernel Build
 
-          🏷️ **Category**: \`kernel\` | \`${{ inputs.ksu_type }}\` | ksu${{ needs.build.outputs.ksuver }}
+          🏷️ **Category**: \`kernel\` | \`${{ inputs.ksumeta }}\` | ksu${{ needs.build.outputs.ksuver }}
 
           ---
 
@@ -957,35 +853,35 @@ jobs:
 
           | Feature | State |
           |---|---|
-          | KernelSU | ${{ inputs.ksu_type }} |
-          | SUSFS | ${{ inputs.susfs_enable }} |
-          | LZ4/ZSTD | ${{ inputs.lz4_zstd }} |
-          | LZ4KD | ${{ inputs.lz4kd_enable }} |
-          | Show all algos | ${{ inputs.show_all_algos }} |
-          | ZRAM writeback | ${{ inputs.zram_writeback }} |
+          | KernelSU | ${{ inputs.ksumeta }} |
+          | SUSFS | ${{ inputs.susfsmeta }} |
+          | LZ4/ZSTD | ${{ inputs.neonlz4 }} |
+          | LZ4KD | ${{ inputs.lz4kd }} |
+          | Show all algos | ${{ inputs.showalgos }} |
+          | ZRAM writeback | ${{ inputs.zramwriteback }} |
           | Droidspaces | ${{ inputs.droidspaces }} |
-          | Baseband Guard | ${{ inputs.baseband_guard }} |
-          | CVE | ${{ inputs.cve_patch }} |
-          | Better network | ${{ inputs.better_net }} |
-          | BBR | ${{ inputs.bbr_enable }} |
-          | KPM | ${{ inputs.kpm_enable }} |
-          | Re:Kernel | ${{ inputs.rekernel_enable }} |
-          | Suffix | ${{ inputs.kernel_suffix || '-' }} |
-          | Attribution | ${{ inputs.attribution_enable }} |
-          | Artifact mode | ${{ inputs.artifact_mode }} |
-          | Public ccache | ${{ inputs.ccache_update }} |
+          | Baseband Guard | ${{ inputs.basebandguard }} |
+          | CVE | ${{ inputs.cvefixpatch }} |
+          | Better network | ${{ inputs.netfilter }} |
+          | BBR | ${{ inputs.bbr }} |
+          | KPM | ${{ inputs.kpmodule }} |
+          | Re:Kernel | ${{ inputs.rekernel }} |
+          | Suffix | ${{ inputs.ksuffix || '-' }} |
+          | Attribution | ${{ inputs.attribute }} |
+          | Artifact mode | ${{ inputs.artifactmode }} |
+          | Public ccache | ${{ inputs.buildccacheupdate }} |
 
           ## ⚙️ Build & Release
 
           | Option | Value |
           |---|---|
-          | Build user | ${{ inputs.build_user }} |
-          | Build host | ${{ inputs.build_host }} |
-          | Release enabled | ${{ inputs.release_enable }} |
-          | Custom build time | ${{ inputs.build_time || '-' }} |
+          | Build user | ${{ inputs.builduser }} |
+          | Build host | ${{ inputs.buildhost }} |
+          | Release enabled | ${{ inputs.enablerelease }} |
+          | Custom build time | ${{ inputs.kbuildtime || '-' }} |
           | Release tag | ${{ inputs.tag || '-' }} |
-          | ccache debug | ${{ inputs.ccache_debug }} |
-          | Debug skip build | ${{ inputs.debug_skip_build }} |
+          | ccache debug | ${{ inputs.buildccachedebug }} |
+          | Debug skip build | ${{ inputs.debugskipbuild }} |
 
           ## 📲 Flashing
 
@@ -993,15 +889,15 @@ jobs:
           (TWRP/OrangeFox/AOSP recovery), or install directly through the built-in
           KernelSU manager.
 
-          ${{ inputs.artifact_mode == 'all' && '> ⚠️ The `.zip` is the flashable package. `Image` and `boot.img` are raw build artifacts for developers only - do NOT flash them directly (boot.img carries no ramdisk).' || '' }}
+          ${{ inputs.artifactmode == 'all' && '> ⚠️ The `.zip` is the flashable package. `Image` and `boot.img` are raw build artifacts for developers only - do NOT flash them directly (boot.img carries no ramdisk).' || '' }}
           EOF
 
           gh release create "$TAG" \
             -R $GITHUB_REPOSITORY \
-            --title "Ace6 Kernel ${{ inputs.ksu_type }} (ksu${{ needs.build.outputs.ksuver }})" \
+            --title "Ace6 Kernel ${{ inputs.ksumeta }} (ksu${{ needs.build.outputs.ksuver }})" \
             --notes-file release_notes.md \
             release_zips/*
         env:
-          # PAT (FINE-GRAINED, THIS REPOSITORY ONLY) PUBLISHES AS THE USER
-          # SO THE RELEASE SHOWS A HUMAN AUTHOR INSTEAD OF GITHUB-ACTIONS[BOT]
+          # PAT (FINE-GRAINED, THIS REPOSITORY ONLY) PUBLISHES AS THE USER,
+          # SO THE RELEASE SHOWS A HUMAN AUTHOR INSTEAD OF GITHUB-ACTIONS[BOT].
           GH_TOKEN: ${{ secrets.PAT || secrets.GITHUB_TOKEN }}
