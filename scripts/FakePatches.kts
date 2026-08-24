@@ -3,502 +3,239 @@
 import java.io.File
 import kotlin.system.exitProcess
 
-/** sed '/pattern/a text' — Insert multiple lines after every matching line */
-fun File.insertAfter(anchor: Regex, vararg newLines: String) {
+fun File.edit(block: MutableList<String>.() -> Unit) {
+    val lines = readLines().toMutableList()
+    lines.block()
+    writeText(lines.joinToString("\n") + "\n")
+}
+
+fun File.insertAfter(regex: Regex, vararg text: String) = edit {
     val out = mutableListOf<String>()
-
-    for (line in readLines()) {
-        out.add(line)
-
-        if (anchor.containsMatchIn(line)) {
-            out.addAll(newLines)
-        }
+    forEach {
+        out += it
+        if (regex.containsMatchIn(it)) out += text
     }
-
-    writeText(out.joinToString("\n") + "\n")
+    clear()
+    addAll(out)
 }
 
-/** Insert multiple lines after the first matching line only */
-fun File.insertAfterFirst(anchor: Regex, vararg newLines: String) {
+fun File.insertAfterFirst(regex: Regex, vararg text: String) = edit {
+    indexOfFirst { regex.containsMatchIn(it) }
+        .takeIf { it >= 0 }
+        ?.let { addAll(it + 1, text.toList()) }
+}
+
+fun File.insertBefore(regex: Regex, vararg text: String) = edit {
     val out = mutableListOf<String>()
-    var inserted = false
-
-    for (line in readLines()) {
-        out.add(line)
-
-        if (!inserted && anchor.containsMatchIn(line)) {
-            out.addAll(newLines)
-            inserted = true
-        }
+    forEach {
+        if (regex.containsMatchIn(it)) out += text
+        out += it
     }
-
-    writeText(out.joinToString("\n") + "\n")
+    clear()
+    addAll(out)
 }
 
-/** sed '/pattern/i text' — Insert multiple lines before every matching line */
-fun File.insertBefore(anchor: Regex, vararg newLines: String) {
+fun File.deleteLine(regex: Regex) = edit {
+    removeAll { regex.containsMatchIn(it) }
+}
+
+fun File.deleteBlock(start: Regex, end: Regex) = edit {
     val out = mutableListOf<String>()
+    var block = false
 
-    for (line in readLines()) {
-        if (anchor.containsMatchIn(line)) {
-            out.addAll(newLines)
+    forEach { line ->
+        if (!block && start.containsMatchIn(line)) {
+            block = true
+        } else if (block) {
+            if (end.containsMatchIn(line)) block = false
+        } else {
+            out += line
         }
-
-        out.add(line)
     }
 
-    writeText(out.joinToString("\n") + "\n")
+    clear()
+    addAll(out)
 }
 
-/** Insert multiple lines before the first matching line only */
-fun File.insertBeforeFirst(anchor: Regex, vararg newLines: String) {
-    val out = mutableListOf<String>()
-    var inserted = false
-
-    for (line in readLines()) {
-        if (!inserted && anchor.containsMatchIn(line)) {
-            out.addAll(newLines)
-            inserted = true
-        }
-
-        out.add(line)
+fun File.replace(regex: Regex, replacement: String) = edit {
+    forEachIndexed { i, line ->
+        this[i] = regex.replace(line, replacement)
     }
-
-    writeText(out.joinToString("\n") + "\n")
 }
 
-/** sed '/pattern/d' — Delete all matching lines */
-fun File.deleteLine(pattern: Regex) {
-    val out = readLines().filterNot {
-        pattern.containsMatchIn(it)
+fun File.replaceExact(old: String, new: String) = edit {
+    forEachIndexed { i, line ->
+        if (line == old) this[i] = new
     }
-
-    writeText(out.joinToString("\n") + "\n")
 }
 
-/**
- * sed '/start/,/end/d' —
- * Delete entire blocks from the start match through the end match,
- * including both boundary lines. Supports multiple blocks.
- */
-fun File.deleteBlock(start: Regex, end: Regex) {
-    val out = mutableListOf<String>()
-    var inBlock = false
+fun File.includeAfter(header: String, include: String) =
+    insertAfter(Regex("^${Regex.escape(header)}$"), include)
 
-    for (line in readLines()) {
+fun File.includeAfterFirst(include: String) =
+    insertAfterFirst(Regex("""^#include """), include)
 
-        if (!inBlock && start.containsMatchIn(line)) {
-            inBlock = true
-            continue
-        }
-
-        if (inBlock) {
-            if (end.containsMatchIn(line)) {
-                inBlock = false
-            }
-
-            continue
-        }
-
-        out.add(line)
-    }
-
-    writeText(out.joinToString("\n") + "\n")
-}
-
-/**
- * perl -pe 's/pattern/repl/' —
- * Perform a regex replacement on every line.
- * Supports regex capture groups such as \1.
- */
-fun File.replaceEachLine(pattern: Regex, replacement: String) {
-    val out = readLines().map {
-        pattern.replace(it, replacement)
-    }
-
-    writeText(out.joinToString("\n") + "\n")
-}
-
-/** sed 's/exact_old/exact_new/' — Replace an entire line exactly */
-fun File.replaceWholeLine(oldLine: String, newLine: String) {
-    val out = readLines().map {
-        if (it == oldLine) newLine else it
-    }
-
-    writeText(out.joinToString("\n") + "\n")
-}
-
-
-/* ============================================================
- * Environment / Arguments
- * ============================================================ */
-
-val kernelModule = System.getenv("KERNELMODULE") ?: ""
-
-val sublevel =
-    (System.getenv("SUBLEVEL") ?: "0").toIntOrNull() ?: 0
-
+val kernelModule = System.getenv("KERNELMODULE").orEmpty()
+val sublevel = System.getenv("SUBLEVEL")?.toIntOrNull() ?: 0
 val mode = args.getOrNull(0) ?: "apply"
-// apply | postfix | revert
+val workDir = args.getOrNull(1) ?: "kernel_workspace/kernel_platform/common"
 
-val workDir =
-    args.getOrNull(1)
-        ?: "kernel_workspace/kernel_platform/common"
+fun file(path: String) = File(workDir, path)
+fun log(msg: String) = println("→ $msg")
 
-fun f(relPath: String) = File(workDir, relPath)
+val fdinfoStart = Regex("""^[ \t]*/\*$""")
+val fdinfoEnd = Regex("""^[ \t]*u32 mask = mark->mask & IN_ALL_EVENTS;$""")
+val inotifyFunc = Regex("""^static void inotify_fdinfo\(struct seq_file \*m, struct fsnotify_mark \*mark\)$""")
 
-
-/* ============================================================
- * Common Regex Patterns
- * ============================================================ */
-
-val fdinfoCommentStart =
-    Regex("""^[ \t]*/\*$""")
-
-val fdinfoCommentEnd =
-    Regex(
-        """^[ \t]*u32 mask = mark->mask & IN_ALL_EVENTS;$"""
-    )
-
-val inotifyFdinfoFuncAnchor =
-    Regex(
-        """^static void inotify_fdinfo\(struct seq_file \*m, struct fsnotify_mark \*mark\)$"""
-    )
-
-
-/* ============================================================
- * Inotify / fdinfo Helpers
- * ============================================================ */
-
-fun addInotifyMarkUserMaskFunction(file: File) {
-    file.insertBeforeFirst(
-        inotifyFdinfoFuncAnchor,
-        "static inline u32 inotify_mark_user_mask(struct fsnotify_mark *mark)",
-        "{",
+fun addInotifyHelper(f: File) {
+    f.insertBeforeFirst(
+        inotifyFunc,
+        "static inline u32 inotify_mark_user_mask(struct fsnotify_mark *mark) {",
         "\treturn mark->mask & IN_ALL_EVENTS;",
         "}",
         ""
     )
 }
 
-fun applyFdinfo(file: File) {
-
-    file.deleteBlock(
-        fdinfoCommentStart,
-        fdinfoCommentEnd
-    )
-
-    file.replaceEachLine(
+fun applyFdinfo(f: File) {
+    f.deleteBlock(fdinfoStart, fdinfoEnd)
+    f.replace(
         Regex("""\bmask,\s*mark->ignored_mask"""),
         "inotify_mark_user_mask(mark)"
     )
-
-    file.replaceEachLine(
+    f.replace(
         Regex("""ignored_mask:%x"""),
         "ignored_mask:0"
     )
-
-    println(
-        "Adding inotify_mark_user_mask function definition"
-    )
-
-    addInotifyMarkUserMaskFunction(file)
+    log("Adding inotify_mark_user_mask()")
+    addInotifyHelper(f)
 }
 
-
-/* ============================================================
- * Android 15 6.6 — SUBLEVEL <= 30
- * ============================================================ */
-
-fun applyAndroid15VmaBlock(
-    taskMmu: File,
-    namespace: File
-) {
-
-    /*
-     * 1. Insert:
-     *
-     *     last_vma_end = vma->vm_end;
-     *
-     * after the line containing:
-     *
-     *     smap_gather_stats(vma, &mss, last_vma_end);
-     */
-    taskMmu.insertAfter(
-        Regex(
-            """smap_gather_stats\(vma, &mss, last_vma_end\);"""
-        ),
+fun applyVma(task: File, namespace: File) {
+    task.insertAfter(
+        Regex("""smap_gather_stats\(vma, &mss, last_vma_end\);"""),
         "last_vma_end = vma->vm_end;"
     )
 
-    /*
-     * 2. Starting from the end of the file, find the last occurrence
-     * of:
-     *
-     *     last_vma_end = vma->vm_end;
-     *
-     * Add indentation and insert a closing brace after it.
-     *
-     * Then search backward for the nearest:
-     *
-     *     if (vma->vm_end > last_vma_end)
-     *
-     * and change the closing ')' to ') {'.
-     */
-    val lines = taskMmu.readLines().toMutableList()
+    task.edit {
+        val assignment = indexOfLast {
+            it.contains("last_vma_end = vma->vm_end;")
+        }
 
-    val ifPattern =
-        Regex(
-            """if\s*\(vma->vm_end > last_vma_end\)"""
-        )
+        if (assignment >= 0) {
+            this[assignment] = "\t\t\t\t$this[assignment]"
+            add(assignment + 1, "\t\t\t}")
 
-    val trailingParen =
-        Regex("""\)\s*$""")
-
-    for (i in lines.indices.reversed()) {
-
-        if (
-            lines[i].contains(
-                "last_vma_end = vma->vm_end;"
-            )
-        ) {
-
-            lines[i] =
-                "\t\t\t\t" + lines[i]
-
-            lines.add(
-                i + 1,
-                "\t\t\t}"
-            )
-
-            for (j in i downTo 0) {
-
-                if (ifPattern.containsMatchIn(lines[j])) {
-
-                    lines[j] =
-                        trailingParen.replace(
-                            lines[j],
-                            ") {"
-                        )
-
-                    break
-                }
+            (assignment downTo 0).firstOrNull {
+                Regex("""if\s*\(vma->vm_end > last_vma_end\)""")
+                    .containsMatchIn(this[it])
+            }?.let {
+                this[it] = Regex("""\)\s*$""")
+                    .replace(this[it], ") {")
             }
-
-            break
         }
     }
 
-    taskMmu.writeText(
-        lines.joinToString("\n") + "\n"
-    )
-
-    /*
-     * 3. namespace.c:
-     *
-     * Insert trace/hooks/fs.h after:
-     *
-     *     #include <trace/hooks/blk.h>
-     */
-    namespace.insertAfter(
-        Regex(
-            """#include <trace/hooks/blk\.h>"""
-        ),
+    namespace.includeAfter(
+        "#include <trace/hooks/blk.h>",
         "#include <trace/hooks/fs.h>"
     )
 
-    /*
-     * 4. task_mmu.c:
-     *
-     * Insert the following two lines after:
-     *
-     *     int ret = 0, copied = 0;
-     */
-    taskMmu.insertAfter(
-        Regex(
-            """int ret = 0, copied = 0;"""
-        ),
+    task.insertAfter(
+        Regex("""int ret = 0, copied = 0;"""),
         "\tunsigned int nr_subpages = __PAGE_SIZE / PAGE_SIZE;",
         "\tpagemap_entry_t *res = NULL;"
     )
 }
 
-fun revertAndroid15VmaBlock(
-    taskMmu: File,
-    namespace: File
-) {
-
+fun revertVma(task: File, namespace: File) {
     namespace.deleteLine(
-        Regex(
-            """#include <trace/hooks/fs\.h>"""
-        )
+        Regex("""^#include <trace/hooks/fs\.h>$""")
     )
 
-    taskMmu.deleteLine(
-        Regex(
-            """unsigned int nr_subpages = __PAGE_SIZE / PAGE_SIZE;"""
-        )
+    task.deleteLine(
+        Regex("""unsigned int nr_subpages = __PAGE_SIZE / PAGE_SIZE;""")
     )
 
-    taskMmu.deleteLine(
-        Regex(
-            """pagemap_entry_t \*res = NULL;"""
-        )
+    task.deleteLine(
+        Regex("""pagemap_entry_t \*res = NULL;""")
     )
 }
 
+fun postFix() {
+    val task = file("fs/proc/task_mmu.c")
 
-/* ============================================================
- * Post-Patch Fixups
- * ============================================================ */
+    if (task.exists()) {
+        var content = task.readText()
 
-fun applyPostPatchFixups() {
-
-    val taskMmu =
-        f("fs/proc/task_mmu.c")
-
-    if (taskMmu.exists()) {
-
-        val content =
-            taskMmu.readText()
-
-        /*
-         * Add a fallback definition for VMA_PAD_START
-         * when the required definition/header is unavailable.
-         */
         if (
             content.contains("VMA_PAD_START(") &&
             !Regex(
                 """#include <linux/pgsize_migration(_inline)?\.h>|define VMA_PAD_START"""
             ).containsMatchIn(content)
         ) {
-
-            val lines =
-                taskMmu.readLines().toMutableList()
-
-            lines.addAll(
-                1,
-                listOf(
-                    "#ifndef VMA_PAD_START",
-                    "#define VMA_PAD_START(vma) ((vma)->vm_end)",
-                    "#endif"
+            task.edit {
+                addAll(
+                    1,
+                    listOf(
+                        "#ifndef VMA_PAD_START",
+                        "#define VMA_PAD_START(vma) ((vma)->vm_end)",
+                        "#endif"
+                    )
                 )
-            )
+            }
 
-            taskMmu.writeText(
-                lines.joinToString("\n") + "\n"
-            )
-
-            println(
-                "Added VMA_PAD_START fallback definition to fs/proc/task_mmu.c"
-            )
+            log("Added VMA_PAD_START fallback")
         }
 
-        /*
-         * Add or provide a fallback for
-         * __fold_filemap_fixup_entry().
-         */
-        val content2 =
-            taskMmu.readText()
+        content = task.readText()
 
         if (
-            content2.contains(
-                "__fold_filemap_fixup_entry("
-            ) &&
+            content.contains("__fold_filemap_fixup_entry(") &&
             !Regex(
                 """static\s+inline\s+void\s+__fold_filemap_fixup_entry"""
-            ).containsMatchIn(content2)
+            ).containsMatchIn(content)
         ) {
+            val header = file("include/linux/page_size_compat.h")
 
-            val headerFile =
-                f("include/linux/page_size_compat.h")
+            if (
+                header.exists() &&
+                header.readText().contains("__fold_filemap_fixup_entry")
+            ) {
+                if (!content.contains("#include <linux/page_size_compat.h>")) {
+                    task.edit {
+                        add(1, "#include <linux/page_size_compat.h>")
+                    }
 
-            val headerDeclaresFn =
-                headerFile.exists() &&
-                headerFile.readText()
-                    .contains(
-                        "__fold_filemap_fixup_entry"
-                    )
+                    log("Added page_size_compat.h include")
+                }
+            } else {
+                task.edit {
+                    val lastInclude =
+                        indexOfLast {
+                            it.trimStart().startsWith("#include")
+                        }
 
-            if (headerDeclaresFn) {
+                    val at =
+                        if (lastInclude >= 0) lastInclude + 1 else 1
 
-                if (
-                    !content2.contains(
-                        "#include <linux/page_size_compat.h>"
-                    )
-                ) {
-
-                    val lines =
-                        taskMmu.readLines()
-                            .toMutableList()
-
-                    lines.add(
-                        1,
-                        "#include <linux/page_size_compat.h>"
-                    )
-
-                    taskMmu.writeText(
-                        lines.joinToString("\n") + "\n"
-                    )
-
-                    println(
-                        "Added page_size_compat.h include to fs/proc/task_mmu.c"
+                    addAll(
+                        at,
+                        listOf(
+                            "#ifndef __fold_filemap_fixup_entry",
+                            "static inline void __fold_filemap_fixup_entry(struct vma_iterator *iter, unsigned long *end) { }",
+                            "#endif /* __fold_filemap_fixup_entry */"
+                        )
                     )
                 }
 
-            } else {
-
-                val lines =
-                    taskMmu.readLines()
-                        .toMutableList()
-
-                val lastIncludeIdx =
-                    lines.indexOfLast {
-                        it.trimStart()
-                            .startsWith("#include")
-                    }
-
-                val insertAt =
-                    if (lastIncludeIdx >= 0) {
-                        lastIncludeIdx + 1
-                    } else {
-                        1
-                    }
-
-                lines.addAll(
-                    insertAt,
-                    listOf(
-                        "#ifndef __fold_filemap_fixup_entry",
-                        "static inline void __fold_filemap_fixup_entry(struct vma_iterator *iter, unsigned long *end) { }",
-                        "#endif /* __fold_filemap_fixup_entry */"
-                    )
-                )
-
-                taskMmu.writeText(
-                    lines.joinToString("\n") + "\n"
-                )
-
-                println(
-                    "page_size_compat.h missing or doesn't declare " +
-                    "__fold_filemap_fixup_entry on this baseline; " +
-                    "added local stub to fs/proc/task_mmu.c"
-                )
+                log("Added __fold_filemap_fixup_entry() stub")
             }
         }
     }
 
-    /*
-     * Android 12 / Android 13 5.10:
-     * Convert the 4-argument set_nameidata() call
-     * to the 3-argument version.
-     */
-    if (
-        kernelModule == "android12-5.10" ||
-        kernelModule == "android13-5.10"
-    ) {
-
-        val namei =
-            f("fs/namei.c")
+    if (kernelModule in setOf("android12-5.10", "android13-5.10")) {
+        val namei = file("fs/namei.c")
 
         if (
             namei.exists() &&
@@ -506,12 +243,9 @@ fun applyPostPatchFixups() {
                 "set_nameidata(nd, old_dfd, fake_filename, NULL)"
             )
         ) {
+            log("Fixing set_nameidata() for 5.10")
 
-            println(
-                "Fixing set_nameidata calls for 5.10 (4-arg -> 3-arg)"
-            )
-
-            namei.replaceEachLine(
+            namei.replace(
                 Regex(
                     """set_nameidata\(nd, old_dfd, fake_filename, NULL\)"""
                 ),
@@ -519,540 +253,300 @@ fun applyPostPatchFixups() {
             )
         }
     }
+
+    if (kernelModule == "android16-6.12") {
+        val openC = file("fs/open.c")
+
+        if (
+            openC.exists() &&
+            openC.readText().contains(
+                "getname_flags(filename, lookup_flags, NULL)"
+            )
+        ) {
+            log("Fixing getname_flags() for 6.12")
+
+            openC.replace(
+                Regex(
+                    """getname_flags\(filename, lookup_flags, NULL\)"""
+                ),
+                "getname_flags(filename, lookup_flags)"
+            )
+        }
+    }
 }
-
-
-/* ============================================================
- * Apply Patches
- * ============================================================ */
 
 fun apply() {
+    when (kernelModule) {
+        "android12-5.10" -> {
+            if (sublevel <= 43) {
+                log("Android 12 5.10 base.c")
 
-    /* --------------------------------------------------------
-     * Android 12 - 5.10
-     * -------------------------------------------------------- */
-
-    if (kernelModule == "android12-5.10") {
-
-        if (sublevel <= 43) {
-
-            println(
-                "Applying base.c Android 12 5.10 Fake Patch"
-            )
-
-            f("fs/proc/base.c").replaceEachLine(
-                Regex(
-                    """(int|size_t)\s+this_len\s*=\s*min_t\s*\(\s*\1\s*,"""
-                ),
-                "size_t this_len = min_t(size_t,"
-            )
-        }
-
-        if (sublevel <= 117) {
-
-            println(
-                "Applying fdinfo.c Android 12 5.10 Fake Patch"
-            )
-
-            applyFdinfo(
-                f("fs/notify/fdinfo.c")
-            )
-        }
-    }
-
-
-    /* --------------------------------------------------------
-     * Android 13 - 5.10
-     * -------------------------------------------------------- */
-
-    if (kernelModule == "android13-5.10") {
-
-        if (sublevel <= 107) {
-
-            println(
-                "Applying fdinfo.c Android 13 5.10 Fake Patch"
-            )
-
-            applyFdinfo(
-                f("fs/notify/fdinfo.c")
-            )
-        }
-    }
-
-
-    /* --------------------------------------------------------
-     * Android 13 - 5.15
-     * -------------------------------------------------------- */
-
-    if (kernelModule == "android13-5.15") {
-
-        if (sublevel <= 41) {
-
-            println(
-                "Applying namespace.c Android 13 5.15 SUSFS fixes"
-            )
-
-            f("fs/namespace.c").insertAfter(
-                Regex(
-                    """^#include <linux/shmem_fs\.h>$"""
-                ),
-                "#include <linux/mnt_idmapping.h>"
-            )
-
-            println(
-                "Applying open.c Android 13 5.15 Fake Patch"
-            )
-
-            f("fs/open.c").insertAfter(
-                Regex(
-                    """^#include <linux/compat\.h>$"""
-                ),
-                "#include <linux/mnt_idmapping.h>"
-            )
-
-            println(
-                "Applying fdinfo.c Android 13 5.15 Fake Patch"
-            )
-
-            applyFdinfo(
-                f("fs/notify/fdinfo.c")
-            )
-        }
-
-        if (sublevel >= 123) {
-
-            println(
-                "Applying memory.c Android 13 5.15 Fake Patch"
-            )
-
-            f("mm/memory.c").deleteLine(
-                Regex(
-                    """#include <linux/swap_slots\.h>"""
+                file("fs/proc/base.c").replace(
+                    Regex(
+                        """(int|size_t)\s+this_len\s*=\s*min_t\s*\(\s*\1\s*,"""
+                    ),
+                    "size_t this_len = min_t(size_t,"
                 )
-            )
+            }
+
+            if (sublevel <= 117) {
+                log("Android 12 5.10 fdinfo.c")
+                applyFdinfo(file("fs/notify/fdinfo.c"))
+            }
         }
 
-        if (sublevel >= 197) {
+        "android13-5.10" -> {
+            if (sublevel <= 107) {
+                log("Android 13 5.10 fdinfo.c")
+                applyFdinfo(file("fs/notify/fdinfo.c"))
+            }
+        }
 
-            println(
-                "Applying namespace.c Android 13 5.15 Fake Patch"
-            )
+        "android13-5.15" -> {
+            if (sublevel <= 41) {
+                log("Android 13 5.15 namespace/open/fdinfo")
 
-            f("fs/namespace.c").deleteLine(
-                Regex(
-                    """^#include <trace/hooks/blk\.h>$"""
+                file("fs/namespace.c").includeAfter(
+                    "#include <linux/shmem_fs.h>",
+                    "#include <linux/mnt_idmapping.h>"
                 )
-            )
-        }
 
-        if (sublevel >= 206) {
-
-            println(
-                "Applying task_mmu.c Android 13 5.15 Fake Patch"
-            )
-
-            f("fs/proc/task_mmu.c").deleteLine(
-                Regex(
-                    """^#include <trace/hooks/mm\.h>$"""
+                file("fs/open.c").includeAfter(
+                    "#include <linux/compat.h>",
+                    "#include <linux/mnt_idmapping.h>"
                 )
-            )
-        }
-    }
 
+                applyFdinfo(file("fs/notify/fdinfo.c"))
+            }
 
-    /* --------------------------------------------------------
-     * Android 14 - 6.1
-     * -------------------------------------------------------- */
+            if (sublevel >= 123) {
+                log("Android 13 5.15 memory.c")
 
-    if (kernelModule == "android14-6.1") {
-
-        if (sublevel <= 25) {
-
-            println(
-                "Applying base.c Android 14 6.1 Fake Patch"
-            )
-
-            f("fs/proc/base.c").insertAfter(
-                Regex(
-                    """^#include <trace/events/oom\.h>$"""
-                ),
-                "#include <trace/hooks/sched.h>"
-            )
-        }
-
-        if (sublevel <= 141) {
-
-            println(
-                "Applying base.c Android 14 6.1 Fake Patch"
-            )
-
-            f("fs/proc/base.c").insertAfter(
-                Regex(
-                    """^#include <linux/cpufreq_times\.h>$"""
-                ),
-                "#include <linux/dma-buf.h>"
-            )
-        }
-
-        if (sublevel >= 157) {
-
-            println(
-                "Applying namespace.c Android 14 6.1 Fake Patch"
-            )
-
-            f("fs/namespace.c").deleteLine(
-                Regex(
-                    """^#include <trace/hooks/blk\.h>$"""
+                file("mm/memory.c").deleteLine(
+                    Regex("""#include <linux/swap_slots\.h>""")
                 )
-            )
-        }
-    }
+            }
 
+            if (sublevel >= 197) {
+                log("Android 13 5.15 namespace.c")
 
-    /* --------------------------------------------------------
-     * Android 15 - 6.6
-     * -------------------------------------------------------- */
-
-    if (kernelModule == "android15-6.6") {
-
-        if (sublevel <= 30) {
-
-            println(
-                "Applying task_mmu.c, namespace.c Android 15 6.6 Fake Patch"
-            )
-
-            applyAndroid15VmaBlock(
-                f("fs/proc/task_mmu.c"),
-                f("fs/namespace.c")
-            )
-        }
-
-        if (sublevel <= 57) {
-
-            println(
-                "Applying memory.c Android 15 6.6 Fake Patch"
-            )
-
-            f("mm/memory.c").insertAfter(
-                Regex(
-                    """^#include <linux/sched/sysctl\.h>$"""
-                ),
-                "#include <linux/zswap.h>"
-            )
-        }
-
-        if (sublevel <= 92) {
-
-            println(
-                "Applying base.c Android 15 6.6 Fake Patch"
-            )
-
-            f("fs/proc/base.c").insertAfter(
-                Regex(
-                    """^#include <linux/cpufreq_times\.h>$"""
-                ),
-                "#include <linux/dma-buf.h>"
-            )
-        }
-    }
-
-
-    /* --------------------------------------------------------
-     * Android 16 - 6.12
-     * -------------------------------------------------------- */
-
-    if (kernelModule == "android16-6.12") {
-
-        if (sublevel >= 58) {
-
-            println(
-                "Applying exec.c Android 16 6.12 Fake Patch"
-            )
-
-            f("fs/exec.c").deleteLine(
-                Regex(
-                    """^#include <linux/dma-buf\.h>$"""
+                file("fs/namespace.c").deleteLine(
+                    Regex("""^#include <trace/hooks/blk\.h>$""")
                 )
-            )
+            }
+
+            if (sublevel >= 206) {
+                log("Android 13 5.15 task_mmu.c")
+
+                file("fs/proc/task_mmu.c").deleteLine(
+                    Regex("""^#include <trace/hooks/mm\.h>$""")
+                )
+            }
         }
 
-        if (sublevel >= 69) {
+        "android14-6.1" -> {
+            if (sublevel <= 25) {
+                log("Android 14 6.1 sched.h")
 
-            println(
-                "Applying task_mmu.c Android 16 6.12 Fake Patch"
-            )
+                file("fs/proc/base.c").includeAfter(
+                    "#include <trace/events/oom.h>",
+                    "#include <trace/hooks/sched.h>"
+                )
+            }
 
-            f("fs/proc/task_mmu.c").replaceEachLine(
-                Regex(
-                    """vma_data_pages"""
-                ),
-                "vma_pages"
-            )
+            if (sublevel <= 141) {
+                log("Android 14 6.1 dma-buf.h")
+
+                file("fs/proc/base.c").includeAfter(
+                    "#include <linux/cpufreq_times.h>",
+                    "#include <linux/dma-buf.h>"
+                )
+            }
+
+            if (sublevel >= 157) {
+                log("Android 14 6.1 namespace.c")
+
+                file("fs/namespace.c").deleteLine(
+                    Regex("""^#include <trace/hooks/blk\.h>$""")
+                )
+            }
+        }
+
+        "android15-6.6" -> {
+            if (sublevel <= 30) {
+                log("Android 15 6.6 VMA")
+
+                applyVma(
+                    file("fs/proc/task_mmu.c"),
+                    file("fs/namespace.c")
+                )
+            }
+
+            if (sublevel <= 57) {
+                log("Android 15 6.6 zswap.h")
+
+                file("mm/memory.c").includeAfter(
+                    "#include <linux/sched/sysctl.h>",
+                    "#include <linux/zswap.h>"
+                )
+            }
+
+            if (sublevel <= 92) {
+                log("Android 15 6.6 dma-buf.h")
+
+                file("fs/proc/base.c").includeAfter(
+                    "#include <linux/cpufreq_times.h>",
+                    "#include <linux/dma-buf.h>"
+                )
+            }
+        }
+
+        "android16-6.12" -> {
+            if (sublevel >= 58) {
+                log("Android 16 6.12 exec.c")
+
+                file("fs/exec.c").deleteLine(
+                    Regex("""^#include <linux/dma-buf\.h>$""")
+                )
+            }
+
+            if (sublevel >= 69) {
+                log("Android 16 6.12 task_mmu.c")
+
+                file("fs/proc/task_mmu.c").replace(
+                    Regex("""vma_data_pages"""),
+                    "vma_pages"
+                )
+            }
         }
     }
 }
-
-
-/* ============================================================
- * Postfix
- * ============================================================ */
-
-fun postfix() {
-    applyPostPatchFixups()
-}
-
-
-/* ============================================================
- * Revert Patches
- * ============================================================ */
 
 fun revert() {
+    when (kernelModule) {
+        "android12-5.10" -> {
+            if (sublevel <= 43) {
+                log("Reverting Android 12 5.10 base.c")
 
-    /* --------------------------------------------------------
-     * Android 12 - 5.10
-     * -------------------------------------------------------- */
-
-    if (kernelModule == "android12-5.10") {
-
-        if (sublevel <= 43) {
-
-            println(
-                "Reverting base.c Android 12 5.10 Fake Patch"
-            )
-
-            f("fs/proc/base.c").replaceWholeLine(
-                "size_t this_len = min_t(size_t, count, PAGE_SIZE);",
-                "int this_len = min_t(int, count, PAGE_SIZE);"
-            )
+                file("fs/proc/base.c").replaceExact(
+                    "size_t this_len = min_t(size_t, count, PAGE_SIZE);",
+                    "int this_len = min_t(int, count, PAGE_SIZE);"
+                )
+            }
         }
-    }
 
+        "android13-5.15" -> {
+            if (sublevel <= 41) {
+                log("Reverting Android 13 5.15")
 
-    /* --------------------------------------------------------
-     * Android 13 - 5.15
-     * -------------------------------------------------------- */
-
-    if (kernelModule == "android13-5.15") {
-
-        if (sublevel <= 41) {
-
-            println(
-                "Reverting namespace.c Android 13 5.15 Fake Patch"
-            )
-
-            f("fs/namespace.c").deleteLine(
-                Regex(
-                    """#include <linux/mnt_idmapping\.h>$"""
+                file("fs/namespace.c").deleteLine(
+                    Regex("""#include <linux/mnt_idmapping\.h>$""")
                 )
-            )
 
-            println(
-                "Reverting open.c Android 13 5.15 Fake Patch"
-            )
-
-            f("fs/open.c").deleteLine(
-                Regex(
-                    """#include <linux/mnt_idmapping\.h>$"""
+                file("fs/open.c").deleteLine(
+                    Regex("""#include <linux/mnt_idmapping\.h>$""")
                 )
-            )
 
-            f("fs/susfs.c").replaceEachLine(
-                Regex(
+                file("fs/susfs.c").replace(
                     Regex.escape(
                         "i_uid_into_mnt(i_user_ns(&fi->inode), &fi->inode).val"
-                    )
-                ),
-                "i_uid_into_mnt(&init_user_ns, &fi->inode).val"
-            )
+                    ).toRegex(),
+                    "i_uid_into_mnt(&init_user_ns, &fi->inode).val"
+                )
 
-            f("fs/susfs.c").replaceEachLine(
-                Regex(
+                file("fs/susfs.c").replace(
                     Regex.escape(
                         "i_uid_into_mnt(i_user_ns(inode), inode).val"
-                    )
-                ),
-                "i_uid_into_mnt(&init_user_ns, inode).val"
-            )
-        }
-
-        if (sublevel >= 123) {
-
-            println(
-                "Reverting memory.c Android 13 5.15 Fake Patch"
-            )
-
-            f("mm/memory.c").insertBefore(
-                Regex(
-                    """#ifdef CONFIG_KSU_SUSFS_SUS_MAP"""
-                ),
-                "#include <linux/swap_slots.h>"
-            )
-        }
-
-        if (sublevel >= 197) {
-
-            println(
-                "Reverting namespace.c Android 13 5.15 Fake Patch"
-            )
-
-            f("fs/namespace.c").insertAfter(
-                Regex(
-                    """^#include "internal\.h"$"""
-                ),
-                "#include <trace/hooks/blk.h>"
-            )
-        }
-
-        if (sublevel >= 206) {
-
-            println(
-                "Reverting task_mmu.c Android 13 5.15 Fake Patch"
-            )
-
-            f("fs/proc/task_mmu.c").insertAfter(
-                Regex(
-                    """^#include <linux/pkeys\.h>$"""
-                ),
-                "#include <trace/hooks/mm.h>"
-            )
-        }
-    }
-
-
-    /* --------------------------------------------------------
-     * Android 14 - 6.1
-     * -------------------------------------------------------- */
-
-    if (kernelModule == "android14-6.1") {
-
-        if (sublevel <= 25) {
-
-            println(
-                "Reverting base.c Android 14 6.1 Fake Patch"
-            )
-
-            f("fs/proc/base.c").deleteLine(
-                Regex(
-                    """^#include <trace/hooks/sched\.h>$"""
+                    ).toRegex(),
+                    "i_uid_into_mnt(&init_user_ns, inode).val"
                 )
-            )
-        }
+            }
 
-        if (sublevel <= 141) {
-
-            println(
-                "Reverting base.c Android 14 6.1 Fake Patch"
-            )
-
-            f("fs/proc/base.c").deleteLine(
-                Regex(
-                    """^#include <linux/dma-buf\.h>$"""
+            if (sublevel >= 123) {
+                file("mm/memory.c").insertBefore(
+                    Regex("""#ifdef CONFIG_KSU_SUSFS_SUS_MAP"""),
+                    "#include <linux/swap_slots.h>"
                 )
-            )
-        }
-    }
+            }
 
-
-    /* --------------------------------------------------------
-     * Android 15 - 6.6
-     * -------------------------------------------------------- */
-
-    if (kernelModule == "android15-6.6") {
-
-        if (sublevel <= 30) {
-
-            println(
-                "Reverting task_mmu.c, namespace.c Android 15 6.6 Fake Patch"
-            )
-
-            revertAndroid15VmaBlock(
-                f("fs/proc/task_mmu.c"),
-                f("fs/namespace.c")
-            )
-        }
-
-        if (sublevel <= 57) {
-
-            println(
-                "Reverting memory.c Android 15 6.6 Fake Patch"
-            )
-
-            f("mm/memory.c").deleteLine(
-                Regex(
-                    """^#include <linux/zswap\.h>$"""
+            if (sublevel >= 197) {
+                file("fs/namespace.c").insertAfter(
+                    Regex("""^#include "internal\.h"$"""),
+                    "#include <trace/hooks/blk.h>"
                 )
-            )
-        }
+            }
 
-        if (sublevel <= 92) {
-
-            println(
-                "Reverting base.c Android 15 6.6 Fake Patch"
-            )
-
-            f("fs/proc/base.c").deleteLine(
-                Regex(
-                    """^#include <linux/dma-buf\.h>$"""
+            if (sublevel >= 206) {
+                file("fs/proc/task_mmu.c").insertAfter(
+                    Regex("""^#include <linux/pkeys\.h>$"""),
+                    "#include <trace/hooks/mm.h>"
                 )
-            )
-        }
-    }
-
-
-    /* --------------------------------------------------------
-     * Android 16 - 6.12
-     * -------------------------------------------------------- */
-
-    if (kernelModule == "android16-6.12") {
-
-        if (sublevel >= 58) {
-
-            println(
-                "Reverting exec.c Android 16 6.12 Fake Patch"
-            )
-
-            f("fs/exec.c").insertAfterFirst(
-                Regex("""^#include """),
-                "#include <linux/dma-buf.h>"
-            )
+            }
         }
 
-        if (sublevel >= 69) {
+        "android14-6.1" -> {
+            if (sublevel <= 25) {
+                file("fs/proc/base.c").deleteLine(
+                    Regex("""^#include <trace/hooks/sched\.h>$""")
+                )
+            }
 
-            println(
-                "Reverting task_mmu.c Android 16 6.12 Fake Patch"
-            )
+            if (sublevel <= 141) {
+                file("fs/proc/base.c").deleteLine(
+                    Regex("""^#include <linux/dma-buf\.h>$""")
+                )
+            }
+        }
 
-            f("fs/proc/task_mmu.c").replaceEachLine(
-                Regex(
-                    """vma_pages"""
-                ),
-                "vma_data_pages"
-            )
+        "android15-6.6" -> {
+            if (sublevel <= 30) {
+                log("Reverting Android 15 6.6 VMA")
+
+                revertVma(
+                    file("fs/proc/task_mmu.c"),
+                    file("fs/namespace.c")
+                )
+            }
+
+            if (sublevel <= 57) {
+                file("mm/memory.c").deleteLine(
+                    Regex("""^#include <linux/zswap\.h>$""")
+                )
+            }
+
+            if (sublevel <= 92) {
+                file("fs/proc/base.c").deleteLine(
+                    Regex("""^#include <linux/dma-buf\.h>$""")
+                )
+            }
+        }
+
+        "android16-6.12" -> {
+            if (sublevel >= 58) {
+                file("fs/exec.c").includeAfterFirst(
+                    "#include <linux/dma-buf.h>"
+                )
+            }
+
+            if (sublevel >= 69) {
+                file("fs/proc/task_mmu.c").replace(
+                    Regex("""vma_pages"""),
+                    "vma_data_pages"
+                )
+            }
         }
     }
 }
 
-
-/* ============================================================
- * Main
- * ============================================================ */
-
 when (mode) {
-
     "apply" -> apply()
-
-    "postfix" -> postfix()
-
+    "postfix" -> postFix()
     "revert" -> revert()
-
     else -> {
-
         println(
-            "Usage: kotlin PatchFakePatches.main.kts " +
+            "Usage: kotlin FakePatches.kts " +
             "<apply|postfix|revert> [workDir]"
         )
-
         exitProcess(1)
     }
 }
