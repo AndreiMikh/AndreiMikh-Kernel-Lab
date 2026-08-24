@@ -3,91 +3,198 @@
 import java.io.File
 import kotlin.system.exitProcess
 
-fun File.edit(block: MutableList<String>.() -> Unit) {
-    val lines = readLines().toMutableList()
-    lines.block()
-    writeText(lines.joinToString("\n") + "\n")
-}
-
-fun File.insertAfter(regex: Regex, vararg text: String) = edit {
-    val out = mutableListOf<String>()
-    forEach {
-        out += it
-        if (regex.containsMatchIn(it)) out += text
-    }
-    clear()
-    addAll(out)
-}
-
-fun File.insertAfterFirst(regex: Regex, vararg text: String) = edit {
-    indexOfFirst { regex.containsMatchIn(it) }
-        .takeIf { it >= 0 }
-        ?.let { addAll(it + 1, text.toList()) }
-}
-
-fun File.insertBefore(regex: Regex, vararg text: String) = edit {
-    val out = mutableListOf<String>()
-    forEach {
-        if (regex.containsMatchIn(it)) out += text
-        out += it
-    }
-    clear()
-    addAll(out)
-}
-
-fun File.deleteLine(regex: Regex) = edit {
-    removeAll { regex.containsMatchIn(it) }
-}
-
-fun File.deleteBlock(start: Regex, end: Regex) = edit {
-    val out = mutableListOf<String>()
-    var block = false
-
-    forEach { line ->
-        if (!block && start.containsMatchIn(line)) {
-            block = true
-        } else if (block) {
-            if (end.containsMatchIn(line)) block = false
-        } else {
-            out += line
-        }
-    }
-
-    clear()
-    addAll(out)
-}
-
-fun File.replace(regex: Regex, replacement: String) = edit {
-    forEachIndexed { i, line ->
-        this[i] = regex.replace(line, replacement)
-    }
-}
-
-fun File.replaceExact(old: String, new: String) = edit {
-    forEachIndexed { i, line ->
-        if (line == old) this[i] = new
-    }
-}
-
-fun File.includeAfter(header: String, include: String) =
-    insertAfter(Regex("^${Regex.escape(header)}$"), include)
-
-fun File.includeAfterFirst(include: String) =
-    insertAfterFirst(Regex("""^#include """), include)
-
 val kernelModule = System.getenv("KERNELMODULE").orEmpty()
 val sublevel = System.getenv("SUBLEVEL")?.toIntOrNull() ?: 0
 val mode = args.getOrNull(0) ?: "apply"
 val workDir = args.getOrNull(1) ?: "kernel_workspace/kernel_platform/common"
 
 fun file(path: String) = File(workDir, path)
+
+fun requireFile(path: String): File {
+    val f = file(path)
+    if (!f.exists()) error("Required file not found: ${f.path}")
+    return f
+}
+
 fun log(msg: String) = println("→ $msg")
+
+fun File.edit(block: MutableList<String>.() -> Boolean): Boolean {
+    val lines = readLines().toMutableList()
+    val changed = lines.block()
+    if (changed) writeText(lines.joinToString("\n") + "\n")
+    return changed
+}
+
+fun File.insertAfter(regex: Regex, vararg text: String): Boolean {
+    if (!exists()) error("File not found: $path")
+
+    return edit {
+        if (text.all { it in this }) return@edit false
+
+        val out = mutableListOf<String>()
+        var changed = false
+
+        forEach { line ->
+            out += line
+            if (regex.containsMatchIn(line)) {
+                out += text
+                changed = true
+            }
+        }
+
+        if (!changed) return@edit false
+
+        clear()
+        addAll(out)
+        true
+    }
+}
+
+fun File.insertAfterFirst(regex: Regex, vararg text: String): Boolean {
+    if (!exists()) error("File not found: $path")
+
+    return edit {
+        if (text.all { it in this }) return@edit false
+
+        val index = indexOfFirst { regex.containsMatchIn(it) }
+        if (index < 0) return@edit false
+
+        addAll(index + 1, text.toList())
+        true
+    }
+}
+
+fun File.insertBefore(regex: Regex, vararg text: String): Boolean {
+    if (!exists()) error("File not found: $path")
+
+    return edit {
+        if (text.all { it in this }) return@edit false
+
+        val out = mutableListOf<String>()
+        var changed = false
+
+        forEach { line ->
+            if (regex.containsMatchIn(line)) {
+                out += text
+                changed = true
+            }
+            out += line
+        }
+
+        if (!changed) return@edit false
+
+        clear()
+        addAll(out)
+        true
+    }
+}
+
+fun File.deleteLine(regex: Regex): Boolean {
+    if (!exists()) error("File not found: $path")
+
+    return edit {
+        val oldSize = size
+        removeAll { regex.containsMatchIn(it) }
+        size != oldSize
+    }
+}
+
+fun File.deleteBlock(start: Regex, end: Regex): Boolean {
+    if (!exists()) error("File not found: $path")
+
+    return edit {
+        val out = mutableListOf<String>()
+        var inBlock = false
+        var changed = false
+
+        forEach { line ->
+            if (!inBlock && start.containsMatchIn(line)) {
+                inBlock = true
+                changed = true
+            } else if (inBlock) {
+                if (end.containsMatchIn(line)) inBlock = false
+            } else {
+                out += line
+            }
+        }
+
+        if (!changed) return@edit false
+
+        clear()
+        addAll(out)
+        true
+    }
+}
+
+fun File.replace(regex: Regex, replacement: String): Int {
+    if (!exists()) error("File not found: $path")
+
+    var count = 0
+
+    edit {
+        forEachIndexed { i, line ->
+            val replaced = regex.replace(line, replacement)
+
+            if (replaced != line) {
+                this[i] = replaced
+                count++
+            }
+        }
+
+        count > 0
+    }
+
+    return count
+}
+
+fun File.replaceExact(old: String, new: String): Boolean {
+    if (!exists()) error("File not found: $path")
+
+    return edit {
+        var changed = false
+
+        forEachIndexed { i, line ->
+            if (line == old) {
+                this[i] = new
+                changed = true
+            }
+        }
+
+        changed
+    }
+}
+
+fun File.includeAfter(header: String, include: String) =
+    insertAfter(
+        Regex("^${Regex.escape(header)}$"),
+        include
+    )
+
+fun File.includeAfterFirst(include: String) =
+    insertAfterFirst(
+        Regex("""^#include """),
+        include
+    )
+
+fun logChange(changed: Boolean, message: String) {
+    if (changed) log(message)
+}
+
+fun requireMatch(f: File, regex: Regex, description: String) {
+    if (!f.readText().contains(regex)) {
+        error("Required pattern not found in ${f.path}: $description")
+    }
+}
 
 val fdinfoStart = Regex("""^[ \t]*/\*$""")
 val fdinfoEnd = Regex("""^[ \t]*u32 mask = mark->mask & IN_ALL_EVENTS;$""")
-val inotifyFunc = Regex("""^static void inotify_fdinfo\(struct seq_file \*m, struct fsnotify_mark \*mark\)$""")
+val inotifyFunc = Regex(
+    """^static void inotify_fdinfo\(struct seq_file \*m, struct fsnotify_mark \*mark\)$"""
+)
 
 fun addInotifyHelper(f: File) {
+    if (f.readText().contains("inotify_mark_user_mask(")) return
+
     f.insertBeforeFirst(
         inotifyFunc,
         "static inline u32 inotify_mark_user_mask(struct fsnotify_mark *mark) {",
@@ -95,26 +202,42 @@ fun addInotifyHelper(f: File) {
         "}",
         ""
     )
+
+    log("Added inotify_mark_user_mask()")
 }
 
 fun applyFdinfo(f: File) {
+    requireFile(f.relativeTo(File(workDir)).path)
+
     f.deleteBlock(fdinfoStart, fdinfoEnd)
-    f.replace(
+
+    val maskChanged = f.replace(
         Regex("""\bmask,\s*mark->ignored_mask"""),
         "inotify_mark_user_mask(mark)"
     )
-    f.replace(
+
+    val ignoredChanged = f.replace(
         Regex("""ignored_mask:%x"""),
         "ignored_mask:0"
     )
-    log("Adding inotify_mark_user_mask()")
+
     addInotifyHelper(f)
+
+    if (maskChanged > 0 || ignoredChanged > 0) {
+        log("Applied fdinfo compatibility fix")
+    }
 }
 
 fun applyVma(task: File, namespace: File) {
-    task.insertAfter(
-        Regex("""smap_gather_stats\(vma, &mss, last_vma_end\);"""),
-        "last_vma_end = vma->vm_end;"
+    requireFile("fs/proc/task_mmu.c")
+    requireFile("fs/namespace.c")
+
+    logChange(
+        task.insertAfter(
+            Regex("""smap_gather_stats\(vma, &mss, last_vma_end\);"""),
+            "last_vma_end = vma->vm_end;"
+        ),
+        "Added last_vma_end assignment"
     )
 
     task.edit {
@@ -122,44 +245,93 @@ fun applyVma(task: File, namespace: File) {
             it.contains("last_vma_end = vma->vm_end;")
         }
 
-        if (assignment >= 0) {
-            this[assignment] = "\t\t\t\t$this[assignment]"
-            add(assignment + 1, "\t\t\t}")
+        if (assignment < 0) return@edit false
 
-            (assignment downTo 0).firstOrNull {
-                Regex("""if\s*\(vma->vm_end > last_vma_end\)""")
-                    .containsMatchIn(this[it])
-            }?.let {
-                this[it] = Regex("""\)\s*$""")
-                    .replace(this[it], ") {")
-            }
-        }
+        val alreadyWrapped =
+            assignment + 1 < size &&
+            this[assignment + 1].trim() == "}"
+
+        if (alreadyWrapped) return@edit false
+
+        this[assignment] = "\t\t\t\t$this[assignment]"
+        add(assignment + 1, "\t\t\t}")
+
+        val ifIndex = (assignment downTo 0).firstOrNull {
+            Regex("""if\s*\(vma->vm_end > last_vma_end\)""")
+                .containsMatchIn(this[it])
+        } ?: return@edit true
+
+        this[ifIndex] = Regex("""\)\s*$""")
+            .replace(this[ifIndex], ") {")
+
+        true
     }
 
-    namespace.includeAfter(
-        "#include <trace/hooks/blk.h>",
-        "#include <trace/hooks/fs.h>"
+    logChange(
+        namespace.includeAfter(
+            "#include <trace/hooks/blk.h>",
+            "#include <trace/hooks/fs.h>"
+        ),
+        "Added trace/hooks/fs.h"
     )
 
-    task.insertAfter(
-        Regex("""int ret = 0, copied = 0;"""),
-        "\tunsigned int nr_subpages = __PAGE_SIZE / PAGE_SIZE;",
-        "\tpagemap_entry_t *res = NULL;"
+    logChange(
+        task.insertAfter(
+            Regex("""int ret = 0, copied = 0;"""),
+            "\tunsigned int nr_subpages = __PAGE_SIZE / PAGE_SIZE;",
+            "\tpagemap_entry_t *res = NULL;"
+        ),
+        "Added VMA compatibility variables"
     )
 }
 
 fun revertVma(task: File, namespace: File) {
+    requireFile("fs/proc/task_mmu.c")
+    requireFile("fs/namespace.c")
+
     namespace.deleteLine(
         Regex("""^#include <trace/hooks/fs\.h>$""")
     )
 
     task.deleteLine(
-        Regex("""unsigned int nr_subpages = __PAGE_SIZE / PAGE_SIZE;""")
+        Regex("""^\s*unsigned int nr_subpages = __PAGE_SIZE / PAGE_SIZE;$""")
     )
 
     task.deleteLine(
-        Regex("""pagemap_entry_t \*res = NULL;""")
+        Regex("""^\s*pagemap_entry_t \*res = NULL;$""")
     )
+
+    task.edit {
+        val closing = indexOfFirst {
+            it.trim() == "}" &&
+            it != last()
+        }
+
+        if (closing < 0) return@edit false
+
+        val assignment = (closing downTo 0).firstOrNull {
+            this[it].contains("last_vma_end = vma->vm_end;")
+        } ?: return@edit false
+
+        val ifIndex = (assignment downTo 0).firstOrNull {
+            Regex("""if\s*\(vma->vm_end > last_vma_end\)""")
+                .containsMatchIn(this[it])
+        } ?: return@edit false
+
+        this.removeAt(closing)
+        this[assignment - if (closing < assignment) 1 else 0] =
+            this[assignment - if (closing < assignment) 1 else 0]
+                .removePrefix("\t\t\t\t")
+
+        val actualIf = ifIndex - if (closing < ifIndex) 1 else 0
+
+        if (actualIf in indices) {
+            this[actualIf] = Regex("""\)\s*\{$""")
+                .replace(this[actualIf], ")")
+        }
+
+        true
+    }
 }
 
 fun postFix() {
@@ -183,6 +355,7 @@ fun postFix() {
                         "#endif"
                     )
                 )
+                true
             }
 
             log("Added VMA_PAD_START fallback")
@@ -200,24 +373,31 @@ fun postFix() {
 
             if (
                 header.exists() &&
-                header.readText().contains("__fold_filemap_fixup_entry")
+                header.readText().contains(
+                    "__fold_filemap_fixup_entry"
+                )
             ) {
-                if (!content.contains("#include <linux/page_size_compat.h>")) {
-                    task.edit {
-                        add(1, "#include <linux/page_size_compat.h>")
-                    }
+                if (
+                    !content.contains(
+                        "#include <linux/page_size_compat.h>"
+                    )
+                ) {
+                    task.insertAfterFirst(
+                        Regex("""^#include """),
+                        "#include <linux/page_size_compat.h>"
+                    )
 
                     log("Added page_size_compat.h include")
                 }
             } else {
                 task.edit {
-                    val lastInclude =
-                        indexOfLast {
-                            it.trimStart().startsWith("#include")
-                        }
+                    val lastInclude = indexOfLast {
+                        it.trimStart().startsWith("#include")
+                    }
 
                     val at =
-                        if (lastInclude >= 0) lastInclude + 1 else 1
+                        if (lastInclude >= 0) lastInclude + 1
+                        else 1
 
                     addAll(
                         at,
@@ -227,6 +407,8 @@ fun postFix() {
                             "#endif /* __fold_filemap_fixup_entry */"
                         )
                     )
+
+                    true
                 }
 
                 log("Added __fold_filemap_fixup_entry() stub")
@@ -234,7 +416,10 @@ fun postFix() {
         }
     }
 
-    if (kernelModule in setOf("android12-5.10", "android13-5.10")) {
+    if (
+        kernelModule == "android12-5.10" ||
+        kernelModule == "android13-5.10"
+    ) {
         val namei = file("fs/namei.c")
 
         if (
@@ -279,9 +464,10 @@ fun apply() {
     when (kernelModule) {
         "android12-5.10" -> {
             if (sublevel <= 43) {
+                val f = requireFile("fs/proc/base.c")
                 log("Android 12 5.10 base.c")
 
-                file("fs/proc/base.c").replace(
+                f.replace(
                     Regex(
                         """(int|size_t)\s+this_len\s*=\s*min_t\s*\(\s*\1\s*,"""
                     ),
@@ -291,14 +477,14 @@ fun apply() {
 
             if (sublevel <= 117) {
                 log("Android 12 5.10 fdinfo.c")
-                applyFdinfo(file("fs/notify/fdinfo.c"))
+                applyFdinfo(requireFile("fs/notify/fdinfo.c"))
             }
         }
 
         "android13-5.10" -> {
             if (sublevel <= 107) {
                 log("Android 13 5.10 fdinfo.c")
-                applyFdinfo(file("fs/notify/fdinfo.c"))
+                applyFdinfo(requireFile("fs/notify/fdinfo.c"))
             }
         }
 
@@ -306,31 +492,31 @@ fun apply() {
             if (sublevel <= 41) {
                 log("Android 13 5.15 namespace/open/fdinfo")
 
-                file("fs/namespace.c").includeAfter(
+                requireFile("fs/namespace.c").includeAfter(
                     "#include <linux/shmem_fs.h>",
                     "#include <linux/mnt_idmapping.h>"
                 )
 
-                file("fs/open.c").includeAfter(
+                requireFile("fs/open.c").includeAfter(
                     "#include <linux/compat.h>",
                     "#include <linux/mnt_idmapping.h>"
                 )
 
-                applyFdinfo(file("fs/notify/fdinfo.c"))
+                applyFdinfo(requireFile("fs/notify/fdinfo.c"))
             }
 
             if (sublevel >= 123) {
                 log("Android 13 5.15 memory.c")
 
-                file("mm/memory.c").deleteLine(
-                    Regex("""#include <linux/swap_slots\.h>""")
+                requireFile("mm/memory.c").deleteLine(
+                    Regex("""^#include <linux/swap_slots\.h>$""")
                 )
             }
 
             if (sublevel >= 197) {
                 log("Android 13 5.15 namespace.c")
 
-                file("fs/namespace.c").deleteLine(
+                requireFile("fs/namespace.c").deleteLine(
                     Regex("""^#include <trace/hooks/blk\.h>$""")
                 )
             }
@@ -338,7 +524,7 @@ fun apply() {
             if (sublevel >= 206) {
                 log("Android 13 5.15 task_mmu.c")
 
-                file("fs/proc/task_mmu.c").deleteLine(
+                requireFile("fs/proc/task_mmu.c").deleteLine(
                     Regex("""^#include <trace/hooks/mm\.h>$""")
                 )
             }
@@ -348,7 +534,7 @@ fun apply() {
             if (sublevel <= 25) {
                 log("Android 14 6.1 sched.h")
 
-                file("fs/proc/base.c").includeAfter(
+                requireFile("fs/proc/base.c").includeAfter(
                     "#include <trace/events/oom.h>",
                     "#include <trace/hooks/sched.h>"
                 )
@@ -357,7 +543,7 @@ fun apply() {
             if (sublevel <= 141) {
                 log("Android 14 6.1 dma-buf.h")
 
-                file("fs/proc/base.c").includeAfter(
+                requireFile("fs/proc/base.c").includeAfter(
                     "#include <linux/cpufreq_times.h>",
                     "#include <linux/dma-buf.h>"
                 )
@@ -366,7 +552,7 @@ fun apply() {
             if (sublevel >= 157) {
                 log("Android 14 6.1 namespace.c")
 
-                file("fs/namespace.c").deleteLine(
+                requireFile("fs/namespace.c").deleteLine(
                     Regex("""^#include <trace/hooks/blk\.h>$""")
                 )
             }
@@ -377,15 +563,15 @@ fun apply() {
                 log("Android 15 6.6 VMA")
 
                 applyVma(
-                    file("fs/proc/task_mmu.c"),
-                    file("fs/namespace.c")
+                    requireFile("fs/proc/task_mmu.c"),
+                    requireFile("fs/namespace.c")
                 )
             }
 
             if (sublevel <= 57) {
                 log("Android 15 6.6 zswap.h")
 
-                file("mm/memory.c").includeAfter(
+                requireFile("mm/memory.c").includeAfter(
                     "#include <linux/sched/sysctl.h>",
                     "#include <linux/zswap.h>"
                 )
@@ -394,7 +580,7 @@ fun apply() {
             if (sublevel <= 92) {
                 log("Android 15 6.6 dma-buf.h")
 
-                file("fs/proc/base.c").includeAfter(
+                requireFile("fs/proc/base.c").includeAfter(
                     "#include <linux/cpufreq_times.h>",
                     "#include <linux/dma-buf.h>"
                 )
@@ -405,7 +591,7 @@ fun apply() {
             if (sublevel >= 58) {
                 log("Android 16 6.12 exec.c")
 
-                file("fs/exec.c").deleteLine(
+                requireFile("fs/exec.c").deleteLine(
                     Regex("""^#include <linux/dma-buf\.h>$""")
                 )
             }
@@ -413,12 +599,14 @@ fun apply() {
             if (sublevel >= 69) {
                 log("Android 16 6.12 task_mmu.c")
 
-                file("fs/proc/task_mmu.c").replace(
+                requireFile("fs/proc/task_mmu.c").replace(
                     Regex("""vma_data_pages"""),
                     "vma_pages"
                 )
             }
         }
+
+        else -> log("No apply patches for $kernelModule")
     }
 }
 
@@ -428,7 +616,7 @@ fun revert() {
             if (sublevel <= 43) {
                 log("Reverting Android 12 5.10 base.c")
 
-                file("fs/proc/base.c").replaceExact(
+                requireFile("fs/proc/base.c").replaceExact(
                     "size_t this_len = min_t(size_t, count, PAGE_SIZE);",
                     "int this_len = min_t(int, count, PAGE_SIZE);"
                 )
@@ -439,22 +627,22 @@ fun revert() {
             if (sublevel <= 41) {
                 log("Reverting Android 13 5.15")
 
-                file("fs/namespace.c").deleteLine(
-                    Regex("""#include <linux/mnt_idmapping\.h>$""")
+                requireFile("fs/namespace.c").deleteLine(
+                    Regex("""^#include <linux/mnt_idmapping\.h>$""")
                 )
 
-                file("fs/open.c").deleteLine(
-                    Regex("""#include <linux/mnt_idmapping\.h>$""")
+                requireFile("fs/open.c").deleteLine(
+                    Regex("""^#include <linux/mnt_idmapping\.h>$""")
                 )
 
-                file("fs/susfs.c").replace(
+                requireFile("fs/susfs.c").replace(
                     Regex.escape(
                         "i_uid_into_mnt(i_user_ns(&fi->inode), &fi->inode).val"
                     ).toRegex(),
                     "i_uid_into_mnt(&init_user_ns, &fi->inode).val"
                 )
 
-                file("fs/susfs.c").replace(
+                requireFile("fs/susfs.c").replace(
                     Regex.escape(
                         "i_uid_into_mnt(i_user_ns(inode), inode).val"
                     ).toRegex(),
@@ -463,21 +651,21 @@ fun revert() {
             }
 
             if (sublevel >= 123) {
-                file("mm/memory.c").insertBefore(
+                requireFile("mm/memory.c").insertBefore(
                     Regex("""#ifdef CONFIG_KSU_SUSFS_SUS_MAP"""),
                     "#include <linux/swap_slots.h>"
                 )
             }
 
             if (sublevel >= 197) {
-                file("fs/namespace.c").insertAfter(
+                requireFile("fs/namespace.c").insertAfter(
                     Regex("""^#include "internal\.h"$"""),
                     "#include <trace/hooks/blk.h>"
                 )
             }
 
             if (sublevel >= 206) {
-                file("fs/proc/task_mmu.c").insertAfter(
+                requireFile("fs/proc/task_mmu.c").insertAfter(
                     Regex("""^#include <linux/pkeys\.h>$"""),
                     "#include <trace/hooks/mm.h>"
                 )
@@ -486,13 +674,13 @@ fun revert() {
 
         "android14-6.1" -> {
             if (sublevel <= 25) {
-                file("fs/proc/base.c").deleteLine(
+                requireFile("fs/proc/base.c").deleteLine(
                     Regex("""^#include <trace/hooks/sched\.h>$""")
                 )
             }
 
             if (sublevel <= 141) {
-                file("fs/proc/base.c").deleteLine(
+                requireFile("fs/proc/base.c").deleteLine(
                     Regex("""^#include <linux/dma-buf\.h>$""")
                 )
             }
@@ -503,19 +691,19 @@ fun revert() {
                 log("Reverting Android 15 6.6 VMA")
 
                 revertVma(
-                    file("fs/proc/task_mmu.c"),
-                    file("fs/namespace.c")
+                    requireFile("fs/proc/task_mmu.c"),
+                    requireFile("fs/namespace.c")
                 )
             }
 
             if (sublevel <= 57) {
-                file("mm/memory.c").deleteLine(
+                requireFile("mm/memory.c").deleteLine(
                     Regex("""^#include <linux/zswap\.h>$""")
                 )
             }
 
             if (sublevel <= 92) {
-                file("fs/proc/base.c").deleteLine(
+                requireFile("fs/proc/base.c").deleteLine(
                     Regex("""^#include <linux/dma-buf\.h>$""")
                 )
             }
@@ -523,29 +711,107 @@ fun revert() {
 
         "android16-6.12" -> {
             if (sublevel >= 58) {
-                file("fs/exec.c").includeAfterFirst(
+                requireFile("fs/exec.c").includeAfterFirst(
                     "#include <linux/dma-buf.h>"
                 )
             }
 
             if (sublevel >= 69) {
-                file("fs/proc/task_mmu.c").replace(
+                requireFile("fs/proc/task_mmu.c").replace(
                     Regex("""vma_pages"""),
                     "vma_data_pages"
                 )
             }
         }
+
+        else -> log("No revert patches for $kernelModule")
     }
 }
 
+fun validate() {
+    log("Validating $kernelModule sublevel $sublevel")
+
+    val missing = mutableListOf<String>()
+
+    fun check(path: String) {
+        if (!file(path).exists()) missing += path
+    }
+
+    when (kernelModule) {
+        "android12-5.10" -> {
+            if (sublevel <= 43) check("fs/proc/base.c")
+            if (sublevel <= 117) check("fs/notify/fdinfo.c")
+        }
+
+        "android13-5.10" -> {
+            if (sublevel <= 107) check("fs/notify/fdinfo.c")
+        }
+
+        "android13-5.15" -> {
+            if (sublevel <= 41) {
+                check("fs/namespace.c")
+                check("fs/open.c")
+                check("fs/notify/fdinfo.c")
+            }
+            if (sublevel >= 123) check("mm/memory.c")
+            if (sublevel >= 197) check("fs/namespace.c")
+            if (sublevel >= 206) check("fs/proc/task_mmu.c")
+        }
+
+        "android14-6.1" -> {
+            if (sublevel <= 141) check("fs/proc/base.c")
+            if (sublevel >= 157) check("fs/namespace.c")
+        }
+
+        "android15-6.6" -> {
+            if (sublevel <= 30) {
+                check("fs/proc/task_mmu.c")
+                check("fs/namespace.c")
+            }
+            if (sublevel <= 57) check("mm/memory.c")
+            if (sublevel <= 92) check("fs/proc/base.c")
+        }
+
+        "android16-6.12" -> {
+            if (sublevel >= 58) check("fs/exec.c")
+            if (sublevel >= 69) check("fs/proc/task_mmu.c")
+            check("fs/open.c")
+        }
+    }
+
+    if (missing.isNotEmpty()) {
+        error(
+            "Validation failed. Missing files:\n" +
+            missing.joinToString("\n") { "  - $it" }
+        )
+    }
+
+    log("Validation passed")
+}
+
 when (mode) {
-    "apply" -> apply()
-    "postfix" -> postFix()
-    "revert" -> revert()
+    "apply" -> {
+        apply()
+        postFix()
+        validate()
+    }
+
+    "postfix" -> {
+        postFix()
+        validate()
+    }
+
+    "revert" -> {
+        revert()
+        validate()
+    }
+
+    "check", "validate" -> validate()
+
     else -> {
         println(
             "Usage: kotlin FakePatches.kts " +
-            "<apply|postfix|revert> [workDir]"
+            "<apply|postfix|revert|check> [workDir]"
         )
         exitProcess(1)
     }
