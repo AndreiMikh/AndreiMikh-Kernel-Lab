@@ -1878,74 +1878,193 @@ jobs:
           }
       
           # SukiSU-Ultra Setup
-          if [[ "$ROOTENGINE" == "SukiSU-Ultra"* ]]; then
-            echo "🚀 Setting Up SukiSU-Ultra..."      
-            # Download and Run Setup Script (Official Source)
-            echo "🌐 Using Official Source"
-            echo "🌐 URL: https://raw.githubusercontent.com/${KSUREPO}/${BRANCHPATH}/kernel/setup.sh"
-            downloadsetup \
-              "https://raw.githubusercontent.com/${KSUREPO}/${BRANCHPATH}/kernel/setup.sh"
-              
-            cd KernelSU || exit 1
-      
-            # Fetch KSU API Version (Retry Up to 3 Times)
+          if [[ "$ROOTENGINE" == "SukiSU-Ultra" ]]; then
+            echo "🚀 Setting Up SukiSU-Ultra..."
+
+            # Validate Resolved Values
+            [[ -n "${KSUREPO:-}" ]] || {
+              echo "⚠️ SukiSU-Ultra Manager is Empty"
+              exit 1
+            }
+
+            [[ -n "${MANAGERBRANCH:-}" ]] || {
+              echo "⚠️ Main Branch is Empty"
+              exit 1
+            }
+
+            [[ -n "${BRANCHPATH:-}" ]] || {
+              echo "⚠️ Builtin Branch is Empty"
+              exit 1
+            }
+
+            echo "📂 Repository      : $KSUREPO"
+            echo "📂 Manager Branch  : $MANAGERBRANCH"
+            echo "📂 Builtin Branch  : $BRANCHPATH"
+            echo "📂 Root Source     : $ROOTBRANCH"
+
+            # Download and execute the official SukiSU-Ultra setup script
+            SETUP_URL="https://raw.githubusercontent.com/${KSUREPO}/${MANAGERBRANCH}/kernel/setup.sh"
+            echo "🌐 Setup URL: $SETUP_URL"
+            downloadsetup "$SETUP_URL"
+
+            # Setup sh File Should Create the Directory
+            cd KernelSU || {
+              echo "⚠️ SukiSU-Ultra Directory was Not Created"
+              exit 1
+            }
+
+            echo "📍 KernelSU Source: $(pwd)"
+
+            # Get the actual checked-out commit
+            GIT_HASH=$(git rev-parse --short HEAD 2>/dev/null || true)
+
+            if [[ -z "$GIT_HASH" ]]; then
+              echo "⚠️ Failed to determine SukiSU-Ultra commit hash"
+              exit 1
+            fi
+
+            echo "🔖 Git Hash: $GIT_HASH"
+
+            # Fetch the Latest SukiSU-Ultra Release Version
+            # Minimum Fallback Version is 3.1.7
+            echo "🌐 Fetching Latest SukiSU-Ultra Release Version..."
+
+            KSU_VERSION_TAG=""
             for i in {1..3}; do
-              RAW=$(curl -fsSL \
-                "https://raw.githubusercontent.com/${KSUREPO}/${BRANCHPATH}/kernel/Makefile" \
-                2>/dev/null || true)            
-              KSU_API_VERSION=$(
-                grep -m1 "KSU_VERSION_API" <<< "$RAW" 2>/dev/null \
-                | cut -d '=' -f2 \
-                | tr -d '[:space:]'
-              ) || true          
-              # SukiSU-Ultra Builtin Fallback -> Main
-              if [[ -z "${KSU_API_VERSION:-}" ]]; then
-                echo "⚠️ ${ROOTENGINE} API Version Not Found in '${BRANCHPATH}', Falling Back to '${MANAGERBRANCH}'"          
-                RAW=$(curl -fsSL \
-                  "https://raw.githubusercontent.com/${KSUREPO}/${MANAGERBRANCH}/kernel/Makefile" \
-                  2>/dev/null || true)            
-                KSU_API_VERSION=$(
-                  grep -m1 "KSU_VERSION_API" <<< "$RAW" 2>/dev/null \
-                  | cut -d '=' -f2 \
-                  | tr -d '[:space:]'
-                ) || true
-              fi           
-              echo "Fetched API Version: ${KSU_API_VERSION:-EMPTY}"            
-              [[ -n "${KSU_API_VERSION:-}" ]] && break || sleep 1
-            done            
-            # Final Fallback
-            KSU_API_VERSION="${KSU_API_VERSION:-3.1.7}"
-            echo "KSU_API_VERSION=$KSU_API_VERSION" >> $GITHUB_ENV   
-            # Define Version Format
-            VERSION_DEFINITIONS=$(
-              printf '%s\n' \
-              'define get_ksu_version_full' \
-              'v$1' \
-              'endef' \
-              '' \
-              "KSU_VERSION_API := ${KSU_API_VERSION}" \
-              "KSU_VERSION_FULL := v${KSU_API_VERSION}"
-            )             
-            # Clean Old Definitions
-            sed -i '/define get_ksu_version_full/,/endef/d' kernel/Makefile || true
-            sed -i '/KSU_VERSION_API :=/d' kernel/Makefile || true
-            sed -i '/KSU_VERSION_FULL :=/d' kernel/Makefile || true      
-            # Insert New Definitions safely
-            awk -v def="$VERSION_DEFINITIONS" '
-              /REPO_OWNER :=/ {print; print def; inserted=1; next}
-              1
-              END {if (!inserted) print def}
-            ' kernel/Makefile > kernel/Makefile.tmp || true
-            mv kernel/Makefile.tmp kernel/Makefile || true    
-            # Generate Custom Version Number (Based on Commit Count) Fallback
-            KSUVERSION=$(( $(git rev-list --count main 2>/dev/null || echo 114514) + 37185 ))
-            echo "KSUVERSION=$KSUVERSION" >> $GITHUB_ENV      
-            # Verify (Non-Fatal)
-            echo "Checking Repo Owner Section..."
-            grep -A10 "REPO_OWNER" kernel/Makefile || echo "⚠️ ${ROOTENGINE} Repository Owner Not Found"            
-            echo "Checking KSU version..."
-            grep "KSU_VERSION_FULL" kernel/Makefile || echo "⚠️ ${ROOTENGINE} Version Not Found"        
-            echo "SukiSU Version: v${KSU_API_VERSION}"        
+              KSU_VERSION_TAG=$(
+                curl -fsSL \
+                  --retry 2 \
+                  --retry-delay 2 \
+                  --connect-timeout 10 \
+                  --max-time 30 \
+                  "https://api.github.com/repos/${KSUREPO}/releases/latest" \
+                | grep '"tag_name":' \
+                | sed -E 's/.*"v?([^"]+)".*/\1/' \
+                | head -n1 \
+                || true
+              )
+
+              if [[ -n "$KSU_VERSION_TAG" ]]; then
+                break
+              fi
+
+              echo "⚠️ Failed to Fetch Release Version, Retrying..."
+              sleep "$i"
+            done
+
+            # Keep 3.1.7 as the Minimum Supported Fallback Version
+            if [[ -z "$KSU_VERSION_TAG" || \
+              "$(printf '%s\n' "$KSU_VERSION_TAG" "3.1.7" \
+                | sort -V \
+                | head -n1)" != "3.1.7" ]]; then
+              KSU_VERSION_TAG="3.1.7"
+            fi
+
+            echo "KSU_VERSION_TAG=$KSU_VERSION_TAG" >> "$GITHUB_ENV"
+            echo "KSU_API_VERSION=$KSU_VERSION_TAG" >> "$GITHUB_ENV"
+            echo "🔖 KSU API Version: $KSU_VERSION_TAG"
+
+            # Build Version String
+            # SukiSU is Kept in the Version Information for Clarity
+            VERSION_FULL="v${KSU_VERSION_TAG}-${GIT_HASH}@${BRANCHPATH}"
+
+            echo "🏷️ Full Version: $VERSION_FULL"
+
+            # Escape Values Before Using them with Sed
+            ESC_VERSION_FULL=$(
+              printf '%s' "$VERSION_FULL" | sed 's/[&|\\/]/\\&/g'
+            )
+
+            ESC_KSU_VERSION_TAG=$(
+              printf '%s' "$KSU_VERSION_TAG" | sed 's/[&|\\/]/\\&/g'
+            )
+
+            # Remove Old Custom Version Definitions First
+            sed -i \
+              '/^define get_ksu_version_full$/,/^endef$/d' \
+              kernel/Makefile
+
+            # Update or Insert Full KSU Version
+            if grep -q '^KSU_VERSION_FULL := ' kernel/Makefile; then
+              sed -i \
+                "s|^KSU_VERSION_FULL := .*|KSU_VERSION_FULL := $ESC_VERSION_FULL|" \
+                kernel/Makefile
+            else
+              awk -v full="$VERSION_FULL" '
+                /^REPO_OWNER :=/ && !done {
+                  print
+                  print ""
+                  print "KSU_VERSION_FULL := " full
+                  done=1
+                  next
+                }
+                { print }
+                END {
+                  if (!done) {
+                    print ""
+                    print "KSU_VERSION_FULL := " full
+                  }
+                }
+              ' kernel/Makefile > kernel/Makefile.tmp
+              mv kernel/Makefile.tmp kernel/Makefile
+            fi
+
+            # Update or Insert KSU API Version
+            if grep -q '^KSU_VERSION_API := ' kernel/Makefile; then
+              sed -i \
+                "s|^KSU_VERSION_API := .*|KSU_VERSION_API := $ESC_KSU_VERSION_TAG|" \
+                kernel/Makefile
+            else
+              awk -v api="$KSU_VERSION_TAG" '
+                /^KSU_VERSION_FULL :=/ && !done {
+                  print
+                  print "KSU_VERSION_API := " api
+                  done=1
+                  next
+                }
+                { print }
+                END {
+                  if (!done) {
+                    print "KSU_VERSION_API := " api
+                  }
+                }
+              ' kernel/Makefile > kernel/Makefile.tmp
+
+              mv kernel/Makefile.tmp kernel/Makefile
+            fi
+
+            # Generate KSU Version Number from the Checked-out Source
+            # Use the Actual Head History Instead of Main Branch Because
+            # Setup Script may Check out Builtin Branch or Another Commit
+            COMMIT_COUNT=$(git rev-list --count HEAD 2>/dev/null || true)
+
+            if [[ "$COMMIT_COUNT" =~ ^[0-9]+$ ]]; then
+              KSUVERSION=$((COMMIT_COUNT + 37185))
+            else
+              echo "⚠️ Failed to Determine Commit Count, Using Fallback"
+              KSUVERSION=$((13000 + 37185))
+            fi
+
+            echo "KSUVERSION=$KSUVERSION" >> "$GITHUB_ENV"
+            echo "KSUVER=$KSUVERSION" >> "$GITHUB_ENV"
+
+            # Final Verification
+            echo "SukiSU-Ultra Final Version Information"
+            echo "Repository       : $KSUREPO"
+            echo "Manager Branch   : $MANAGERBRANCH"
+            echo "Builtin Branch   : $BRANCHPATH"
+            echo "Root Source      : $ROOTBRANCH"
+            echo "Git Hash         : $GIT_HASH"
+            echo "API Version      : $KSU_VERSION_TAG"
+            echo "Full Version     : $VERSION_FULL"
+            echo "KSU Version      : $KSUVERSION"
+
+            echo ""
+            echo "Makefile Entries:"
+            grep -nE \
+              '^(REPO_OWNER|REPO_NAME|REPO_BRANCH|KSU_VERSION_API|KSU_VERSION_FULL|VERSION_TAG|GIT_BIN|CURL_BIN)' \
+              kernel/Makefile \
+              || true
             echo "🎉 SukiSU-Ultra Ready"
       
           # ReSukiSU Setup
