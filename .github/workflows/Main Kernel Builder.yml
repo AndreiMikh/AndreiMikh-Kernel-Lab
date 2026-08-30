@@ -1729,16 +1729,27 @@ jobs:
 
       - name: 🔧 Solve Root Engine Source
         id: manager
+        shell: bash
         run: |
+          set -euo pipefail
+
           ROOTBRANCHSOURCE="${{ github.event.inputs.ROOTBRANCHSOURCE }}"
           ROOTENGINE="${{ github.event.inputs.ROOTENGINE }}"
 
-          # Solve KSU Meta Downloader Branch + Artifact
+          MANAGERBRANCH=""
+          MANAGERARTIFACT=""
+          KSUREPO=""
+          SETUPREPO=""
+          SETUPBRANCH=""
+          FALLBACKBRANCH=""
+
+          # Resolve manager branch and artifact
           case "$ROOTBRANCHSOURCE" in
             SukiSU-Ultra-Builtin)
               MANAGERBRANCH="builtin"
-              BRANCHPATH="main"
               MANAGERARTIFACT="manager"
+              SETUPBRANCH="main"
+              FALLBACKBRANCH="builtin"
               ;;
             KernelSU-Next-Dev-SUSFS)
               MANAGERBRANCH="dev-susfs"
@@ -1756,229 +1767,296 @@ jobs:
               MANAGERBRANCH="dev"
               MANAGERARTIFACT="Manager-release"
               ;;
-          esac
-
-          # Re-Solve Actual Repository (Critical Fix)
-          case "$ROOTENGINE" in
-            SukiSU-Ultra)
-              KSUREPO="SukiSU-Ultra/SukiSU-Ultra"
-              ;;
-            KernelSU-Next)
-              BRANCHPATH="pershoot/KernelSU-Next"
-              KSUREPO="KernelSU-Next/KernelSU-Next"
-              ;;
-            ReSukiSU)
-              KSUREPO="ReSukiSU/ReSukiSU"
-              ;;
-            KernelSU)
-              KSUREPO="tiann/KernelSU"
-              ;;              
             *)
-              echo "⚠️ Unsupported KSU: $ROOTENGINE"
+              echo "⚠️ Unsupported Root Branch Source: $ROOTBRANCHSOURCE"
               exit 1
               ;;
           esac
 
-          echo "MANAGERBRANCH=$MANAGERBRANCH" >> "$GITHUB_OUTPUT"
-          echo "BRANCHPATH=${BRANCHPATH:-}" >> "$GITHUB_OUTPUT"
-          echo "MANAGERARTIFACT=$MANAGERARTIFACT" >> "$GITHUB_OUTPUT"
-          echo "KSUREPO=$KSUREPO" >> "$GITHUB_OUTPUT"
+          # Resolve actual root engine repository
+          case "$ROOTENGINE" in
+            SukiSU-Ultra)
+              KSUREPO="SukiSU-Ultra/SukiSU-Ultra"
+              SETUPREPO="$KSUREPO"
+              SETUPBRANCH="${SETUPBRANCH:-$MANAGERBRANCH}"
+              ;;
+            KernelSU-Next)
+              KSUREPO="KernelSU-Next/KernelSU-Next"
+              SETUPREPO="pershoot/KernelSU-Next"
+              SETUPBRANCH="$MANAGERBRANCH"
+              ;;
+            ReSukiSU)
+              KSUREPO="ReSukiSU/ReSukiSU"
+              SETUPREPO="$KSUREPO"
+              SETUPBRANCH="$MANAGERBRANCH"
+              ;;
+            KernelSU)
+              KSUREPO="tiann/KernelSU"
+              SETUPREPO="$KSUREPO"
+              SETUPBRANCH="$MANAGERBRANCH"
+              ;;
+            *)
+              echo "⚠️ Unsupported Root Engine: $ROOTENGINE"
+              exit 1
+              ;;
+          esac
+
+          {
+            echo "MANAGERBRANCH=$MANAGERBRANCH"
+            echo "MANAGERARTIFACT=$MANAGERARTIFACT"
+            echo "KSUREPO=$KSUREPO"
+            echo "SETUPREPO=$SETUPREPO"
+            echo "SETUPBRANCH=$SETUPBRANCH"
+            echo "FALLBACKBRANCH=$FALLBACKBRANCH"
+          } >> "$GITHUB_OUTPUT"
 
           echo "------------------------------"
-          echo "✔️ Resolved:"
-          echo "📂 Repository  : $KSUREPO"
-          echo "📂 Branch      : $MANAGERBRANCH"
-          echo "📂 Artifact    : $MANAGERARTIFACT"
+          echo "✔️ Root Engine Resolved"
+          echo "📦 Engine           : $ROOTENGINE"
+          echo "📂 Repository       : $KSUREPO"
+          echo "🔧 Setup Repository : $SETUPREPO"
+          echo "🌿 Setup Branch     : $SETUPBRANCH"
+          echo "📱 Manager Branch   : $MANAGERBRANCH"
+          echo "📦 Artifact         : $MANAGERARTIFACT"
+          [[ -n "$FALLBACKBRANCH" ]] && echo "↩️ Fallback Branch : $FALLBACKBRANCH"
           echo "------------------------------"
-          echo ""
 
       - name: 🔧 Configure Root Engine
+        shell: bash
         run: |
-          set -euo pipefail
-      
-          # Enter Kernel Workspace
-          cd kernel_workspace/kernel_platform || exit 1
+          set -Eeuo pipefail
 
-          # Set Github Inputs and Outputs
+          cd "$GITHUB_WORKSPACE/kernel_workspace/kernel_platform"
+
           MANAGERBRANCH="${{ steps.manager.outputs.MANAGERBRANCH }}"
-          BRANCHPATH="${{ steps.manager.outputs.BRANCHPATH }}"
+          MANAGERARTIFACT="${{ steps.manager.outputs.MANAGERARTIFACT }}"
           KSUREPO="${{ steps.manager.outputs.KSUREPO }}"
+          SETUPREPO="${{ steps.manager.outputs.SETUPREPO }}"
+          SETUPBRANCH="${{ steps.manager.outputs.SETUPBRANCH }}"
+          FALLBACKBRANCH="${{ steps.manager.outputs.FALLBACKBRANCH }}"
+
           ROOTENGINE="${{ github.event.inputs.ROOTENGINE }}"
-          ROOTBRANCH="${{ github.event.inputs.ROOTBRANCHSOURCE }}"
+          ROOTBRANCHSOURCE="${{ github.event.inputs.ROOTBRANCHSOURCE }}"
           SUSFS="${{ github.event.inputs.SUSFSREPOSITORY }}"
 
-          # Kernel and Patch Directories
           KCDIR="${GITHUB_WORKSPACE}/kernel_workspace/kernel_platform/common"
-          DEFCONFIG="${KCDIR}/arch/arm64/configs/gki_defconfig" 
-          
-          # Helper Functions      
-          # Get Commit-Count-Based Version
+          DEFCONFIG="${KCDIR}/arch/arm64/configs/gki_defconfig"
+
           gitcommitcountversion() {
-            local KSUREPO="$1"
-            local MANAGERBRANCH="$2"
-            local OFFSET="$3"          
-            local LASTPAGE          
-            LASTPAGE=$(
-              curl -sI \
-                "https://api.github.com/repos/${KSUREPO}/commits?sha=${MANAGERBRANCH}&per_page=1" \
-              | sed -n 's/.*page=\([0-9]*\)>; rel="last".*/\1/p'
-            )          
-            [[ "$LASTPAGE" =~ ^[0-9]+$ ]] || LASTPAGE=0         
-            echo $((LASTPAGE + OFFSET))
-          }
-      
-          # Get Latest Git Tag
-          gitlatesttag() {
-            local KSUREPO="$1"          
-            local TAG
-            TAG=$(git ls-remote --tags --sort="v:refname" "https://github.com/${KSUREPO}.git" \
-              | awk '{print $2}' \
-              | sed 's#refs/tags/##' \
-              | grep -v '\^{}' \
-              | tail -n1)          
-            if [[ -z "$TAG" ]]; then
-              echo "v0.0.0"
+            local repo="$1"
+            local branch="$2"
+            local offset="$3"
+            local lastpage=""
+
+            lastpage="$(
+              curl -fsSI \
+                --retry 3 \
+                --retry-delay 2 \
+                --connect-timeout 10 \
+                "https://api.github.com/repos/${repo}/commits?sha=${branch}&per_page=1" \
+                2>/dev/null \
+              | tr -d '\r' \
+              | sed -nE 's/.*[?&]page=([0-9]+)>; rel="last".*/\1/p' \
+              | tail -n1 || true
+            )"
+
+            if [[ "$lastpage" =~ ^[0-9]+$ ]]; then
+              echo $((lastpage + offset))
             else
-              echo "$TAG"
+              echo "$offset"
             fi
           }
 
+          gitlatesttag() {
+            local repo="$1"
+            local tag
+
+            tag="$(
+              git ls-remote --tags --sort="v:refname" \
+                "https://github.com/${repo}.git" \
+              | awk '{print $2}' \
+              | sed 's#refs/tags/##' \
+              | grep -v '\^{}' \
+              | tail -n1 || true
+            )"
+
+            echo "${tag:-v0.0.0}"
+          }
+
           downloadsetup() {
-            local urlsource1="$1"
-            local urlsource2="${2:-}"
+            local repo="$1"
+            local branch="$2"
+            local fallbackbranch="${3:-}"
             local setupfile="setup.sh"
-            local temporaryfile    
-            temporaryfile="$(mktemp)"
-            urlfetch() {
-              local url="$1"
-              echo "🌐 Using Source: $url"          
+            local tmpfile
+
+            tmpfile="$(mktemp)"
+            trap 'rm -f "$tmpfile"' RETURN
+
+            fetchsetup() {
+              local fetchbranch="$1"
+              local url="https://raw.githubusercontent.com/${repo}/${fetchbranch}/kernel/setup.sh"
+              echo "🌐 Source: $url"
               for i in {1..5}; do
-                echo "📥 Attempt $i/5: $url"          
+                echo "📥 Attempt $i/5"
                 if curl -fsSL \
                   --retry 3 \
                   --retry-delay 2 \
                   --connect-timeout 10 \
                   --max-time 60 \
-                  "$url" -o "$temporaryfile"; then          
-                  # Validation
-                  if [[ -s "$temporaryfile" ]] \
-                    && head -n1 "$temporaryfile" | grep -q "^#"; then          
-                    # Reject HTML
-                    if ! grep -qi "<html" "$temporaryfile"; then
-                      mv "$temporaryfile" "$setupfile"
-                      return 0
-                    fi
+                  "$url" -o "$tmpfile"; then
+
+                  if [[ -s "$tmpfile" ]] \
+                    && head -n1 "$tmpfile" | grep -q '^#!' \
+                    && ! grep -qi '<html' "$tmpfile"; then
+                    mv "$tmpfile" "$setupfile"
+                    return 0
                   fi
-                fi          
-                sleep $((i * 2))
-              done      
+                fi
+
+                sleep "$((i * 2))"
+              done
               return 1
             }
-          
-            if urlfetch "$urlsource1"; then
-              echo "📃 Primary Setup Downloaded"
-            elif [[ -n "$urlsource2" ]] && urlfetch "$urlsource2"; then
-              echo "📃 Fallback Setup Downloaded"
+
+            if fetchsetup "$branch"; then
+              echo "✔️ Setup Script Downloaded"
+            elif [[ -n "$fallbackbranch" ]] && fetchsetup "$fallbackbranch"; then
+              echo "✔️ Setup Script Downloaded from Fallback"
             else
-              echo "⚠️ Failed to Download Setup Script from All Sources"
+              echo "⚠️ Failed to Download Setup.sh"
               exit 1
             fi
-          
-            [[ -s "$setupfile" ]] || { echo "⚠️ Empty Script"; exit 1; }         
-            chmod +x "$setupfile"          
-            echo "🔧 Executing Setup Script..."
-            bash "$setupfile" "$MANAGERBRANCH" "${BRANCHPATH-}"
-          }
 
-          downloadfile() {
-            local url="$1"
-            local output="$2"
-            for i in {1..5}; do
-              echo "📥 Attempt $i/5: $url"
-              if curl -fsSL \
-                --retry 3 \
-                --retry-delay 2 \
-                --connect-timeout 10 \
-                --max-time 60 \
-                "$url" -o "$output"; then
-                [[ -s "$output" ]] && return 0
-              fi
-              sleep $((i * 2))
-            done
-            return 1
+            chmod +x "$setupfile"
+            bash "$setupfile" "$MANAGERBRANCH"
           }
-      
+     
           # SukiSU-Ultra Setup
-          if [[ "$ROOTENGINE" == "SukiSU-Ultra"* ]]; then
-            echo "🚀 Setting Up SukiSU-Ultra..."      
-            # Download and Run Setup Script (Official Source)
-            echo "🌐 Using Official Source"
-            echo "🌐 URL: https://raw.githubusercontent.com/${KSUREPO}/${MANAGERBRANCH}/kernel/setup.sh"
+          if [[ "$ROOTENGINE" == "SukiSU-Ultra" ]]; then
+            echo "🚀 Setting Up SukiSU-Ultra..."
+
+            # Download and execute the official setup script
             downloadsetup \
-              "https://raw.githubusercontent.com/${KSUREPO}/${MANAGERBRANCH}/kernel/setup.sh"
-              
-            cd KernelSU || exit 1
-      
-            # Fetch KSU API Version (Retry Up to 3 Times)
-            for i in {1..3}; do
-              RAW=$(curl -fsSL \
-                "https://raw.githubusercontent.com/${KSUREPO}/${MANAGERBRANCH}/kernel/Makefile" \
-                2>/dev/null || true)            
-              KSU_API_VERSION=$(
-                grep -m1 "KSU_VERSION_API" <<< "$RAW" 2>/dev/null \
-                | cut -d '=' -f2 \
-                | tr -d '[:space:]'
-              ) || true          
-              # SukiSU-Ultra Builtin Fallback
-              if [[ -z "${KSU_API_VERSION:-}" ]]; then
-                echo "⚠️ ${ROOTENGINE} API Version Not Found in '${MANAGERBRANCH}', Falling Back to '${BRANCHPATH}'"          
-                RAW=$(curl -fsSL \
-                  "https://raw.githubusercontent.com/${KSUREPO}/${MANAGERBRANCH}/kernel/Makefile" \
-                  2>/dev/null || true)            
-                KSU_API_VERSION=$(
-                  grep -m1 "KSU_VERSION_API" <<< "$RAW" 2>/dev/null \
-                  | cut -d '=' -f2 \
-                  | tr -d '[:space:]'
-                ) || true
-              fi           
-              echo "Fetched API Version: ${KSU_API_VERSION:-EMPTY}"            
-              [[ -n "${KSU_API_VERSION:-}" ]] && break || sleep 1
-            done            
-            # Final Fallback
+              "$SETUPREPO" \
+              "$SETUPBRANCH" \
+              "$FALLBACKBRANCH"
+
+            # Enter the installed KernelSU directory
+            cd KernelSU || {
+              echo "❌ KernelSU directory not found after setup"
+              exit 1
+            }
+
+            # Resolve KSU API Version
+            KSU_API_VERSION=""
+            for BRANCH in "$SETUPBRANCH" "$FALLBACKBRANCH"; do
+              [[ -n "$BRANCH" ]] || continue
+
+              echo "🔍 Checking KSU API Version from: $BRANCH"
+              KSU_API_VERSION="$(
+                curl -fsSL \
+                  --retry 3 \
+                  --retry-delay 2 \
+                  --connect-timeout 10 \
+                  --max-time 30 \
+                  "https://raw.githubusercontent.com/${KSUREPO}/${BRANCH}/kernel/Makefile" \
+                  2>/dev/null \
+                | awk -F ':=' '
+                    /^[[:space:]]*KSU_VERSION_API[[:space:]]*:=/ {
+                      gsub(/[[:space:]]/, "", $2)
+                      print $2
+                      exit
+                    }
+                  ' || true
+              )"
+
+              if [[ -n "$KSU_API_VERSION" ]]; then
+                echo "✔️ KSU API Version: $KSU_API_VERSION"
+                break
+              fi
+            done
+
+            # Fallback
             KSU_API_VERSION="${KSU_API_VERSION:-3.1.7}"
-            echo "KSU_API_VERSION=$KSU_API_VERSION" >> $GITHUB_ENV   
-            # Define Version Format
-            VERSION_DEFINITIONS=$(
-              printf '%s\n' \
-              'define get_ksu_version_full' \
-              'v$1' \
-              'endef' \
-              '' \
-              "KSU_VERSION_API := ${KSU_API_VERSION}" \
-              "KSU_VERSION_FULL := v${KSU_API_VERSION}"
-            )             
-            # Clean Old Definitions
-            sed -i '/define get_ksu_version_full/,/endef/d' kernel/Makefile || true
-            sed -i '/KSU_VERSION_API :=/d' kernel/Makefile || true
-            sed -i '/KSU_VERSION_FULL :=/d' kernel/Makefile || true      
-            # Insert New Definitions safely
-            awk -v def="$VERSION_DEFINITIONS" '
-              /REPO_OWNER :=/ {print; print def; inserted=1; next}
-              1
-              END {if (!inserted) print def}
-            ' kernel/Makefile > kernel/Makefile.tmp || true
-            mv kernel/Makefile.tmp kernel/Makefile || true    
-            # Generate Custom Version Number (Based on Commit Count) Fallback
-            KSUVERSION=$(( $(git rev-list --count main 2>/dev/null || echo 114514) + 37185 ))
-            echo "KSUVERSION=$KSUVERSION" >> $GITHUB_ENV      
-            # Verify (Non-Fatal)
-            echo "Checking Repo Owner Section..."
-            grep -A10 "REPO_OWNER" kernel/Makefile || echo "⚠️ ${ROOTENGINE} Repository Owner Not Found"            
-            echo "Checking KSU version..."
-            grep "KSU_VERSION_FULL" kernel/Makefile || echo "⚠️ ${ROOTENGINE} Version Not Found"        
-            echo "SukiSU Version: v${KSU_API_VERSION}"        
-            echo "🎉 SukiSU-Ultra Ready"
-      
+            echo "KSU_API_VERSION=$KSU_API_VERSION" >> "$GITHUB_ENV"
+
+            # Update KernelSU Version Definitions
+            MAKEFILE="kernel/Makefile"
+
+            [[ -f "$MAKEFILE" ]] || {
+              echo "❌ KernelSU Makefile not found: $MAKEFILE"
+              exit 1
+            }
+
+            # Remove existing version definitions
+            sed -i \
+              -e '/define get_ksu_version_full/,/endef/d' \
+              -e '/^[[:space:]]*KSU_VERSION_API[[:space:]]*:=/d' \
+              -e '/^[[:space:]]*KSU_VERSION_FULL[[:space:]]*:=/d' \
+              "$MAKEFILE"
+
+            # Insert Updated Definitions
+            awk -v version="$KSU_API_VERSION" '
+              /REPO_OWNER :=/ && !inserted {
+                print
+                print ""
+                print "define get_ksu_version_full"
+                print "v$1"
+                print "endef"
+                print ""
+                print "KSU_VERSION_API := " version
+                print "KSU_VERSION_FULL := v" version
+                inserted=1
+                next
+              }
+
+              { print }
+
+              END {
+                if (!inserted) {
+                  print ""
+                  print "define get_ksu_version_full"
+                  print "v$1"
+                  print "endef"
+                  print ""
+                  print "KSU_VERSION_API := " version
+                  print "KSU_VERSION_FULL := v" version
+                }
+              }
+            ' "$MAKEFILE" > "${MAKEFILE}.tmp"
+
+            mv "${MAKEFILE}.tmp" "$MAKEFILE"
+
+            # Generate KSU Version Number
+            LOCAL_COUNT="$(git rev-list --count HEAD 2>/dev/null || echo 0)"
+            KSUVERSION=$((LOCAL_COUNT + 37185))
+
+            {
+              echo "KSU_API_VERSION=$KSU_API_VERSION"
+              echo "KSUVERSION=$KSUVERSION"
+            } >> "$GITHUB_ENV"
+
+            # Final Verification
+            grep -q "^KSU_VERSION_API := ${KSU_API_VERSION}$" "$MAKEFILE" || {
+              echo "⚠️ Failed to Write KSU API Version"
+              exit 1
+            }
+
+            grep -q "^KSU_VERSION_FULL := v${KSU_API_VERSION}$" "$MAKEFILE" || {
+              echo "⚠️ Failed to Write KSU Full Version"
+              exit 1
+            }
+
+            echo "------------------------------"
+            echo "🎉 SukiSU-Ultra Setup Complete"
+            echo "------------------------------"
+            echo "🌿 Setup Branch : $SETUPBRANCH"
+            echo "📱 Manager      : $MANAGERBRANCH"
+            echo "🔢 API Version  : $KSU_API_VERSION"
+            echo "🔢 KSU Version  : $KSUVERSION"
+            echo "------------------------------"
+
           # ReSukiSU Setup
           elif [[ "$ROOTENGINE" == "ReSukiSU" ]]; then
             echo "🚀 Setting Up ReSukiSU..."    
