@@ -4149,55 +4149,89 @@ jobs:
           echo ""
           echo "🎉 IPv6 NAT Fix Stage Completed"
 
-      - name: 🔧 Setup Custom Build Time
+      - name: 🛠️ Setup Custom Build Time
         shell: bash
         run: |
-          set -euo pipefail
-      
-          # Determine Build Timestamp
-          TIMEINPUT="${{ github.event.inputs.BUILDTIME }}"      
-          if [[ -n "$TIMEINPUT" && "$TIMEINPUT" != [Ff] ]]; then
+          set -Eeuo pipefail
+
+          TIMEINPUT="${{ github.event.inputs.BUILDTIME }}"
+          if [[ -n "$TIMEINPUT" && "$TIMEINPUT" != "[Ff]" ]]; then
             DATESTR="$TIMEINPUT"
             echo "🔎 Using Input Build Time: $DATESTR"
           else
-            DATESTR="$(TZ='UTC' date +'%a %b %d %T %Z %Y')"
+            DATESTR="$(TZ='UTC' date '+%a %b %-d %H:%M:%S UTC %Y')"
             echo "🛠️ Using UTC Time as Fallback: $DATESTR"
           fi
-      
-          # Export Kernel Build Environment Variables
-          echo "KBUILD_BUILD_TIMESTAMP=${DATESTR}" >> "$GITHUB_ENV"
-          echo "KBUILD_BUILD_VERSION=1" >> "$GITHUB_ENV"      
+
+          {
+            echo "KBUILD_BUILD_TIMESTAMP=$DATESTR"
+            echo "KBUILD_BUILD_VERSION=1"
+          } >> "$GITHUB_ENV"
+
           KDIR="${GITHUB_WORKSPACE}/kernel_workspace/kernel_platform"
-          cd "$KDIR" || { echo "⚠️ Kernel Directory Not Found: $KDIR"; exit 1; }
-      
-          # Patch MK Compile Scripts
-          SCRIPTS=(
-            "common/scripts/mkcompile_h"
-            "msm-kernel/scripts/mkcompile_h"
-          )      
-          for SCRIPT in "${SCRIPTS[@]}"; do
-            if [[ -f "$SCRIPT" ]]; then
-              echo "🚀 Patching MKCompile Script: $SCRIPT"      
-              # Replace Existing UTS Version
+          [[ -d "$KDIR" ]] || {
+            echo "⚠️ Kernel Directory Not Found: $KDIR"
+            exit 1
+          }
+
+          cd "$KDIR"
+
+          if [[ "$ANDROIDVERSION" == "android16" && "$KERNELVERSION" == "6.12" ]]; then
+            echo "ℹ️ Android 16 / 6.12 Detected"
+            echo "ℹ️ Using Kbuild Build Timestamp"
+            echo "ℹ️ Skipping MKCompile H Modification"
+          else
+            SCRIPTS=(
+              "common/scripts/mkcompile_h"
+              "msm-kernel/scripts/mkcompile_h"
+            )
+
+            PATCHED=0
+
+            for SCRIPT in "${SCRIPTS[@]}"; do
+              if [[ ! -f "$SCRIPT" ]]; then
+                echo "ℹ️ Script Not Found: $SCRIPT — Skipping"
+                continue
+              fi
+
+              echo "🚀 Patching MKCompile Script: $SCRIPT"
+
               if grep -q '^UTS_VERSION=' "$SCRIPT"; then
-                perl -pi -e "s{^UTS_VERSION=.*}{UTS_VERSION=\"#1 SMP PREEMPT $DATESTR\"}" "$SCRIPT"
+                perl -pi -e \
+                  "s{^UTS_VERSION=.*}{UTS_VERSION=\"#1 SMP PREEMPT $DATESTR\"}" \
+                  "$SCRIPT"
+
                 echo "✔ Replaced Existing UTS Version"
-              else
-                # Inject UTS Version if Missing
-                # Add After First 'CAT <<EOF'
-                perl -0777 -pi -e "
-                  s{(cat <<EOF)}{\$1\n#undef UTS_VERSION\n#define UTS_VERSION \"#1 SMP PREEMPT $DATESTR\"}ms
-                " "$SCRIPT"
+              elif grep -q 'cat <<EOF' "$SCRIPT"; then
+                perl -0777 -pi -e \
+                  "s{(cat <<EOF)}{\$1\n#undef UTS_VERSION\n#define UTS_VERSION \"#1 SMP PREEMPT $DATESTR\"}ms" \
+                  "$SCRIPT"
+
                 echo "✔ Injected UTS Version Definition"
-              fi      
+              else
+                echo "⚠️ UTS Version Injection Point Not Found: $SCRIPT"
+                continue
+              fi
+
+              PATCHED=$((PATCHED + 1))
+            done
+
+            if [[ "$PATCHED" -eq 0 ]]; then
+              echo "ℹ️ No MKCompile Scripts Required Patching"
+              echo "ℹ️ Kbuild Build Timestamp will be Used"
             else
-              echo "⚠️ Script Not Found: $SCRIPT — Skipping"
-            fi      
-          done
+              echo "🎉 Patched $PATCHED MKCompile Script(s)"
+            fi
+          fi
+
+          echo ""
+          echo "🔍 Build Environment:"
+          echo "   Build Timestamp=$DATESTR"
+          echo "   Build Version=1"
 
           echo ""
           echo "🎉 Custom Build Time Setup Completed"
-          
+     
       - name: 🔧 Disable GPU Embedded Bridge / Engine
         if: ${{ env.KERNELVERSION == '5.10' && startsWith(env.CPU, 'mt') }}
         shell: bash
