@@ -160,8 +160,6 @@ jobs:
       - name: Install AOSP Clang 21 (r563880c) + dependencies
         if: steps.clang-cache.outputs.cache-hit != 'true'
         run: |
-          set -e
-
           echo "📥 Downloading AOSP Clang 21 (R-563880C)..."
           curl -fsSL --retry 3 \
             "https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/b5f16aee7b8af4c339972027e91e7e793c2e55d9/clang-r563880c.tar.gz" \
@@ -174,8 +172,6 @@ jobs:
 
       - name: Install Build Dependencies
         run: |
-          set -e
-
           sudo apt-get update
           sudo apt-get install -y \
             zip zstd patch bc flex bison \
@@ -188,7 +184,6 @@ jobs:
 
           echo "🔍 Verifying Clang..."
           clang --version
-
           mkdir -p /tmp/gki
           printf 'def generate_gki_certificate(*args, **kwargs):\n    raise SystemExit("GKI SIGNING NOT SUPPORTED (STUB)")\n' \
             > /tmp/gki/generate_gki_certificate.py
@@ -230,7 +225,6 @@ jobs:
             grep -oE '"sha": "[0-9a-f]{40}"' |
             head -1 |
             grep -oE '[0-9a-f]{40}' || true)
-
           echo "SRC_COMMIT=$SRC" >> "$GITHUB_ENV"
           FP=$(printf '%s' \
             "${{ inputs.ksumeta }}|${{ inputs.susfsmeta }}|${{ inputs.neonlz4 }}|${{ inputs.lz4kd }}|${{ inputs.showalgos }}|${{ inputs.zramwriteback }}|${{ inputs.droidspaces }}|${{ inputs.basebandguard }}|${{ inputs.cvefixpatch }}|${{ inputs.netfilter }}|${{ inputs.bbr }}|${{ inputs.kpmodule }}|${{ inputs.rekernel }}|${{ inputs.ksuffix }}|$SRC" |
@@ -264,7 +258,6 @@ jobs:
           if gh release download "ccache-sm8750-lineage" \
             -p "ccache-sm8750-lineage.tar.zst" \
             -R $GITHUB_REPOSITORY 2>/dev/null; then
-
             echo "Public CCache Downloaded, Extracting..."
             tar -I zstd -xf ccache-sm8750-lineage.tar.zst \
               -C "${{ env.CCACHE_DIR }}"
@@ -275,15 +268,13 @@ jobs:
 
       - name: Prepare Kernel Sources
         run: |
-          set -e
           mkdir -p work
           cd work
           SRC_COMMIT="${SRC_COMMIT:-}"
           echo "SRC_COMMIT=$SRC_COMMIT" >> "$GITHUB_ENV"
-          echo "Source commit: $SRC_COMMIT"
-
+          echo "Source Commit: $SRC_COMMIT"
           [ -n "$SRC_COMMIT" ] || {
-            echo "WARN: FAILED TO GET COMMIT, USING PLAIN -4K"
+            echo "Warn: Failed to Get Commit, Using Plain -4K"
             SRC_COMMIT=""
           }
 
@@ -327,12 +318,124 @@ jobs:
             < "$GITHUB_WORKSPACE/patches/AOSP/001-KSUMeta-Hooks-AOSP.patch"
         working-directory: work/src
 
-      - name: 🔧 Apply SUSFS Meta Patch
+      - name: 🔧 Integrate SUSFS + KSU Adaptation
         if: ${{ inputs.susfsmeta && inputs.ksumeta != 'none' }}
         run: |
-          patch -p1 -F3 --batch -f \
-            < "$GITHUB_WORKSPACE/patches/AOSP/001-SUSFS-Main-AOSP.patch"
-        working-directory: work/src
+          SRC="$GITHUB_WORKSPACE/work/src"
+          SUSFSKERNEL="$GITHUB_WORKSPACE/work/susfs"
+      
+          SUSFSREPO="https://gitlab.com/simonpunk/susfs4ksu.git"
+          SUSFSBRANCH="android15-6.6"
+      
+          SUSFSPATCH="$GITHUB_WORKSPACE/patches/AOSP/001-SUSFS-Main-AOSP.patch"
+          KSUPATCH="$GITHUB_WORKSPACE/patches/AOSP/002-SUSFS-Main-AOSP.patch"
+      
+          echo "🔧 SUSFS + KSU Integration"
+          echo "📌 SUSFS Repository : $SUSFSREPO"
+          echo "📌 SUSFS Branch     : $SUSFSBRANCH"
+          echo "📌 Kernel Source    : $SRC"
+      
+          # Validate Required Patches
+          for FILE in \
+            "$SUSFSPATCH" \
+            "$KSUPATCH"; do     
+            if [ ! -f "$FILE" ]; then
+              echo "Missing Required Patch:"
+              echo "$FILE"
+              exit 1
+            fi     
+          done
+      
+          # Clone SUSFS from GitLab
+          echo "Cloning SUSFS..."      
+          rm -rf "$SUSFSKERNEL"      
+          git clone \
+            --depth 1 \
+            --branch "$SUSFSBRANCH" \
+            "$SUSFSREPO" \
+            "$SUSFSKERNEL"     
+          echo "SUSFS Cloned Successfully"
+      
+          # Show SUSFS Revision
+          echo "SUSFS Commit:"
+          git -C "$SUSFSKERNEL" rev-parse --short HEAD
+      
+          # Locate SUSFS Source Files
+          echo "🔎 Validating SUSFS Source Files..."      
+          SUSFSC="$SUSFSKERNEL/fs/susfs.c"
+          SUSFSH="$SUSFSKERNEL/include/linux/susfs.h"
+          SUSFSDEFH="$SUSFSKERNEL/include/linux/susfs_def.h"
+      
+          for FILE in \
+            "$SUSFSC" \
+            "$SUSFSH" \
+            "$SUSFSDEFH"; do     
+            if [ ! -f "$FILE" ]; then
+              echo "Missing SUSFS File:"
+              echo "$FILE"
+              exit 1
+            fi      
+          done      
+          echo "SUSFS Source Files Found"
+      
+          # Apply SUSFS Main Kernel Patch
+          echo "🔧 Applying SUSFS Meta Patch..."      
+          cd "$SRC"      
+          patch \
+            -p1 \
+            -F3 \
+            --batch \
+            -f \
+            < "$SUSFSPATCH"      
+          echo "SUSFS Meta Patch Applied"
+      
+          # Install SUSFS Kernel Source Files
+          echo "Installing SUSFS Kernel Files..."      
+          install -Dm0644 \
+            "$SUSFSC" \
+            "$SRC/fs/susfs.c"    
+          install -Dm0644 \
+            "$SUSFSH" \
+            "$SRC/include/linux/susfs.h"      
+          install -Dm0644 \
+            "$SUSFSDEFH" \
+            "$SRC/include/linux/susfs_def.h"      
+          echo "SUSFS Kernel Files Installed"
+      
+          # Apply SUSFS KSU / ReSukiSU Adaptation
+          echo "🔧 Applying SUSFS KSU Adaptation..."     
+          cd "$SRC/KernelSU"    
+          if git apply --check "$KSUPATCH"; then
+            git apply "$KSUPATCH"
+            echo "SUSFS KSU Adaptation Applied"
+          else
+            echo "SUSFS KSU Adaptation Patch does Not Match"
+            echo "Currently Cloned ReSukiSU Revision"
+            exit 1
+          fi
+      
+          # Final Validation
+          echo "Validating SUSFS Integration..."      
+          for FILE in \
+            "$SRC/fs/susfs.c" \
+            "$SRC/include/linux/susfs.h" \
+            "$SRC/include/linux/susfs_def.h"; do      
+            if [ ! -f "$FILE" ]; then
+              echo "Missing Installed SUSFS File:"
+              echo "$FILE"
+              exit 1
+            fi      
+          done
+      
+          if ! grep -Rqs "CONFIG_KSU_SUSFS" \
+            "$SRC/KernelSU" \
+            "$SRC/fs" \
+            "$SRC/include"; then      
+            echo "Config KSU SUSFS was Not Found"
+            exit 1
+          fi
+      
+          echo "SUSFS + KSU Integration Complete"
 
       - name: 🔧 Apply LZ4 Patch
         if: inputs.neonlz4
@@ -392,15 +495,6 @@ jobs:
 
           EXTRA="${GITHUB_WORKSPACE}/extra-files/patches/extra"
 
-          # SUSFS New Files
-          if [ "${{ inputs.susfsmeta }}" = "true" ] &&
-             [ "${{ inputs.ksumeta }}" != "none" ]; then
-            cp -r "$EXTRA/fs/susfs.c" work/src/fs/
-            cp -r "$EXTRA/include/linux/susfs.h" \
-                  "$EXTRA/include/linux/susfs_def.h" \
-                  work/src/include/linux/
-          fi
-
           # LZ4 1.10 New Files
           if [ "${{ inputs.neonlz4 }}" = "true" ]; then
             cp -r "$EXTRA/lib/lz4" work/src/lib/
@@ -453,27 +547,21 @@ jobs:
       - name: Integrate KSU Meta
         if: ${{ inputs.ksumeta != 'none' }}
         run: |
-          set -e
           cd work/src
-
           case "${{ inputs.ksumeta }}" in
             resukisu)
               KSUREPO="https://github.com/ReSukiSU/ReSukiSU.git"
               ;;
             none)
-              echo "NO KERNELSU"
+              echo "No KSU Integration"
               exit 0
               ;;
           esac
-
           rm -rf KernelSU drivers/kernelsu
           git clone "$KSUREPO" KernelSU
-
           ln -sfn ../KernelSU/kernel drivers/kernelsu
-
           grep -q "kernelsu" drivers/Makefile ||
             echo 'obj-$(CONFIG_KSU) += kernelsu/' >> drivers/Makefile
-
           grep -q "drivers/kernelsu/Kconfig" drivers/Kconfig ||
             sed -i '/endmenu/i\source "drivers/kernelsu/Kconfig"' \
               drivers/Kconfig
@@ -516,7 +604,6 @@ jobs:
 
       - name: Deploy Configurations
         run: |
-          set -e
           cd work/src
           cp "$GITHUB_WORKSPACE/patches/AOSP/Config-SM8750-AOSP.config" .config
           # Local Version: Custom Suffix or Real Commit
@@ -638,10 +725,8 @@ jobs:
 
           export FAKESTAT="2025-05-25 12:00:00"
           export FAKETIME="@2025-05-25 13:00:00"
-
-          SO_DIR="$GITHUB_WORKSPACE/lib"
-          export PRELOAD_LIBS="$SO_DIR/libfakestat.so $SO_DIR/libfaketimeMT.so"
-
+          LIBDIR="$GITHUB_WORKSPACE/lib"
+          export PRELOAD_LIBS="$LIBDIR/libfakestat.so $LIBDIR/libfaketimeMT.so"
           echo '#!/bin/bash' > cc-wrapper
           echo 'export LD_PRELOAD="'$PRELOAD_LIBS'"' >> cc-wrapper
           echo 'export FAKESTAT="'$FAKESTAT'"' >> cc-wrapper
@@ -655,7 +740,6 @@ jobs:
           echo 'ld.lld "$@"' >> ld-wrapper
 
           chmod +x cc-wrapper ld-wrapper
-
           cd work/src
 
           set -o pipefail
@@ -711,10 +795,8 @@ jobs:
           cd work/src/arch/arm64/boot
           wget -q \
             https://github.com/KernelSU-Next/KPatch-Next/releases/latest/download/kptools-linux
-
           wget -q \
             https://github.com/KernelSU-Next/KPatch-Next/releases/latest/download/kpimg-linux
-
           chmod +x kptools-linux
           ./kptools-linux \
             -p \
