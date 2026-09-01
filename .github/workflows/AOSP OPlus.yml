@@ -35,11 +35,6 @@ on:
         required: true
         type: boolean
         default: true
-      cvefixpatch:
-        description: 'CVE Security Patches (GhostLock) - Upstream Lineage-23.2 Already Ships Them'
-        required: true
-        type: boolean
-        default: false
       netfilter:
         description: 'Netfilter (IPSet / IPTables)'
         required: true
@@ -211,7 +206,7 @@ jobs:
             grep -oE '[0-9a-f]{40}' || true)
           echo "SRC_COMMIT=$SRC" >> "$GITHUB_ENV"
           FP=$(printf '%s' \
-            "${{ inputs.ksumeta }}|${{ inputs.susfsmeta }}|${{ inputs.neonlz4 }}|${{ inputs.droidspaces }}|${{ inputs.basebandguard }}|${{ inputs.cvefixpatch }}|${{ inputs.netfilter }}|${{ inputs.bbr }}|${{ inputs.kpmodule }}|${{ inputs.rekernel }}|${{ inputs.ksuffix }}|$SRC" |
+            "${{ inputs.ksumeta }}|${{ inputs.susfsmeta }}|${{ inputs.neonlz4 }}|${{ inputs.droidspaces }}|${{ inputs.basebandguard }}|${{ inputs.netfilter }}|${{ inputs.bbr }}|${{ inputs.kpmodule }}|${{ inputs.rekernel }}|${{ inputs.ksuffix }}|$SRC" |
             md5sum |
             cut -d' ' -f1)
 
@@ -421,19 +416,41 @@ jobs:
       
           echo "SUSFS + KSU Integration Complete"
 
-      - name: 🔧 Apply LZ4 Patch
+      - name: 🔧 Integrate LZ4 OPlus
         if: inputs.neonlz4
+        shell: bash
         run: |
-          patch -p1 -F3 --batch -f \
-            < "$GITHUB_WORKSPACE/patches/AOSP/001-Neon-LZ4-AOSP.patch"
-        working-directory: work/src
-
-      - name: 🔧 Apply ZSTD Patch
-        if: inputs.neonlz4
-        run: |
-          patch -p1 -F3 --batch -f \
-            < "$GITHUB_WORKSPACE/patches/AOSP/001-ZSTD-AOSP.patch"
-        working-directory: work/src
+          SRC="$GITHUB_WORKSPACE/work/src"
+          LZ4PATCHUPDATE="$GITHUB_WORKSPACE/lz4_oplus"  
+          echo "🔧 LZ4 OPlus Integration"      
+          cd "$SRC"
+      
+          # Clone LZ4 OPlus
+          echo "📥 Cloning LZ4 OPlus..."
+          rm -rf "$LZ4PATCHUPDATE"
+          git clone \
+            --depth=1 \
+            https://github.com/Numbersf/lz4_oplus.git \
+            "$LZ4PATCHUPDATE"
+          echo "LZ4 OPlus Repository Cloned"
+      
+          # Run LZ4 OPlus Patch Update
+          if [ "${{ inputs.neonlz4 }}" = "true" ]; then
+            echo "Running LZ4 Patch Update Script..."
+            if [[ -f "$LZ4PATCHUPDATE/apply_lz4_oplus.sh" ]]; then
+              . "$LZ4PATCHUPDATE/apply_lz4_oplus.sh"
+              echo "LZ4 OPlus Shell Script Completed"
+            else
+              echo "LZ4 OPlus Shell Script Not Found:"
+              echo "$LZ4PATCHUPDATE/apply_lz4_oplus.sh"
+              exit 1
+            fi
+          else
+            echo "ZRAM patch selection is not LZ4-1.10.0-Patch-Update"
+            echo "Skipping LZ4 OPlus Patch Script"
+          fi
+      
+          echo "LZ4 OPlus Integration Complete"
 
       - name: 🔧 Apply Droidspaces Patch
         if: ${{ inputs.droidspaces != 'false' }}
@@ -442,18 +459,134 @@ jobs:
             < "$GITHUB_WORKSPACE/patches/AOSP/001-Droidspaces-AOSP.patch"
         working-directory: work/src
 
-      - name: 🔧 Apply Baseband Guard Patch
-        if: inputs.basebandguard
+      - name: 🔧 Integrate Linux Security Module Baseband Guard
+        if: ${{ inputs.basebandguard == 'true' }}
+        shell: bash
         run: |
-          patch -p1 -F3 --batch -f \
-            < "$GITHUB_WORKSPACE/patches/AOSP/001-BBG-AOSP.patch"
-        working-directory: work/src
+          SRC="$GITHUB_WORKSPACE/work/src"
+          MAXRETRIES=3   
+          if [ ! -d "$SRC" ]; then
+            echo "Kernel Source Directory Not Found:"
+            echo "$SRC"
+            exit 1
+          fi
+     
+          cd "$SRC"     
+          
+          echo "🔧 Baseband Guard Integration"
+          echo "📌 Source: VC-Teahouse/Baseband-guard"
+          echo "📌 Kernel: $SRC"
 
-      - name: CVE Patch
-        if: inputs.cvefixpatch
-        run: |
-          echo "GhostLock Fixes (CVE-2026-43499, CVE-2026-53163) are Already Upstream in Lineage-23.2; CVE Fix Patch was Removed"
-        working-directory: work/src
+          # Download and Execute VC-Teahouse Setup Script
+          URLBBG="https://raw.githubusercontent.com/vc-teahouse/Baseband-guard/main/setup.sh"      
+          echo "Fetching Baseband Guard Setup Script..."      
+          BBG_APPLIED=false     
+          for i in $(seq 1 "$MAXRETRIES"); do
+            if curl -fsSL "$URLBBG" | bash -s -- main; then
+              BBG_APPLIED=true
+              break
+            fi
+      
+            echo "Baseband Guard Setup Failed"
+            echo "Retry $i/$MAXRETRIES..."      
+            if [ "$i" -lt "$MAXRETRIES" ]; then
+              sleep 2
+            fi
+          done
+      
+          if [ "$BBG_APPLIED" != "true" ]; then
+            echo "Failed to Apply Baseband Guard"
+            exit 1
+          fi
+      
+          echo "Baseband Guard Setup Script Completed"
+      
+          # Locate Baseband Guard Source
+          echo "Locating Baseband Guard Source..."      
+          BBGPATHDIR=""     
+          if [ -d "$SRC/Baseband-guard" ]; then
+            BBGPATHDIR="$SRC/Baseband-guard"
+          elif [ -L "$SRC/Baseband-guard" ]; then
+            BBGPATHDIR="$(readlink -f "$SRC/Baseband-guard")"
+          else
+            BBGPATHDIR="$(find "$SRC" -maxdepth 3 \
+              -type d \
+              -name "Baseband-guard" \
+              -print -quit)"
+          fi
+      
+          if [ -z "$BBGPATHDIR" ] || [ ! -d "$BBGPATHDIR" ]; then
+            echo "Baseband Guard Directory was Not Found"
+            exit 1
+          fi
+      
+          echo "Baseband Guard Directory:"
+          echo "$BBGPATHDIR"
+      
+          # Validate Baseband Guard Source
+          if [ ! -f "$BBGPATHDIR/baseband_guard.c" ]; then
+            echo "Baseband Guard C was Not Found"      
+            echo "Baseband Guard Contents:"
+            ls -la "$BBGPATHDIR"      
+            exit 1
+          fi
+      
+          echo "Baseband Guard C Detected"
+      
+          # Ensure Baseband Guard is Included in LSM Defaults
+          BBGCONFIGFILE="$SRC/security/Kconfig"      
+          if [ ! -f "$BBGCONFIGFILE" ]; then
+            echo "Kernel Security Kconfig Not Found:"
+            echo "$BBGCONFIGFILE"
+            exit 1
+          fi
+      
+          echo "Updating Linux Security Module Configuration..."      
+          awk '
+            BEGIN { in_block=0 }      
+            /^config LSM$/ {
+              in_block=1
+            }      
+            in_block && /^[[:space:]]*default/ {
+              if ($0 !~ /baseband_guard/) {
+                sub(/selinux/, "selinux,baseband_guard")
+              }
+            }      
+            in_block && /^help$/ {
+              in_block=0
+            }      
+            {
+              print
+            }
+          ' "$BBGCONFIGFILE" > "${BBGCONFIGFILE}.tmp"      
+          mv "${BBGCONFIGFILE}.tmp" "$BBGCONFIGFILE"      
+          echo "Linux Security Configuration Updated"
+      
+          # Enable Baseband Guard
+          if [ -f "$SRC/.config" ]; then
+            echo "⚙️ Enabling CONFIG_BBG..."      
+            ./scripts/config \
+              --file "$SRC/.config" \
+              -e CONFIG_BBG      
+            echo "Config BBG Enabled"
+          else
+            echo "Config Not Present Yet"
+            echo "Config BBG will be Resolved During Kernel Configuration"
+          fi
+      
+          # Final Validation
+          echo "Validating Baseband Guard Integration..."      
+          if [ ! -f "$BBGPATHDIR/baseband_guard.c" ]; then
+            echo "Baseband Guard Source Validation Failed"
+            exit 1
+          fi
+      
+          if ! grep -q "baseband_guard" "$BBGCONFIGFILE"; then
+            echo "Baseband Guard was Not Added to security / Kconfig"
+            exit 1
+          fi
+      
+          echo "Baseband Guard Fully Integrated"
 
       - name: Apply ReKernel Patch
         if: ${{ inputs.rekernel }}
@@ -461,31 +594,11 @@ jobs:
           patch -p1 -F3 --batch -f \
             < "$GITHUB_WORKSPACE/patches/AOSP/001-ReKernel-AOSP.patch"
         working-directory: work/src
-
-      - name: Clone Extra Files Repository
-        run: |
-          git clone --depth=1 https://github.com/GuLingguang/oneplus-sm8750-kernel-pro-build.git extra-files
-
+          
       - name: Copy Extra Files
         run: |
-          set -e
-
+          git clone --depth=1 https://github.com/GuLingguang/oneplus-sm8750-kernel-pro-build.git extra-files
           EXTRA="${GITHUB_WORKSPACE}/extra-files/patches/extra"
-
-          # LZ4 1.10 New Files
-          if [ "${{ inputs.neonlz4 }}" = "true" ]; then
-            cp -r "$EXTRA/lib/lz4" work/src/lib/
-          fi
-
-          # ZSTD 1.5.7 New Files
-          if [ "${{ inputs.neonlz4 }}" = "true" ]; then
-            cp -r "$EXTRA/lib/zstd/common/allocations.h" \
-                  "$EXTRA/lib/zstd/common/bits.h" \
-                  work/src/lib/zstd/common/
-            cp -r "$EXTRA/lib/zstd/compress/zstd_preSplit.c" \
-                  "$EXTRA/lib/zstd/compress/zstd_preSplit.h" \
-                  work/src/lib/zstd/compress/
-          fi
 
           # Droidspaces New Files
           if [ "${{ inputs.droidspaces }}" != "false" ]; then
@@ -495,13 +608,6 @@ jobs:
                   work/src/include/uapi/linux/
             cp -r "$EXTRA/drivers/gpu/drm/evdi" \
                   work/src/drivers/gpu/drm/
-          fi
-
-          # Baseband Guard New Files
-          if [ "${{ inputs.basebandguard }}" = "true" ]; then
-            cp -r "$EXTRA/Baseband-guard" work/src/
-            ln -sfn ../Baseband-guard \
-              work/src/security/baseband-guard
           fi
 
       - name: Integrate KSU Meta
@@ -602,11 +708,6 @@ jobs:
           if [ "${{ inputs.droidspaces }}" != "extend" ]; then
             ./scripts/config --file .config \
               -d CONFIG_DRM_LINDROID_EVDI
-          fi
-
-          # Disable BBG when Not Requested
-          if [ "${{ inputs.basebandguard }}" != "true" ]; then
-            ./scripts/config --file .config -d CONFIG_BBG
           fi
 
           # Disable Better Networkk/Netfilter when Not Requested
