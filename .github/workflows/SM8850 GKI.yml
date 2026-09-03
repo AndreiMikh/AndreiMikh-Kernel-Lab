@@ -342,162 +342,148 @@ jobs:
           echo "📊 Compiler Cache Statistics (Before Build):"
           ccache -s
 
-      - name: 🔧 Kernel Version Setup
+      - name: Detect Kernel Version
+        id: version
         shell: bash
         run: |
           set -Eeuo pipefail
-
-          cd kernel_workspace/kernel_platform
-
+      
+          cd "${GITHUB_WORKSPACE}/kernel_workspace"
+      
           echo "📂 Working Directory: $(pwd)"
-
-          # Resolve Kernel Common Directory
-          echo "🔍 Locating Kernel Common Directory..."
+          echo "📁 Kernel Workspace:"
+          find . -maxdepth 2 -type d | sort
+      
+          # Resolve Google GKI Common Kernel Directory
           if [[ -f "./common/Makefile" ]]; then
             KCDIR="./common"
-          elif [[ -f "./kernel_platform/common/Makefile" ]]; then
-            KCDIR="./kernel_platform/common"
           else
-            echo "⚠️ ERROR: Kernel Common Makefile Not Found"
-            echo "📂 Nearby Makefiles:"
-            find . -maxdepth 4 -name Makefile | head -20
+            echo "ERROR: Google GKI Common / Directory Not Found"
+            echo
+            echo "Available directories:"
+            find . -maxdepth 3 -type d | sort
+            echo
+            echo "Available Makefiles:"
+            find . -maxdepth 4 -name Makefile -print
             exit 1
           fi
-
-          COMMONMAKEFILE="$KCDIR/Makefile"
+      
+          COMMONMAKEFILE="${KCDIR}/Makefile"
+      
           echo "🚀 Kernel Common Directory Found"
-          echo "📌 Using Makefile: $COMMONMAKEFILE"
-          echo ""
-
-          # Detect Kernel Module Branch
-          echo "🔍 Detecting Kernel Module Branch..."
-          KERNELMODULE=""
-
-          for cfg in \
-            "$KCDIR/build.config.constants" \
-            "$KCDIR/build.config.common"; do
-            if [[ -f "$cfg" ]]; then
-              TMPBRANCH=$(grep -m1 '^BRANCH=' "$cfg" | cut -d= -f2 || true)
-
-              if [[ -n "${TMPBRANCH:-}" ]]; then
-                KERNELMODULE="$TMPBRANCH"
-                break
-              fi
-            fi
-          done
-
-          # Fallback Using ACK SHA
-          if [[ -z "${KERNELMODULE:-}" && -n "${KERNELREPOSITORY:-}" \
-            && -f "./$KERNELREPOSITORY/android/ACK_SHA" ]]; then
-            KERNELMODULE=$(sed -n '2p' "./$KERNELREPOSITORY/android/ACK_SHA" \
-              | awk -F'-' '{print $1"-"$2}')
+          echo "📌 KCDIR: ${KCDIR}"
+          echo "📌 Makefile: ${COMMONMAKEFILE}"
+      
+          # Detect Branch / Kernel Module
+          BRANCH=""
+      
+          if [[ -f "${KCDIR}/build.config.constants" ]]; then
+            BRANCH=$(grep -m1 '^BRANCH=' \
+              "${KCDIR}/build.config.constants" |
+              cut -d'=' -f2- |
+              tr -d '"' |
+              xargs || true)
           fi
-
-          # Parse Kernel Module Information
-          if [[ -n "${KERNELMODULE:-}" ]]; then
-            ANDROIDVERSION="${KERNELMODULE%-*}"
-            KERNELVERSION="${KERNELMODULE#*-}"
-
-            echo "🚀 Kernel Module Detected"
-            echo "📌 Kernel Module   : $KERNELMODULE"
-            echo "📌 Android Version : $ANDROIDVERSION"
-            echo "📌 Kernel Branch   : $KERNELVERSION"
+      
+          if [[ -z "${BRANCH}" && -f "${KCDIR}/build.config.common" ]]; then
+            BRANCH=$(grep -m1 '^BRANCH=' \
+              "${KCDIR}/build.config.common" |
+              cut -d'=' -f2- |
+              tr -d '"' |
+              xargs || true)
+          fi
+      
+          if [[ -z "${BRANCH}" ]]; then
+            echo "⚠️ BRANCH not found in build config"
           else
-            echo "⚠️ Unable to Detect Kernel Module"
-
-            KERNELMODULE="Unknown"
-            ANDROIDVERSION="Unknown"
-            KERNELVERSION="Unknown"
+            echo "🌿 Kernel Branch: ${BRANCH}"
           fi
-
-          # Read Actual Kernel Version
-          echo ""
-          echo "🧾 Reading Real Kernel Version..."
-          VERSION=$(grep '^VERSION[[:space:]]*=' "$COMMONMAKEFILE" \
-            | head -n1 | cut -d= -f2 | tr -d ' ')
-          PATCHLEVEL=$(grep '^PATCHLEVEL[[:space:]]*=' "$COMMONMAKEFILE" \
-            | head -n1 | cut -d= -f2 | tr -d ' ')
-
-          # Extract Sublevel
-          SUBLEVEL=$(grep '^SUBLEVEL[[:space:]]*=' "$COMMONMAKEFILE" \
-            | head -n1 | cut -d= -f2 | tr -d ' ')
-
-          # Fallback if Empty
-          VERSION="${VERSION:-0}"
-          PATCHLEVEL="${PATCHLEVEL:-0}"
-          SUBLEVEL="${SUBLEVEL:-0}"
-
-          # Validate Sublevel
-          if ! [[ "$SUBLEVEL" =~ ^[0-9]+$ ]]; then
-            echo "⚠️ Invalid Sublevel Detected: $SUBLEVEL — Forcing 0"
-            SUBLEVEL=0
-          fi
-
-          OGVERSION="${VERSION}.${PATCHLEVEL}.${SUBLEVEL}"
-
-          echo "📌 Kernel Version : $VERSION.$PATCHLEVEL"
-          echo "📌 Kernel Sublevel: $SUBLEVEL"
-          echo "📌 Original Kernel Version: $OGVERSION"
-
-          # Optional Sublevel Override
-          SUBLVLINPUT="${{ github.event.inputs.SUBLEVEL }}"
-
-          if [[ -n "${SUBLVLINPUT:-}" ]]; then
-            echo ""
-            echo "🛠️ Updating Kernel Sublevel..."
-            echo "📌 New Sublevel: $SUBLVLINPUT"
-
-            if ! [[ "$SUBLVLINPUT" =~ ^[0-9]+$ ]]; then
-              echo "⚠️ Invalid Custom Sublevel: $SUBLVLINPUT"
-              exit 1
-            fi
-
-            sed -i \
-              "s/^\(SUBLEVEL[[:space:]]*=[[:space:]]*\).*/\1$SUBLVLINPUT/" \
-              "$COMMONMAKEFILE"
-          else
-            echo "📌 No Custom Sublevel Provided"
-          fi
-
-          # Read Updated Kernel Version
-          NEWVERSION=$(awk '
-            /^VERSION[[:space:]]*=/ {v=$3}
-            /^PATCHLEVEL[[:space:]]*=/ {p=$3}
-            /^SUBLEVEL[[:space:]]*=/ {s=$3}
-            END {print v "." p "." s}
+      
+          # Kernel Version Information
+          VERSION=$(awk -F= '
+            /^[[:space:]]*VERSION[[:space:]]*=/ {
+              gsub(/[[:space:]]/, "", $2)
+              print $2
+              exit
+            }
           ' "$COMMONMAKEFILE")
-
-          echo ""
-          echo "📊 Final Kernel Version: $NEWVERSION"
-
-          if [[ "$OGVERSION" != "$NEWVERSION" ]]; then
-            echo "⚙️ Kernel Version Modified"
-            echo "📌 $OGVERSION → $NEWVERSION"
-          else
-            echo "✔️ Kernel Version Unchanged"
+      
+          PATCHLEVEL=$(awk -F= '
+            /^[[:space:]]*PATCHLEVEL[[:space:]]*=/ {
+              gsub(/[[:space:]]/, "", $2)
+              print $2
+              exit
+            }
+          ' "$COMMONMAKEFILE")
+      
+          SUBLEVEL=$(awk -F= '
+            /^[[:space:]]*SUBLEVEL[[:space:]]*=/ {
+              gsub(/[[:space:]]/, "", $2)
+              print $2
+              exit
+            }
+          ' "$COMMONMAKEFILE")
+      
+          if [[ -z "${VERSION}" || -z "${PATCHLEVEL}" || -z "${SUBLEVEL}" ]]; then
+            echo "Failed to Detect Kernel Version"
+            echo "VERSION=${VERSION:-<Empty>}"
+            echo "PATCHLEVEL=${PATCHLEVEL:-<Empty>}"
+            echo "SUBLEVEL=${SUBLEVEL:-<Empty>}"
+            exit 1
           fi
-
-          # Export Environment Variables
-          echo ""
-          echo "📤 Exporting Environment Variables..."
-
+      
+          KERNELVERSION="${VERSION}.${PATCHLEVEL}"
+          FULLVERSION="${VERSION}.${PATCHLEVEL}.${SUBLEVEL}"
+      
+          echo "🐧 Kernel Version: ${FULLVERSION}"
+      
+          # Android / Kernel Branch
+          KERNELMODULE="${BRANCH:-}"
+      
+          if [[ -n "${KERNELMODULE}" && "${KERNELMODULE}" == *-* ]]; then
+            ANDROIDVERSION="${KERNELMODULE%%-*}"
+            KERNELBRANCHVERSION="${KERNELMODULE#*-}"
+          else
+            ANDROIDVERSION=""
+            KERNELBRANCHVERSION="${KERNELVERSION}"
+          fi
+      
+          # Extract only X.Y from branch version such as:
+          # 6.12-2025-06
+          KERNELBRANCHVERSION=$(echo "${KERNELBRANCHVERSION}" |
+            grep -oE '^[0-9]+\.[0-9]+' || true)      
+          [[ -n "${KERNELBRANCHVERSION}" ]] || KERNELBRANCHVERSION="${KERNELVERSION}"
+      
+          # Short Versions
+          KV1="${VERSION}"
+          KV2="${PATCHLEVEL}"
+          KV3="${SUBLEVEL}"
+      
+          KSHORTVERSION="${KV1}.${KV2}"
+          KSHORTPATCHVERSION="${KV1}.${KV2}.${KV3}"
+      
+          echo "Kernel Information"
+          echo "Android Version : ${ANDROIDVERSION}"
+          echo "Kernel Branch   : ${KERNELBRANCHVERSION}"
+          echo "Kernel Version  : ${KSHORTVERSION}"
+          echo "Full Version    : ${KSHORTPATCHVERSION}"
+          echo "Branch          : ${BRANCH}"
+          
+          # Export
           {
-            echo "SUBLEVEL=$SUBLEVEL"
-            echo "KERNELMODULE=$KERNELMODULE"
-            echo "ANDROIDVERSION=$ANDROIDVERSION"
-            echo "KERNELVERSION=$KERNELVERSION"
-            echo "FULLVERSION=$NEWVERSION"
-            echo "KV1=$(echo "$KERNELVERSION" | cut -d. -f1)"
-            echo "KV2=$(echo "$KERNELVERSION" | tr -d '.')"
-            echo "KV3=$(echo "$NEWVERSION" | tr -d '.')"
-            echo "KSHORTVERSION=$(echo "$NEWVERSION" | cut -d. -f1,2)"
-            echo "KSHORTPATCHVERSION=$(echo "$NEWVERSION" | cut -d. -f1,2 | tr '.' '_')"
-          } >> "$GITHUB_ENV"
-
-          echo "🚀 Environment Variables Exported"
-
-          echo ""
-          echo "🎉 Kernel Version Setup Complete"
+            echo "VERSION=${VERSION}"
+            echo "PATCHLEVEL=${PATCHLEVEL}"
+            echo "SUBLEVEL=${SUBLEVEL}"
+            echo "ANDROIDVERSION=${ANDROIDVERSION}"
+            echo "KERNELMODULE=${KERNELMODULE}"
+            echo "KERNELVERSION=${KERNELBRANCHVERSION}"
+            echo "FULLVERSION=${FULLVERSION}"
+            echo "KV1=${KV1}"
+            echo "KV2=${KV2}"
+            echo "KV3=${KV3}"
+            echo "KSHORTVERSION=${KSHORTVERSION}"
+            echo "KSHORTPATCHVERSION=${KSHORTPATCHVERSION}"
+          } >> "${GITHUB_ENV}"
 
       - name: Inject Custom Kernel Version Suffix
         if: ${{ github.event.inputs.SUFFIX != '' }}
