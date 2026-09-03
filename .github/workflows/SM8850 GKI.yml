@@ -1887,226 +1887,353 @@ jobs:
           rm -f Image
           mv oImage Image
 
-      - name: Clone AnyKernel3 and Package Kernel
-        id: create_zip
+      - name: KernelSU-Next KernelPatch-Next
+        if: ${{ github.event.inputs.KERNELPATCH == 'KPN' }}
+        shell: bash
         run: |
-          cd kernel_workspace
+          set -euo pipefail
 
-          git clone https://github.com/cctv18/AnyKernel3 --depth=1
-          rm -rf ./AnyKernel3/.git
+          KPREPO="KernelSU-Next/KPatch-Next"
+          AK3DIRECTORY="${GITHUB_WORKSPACE}/AnyKernel3"
+          KERNELDIRECTORY="${GITHUB_WORKSPACE}/common/out/arch/arm64/boot"
+          IMAGEPATH="${KERNELDIRECTORY}/Image"
 
-          cd AnyKernel3
+          KPFALLBACK="https://raw.githubusercontent.com/AndreiMikh/AndreiMikh-Kernel-Lab/refs/heads/${GITHUB_REF_NAME}/patches"
 
-          cp ../common/out/arch/arm64/boot/Image ./Image
+          echo "🔎 Checking Kernel Image..."
 
-          if [[ ! -f ./Image ]]; then
-            echo "Kernel image not found. The build may have failed."
+          # Validate Kernel Image
+          if [[ ! -f "$IMAGEPATH" ]]; then
+            echo "⚠️ ERROR: Kernel Image Not Found!"
+            echo "🧾 Expected Path:"
+            echo "$IMAGEPATH"
             exit 1
           fi
 
-          if [[ ${{ github.event.inputs.ksu_type }} == "sukisu" ]]; then
-            KSU_TYPENAME="SukiSU"
-          elif [[ ${{ github.event.inputs.ksu_type }} == "resukisu" ]]; then
-            KSU_TYPENAME="ReSukiSU"
-          elif [[ ${{ github.event.inputs.ksu_type }} == "ksunext" ]]; then
-            KSU_TYPENAME="KSUNext"
-          elif [[ ${{ github.event.inputs.ksu_type }} == "ksu" ]]; then
-            KSU_TYPENAME="KSU"
-          else
-            KSU_TYPENAME="none"
+          echo "📌 Kernel Image Found:"
+          realpath "$IMAGEPATH"
+
+          echo "📦 Image Size:"
+          ls -lh "$IMAGEPATH"
+
+          echo "📊 Bytes:"
+          stat -c%s "$IMAGEPATH"
+
+          # Save Original Checksum
+          echo "📝 Saving Original Checksum..."
+          sha256sum "$IMAGEPATH" > "${KERNELDIRECTORY}/Image.sha256"
+
+          # Resolve Latest KernelPatch-Next Release
+          echo "🌐 Resolving Latest KernelPatch-Next Release Tag..."
+
+          TAG="$(
+            curl -fsSL \
+              -H "User-Agent: Mozilla/5.0" \
+              --retry 5 \
+              --retry-all-errors \
+              --retry-delay 3 \
+              "https://api.github.com/repos/${KPREPO}/releases/latest" \
+            | sed -n 's/.*"tag_name":[[:space:]]*"\([^"]*\)".*/\1/p' \
+            | head -n1 || true
+          )"
+
+          if [[ -z "${TAG}" || "${TAG}" == "null" ]]; then
+            echo "⚠️ Latest release lookup failed."
+            echo "🔄 Falling Back to Releases List..."
+
+            TAG="$(
+              curl -fsSL \
+                -H "User-Agent: Mozilla/5.0" \
+                --retry 5 \
+                --retry-all-errors \
+                --retry-delay 3 \
+                "https://api.github.com/repos/${KPREPO}/releases" \
+              | sed -n 's/.*"tag_name":[[:space:]]*"\([^"]*\)".*/\1/p' \
+              | head -n1 || true
+            )"
           fi
 
-          if [[ "${{ github.event.inputs.lz4kd_enable }}" == "true" ]]; then
-            wget https://raw.githubusercontent.com/$GITHUB_REPOSITORY/refs/heads/$GITHUB_REF_NAME/zram.zip
+          if [[ -z "${TAG}" || "${TAG}" == "null" ]]; then
+            echo "⚠️ Unable to Determine Latest Release"
+            echo "📦 Using Built-in Fallback: 0.13.5-2"
+            TAG="0.13.5-2"
           fi
 
-          if [[ ${{ github.event.inputs.kpm_enable }} == 'true' ]]; then
-            wget https://github.com/cctv18/KPatch-Next/releases/latest/download/kpn.zip
+          BASE_URL="https://github.com/${KPREPO}/releases/download/${TAG}"
+
+          echo ""
+          echo "📦 Release Information"
+          echo "Repository : ${KPREPO}"
+          echo "Tag        : ${TAG}"
+
+          # Download KernelPatch-Next Tools
+          download() {
+            local file="$1"
+            local primary="${BASE_URL}/${file}"
+            local fallback="${KPFALLBACK}/${file}"
+
+            echo ""
+            echo "📥 Downloading ${file}..."
+
+            if ! curl -fsSL \
+                -H "User-Agent: Mozilla/5.0" \
+                --retry 5 \
+                --retry-all-errors \
+                --retry-delay 3 \
+                -o "${KERNELDIRECTORY}/${file}" \
+                "${primary}"
+            then
+              echo "⚠️ Primary Download Failed"
+              echo "🔄 Trying Fallback..."
+
+              curl -fsSL \
+                -H "User-Agent: Mozilla/5.0" \
+                --retry 5 \
+                --retry-all-errors \
+                --retry-delay 3 \
+                -o "${KERNELDIRECTORY}/${file}" \
+                "${fallback}"
+            fi
+
+            if [[ ! -s "${KERNELDIRECTORY}/${file}" ]]; then
+              echo "⚠️ ${file} Download Failed"
+              exit 1
+            fi
+
+            chmod +x "${KERNELDIRECTORY}/${file}"
+
+            echo "📥 ${file} Ready"
+          }
+
+          # Download Required Tools
+          download kptools-linux
+          download kpimg-linux
+
+          # Apply KernelPatch-Next
+          echo ""
+          echo "⚙️ Applying KernelPatch-Next..."
+
+          cd "$KERNELDIRECTORY"
+
+          ./kptools-linux \
+            -p \
+            -i Image \
+            -k kpimg-linux \
+            -o oImage
+
+          if [[ ! -s oImage ]]; then
+            echo "⚠️ ERROR: KernelPatch-Next Failed"
+            exit 1
           fi
 
-          if [[ -n "${{ github.event.inputs.kernel_suffix }}" ]]; then
-            AK3_NAME=AnyKernel3_${KSU_TYPENAME}_${{ env.KSUVER }}_${{ env.KERNEL_VERSION }}_${{ github.event.inputs.kernel_suffix }}.zip
-          else
-            AK3_NAME=AnyKernel3_${KSU_TYPENAME}_${{ env.KSUVER }}_${{ env.KERNEL_VERSION }}_${{ env.KERNEL_NAME }}.zip
+          # Replace Original Kernel Image
+          mv -f oImage Image
+
+          # Verify Kernel Image Was Modified
+          echo ""
+          echo "🔍 Verifying Patched Image..."
+
+          if sha256sum -c Image.sha256 >/dev/null 2>&1; then
+            echo "⚠️ WARNING: Image Checksum Is Unchanged"
+            echo "⚠️ KernelPatch-Next May Not Have Been Applied"
+            exit 1
           fi
 
-          zip -r ../$AK3_NAME ./*
+          echo "🎉 Kernel Image Successfully Modified"
 
-          echo "ak3name=$AK3_NAME" >> $GITHUB_OUTPUT
-
-          # Add build information as an AnyKernel3 ZIP comment.
-          CLEAN_SUB_VERSION="${{ env.SUB_VERSION }}"
-          CLEAN_SUB_VERSION="${CLEAN_SUB_VERSION%_mtk}"
-
-          if [[ -n "${{ github.event.inputs.kernel_suffix }}" ]]; then
-            FULL_VERSION=${{ env.KERNEL_VERSION }}.${CLEAN_SUB_VERSION}-${{ github.event.inputs.kernel_suffix }}
-          else
-            FULL_VERSION=${{ env.KERNEL_VERSION }}.${CLEAN_SUB_VERSION}-${{ env.KERNEL_NAME }}
+          # Validate AnyKernel3 Directory
+          if [[ ! -d "$AK3DIRECTORY" ]]; then
+            echo "⚠️ ERROR: AnyKernel3 Directory Not Found!"
+            echo "$AK3DIRECTORY"
+            exit 1
           fi
 
-          TIME_NOW="$(TZ='Asia/Shanghai' date +'%Y-%m-%d %H:%M:%S')"
+          # Copy Patched Kernel Image to AnyKernel3
+          echo ""
+          echo "📦 Copying Patched Image to AnyKernel3..."
+          cp -f "$IMAGEPATH" "$AK3DIRECTORY/Image"
 
-          echo "Author: $GITHUB_ACTOR" > ./ak3.log
-          echo "Repo: $GITHUB_REPOSITORY" >> ./ak3.log
-          echo "Branch: $GITHUB_REF_NAME" >> ./ak3.log
-          echo "Run ID: $GITHUB_RUN_ID" >> ./ak3.log
-          echo "Commit: $GITHUB_SHA" >> ./ak3.log
-          echo "Time: $TIME_NOW" >> ./ak3.log
-          echo "Kernel Ver: $FULL_VERSION" >> ./ak3.log
-          echo "KSU Branch: ${KSU_TYPENAME}" >> ./ak3.log
-          echo "KSU Ver: ${KSUVER}" >> ./ak3.log
-          echo "SUSFS: ${{ github.event.inputs.susfs_enable }}" >> ./ak3.log
-          echo "KPM: ${{ github.event.inputs.kpm_enable }}" >> ./ak3.log
-          echo "LZ4: ${{ github.event.inputs.lz4_enable }}" >> ./ak3.log
-          echo "LZ4KD: ${{ github.event.inputs.lz4kd_enable }}" >> ./ak3.log
-          echo "IPSet: ${{ github.event.inputs.better_net }}" >> ./ak3.log
-          echo "BBR & Brutal: ${{ github.event.inputs.bbr_enable }}" >> ./ak3.log
-          echo "Droidspaces: ${{ github.event.inputs.droidspaces_enable }}" >> ./ak3.log
-          echo "ADIOS: ${{ github.event.inputs.adios_enable }}" >> ./ak3.log
-          echo "Re-Kernel: ${{ github.event.inputs.rekernel_enable }}" >> ./ak3.log
-          echo "BBG: ${{ github.event.inputs.baseband_guard }}" >> ./ak3.log
+          echo "📌 AnyKernel3 Image:"
+          ls -lh "$AK3DIRECTORY/Image"
 
-          zip -z ../$AK3_NAME < ./ak3.log
+          echo "🎉 KernelPatch-Next Patch Completed Successfully"
 
-      - name: Upload ccache Debug Logs
-        if: always() && inputs.ccache_debug
+
+      - name: AnyKernel3 Packaging Engine
+        run: |
+          set -euo pipefail
+
+          echo "📂 Cloning AnyKernel3 Master Branch..."
+          git clone --depth=1 --branch master --single-branch \
+            https://github.com/AndreiMikh/AnyKernel3.git
+
+          # Path to AnyKernel3 Folder
+          AK3DIRECTORY="${GITHUB_WORKSPACE}/AnyKernel3"
+
+          # Using Master Branch
+          cd "$AK3DIRECTORY"
+          git checkout master
+          echo "🌿 AnyKernel3 Branch: $(git branch --show-current)"
+
+          echo "🔎 Checking Kernel Image..."
+
+          # Kernel Image Path relative to AnyKernel3
+          IMAGEPATH="../common/out/arch/arm64/boot/Image"
+
+          # Validate Kernel Image Exists
+          if [[ ! -f "$IMAGEPATH" ]]; then
+            echo "⚠️ ERROR: Kernel Image Not Found!"
+            echo "🧾 Expected Path:"
+            realpath "$IMAGEPATH"
+            exit 1
+          fi
+
+          echo "📌 Kernel Image Found:"
+          realpath "$IMAGEPATH"
+
+          echo "📦 Image Size:"
+          ls -lh "$IMAGEPATH"
+
+          echo "📊 Bytes:"
+          stat -c%s "$IMAGEPATH"
+
+          # Copy Kernel Image to AnyKernel3
+          echo "📦 Copying to AnyKernel3..."
+          cp -f ../common/out/arch/arm64/boot/Image ./Image
+
+          # Create Final AnyKernel3 ZIP
+          echo "🗜️ Creating AnyKernel3 ZIP..."
+          zip -r "${GITHUB_WORKSPACE}/AnyKernel3.zip" ./*
+
+          # Validate Final ZIP
+          if [[ ! -f "${GITHUB_WORKSPACE}/AnyKernel3.zip" ]]; then
+            echo "⚠️ AnyKernel3 ZIP was Not Created!"
+            exit 1
+          fi
+
+          echo "🎉 AnyKernel3 Packaging Completed Successfully"
+
+      - name: Full Build Identity
+        id: suffix
+        run: |
+          set -euo pipefail
+
+          echo "⚡ Full Build Identity..."
+          echo ""
+
+          # Inputs / Environment
+          ROOTENGINE="${{ github.event.inputs.ROOTENGINE }}"
+          ROOTBRANCH="${{ github.event.inputs.ROOTBRANCHSOURCE }}"
+          KERNELPATCH="${{ github.event.inputs.KERNELPATCH }}"
+          LZ4UPDATE="${{ github.event.inputs.LZ4UPDATE }}"
+          SUSFSVAR="${{ github.event.inputs.SUSFSVARIANT }}"
+          SUSFSDEV="${{ github.event.inputs.SUSFSBRANCHDEV }}"
+          REKERNEL="${{ github.event.inputs.REKERNEL }}"
+          LSMBBG="${{ github.event.inputs.LSMBBG }}"
+          LXC="${{ github.event.inputs.LXCDOCKERSUPPORT }}"
+          NETFILTER="${{ github.event.inputs.NETFILTER }}"
+          NTSYNC="${{ github.event.inputs.NTSYNC }}"
+          TCP="${{ github.event.inputs.TCPALGORITHM }}"
+
+          # Base Identity
+          declare -A ROOTENGINEMAP=(
+            ["KernelSU-Next"]="KernelSU-Next"
+            ["KernelSU"]="KernelSU"
+            ["ReSukiSU"]="ReSukiSU"
+            ["SukiSU-Ultra"]="SukiSU-Ultra"
+          )
+
+          SUFFIX="${ROOTENGINEMAP[$ROOTENGINE]:-$ROOTENGINE}"
+
+          # KernelPatch Layer
+          case "$KERNELPATCH" in
+            "KPM") SUFFIX+="-KPM" ;;
+            "KPN") SUFFIX+="-KPN" ;;
+          esac
+
+          # Root Manager Branch
+          case "$ROOTBRANCH" in
+            *Dev-SUSFS*) SUFFIX+="-(Dev-SUSFS)" ;;
+            *Dev*)       SUFFIX+="-(Dev)" ;;
+            *Main*)      SUFFIX+="-(Main)" ;;
+            *Builtin*)   SUFFIX+="-(Builtin)" ;;
+          esac
+
+          # LZ4 / ZSTD Layer
+          case "$LZ4UPDATE" in
+            "LZ4-1.10.0-Patch-Update")
+              SUFFIX+="-LZ4(1.10.0)"
+              ;;
+            "None")
+              ;;
+          esac
+
+          # SUSFS Layer
+          case "$SUSFSVAR" in
+            "OGKI") SUFFIX+="-SuSFS(OKI)" ;;
+            "GKI")  SUFFIX+="-SuSFS(GKI)" ;;
+          esac
+
+          # SUSFS Development Branch
+          case "$SUSFSDEV" in
+            "true")  SUFFIX+="(Dev)" ;;
+            "false") SUFFIX+="(Main)" ;;
+          esac
+
+          # Re-Kernel
+          [[ "$REKERNEL" == "true" ]] && SUFFIX+="-ReKernel"
+
+          # BBG Linux Security Module
+          [[ "$LSMBBG" == "true" ]] && SUFFIX+="-BBG"
+
+          # DroidSpaces / LXC Support
+          case "$LXC" in
+            "DroidSpacesLXC-Inject")
+              SUFFIX+="-DroidSpaces(Inject)"
+              ;;
+          esac
+
+          # NetFilter
+          [[ "$NETFILTER" == "true" ]] && SUFFIX+="-NetFilter"
+
+          # NTSync
+          [[ "$NTSYNC" == "true" ]] && SUFFIX+="-NTSync"
+
+          # TCP Algorithm
+          case "$TCP" in
+            "BBRV1+ECN")
+              SUFFIX+="-BBRV1+ECN"
+              ;;
+            "BBRV1+BBRV3+ECN")
+              SUFFIX+="-BBRV1+BBRV3+ECN"
+              ;;
+            "BBRV1+ECN+Brutal")
+              SUFFIX+="-BBRV1+ECN+Brutal"
+              ;;
+            "BBRV1+BBRV3+ECN+Brutal")
+              SUFFIX+="-BBRV1+BBRV3+ECN+Brutal"
+              ;;
+          esac
+
+          # Final Branding
+          SUFFIX+="-Mikh"
+
+          # Normalize Output
+          SUFFIX="$(echo "$SUFFIX" | sed 's/--/-/g')"
+
+          echo "suffix=$SUFFIX" >> "$GITHUB_OUTPUT"
+
+          echo ""
+          echo "🎉 Final Build Identity:"
+          echo "$SUFFIX"
+
+      - name: Upload AnyKernel3 Artifact
         uses: actions/upload-artifact@v7
         with:
-          path: ${{ github.workspace }}/kernel_workspace/debug.zip
-          archive: false
+          name: ${{ steps.suffix.outputs.suffix }}
+          path: "${{ github.workspace }}/AnyKernel3.zip"
+          if-no-files-found: error
 
-      - name: Upload ZIP Artifact
-        uses: actions/upload-artifact@v7
-        with:
-          path: ${{ github.workspace }}/kernel_workspace/AnyKernel*.zip
-          archive: false
 
-  release:
-    needs: build
-    runs-on: ubuntu-latest
 
-    permissions:
-      contents: write
-      packages: write
-      actions: read
 
-    steps:
-      - name: Download ZIP Artifact
-        uses: actions/download-artifact@v8
-        with:
-          name: ${{ needs.build.outputs.ak3name }}
-          path: ./release_zips
-          skip-decompress: true
-
-      - name: Set Environment Variables
-        run: |
-          CLEAN_SUB_VERSION="${{ env.SUB_VERSION }}"
-          CLEAN_SUB_VERSION="${CLEAN_SUB_VERSION%_mtk}"
-
-          if [[ -n "${{ github.event.inputs.kernel_suffix }}" ]]; then
-            FULL_VERSION=${{ env.KERNEL_VERSION }}.${CLEAN_SUB_VERSION}-${{ github.event.inputs.kernel_suffix }}
-            echo "FULL_VERSION=$FULL_VERSION" >> $GITHUB_ENV
-            export FULL_VERSION=$FULL_VERSION
-          else
-            FULL_VERSION=${{ env.KERNEL_VERSION }}.${CLEAN_SUB_VERSION}-${{ env.KERNEL_NAME }}
-            echo "FULL_VERSION=$FULL_VERSION" >> $GITHUB_ENV
-            export FULL_VERSION=$FULL_VERSION
-          fi
-
-          TIME="$(TZ='Asia/Shanghai' date +'%y%m%d%H%M%S')"
-          TIME_FORM="$(TZ='Asia/Shanghai' date +'%Y-%m-%d %H:%M:%S')"
-
-          echo "TIME=$TIME" >> $GITHUB_ENV
-          echo "TIME_FORM=$TIME_FORM" >> $GITHUB_ENV
-
-          TAG_HEAD="OPPO-OnePlus-Realme-build"
-          echo "TAG_HEAD=$TAG_HEAD" >> $GITHUB_ENV
-
-          if [[ ${{ github.event.inputs.ksu_type }} == "sukisu" ]]; then
-            KSU_TYPENAME="SukiSU Ultra"
-          elif [[ ${{ github.event.inputs.ksu_type }} == "resukisu" ]]; then
-            KSU_TYPENAME="ReSukiSU"
-          elif [[ ${{ github.event.inputs.ksu_type }} == "ksunext" ]]; then
-            KSU_TYPENAME="KernelSU Next"
-          elif [[ ${{ github.event.inputs.ksu_type }} == "ksu" ]]; then
-            KSU_TYPENAME="KSU"
-          else
-            KSU_TYPENAME="No built-in KSU"
-          fi
-
-          echo "KSU_TYPENAME=$KSU_TYPENAME" >> $GITHUB_ENV
-
-      - name: Create Release
-        id: create_release
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          cat << 'EOF' > release_notes.md
-          ### 📱 Universal OPPO / OnePlus / Realme ${{ env.KSU_TYPENAME }} sm8850 Kernel | Build Information
-
-          - Kernel version: ${{ env.FULL_VERSION }}
-          - Build time: ${{ env.TIME_FORM }}
-          - Device compatibility: Universal OPPO / OnePlus / Realme Snapdragon 8 Elite Gen 5 devices using the ${{ env.KERNEL_VERSION }}.${{ env.SUB_VERSION }} kernel
-          - Kernel source: AOSP official android16-6.12-2025-06 branch
-          - KSU branch: ${{ env.KSU_TYPENAME }}
-          - SUSFS support: ${{ github.event.inputs.susfs_enable }}
-          - KPM support: ${{ github.event.inputs.kpm_enable }}
-          - LZ4 support: ${{ github.event.inputs.lz4_enable }}
-          - LZ4KD support: ${{ github.event.inputs.lz4kd_enable }}
-          - Extended networking support: ${{ github.event.inputs.better_net }}
-          - BBR / Brutal and other congestion control algorithms: ${{ github.event.inputs.bbr_enable }}
-          - Droidspaces container support: ${{ github.event.inputs.droidspaces_enable }}
-          - ADIOS I/O scheduler support: ${{ github.event.inputs.adios_enable }}
-          - Re-Kernel support: ${{ github.event.inputs.rekernel_enable }}
-          - Kernel-level baseband protection: ${{ github.event.inputs.baseband_guard }}
-
-          - ReSukiSU Manager: https://github.com/cctv18/ReSukiSU_CI/releases
-          - SukiSU Ultra Manager: https://github.com/SukiSU-Ultra/SukiSU-Ultra/releases
-          - KernelSU Next Manager: https://github.com/KernelSU-Next/KernelSU-Next/releases
-          - Original KernelSU Manager: https://github.com/tiann/KernelSU/releases
-
-          ### ⏫️ Changelog
-
-          - Updated ${{ env.KSU_TYPENAME }} to the latest version (${{ needs.build.outputs.ksuver }})
-          - (Reserved)
-
-          ### 📋 Installation Guide | 安装方法
-
-          1. If your phone already has a third-party recovery such as TWRP, download the corresponding AnyKernel flashable ZIP, boot into recovery mode, flash the ZIP, and reboot the device.
-
-          2. If your phone already has root access, you can install HorizonKernelFlasher and use it to flash the AnyKernel ZIP directly from Android:
-             https://github.com/libxzr/HorizonKernelFlasher/releases
-
-          3. If you are already using a SukiSU Ultra kernel and have updated the SukiSU Ultra Manager to the latest version, you can flash the AnyKernel ZIP directly through the SukiSU Ultra Manager.
-
-          4. If you previously used a kernel with the LZ4KD patch, disable the ZRAM module before flashing a kernel without LZ4KD to avoid compatibility issues.
-
-          5. Due to the KernelSU upstream meta-module changes, the latest KSU Manager versions (except KernelSU Next) require a meta-module for normal module mounting.
-
-             Available meta-modules include:
-             - meta overlayfs: https://github.com/KernelSU-Modules-Repo/meta-overlayfs
-             - mountify: https://github.com/backslashxx/mountify
-             - meta magicmount: https://github.com/7a72/meta-magic_mount/
-             - meta magicmount rs: https://github.com/Tools-cx-app/meta-magic_mount/
-             - hybrid mount: https://github.com/YuzakiKokuban/meta-hybrid_mount
-
-             If this is your first time using KSU, or you have just upgraded from an older KSU Manager, install a meta-module first. Other modules that rely on system mounting may not work correctly without one.
-
-          6. KernelPatch Next (KPN) is an independent KPM implementation that can run in any KSU/Magisk environment. It is not compatible with APatch and cannot be used together with the built-in KPM implementation of (Re)SukiSU.
-
-             Before using KPN, make sure your kernel does not already contain or have an integrated KPM implementation/patch.
-
-          #### ⚠️⚠️⚠️ Flashing a kernel involves risk!
-
-          To prevent accidental device bricking, always back up critical boot partitions such as boot before flashing a kernel. Tools such as KernelFlasher can be used for backups:
-
-          https://github.com/capntrips/KernelFlasher
-
-          **Flash at your own risk. Make sure you have a known-good kernel or complete partition backup available before proceeding.**
-          EOF
-
-          gh release create "${{ env.TAG_HEAD }}-${{ env.TIME }}" \
-            --repo "${{ github.repository }}" \
-            --title "${{ env.TAG_HEAD }}-${{ env.FULL_VERSION }}" \
-            --notes-file release_notes.md \
-            release_zips/AnyKernel3_*.zip
