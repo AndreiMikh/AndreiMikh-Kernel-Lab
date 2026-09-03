@@ -499,7 +499,7 @@ jobs:
           echo ""
           echo "🎉 Kernel Version Setup Complete"
 
-      - name: 🔧 Inject Custom Kernel Version Suffix
+      - name: Inject Custom Kernel Version Suffix
         if: ${{ github.event.inputs.SUFFIX != '' }}
         id: inject
         continue-on-error: true
@@ -548,102 +548,747 @@ jobs:
           git add -A
           git commit -m "🎉 Inject Custom Kernel Suffix and Remove Dirty Tags"
 
-      - name: Add KernelSU
-        id: ksu_version
+      - name: 🔧 Auto-Generated Kernel Suffix
+        if: ${{ github.event.inputs.SUFFIX == '' }}
         run: |
           cd kernel_workspace
 
-          if [[ ${{ github.event.inputs.ksu_type }} == "sukisu" || ${{ github.event.inputs.ksu_type }} == "resukisu" ]]; then
-            echo "Configuring ReSukiSU..."
-            echo "SukiSU source has been redirected to ReSukiSU because SukiSU has not been maintained for a long time and may no longer compile correctly, while ReSukiSU remains compatible with the SukiSU Manager..."
-
-            curl -LSs "https://raw.githubusercontent.com/ReSukiSU/ReSukiSU/refs/heads/main/kernel/setup.sh" | bash -s main
-
-            echo 'CONFIG_KSU_FULL_NAME_FORMAT="%TAG_NAME%-%COMMIT_SHA%@cctv18"' >> ./common/arch/arm64/configs/gki_defconfig
-
-            cd ./KernelSU
-
-            # Generate a custom version number based on commit count.
-            # Fall back to 114514 if the command fails.
-            KSU_VERSION=$(expr $(git rev-list --count main) + 30700 2>/dev/null || echo 114514)
-
-            # Store version in GitHub environment variables
-            echo "KSUVER=$KSU_VERSION" >> $GITHUB_ENV
-            echo "ksuver=$KSU_VERSION" >> $GITHUB_OUTPUT
-
-          elif [[ ${{ github.event.inputs.ksu_type }} == "ksunext" ]]; then
-            echo "Configuring KernelSU Next..."
-
-            curl -LSs "https://raw.githubusercontent.com/pershoot/KernelSU-Next/refs/heads/dev-susfs/kernel/setup.sh" | bash -s dev-susfs
-
-            cd KernelSU-Next
-            rm -rf .git
-
-            KSU_VERSION=$(expr $(curl -sI "https://api.github.com/repos/pershoot/KernelSU-Next/commits?sha=dev&per_page=1" | grep -i "link:" | sed -n 's/.*page=\([0-9]*\)>; rel="last".*/\1/p') "+" 30000)
-
-            echo "KSUVER=$KSU_VERSION" >> $GITHUB_ENV
-            echo "ksuver=$KSU_VERSION" >> $GITHUB_OUTPUT
-
-            sed -i "s/KSU_VERSION_FALLBACK := 1/KSU_VERSION_FALLBACK := $KSU_VERSION/g" kernel/Kbuild
-
-            KSU_GIT_TAG=$(curl -sL "https://api.github.com/repos/KernelSU-Next/KernelSU-Next/tags" | grep -o '"name": *"[^"]*"' | head -n 1 | sed 's/"name": "//;s/"//')
-
-            sed -i "s/KSU_VERSION_TAG_FALLBACK := v0.0.1/KSU_VERSION_TAG_FALLBACK := $KSU_GIT_TAG/g" kernel/Kbuild
-
-            # Add WildKSU Manager support to KernelSU Next
-            cd ../common/drivers/kernelsu
-
-            wget https://github.com/$GITHUB_REPOSITORY/raw/refs/heads/$GITHUB_REF_NAME/other_patch/apk_sign.patch
-            patch -p2 -N -F 3 < apk_sign.patch || true
-
-          elif [[ ${{ github.event.inputs.ksu_type }} == "ksu" ]]; then
-            echo "Configuring original KernelSU (tiann/KernelSU)..."
-
-            curl -LSs "https://raw.githubusercontent.com/tiann/KernelSU/refs/heads/main/kernel/setup.sh" | bash -s main
-
-            cd ./KernelSU
-
-            KSU_VERSION=$(expr $(curl -sI "https://api.github.com/repos/tiann/KernelSU/commits?sha=main&per_page=1" | grep -i "link:" | sed -n 's/.*page=\([0-9]*\)>; rel="last".*/\1/p') "+" 30000)
-
-            echo "KSUVER=$KSU_VERSION" >> $GITHUB_ENV
-            echo "ksuver=$KSU_VERSION" >> $GITHUB_OUTPUT
-
-            sed -i "s/DKSU_VERSION=16/DKSU_VERSION=${KSU_VERSION}/" kernel/Kbuild
-
+          # Inputs and Variables
+          ANDROIDVERSION="${{ env.ANDROIDVERSION }}"
+          echo "🚀 Generating Random Kernel Suffix..."
+          
+          # Random Generation
+          RANDOMDIGIT=$((RANDOM % 10))
+          RANDOMHASH=$(head -c 7 /dev/urandom | xxd -p)
+      
+          AUTOSUFFIX="${RANDOMDIGIT}-g${RANDOMHASH}"      
+          echo "🧾 Suffix: $AUTOSUFFIX"      
+          FILES=(
+            kernel_platform/common/scripts/setlocalversion
+            kernel_platform/msm-kernel/scripts/setlocalversion
+            kernel_platform/external/dtc/scripts/setlocalversion
+          )
+      
+          for path in "${FILES[@]}"; do
+            [[ -f "$path" ]] || continue
+            echo "⚙️ Processing: $path"      
+            # Ensure Executable
+            chmod +x "$path"      
+            # Remove Dirty Markers
+            sed -i 's/ -dirty//g' "$path"      
+            # Append Suffix Logic in a Safe Way (No Rewriting Core Logic)
+            if ! grep -q "Kernel Auto Suffix Injection" "$path"; then
+              cat >> "$path" <<EOF              
+              # Kernel Auto Suffix Injection
+              if [ -n "\$res" ]; then
+                case "\$res" in
+                  *"-${AUTOSUFFIX}"*) ;;
+                  *)
+                    res="\$res-${ANDROIDVERSION}-${AUTOSUFFIX}"
+                    ;;
+                esac
+              fi
+              EOF
+            fi
+      
+          done      
+          echo "⚙️ Committing changes..."    
+          git add -A
+      
+          if git diff --cached --quiet; then
+            echo "✔️ No changes to commit"
           else
-            echo "No built-in KernelSU selected. Skipping KernelSU configuration..."
+            git commit -m "🎉 Apply Auto-Generated Kernel Suffix"
           fi
 
-      - name: Apply KernelSU & SUSFS Patches
-        if: inputs.susfs_enable
+      - name: 🔧 Solve Root Engine Source
+        id: manager
+        shell: bash
         run: |
+          set -Eeuo pipefail
+
+          ROOTBRANCHSOURCE="${{ github.event.inputs.ROOTBRANCHSOURCE }}"
+          ROOTENGINE="${{ github.event.inputs.ROOTENGINE }}"
+
+          MANAGERBRANCH=""
+          BRANCHPATH=""
+          MANAGERARTIFACT=""
+          KSUREPO=""
+
+          # Resolve Root Source
+          case "$ROOTBRANCHSOURCE" in
+            SukiSU-Ultra-Builtin)
+              MANAGERBRANCH="main"
+              BRANCHPATH="builtin"
+              MANAGERARTIFACT="manager"
+              ;;
+            KernelSU-Next-Dev-SUSFS)
+              MANAGERBRANCH="dev-susfs"
+              BRANCHPATH="pershoot/KernelSU-Next"
+              MANAGERARTIFACT="manager"
+              ;;
+            KernelSU-Next-Dev)
+              MANAGERBRANCH="dev"
+              BRANCHPATH="pershoot/KernelSU-Next"
+              MANAGERARTIFACT="manager-spoofed"
+              ;;
+            KernelSU-Main)
+              MANAGERBRANCH="main"
+              BRANCHPATH="tiann/KernelSU"
+              MANAGERARTIFACT="manager"
+              ;;
+            ReSukiSU-Main)
+              MANAGERBRANCH="main"
+              BRANCHPATH="ReSukiSU/ReSukiSU"
+              MANAGERARTIFACT="Manager-release"
+              ;;
+            ReSukiSU-Dev)
+              MANAGERBRANCH="dev"
+              BRANCHPATH="ReSukiSU/ReSukiSU"
+              MANAGERARTIFACT="Manager-release"
+              ;;
+            *)
+              echo "⚠️ Unsupported Root Source: $ROOTBRANCHSOURCE"
+              exit 1
+              ;;
+          esac
+
+          # Resolve Root Engine Repository
+          case "$ROOTENGINE" in
+            SukiSU-Ultra)
+              KSUREPO="SukiSU-Ultra/SukiSU-Ultra"
+              ;;
+            KernelSU-Next)
+              KSUREPO="KernelSU-Next/KernelSU-Next"
+              ;;
+            ReSukiSU)
+              KSUREPO="ReSukiSU/ReSukiSU"
+              ;;
+            KernelSU)
+              KSUREPO="tiann/KernelSU"
+              ;;
+            *)
+              echo "⚠️ Unsupported Root Engine: $ROOTENGINE"
+              exit 1
+              ;;
+          esac
+
+          # Validate Resolution
+          [[ -n "$MANAGERBRANCH" ]] || {
+            echo "⚠️ Failed to Resolve Manager Branch"
+            exit 1
+          }
+          [[ -n "$KSUREPO" ]] || {
+            echo "⚠️ Failed to Resolve Root Engine Repository"
+            exit 1
+          }
+          [[ -n "$BRANCHPATH" ]] || {
+            echo "⚠️ Failed to Resolve Setup Repository"
+            exit 1
+          }
+          {
+            echo "MANAGERBRANCH=$MANAGERBRANCH"
+            echo "BRANCHPATH=$BRANCHPATH"
+            echo "MANAGERARTIFACT=$MANAGERARTIFACT"
+            echo "KSUREPO=$KSUREPO"
+          } >> "$GITHUB_OUTPUT"
+
+          echo "------------------------------"
+          echo "✔️ Root Engine Source Resolved"
+          echo "📦 Engine     : $ROOTENGINE"
+          echo "📂 Repository : $KSUREPO"
+          echo "🌿 Branch     : $MANAGERBRANCH"
+          echo "📁 Setup Repo : $BRANCHPATH"
+          echo "📦 Artifact   : $MANAGERARTIFACT"
+          echo "------------------------------"
+
+
+      - name: 🔧 Configure Root Engine
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+
+          cd "${GITHUB_WORKSPACE}/kernel_workspace/kernel_platform"
+
+          MANAGERBRANCH="${{ steps.manager.outputs.MANAGERBRANCH }}"
+          BRANCHPATH="${{ steps.manager.outputs.BRANCHPATH }}"
+          KSUREPO="${{ steps.manager.outputs.KSUREPO }}"
+          ROOTENGINE="${{ github.event.inputs.ROOTENGINE }}"
+          SUSFS="${{ github.event.inputs.SUSFSREPOSITORY }}"
+          KCDIR="${GITHUB_WORKSPACE}/kernel_workspace/kernel_platform/common"
+          DEFCONFIG="${KCDIR}/arch/arm64/configs/gki_defconfig"
+
+          # Helpers
+          gitlatesttag() {
+            local repo="$1"
+            local tag
+            tag="$(
+              git ls-remote --tags --sort="v:refname" \
+                "https://github.com/${repo}.git" 2>/dev/null \
+              | awk '{print $2}' \
+              | sed 's#refs/tags/##' \
+              | grep -v '\^{}' \
+              | tail -n1 \
+              || true
+            )"
+            echo "${tag:-v0.0.0}"
+          }
+          getcommitcount() {
+            git rev-list --count HEAD 2>/dev/null || echo 0
+          }
+          setupengine() {
+            local repo="$1"
+            local branch="$2"
+            local argument="$3"
+            echo "🔗 Setup Repository : $repo"
+            echo "🌿 Setup Branch     : $branch"
+            echo "📌 Setup Argument   : $argument"
+            curl -fsSL \
+              "https://raw.githubusercontent.com/${repo}/${branch}/kernel/setup.sh" \
+              | bash -s -- "$argument"
+          }
+
+          # SukiSU-Ultra
+          if [[ "$ROOTENGINE" == "SukiSU-Ultra" ]]; then
+            echo "🚀 Setting Up SukiSU-Ultra..."
+            setupengine \
+              "$KSUREPO" \
+              "$MANAGERBRANCH" \
+              "$BRANCHPATH"
+            cd KernelSU || {
+              echo "⚠️ SukiSU-Ultra KernelSU Directory was Not Created"
+              exit 1
+            }
+
+            GITHASH="$(git rev-parse --short HEAD)"
+            COMMITCOUNT="$(getcommitcount)"
+            echo "🌐 Fetching Latest Release Version..."
+            KSU_VERSION_TAG="$(
+              curl -fsSL \
+                "https://api.github.com/repos/${KSUREPO}/releases/latest" \
+              | grep '"tag_name":' \
+              | sed -E 's/.*"tag_name":[[:space:]]*"v?([^"]+)".*/\1/' \
+              | head -n1 \
+              || true
+            )"
+
+            # Minimum supported fallback
+            if [[ -z "$KSU_VERSION_TAG" ]] || \
+              [[ "$(printf '%s\n' "$KSU_VERSION_TAG" "3.1.7" | sort -V | head -n1)" != "3.1.7" ]]; then
+              KSU_VERSION_TAG="3.1.7"
+            fi
+
+            VERSION_FULL="v${KSU_VERSION_TAG}-${GITHASH}@${BRANCHPATH}"
+
+            {
+              echo "KSU_VERSION_TAG=$KSU_VERSION_TAG"
+              echo "KSU_API_VERSION=$KSU_VERSION_TAG"
+            } >> "$GITHUB_ENV"
+
+            echo "🏷️ Release Version : $KSU_VERSION_TAG"
+            echo "🔖 Commit Hash     : $GITHASH"
+            echo "📦 Full Version    : $VERSION_FULL"
+
+            # Remove Old Custom Version Function
+            sed -i \
+              '/^define get_ksu_version_full$/,/^endef$/d' \
+              kernel/Makefile
+
+            # Set Full Version
+            if grep -q '^KSU_VERSION_FULL := ' kernel/Makefile; then
+              sed -i \
+                "s|^KSU_VERSION_FULL := .*|KSU_VERSION_FULL := $VERSION_FULL|" \
+                kernel/Makefile
+            else
+              awk -v full="$VERSION_FULL" '
+                /^REPO_OWNER :=/ && !done {
+                  print
+                  print ""
+                  print "KSU_VERSION_FULL := " full
+                  done=1
+                  next
+                }
+                { print }
+                END {
+                  if (!done)
+                    print "KSU_VERSION_FULL := " full
+                }
+              ' kernel/Makefile > kernel/Makefile.tmp
+
+              mv kernel/Makefile.tmp kernel/Makefile
+            fi
+
+            # Set API Version
+            if grep -q '^KSU_VERSION_API := ' kernel/Makefile; then
+              sed -i \
+                "s|^KSU_VERSION_API := .*|KSU_VERSION_API := $KSU_VERSION_TAG|" \
+                kernel/Makefile
+            else
+              awk -v api="$KSU_VERSION_TAG" '
+                /^KSU_VERSION_FULL :=/ && !done {
+                  print
+                  print "KSU_VERSION_API := " api
+                  done=1
+                  next
+                }
+                { print }
+                END {
+                  if (!done)
+                    print "KSU_VERSION_API := " api
+                }
+              ' kernel/Makefile > kernel/Makefile.tmp
+              mv kernel/Makefile.tmp kernel/Makefile
+            fi
+
+            # Preserve existing version scheme
+            if [[ "$COMMITCOUNT" =~ ^[0-9]+$ ]]; then
+              KSUVERSION=$((COMMITCOUNT + 37185))
+            else
+              KSUVERSION=50185
+            fi
+
+            {
+              echo "KSUVERSION=$KSUVERSION"
+              echo "KSUVER=$KSUVERSION"
+            } >> "$GITHUB_ENV"
+          
+            echo "🔢 KSU Version      : $KSUVERSION"
+            echo "🎉 SukiSU-Ultra Ready"
+
+          # ReSukiSU
+          elif [[ "$ROOTENGINE" == "ReSukiSU" ]]; then
+            echo "🚀 Setting Up ReSukiSU..."
+            setupengine \
+              "$BRANCHPATH" \
+              "$MANAGERBRANCH" \
+              "$MANAGERBRANCH"
+            cd KernelSU || {
+              echo "⚠️ ReSukiSU Directory was Not Created"
+              exit 1
+            }
+
+            CURRENTBRANCH="$(git branch --show-current || true)"
+            CURRENTBRANCH="${CURRENTBRANCH:-HEAD}"
+            COMMITCOUNT="$(getcommitcount)"
+            if [[ "$COMMITCOUNT" =~ ^[0-9]+$ ]]; then
+              KSUVERSION=$((COMMITCOUNT + 30700))
+            else
+              KSUVERSION=30700
+            fi
+
+            echo "KSUVERSION=$KSUVERSION" >> "$GITHUB_ENV"
+
+            # Force Simple Tag-Based Full-Name Format
+            if [[ -f "$DEFCONFIG" ]]; then
+              sed -i '/^CONFIG_KSU_FULL_NAME_FORMAT=/d' "$DEFCONFIG"
+              printf 'CONFIG_KSU_FULL_NAME_FORMAT="%%TAG_NAME%%"\n' >> "$DEFCONFIG"
+            fi
+           
+            echo "🌿 Branch           : $CURRENTBRANCH"
+            echo "🔢 KSU Version      : $KSUVERSION"
+            echo "🎉 ReSukiSU Setup Complete"
+
+          # KernelSU-Next
+          elif [[ "$ROOTENGINE" == "KernelSU-Next" ]]; then
+            echo "🚀 Setting Up KernelSU-Next..."
+            setupengine \
+              "$BRANCHPATH" \
+              "$MANAGERBRANCH" \
+              "$MANAGERBRANCH"
+            cd KernelSU-Next || {
+              echo "⚠️ KernelSU-Next Directory was Not Created"
+              exit 1
+            }
+            
+            COMMITCOUNT="$(getcommitcount)"
+            if [[ "$COMMITCOUNT" =~ ^[0-9]+$ ]]; then
+              KSUVERSION=$((COMMITCOUNT + 30000))
+            else
+              KSUVERSION=30000
+            fi
+
+            echo "KSUVERSION=$KSUVERSION" >> "$GITHUB_ENV"
+            # Version Fallback
+            if grep -q '^KSU_VERSION_FALLBACK := ' kernel/Kbuild; then
+              sed -i \
+                "s/^KSU_VERSION_FALLBACK := .*/KSU_VERSION_FALLBACK := $KSUVERSION/" \
+                kernel/Kbuild
+            fi
+
+            # Tag fallback
+            KSU_GIT_TAG="$(gitlatesttag "$KSUREPO")"
+            if grep -q '^KSU_VERSION_TAG_FALLBACK := ' kernel/Kbuild; then
+              sed -i \
+                "s/^KSU_VERSION_TAG_FALLBACK := .*/KSU_VERSION_TAG_FALLBACK := $KSU_GIT_TAG/" \
+                kernel/Kbuild
+            fi
+
+            # KernelSU-Next SELinux Fix
+            STATICSELINUX="kernel/feature/selinux_hide.c"
+            if [[ -f "$STATICSELINUX" ]] && \
+              grep -qE \
+                '^static (int|void) security_(context_to_sid|sid_to_context|compute_av_user)_with_policy\(' \
+                "$STATICSELINUX"; then
+              perl -0777 -i -pe '
+                s/^static int security_context_to_sid_with_policy\(/int security_context_to_sid_with_policy(/mg;
+                s/^static int security_sid_to_context_with_policy\(/int security_sid_to_context_with_policy(/mg;
+                s/^static void security_compute_av_user_with_policy\(/void security_compute_av_user_with_policy(/mg;
+              ' "$STATICSELINUX"
+              echo "✔️ KernelSU-Next SELinux Fix Applied"
+            fi
+
+            # SUSFS Inline Hook Mode
+            if [[ "$SUSFS" != "-1" ]] && \
+              [[ -f kernel/supercall/dispatch.c ]]; then
+              perl -0777 -i -pe '
+                s/#ifdef CONFIG_HAVE_SYSCALL_TRACEPOINTS.*?#endif/
+                strscpy(cmd.mode, "Inline", sizeof(cmd.mode));
+                /s
+              ' kernel/supercall/dispatch.c
+              echo "✔️ SUSFS Hook Mode Set to Inline"
+            fi
+            
+            echo "🌿 Branch           : $MANAGERBRANCH"
+            echo "🏷️ Latest Tag       : $KSU_GIT_TAG"
+            echo "🔢 KSU Version      : $KSUVERSION"
+            echo "🎉 KernelSU-Next Setup Complete"
+
+          # KernelSU
+          elif [[ "$ROOTENGINE" == "KernelSU" ]]; then
+            echo "🚀 Setting Up KernelSU..."
+            setupengine \
+              "$BRANCHPATH" \
+              "$MANAGERBRANCH" \
+              "$MANAGERBRANCH"
+            cd KernelSU || {
+              echo "⚠️ KernelSU Directory was Not Created"
+              exit 1
+            }
+
+            COMMITCOUNT="$(getcommitcount)"
+            if [[ "$COMMITCOUNT" =~ ^[0-9]+$ ]]; then
+              KSUVERSION=$((COMMITCOUNT + 30000))
+            else
+              KSUVERSION=30000
+            fi
+
+            echo "KSUVERSION=$KSUVERSION" >> "$GITHUB_ENV"
+            # KernelSU version fallback
+            if grep -q '^KSU_VERSION_FALLBACK := ' kernel/Kbuild; then
+              sed -i \
+                "s/^KSU_VERSION_FALLBACK := .*/KSU_VERSION_FALLBACK := $KSUVERSION/" \
+                kernel/Kbuild
+            fi
+
+            # DKSU Version
+            if grep -qE '^DKSU_VERSION[[:space:]]*=' kernel/Kbuild; then
+              sed -i \
+                -E \
+                "s/^DKSU_VERSION[[:space:]]*=.*$/DKSU_VERSION=${KSUVERSION}/" \
+                kernel/Kbuild
+            fi
+            
+            echo "🌿 Branch           : $MANAGERBRANCH"
+            echo "🔢 KSU Version      : $KSUVERSION"
+            echo "🎉 KernelSU Setup Complete"
+          else
+            echo "⚠️ No Supported KSU Root Engine Selected"
+            exit 1
+          fi
+
+          echo ""
+          echo "------------------------------"
+          echo "🎉 Root Engine Configuration Complete"
+          echo "------------------------------"
+          echo "📦 Engine     : $ROOTENGINE"
+          echo "📂 Repository : $KSUREPO"
+          echo "🌿 Branch     : $MANAGERBRANCH"
+          echo "📁 Setup Repo : $BRANCHPATH"
+          echo "📦 Version    : ${KSUVERSION:-Unknown}"
+          echo "------------------------------"
+
+      - name: 🔧 SUSFS Patches (Auto Official / Fallback)and Kernel Compatibility Patches
+        if: ${{ github.event.inputs.SUSFSREPOSITORY != '-1' }}
+        env:
+          ROOTENGINE: ${{ github.event.inputs.ROOTENGINE }}
+          SUSFSREPOSITORY: ${{ github.event.inputs.SUSFSREPOSITORY }}
+          SUSFSVARIANT: ${{ github.event.inputs.SUSFSVARIANT }}
+          SUSFSBRANCHDEV: ${{ github.event.inputs.SUSFSBRANCHDEV }}
+          ANDROIDVERSION: ${{ env.ANDROIDVERSION }}
+          KERNELVERSION: ${{ env.KERNELVERSION }}
+          XUS: ${{ env.XUS }}
+          KERNELMODULE: ${{ env.KERNELMODULE }}
+          KV2: ${{ env.KV2 }}
+          KV3: ${{ env.KV3 }}
+        run: |
+          set -euo pipefail
+
+          # Check for Patch Reject Files
+          checkrejects() {
+            local SEARCHDIR="${1:-.}"
+            local REJFILES         
+            REJFILES=$(find "$SEARCHDIR" -name "*.rej" 2>/dev/null)
+            [[ -z "$REJFILES" ]] && return 0
+          
+            while IFS= read -r REJFILE; do
+              local ORIGFILE="${REJFILE%.rej}"
+              ORIGFILE="${ORIGFILE#./}"          
+              local FAILEDHUNKS
+              FAILEDHUNKS=$(grep -c '^@@ ' "$REJFILE" 2>/dev/null)          
+              echo "⚠️ Patch Reject Detected"
+              echo "📝 Reject File  : $REJFILE"
+              echo "📄 Target File  : $ORIGFILE"
+              echo "⚠️ Failed Hunks : ${FAILEDHUNKS:-0}"
+              echo
+              cat "$REJFILE"
+            done <<< "$REJFILES"
+          }
+          
+          # Handle Patch Errors
+          rejecthandler() {
+            local EXITCODE=$?          
+            trap - ERR          
+            echo "⚠️ Patch Application Failed"
+            echo "🔍 Scanning for Reject Files..."          
+            checkrejects .          
+            exit "$EXITCODE"
+          }
+
+          # Build derived variables in bash (NOT GitHub expressions)
+          GKIVERSION="${ANDROIDVERSION}-${KERNELVERSION}"
+
+          # Navigate to Kernel Directory
           cd kernel_workspace
 
-          if [[ ${{ github.event.inputs.ksu_type }} != "none" ]]; then
-            echo "Adding SUSFS patches..."
+          # Clone Required Patch Repositories
+          echo "📥 Cloning Patch Dependencies..."                              
+          # LZ4 / ZSTD Patch Sources
+          case "$ZRAMPATCH" in
+            "LZ4-1.10.0-Patch-Update")
+              git clone --depth=1 \
+                https://github.com/Numbersf/lz4_oplus.git
+              ;;
+          esac
+             
+          echo "✔️ Patch Repositories Cloned"
+          echo
 
-            git clone --depth=1 https://github.com/cctv18/susfs4oki.git susfs4ksu -b oki-${{ env.ANDROID_VERSION }}-${{ env.KERNEL_VERSION }}
-
-            cp ./susfs4ksu/kernel_patches/50_add_susfs_in_gki-${{ env.ANDROID_VERSION }}-${{ env.KERNEL_VERSION }}.patch ./common/
-            cp ./susfs4ksu/kernel_patches/fs/* ./common/fs/
-            cp ./susfs4ksu/kernel_patches/include/linux/* ./common/include/linux/
-
-            cd ./common
-            patch -p1 < 50_add_susfs_in_gki-${{ env.ANDROID_VERSION }}-${{ env.KERNEL_VERSION }}.patch || true
-
-            cd ..
+          # Environment Information
+          echo "🧾 Android Version       : $ANDROIDVERSION"
+          echo "🧾 Kernel Version        : $KERNELVERSION"
+          echo "🔎 Detected Kernel Base  : $GKIVERSION"
+          echo
+         
+          echo "🔎 Detected Kernel Base: $GKIVERSION"      
+          # Detect Kernel Common Directory
+          if [[ -d "./kernel_platform/common" ]]; then
+            KDIR="./kernel_platform/common"
+          elif [[ -d "./common" ]]; then
+            KDIR="./common"
           else
-            echo "No built-in KernelSU selected. Skipping SUSFS configuration..."
+            echo "⚠️ ERROR: Kernel Common Directory Not Found!"
+            exit 1
+          fi 
+
+          # Save Absolute Kernel Directory
+          KDIR="$(realpath "$KDIR")"
+          
+          echo "📁 Kernel Directory: $KDIR"
+          echo
+      
+          # Clone SUSFS Repository
+          echo "📥 Cloning SUSFS..."      
+          BRANCH="gki-${ANDROIDVERSION}-${KERNELVERSION}"      
+          if [[ "$SUSFSVARIANT" == "OGKI" ]]; then
+            BRANCH="oki-${ANDROIDVERSION}-${KERNELVERSION}"        
+            if [[ "$SUSFSBRANCHDEV" == "true" ]]; then
+              BRANCH="${BRANCH}-dev"
+            fi
+            git clone --depth=1 https://github.com/cctv18/susfs4oki.git susfs4ksu -b "$BRANCH"      
+          else           
+            if [[ "$SUSFSBRANCHDEV" == "true" ]]; then
+              BRANCH="${BRANCH}-dev"
+            fi
+            git clone --depth=1 https://gitlab.com/simonpunk/susfs4ksu.git susfs4ksu -b "$BRANCH"
+          fi      
+          echo "✔️ SUSFS Branch: $BRANCH"
+      
+          # Optional SUSFS Revision Checkout
+          # - Full Commit Hashes
+          # - Short Commit Hashes          
+          cd susfs4ksu || exit 1
+          
+          # Skip if SUSFS Revision is Empty or Disabled (-1)
+          if [[ -n "${SUSFSREPOSITORY:-}" && "${SUSFSREPOSITORY}" != "-1" ]]; then          
+            echo "🔎 SUSFS Revision: $SUSFSREPOSITORY"          
+            # Numeric Rollback Mode
+            if [[ "$SUSFSREPOSITORY" =~ ^[0-9]+$ ]]; then          
+              echo "📦 Fetching Additional Git History..."         
+              # Deepen Unshallow Clone History
+              git fetch --unshallow || git fetch --depth=1000 origin "$BRANCH"
+          
+              # Checkout Older SUSFS Revision
+              git checkout "HEAD~$SUSFSREPOSITORY" || {
+                echo "⚠️ Failed Checkout HEAD~$SUSFSREPOSITORY"
+                exit 1
+              }          
+      
+            else          
+              # SUSFS Commit Hash / Tag / Branch Mode        
+              # Detect SUSFS Commit Hash Format
+              if [[ "$SUSFSREPOSITORY" =~ ^[0-9a-fA-F]{7,40}$ ]]; then              
+                echo "📦 Expanding Shallow Clone History..."              
+                # Fetch More History So Short Hashes Become Resolvable
+                git fetch --unshallow origin || \
+                git fetch --deepen=200 origin "$BRANCH"              
+              fi
+              
+              # Checkout Requested SUSFS Revision
+              git checkout "$SUSFSREPOSITORY" || {
+                echo "⚠️ Invalid SUSFS Revision"
+                exit 1
+              }
+            fi
+          fi
+          
+          # Print Active Checked Out SUSFS Revision
+          echo "✔️ Active SUSFS Commit: $(git rev-parse --short HEAD)" 
+
+          # Detect SUSFS Version
+          SUSFSVER="Unknown"         
+          SUSFSHEADER="./kernel_patches/include/linux/susfs.h"       
+          if [[ -f "$SUSFSHEADER" ]]; then
+            SUSFSVER=$(
+              awk -F'"' '/SUSFS_VERSION/ {print $2; exit}' "$SUSFSHEADER"
+            )      
+            SUSFSVER="${SUSFSVER:-Unknown}"
+          fi       
+          
+          echo ""
+          echo "📦 SUSFS Version: $SUSFSVER"
+          echo "SUSFSVER=$SUSFSVER" >> "$GITHUB_ENV"
+          
+          cd ..
+      
+          # Find SUSFS Patches
+          echo "🔎 Searching SUSFS Patches..."      
+          shopt -s nullglob
+          SUSFSPATCHLIST=(./susfs4ksu/kernel_patches/50_add_susfs_in_gki-${ANDROIDVERSION}-${KERNELVERSION}*.patch)      
+          if [[ ${#SUSFSPATCHLIST[@]} -eq 0 ]]; then
+            echo "⚠️ No SUSFS Patch Found"
+            ls ./susfs4ksu/kernel_patches/ || true
+            exit 1
+          fi      
+          SUSFSPATCH="${SUSFSPATCHLIST[-1]}"
+
+          echo "🧾 SUSFS Patch Directory: $SUSFSPATCH"
+          echo ""
+          if [[ "$SUSFSREPOSITORY" != "-1" ]]; then
+            echo "📥 Copying SUSFS Patches..."  
+            cp "$SUSFSPATCH" "$KDIR/" 2>/dev/null || \
+              echo "⚠️ Failed to Copy SUSFS Patches"
+            cp -r ./susfs4ksu/kernel_patches/fs/* "$KDIR/fs/" 2>/dev/null || \
+              echo "⚠️ Failed to Copy SUSFS Patches"
+            cp -r ./susfs4ksu/kernel_patches/include/linux/* "$KDIR/include/linux/" 2>/dev/null || \
+              echo "⚠️ Failed to Copy SUSFS Patches"
           fi
 
-          if [[ ${{ github.event.inputs.ksu_type }} == "ksu" ]]; then
-            echo "Adding SUSFS patch for original KernelSU (tiann/KernelSU)..."
+          # Navigate to Common Directory
+          cd "$KDIR"
 
-            cp ./susfs4ksu/kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch ./KernelSU/
-
-            cd ./KernelSU
-            patch -p1 < 10_enable_susfs_for_ksu.patch || true
+          # SUSFS Core Patch (50 SUSFS Patch)
+          echo "⚙️ Applying SUSFS Core Patch (50 Add SUSFS Patch)"
+          if patch -p1 < "$(basename "$SUSFSPATCH")"; then
+            echo "✔️ SUSFS 50 Enable Core Patch Applied"
+          else
+            echo "⚠️ SUSFS Core Patch Already Applied or Failed"
           fi
+
+          # SUSFS 10 Enable Patch for KernelSU (Only for KernelSU)
+          if [[ "$ROOTENGINE" == "KernelSU" ]]; then
+            echo "⚙️ Applying KernelSU SUSFS enable patch"
+            if [[ "$SUSFSVARIANT" == "OGKI" ]]; then
+              PATCHBRANCH="oki-${ANDROIDVERSION}-${KERNELVERSION}"
+            else
+              PATCHBRANCH="gki-${ANDROIDVERSION}-${KERNELVERSION}"
+            fi
+            [[ "${SUSFSBRANCHDEV}" == "true" ]] && PATCHBRANCH="${PATCHBRANCH}-dev"
+            case "$SUSFSVARIANT" in
+              GKI)
+                SUSFS10URL="https://gitlab.com/simonpunk/susfs4ksu/-/raw/${PATCHBRANCH}/kernel_patches/${ROOTENGINE}/10_enable_susfs_for_ksu.patch"
+                ;;
+              OGKI)
+                SUSFS10URL="https://raw.githubusercontent.com/cctv18/susfs4oki/${PATCHBRANCH}/kernel_patches/${ROOTENGINE}/10_enable_susfs_for_ksu.patch"
+                ;;
+              *)
+                echo "⚠️ Invalid SUSFS Variant"
+                exit 1
+                ;;
+            esac
+
+            # Verify the Patch URL Exists
+            echo "🔍 Checking Patch URL..."
+            if ! wget --spider "$SUSFS10URL"; then
+              echo "⚠️ ERROR: Patch does Not Exist:"
+              echo "$SUSFS10URL"
+              exit 1
+            fi
+
+            echo "🌐 Downloading Patch: $SUSFS10URL"
+            if ! wget "$SUSFS10URL" -O enable.patch; then
+              echo "⚠️ ERROR: Failed to Download SUSFS Enable Patch"
+              exit 1
+            fi
+            
+            APPLIED=false
+            # Save Current Directory
+            ORIGDIR="$(pwd)"
+
+            # KernelSU Source Directory
+            KSUDIR="$(dirname "$KDIR")/KernelSU"
+            echo "📂 Current Directory: $(pwd)"
+            echo "🔧 Applying SUSFS Enable Patch..."
+            
+            if [[ ! -d "$KSUDIR" ]]; then
+              echo "⚠️ ERROR: KernelSU Directory Not Found:"
+              echo "   $KSUDIR"
+              rm -f "$ORIGDIR/enable.patch"
+              exit 1
+            fi
+          
+            echo "📂 Entering KernelSU Directory..."
+            cd "$KSUDIR" || exit 1
+          
+            echo "📂 Current Directory: $(pwd)"
+            echo "🔧 Applying SUSFS Enable Patch..."
+          
+            if patch -p1 < "$ORIGDIR/enable.patch"; then
+              APPLIED=true
+              echo "✔️ SUSFS Enable Patch Applied Successfully"
+            else
+              echo "⚠️ SUSFS Enable Patch Is Not Compatible with This KernelSU Source Tree"
+              echo "ℹ️ Skipping SUSFS Enable Patch"
+            fi
+          
+            echo "📂 Returning to Original Directory..."
+            cd "$ORIGDIR" || exit 1
+          
+            rm -f "$ORIGDIR/enable.patch"
+          
+            if [[ "$APPLIED" == "true" ]]; then
+              echo "✔️ KernelSU SUSFS Enable Patch Completed"
+            else
+              echo "⚠️ KernelSU SUSFS Enable Patch Skipped"
+            fi          
+          else
+            echo "⚠️ Skipping KernelSU SUSFS Enable Patch (Root = $ROOTENGINE)"
+          fi
+
+          # Verify Reject Files
+          checkrejects .
+
+          echo ""
+          echo "🎉 SUSFS Patches Complete"
 
       - name: Apply LZ4 1.10.0 & Zstd 1.5.7 Patches
         if: inputs.lz4_enable
