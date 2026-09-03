@@ -94,13 +94,19 @@ on:
         description: "Re-Kernel Support"
         required: true
         default: true
-
-      kernel_suffix:
-        description: 'Kernel suffix (leave empty for default; do not add a leading hyphen, spaces, or other reserved characters that may affect command execution)'
+      LZ4UPDATE:
+        type: choice
+        description: "LZ4 1.10.0 / ZSTD 1.5.7?"
         required: false
-        type: string
-        default: ""
-        
+        default: LZ4-1.10.0-Patch-Update
+        options:
+          - LZ4-1.10.0-Patch-Update
+          - None       
+      CLEANSPACE:
+        type: boolean
+        description: "Clean Build Space"
+        required: true
+        default: true
 permissions:
   actions: write
   contents: read
@@ -128,7 +134,7 @@ jobs:
    
     steps:
       - name: Maximize Build Space
-        if: ${{ env.CLEANSPACE == 'Disabled' }}
+        if: ${{ github.event.inputs.CLEANSPACE == 'false' }}
         uses: easimon/maximize-build-space@master
         with:
           root-reserve-mb: 8192         # Keep 8Gib Free for OS / System
@@ -488,104 +494,156 @@ jobs:
       - name: Inject Custom Kernel Version Suffix
         if: ${{ github.event.inputs.SUFFIX != '' }}
         id: inject
-        continue-on-error: true
+        shell: bash
         run: |
-          cd kernel_workspace
-
-          # Inputs
+          set -Eeuo pipefail
+      
+          cd "${GITHUB_WORKSPACE}/kernel_workspace/common"
+      
           SUFFIX="${{ github.event.inputs.SUFFIX }}"
           ANDROIDVERSION="${{ env.ANDROIDVERSION }}"
-          
-          echo "🚀 Injecting Custom Kernel Suffix: $SUFFIX"
-          
-          for path in \
-            kernel_platform/common/scripts/setlocalversion \
-            kernel_platform/msm-kernel/scripts/setlocalversion \
-            kernel_platform/external/dtc/scripts/setlocalversion; do          
-            [ -f "$path" ] || continue       
-            echo "Processing: $path"
-          
-            # Remove Dirty Tags
-            sed -i 's/ -dirty//g' "$path"
-            sed -i '$i res=$(echo "$res" | sed '\''s/-dirty//g'\'')' "$path"
-          
-            if grep -q 'KERNELVERSION.*scm_version' "$path"; then
-              echo "📌 New Set Local Version Format Detected"          
-              sed -i "s|echo \"\${KERNELVERSION}.*scm_version}\"|echo \"\${KERNELVERSION}-${ANDROIDVERSION}-${SUFFIX}\"|" "$path"        
-            elif grep -q 'echo "\$res"' "$path"; then
-              echo "🛠️ Dynamically Injecting Custom Suffix"          
-              if [[ -f ./kernel_platform/build_with_bazel.py ]]; then
-                echo "⚠️ Note: Using Bazel may limit special characters, adjust script if compilation fails"
-              fi
-          
-              tac "$path" | \
-                sed "0,/echo \"\\\$res\"/s//res=\\\$(echo \\\$res | cut -d- -f1-2)-${SUFFIX}; echo \"\\\$res\";/" | \
-                tac > "$path.tmp"          
-              mv "$path.tmp" "$path"          
-            else
-              echo "⚠️ Unknown Format: Appending Suffix Manually"
-              echo "echo \"\$res-${SUFFIX}\"" >> "$path"
-            fi
-          
-            chmod +x "$path"
-          done
+          path="scripts/setlocalversion"
+      
+          echo "🚀 Injecting Custom Kernel Suffix: ${SUFFIX}"
+          echo "📌 Android Version: ${ANDROIDVERSION}"
+          echo "📂 Processing: ${path}"
+      
+          if [[ ! -f "$path" ]]; then
+            echo "SetLocalVersion Not Found: $path"
+            exit 1
+          fi
+      
+          chmod +x "$path"
+      
+          # Remove Dirty Tags
+          sed -i 's/ -dirty//g' "$path"
+      
+          # Remove Previous Custom Injection
+          sed -i '/# Kernel Custom Suffix Injection/,+8d' "$path"
+      
+          # Detect SetLocalVersion Format
+          if grep -q 'scm_version' "$path"; then
+            echo "📌 Detected SCM Version Format"     
+            tac "$path" |
+              sed "0,/echo \"\\\$KERNELVERSION\\\${scm_version}\"/s//res=\"\\\$KERNELVERSION\\\${scm_version}-${ANDROIDVERSION}-${SUFFIX}\"; echo \"\\\$res\";/" |
+              tac > "${path}.tmp"     
+            mv "${path}.tmp" "$path"      
+          elif grep -q 'echo "\$res"' "$path"; then
+            echo "📌 Detected Res Format"
+            echo "🛠️ Dynamically Injecting Custom Suffix"      
+            tac "$path" |
+              sed "0,/echo \"\\\\\$res\"/s//res=\\\$(echo \\\$res | sed 's\/-dirty\$\/\/')-${ANDROIDVERSION}-${SUFFIX}; echo \"\\\$res\";/" |
+              tac > "${path}.tmp"      
+            mv "${path}.tmp" "$path"      
+          else
+            echo "Unknown SetLocalVersion Format"
+            echo "📄 File: ${path}"
+            exit 1
+          fi
+      
+          chmod +x "$path"
+      
+          # Verify injection
+          if grep -q "${SUFFIX}" "$path"; then
+            echo "Suffix Injection Verified"
+          else
+            echo "Suffix Injection Verification Failed"
+            exit 1
+          fi
+      
+          echo
+          echo "📝 Modified File:"
+          git diff -- scripts/setlocalversion
+      
+          echo
+          echo "⚙️ Committing Suffix Modification..."
+      
+          git add scripts/setlocalversion
+      
+          if git diff --cached --quiet; then
+            echo "ℹ️ No changes to commit"
+          else
+            git commit -m "🎉 Inject Custom Kernel Suffix"
+          fi
+      
+          echo "Custom Kernel Suffix Injection Complete"
 
-          echo "⚙️ Committing Suffix Modifications..."
-          git add -A
-          git commit -m "🎉 Inject Custom Kernel Suffix and Remove Dirty Tags"
-
-      - name: 🔧 Auto-Generated Kernel Suffix
+      - name: Auto-Generated Kernel Suffix
         if: ${{ github.event.inputs.SUFFIX == '' }}
+        shell: bash
         run: |
-          cd kernel_workspace
-
-          # Inputs and Variables
-          ANDROIDVERSION="${{ env.ANDROIDVERSION }}"
-          echo "🚀 Generating Random Kernel Suffix..."
-          
-          # Random Generation
+          set -Eeuo pipefail
+      
+          cd "${GITHUB_WORKSPACE}/kernel_workspace/common"
+      
+          ANDROIDVERSION="${{ env.ANDROIDVERSION }}"      
+          echo "🚀 Generating Random Kernel Suffix..."   
           RANDOMDIGIT=$((RANDOM % 10))
-          RANDOMHASH=$(head -c 7 /dev/urandom | xxd -p)
-      
+          RANDOMHASH=$(head -c 4 /dev/urandom | xxd -p | cut -c1-7)
           AUTOSUFFIX="${RANDOMDIGIT}-g${RANDOMHASH}"      
-          echo "🧾 Suffix: $AUTOSUFFIX"      
-          FILES=(
-            kernel_platform/common/scripts/setlocalversion
-            kernel_platform/msm-kernel/scripts/setlocalversion
-            kernel_platform/external/dtc/scripts/setlocalversion
-          )
+          echo "🧾 Generated Suffix: ${AUTOSUFFIX}"
+          echo "📌 Android Version: ${ANDROIDVERSION}"
       
-          for path in "${FILES[@]}"; do
-            [[ -f "$path" ]] || continue
-            echo "⚙️ Processing: $path"      
-            # Ensure Executable
-            chmod +x "$path"      
-            # Remove Dirty Markers
-            sed -i 's/ -dirty//g' "$path"      
-            # Append Suffix Logic in a Safe Way (No Rewriting Core Logic)
-            if ! grep -q "Kernel Auto Suffix Injection" "$path"; then
-              cat >> "$path" <<EOF              
-              # Kernel Auto Suffix Injection
-              if [ -n "\$res" ]; then
-                case "\$res" in
-                  *"-${AUTOSUFFIX}"*) ;;
-                  *)
-                    res="\$res-${ANDROIDVERSION}-${AUTOSUFFIX}"
-                    ;;
-                esac
-              fi
-              EOF
-            fi
+          path="scripts/setlocalversion"      
+          if [[ ! -f "$path" ]]; then
+            echo "SetLocalVersion Not Found: $path"
+            exit 1
+          fi
       
-          done      
-          echo "⚙️ Committing changes..."    
-          git add -A
+          echo "⚙️ Processing: ${path}"      
+          chmod +x "$path"
       
+          # Remove Dirty Markers
+          sed -i 's/ -dirty//g' "$path"
+      
+          # Remove Previous Auto Suffix Injection
+          sed -i '/# Kernel Auto Suffix Injection/,+8d' "$path"
+      
+          # Detect SetLocalVersion Format
+          if grep -q 'scm_version' "$path"; then
+            echo "📌 Detected SCM Version Format"      
+            tac "$path" |
+              sed "0,/echo \"\\\$KERNELVERSION\\\${scm_version}\"/s//res=\"\\\$KERNELVERSION\\\${scm_version}-${ANDROIDVERSION}-${AUTOSUFFIX}\"; echo \"\\\$res\";/" |
+              tac > "${path}.tmp"      
+            mv "${path}.tmp" "$path"      
+          elif grep -q 'echo "\$res"' "$path"; then
+            echo "📌 Detected Res Format"
+            echo "🛠️ Injecting Auto-Generated Suffix"      
+            tac "$path" |
+              sed "0,/echo \"\\\\\$res\"/s//res=\\\$(echo \\\$res | sed 's\/-dirty\$\/\/'); case \"\\\$res\" in *\"-${AUTOSUFFIX}\"*) ;; *) res=\"\\\$res-${ANDROIDVERSION}-${AUTOSUFFIX}\" ;; esac; echo \"\\\$res\";/" |
+              tac > "${path}.tmp"      
+            mv "${path}.tmp" "$path"      
+          else
+            echo "Unknown SetLocalVersion Format"
+            echo "📄 File: ${path}"
+            exit 1
+          fi
+      
+          chmod +x "$path"
+      
+          # Verify Suffix Injection
+          if grep -q "${AUTOSUFFIX}" "$path"; then
+            echo "Auto Suffix Injection Verified"
+          else
+            echo "Auto Suffix Injection Verification Failed"
+            exit 1
+          fi
+      
+          echo
+          echo "📝 Modified File:"
+          git diff -- scripts/setlocalversion
+      
+          echo
+          echo "⚙️ Committing Changes..."
+      
+          git add scripts/setlocalversion      
           if git diff --cached --quiet; then
             echo "✔️ No changes to commit"
           else
             git commit -m "🎉 Apply Auto-Generated Kernel Suffix"
           fi
+      
+          echo "Auto-Generated Kernel Suffix Complete"
 
       - name: 🔧 Solve Root Engine Source
         id: manager
@@ -694,14 +752,15 @@ jobs:
         run: |
           set -Eeuo pipefail
 
-          cd "${GITHUB_WORKSPACE}/kernel_workspace/kernel_platform"
-
+          cd "${GITHUB_WORKSPACE}/kernel_workspace"
+          
           MANAGERBRANCH="${{ steps.manager.outputs.MANAGERBRANCH }}"
           BRANCHPATH="${{ steps.manager.outputs.BRANCHPATH }}"
           KSUREPO="${{ steps.manager.outputs.KSUREPO }}"
           ROOTENGINE="${{ github.event.inputs.ROOTENGINE }}"
           SUSFS="${{ github.event.inputs.SUSFSREPOSITORY }}"
-          KCDIR="${GITHUB_WORKSPACE}/kernel_workspace/kernel_platform/common"
+          
+          KCDIR="${GITHUB_WORKSPACE}/kernel_workspace/common"
           DEFCONFIG="${KCDIR}/arch/arm64/configs/gki_defconfig"
 
           # Helpers
@@ -1000,6 +1059,7 @@ jobs:
           SUSFSREPOSITORY: ${{ github.event.inputs.SUSFSREPOSITORY }}
           SUSFSVARIANT: ${{ github.event.inputs.SUSFSVARIANT }}
           SUSFSBRANCHDEV: ${{ github.event.inputs.SUSFSBRANCHDEV }}
+          LZ4UPDATE: ${{ github.event.inputs.LZ4UPDATE }}
           ANDROIDVERSION: ${{ env.ANDROIDVERSION }}
           KERNELVERSION: ${{ env.KERNELVERSION }}
           XUS: ${{ env.XUS }}
@@ -1008,6 +1068,8 @@ jobs:
           KV3: ${{ env.KV3 }}
         run: |
           set -euo pipefail
+
+          cd "${GITHUB_WORKSPACE}/kernel_workspace"
 
           # Check for Patch Reject Files
           checkrejects() {
@@ -1040,47 +1102,45 @@ jobs:
             exit "$EXITCODE"
           }
 
-          # Build derived variables in bash (NOT GitHub expressions)
-          GKIVERSION="${ANDROIDVERSION}-${KERNELVERSION}"
 
-          # Navigate to Kernel Directory
-          cd kernel_workspace
+
+          # Kernel Directory
+          KDIR="${GITHUB_WORKSPACE}/kernel_workspace/common"
+          if [[ ! -d "$KDIR" ]]; then
+            echo "ERROR: Google GKI Common Directory Not Found"
+            echo "📂 Expected: $KDIR"
+            exit 1
+          fi
+
+          if [[ ! -f "${KDIR}/Makefile" ]]; then
+            echo "ERROR: Kernel Makefile Not Found"
+            echo "📄 Expected: ${KDIR}/Makefile"
+            exit 1
+          fi
+
+          # Save Absolute Kernel Directory
+          KDIR="$(realpath "$KDIR")"
+          echo "📂 Kernel Directory: $KDIR"
+
+          # Build Derived Variables
+          GKIVERSION="${ANDROIDVERSION}-${KERNELVERSION}"          
 
           # Clone Required Patch Repositories
           echo "📥 Cloning Patch Dependencies..."                              
           # LZ4 / ZSTD Patch Sources
-          case "$ZRAMPATCH" in
+          case "$LZ4UPDATE" in
             "LZ4-1.10.0-Patch-Update")
               git clone --depth=1 \
                 https://github.com/Numbersf/lz4_oplus.git
               ;;
           esac
              
-          echo "✔️ Patch Repositories Cloned"
-          echo
+          echo "✔️ Patch Repositories Cloned
 
           # Environment Information
           echo "🧾 Android Version       : $ANDROIDVERSION"
           echo "🧾 Kernel Version        : $KERNELVERSION"
           echo "🔎 Detected Kernel Base  : $GKIVERSION"
-          echo
-         
-          echo "🔎 Detected Kernel Base: $GKIVERSION"      
-          # Detect Kernel Common Directory
-          if [[ -d "./kernel_platform/common" ]]; then
-            KDIR="./kernel_platform/common"
-          elif [[ -d "./common" ]]; then
-            KDIR="./common"
-          else
-            echo "⚠️ ERROR: Kernel Common Directory Not Found!"
-            exit 1
-          fi 
-
-          # Save Absolute Kernel Directory
-          KDIR="$(realpath "$KDIR")"
-          
-          echo "📁 Kernel Directory: $KDIR"
-          echo
       
           # Clone SUSFS Repository
           echo "📥 Cloning SUSFS..."      
