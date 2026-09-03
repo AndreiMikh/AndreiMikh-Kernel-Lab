@@ -1674,218 +1674,265 @@ jobs:
 
       - name: Build Kernel
         run: |
+          set -Eeuo pipefail
+
+          trap 'echo "❌ Build failed at line $LINENO"; exit 1' ERR
+
           WORKDIR="$(pwd)"
+          KERNELDIR="${WORKDIR}/kernel_workspace/kernel_platform"
+          COMMONDIR="${KERNELDIR}/common"
+          OUTDIR="${COMMONDIR}/out"
+          TOOLCHAIN="${WORKDIR}/kernel_workspace/clang19"
+          BUILD_TOOLS="${WORKDIR}/kernel_workspace/build-tools"
+          RUSTDIR="${WORKDIR}/kernel_workspace/rust"
 
-          export PATH="/usr/lib/ccache:$PATH"
-          export PATH="$WORKDIR/kernel_workspace/clang19/bin:$PATH"
-          export PATH="$WORKDIR/kernel_workspace/build-tools/bin:$PATH"
-          export PATH="$WORKDIR/kernel_workspace/rust/bin:$PATH"
+          echo "🐧 Kernel Build Environment"
+          echo "📂 Workspace: ${WORKDIR}"
+          echo "📂 Kernel Platform: ${KERNELDIR}"
+          echo "📂 Common: ${COMMONDIR}"
+          echo "🔧 Toolchain: ${TOOLCHAIN}"
 
-          export CLANG_DIR="$WORKDIR/kernel_workspace/clang19/bin"
+          cd "${KERNELDIR}"
 
-          CLANG_VERSION="$($CLANG_DIR/clang --version | head -n 1)"
-          LLD_VERSION="$($CLANG_DIR/ld.lld --version | head -n 1)"
-          RUSTC_VERSION="$(rustc -V 2>/dev/null | head -n1)"
-          BINDGEN_VERSION="$(bindgen --version 2>/dev/null | head -n1)"
+          echo "🔎 Checking Clang Toolchain..."
 
-          echo "Compiler information:"
-          echo "Clang version: $CLANG_VERSION"
-          echo "LLD version: $LLD_VERSION"
-          echo "Rustc version: $RUSTC_VERSION"
-          echo "Bindgen version: $BINDGEN_VERSION"
-
-          pahole_version=$(pahole --version 2>/dev/null | head -n1)
-          [ -z "$pahole_version" ] && echo "pahole version: not installed" || echo "pahole version: $pahole_version"
-
-          export CCACHE_LOGFILE="${{ github.workspace }}/kernel_workspace/ccache.log"
-          export CCACHE_COMPILERCHECK="none"
-          export CCACHE_BASEDIR="${{ github.workspace }}"
-          export CCACHE_NOHASHDIR="true"
-          export CCACHE_NOHARDLINK="true"
-          export CCACHE_DIR="${{ env.CCACHE_DIR }}"
-          export CCACHE_MAXSIZE="3G"
-          export CCACHE_IS_KERNEL_COMPILING="true"
-
-          echo "sloppiness = file_stat_matches,include_file_ctime,include_file_mtime,pch_defines,file_macro,time_macros" >> "$CCACHE_DIR/ccache.conf"
-
-          cd kernel_workspace/common
-
-          wget https://github.com/$GITHUB_REPOSITORY/raw/refs/heads/$GITHUB_REF_NAME/lib/libfakestat.so
-          wget https://github.com/$GITHUB_REPOSITORY/raw/refs/heads/$GITHUB_REF_NAME/lib/libfaketimeMT.so
-
-          chmod 777 ./*.so
-
-          export FAKESTAT="2025-05-25 12:00:00"
-          export FAKETIME="@2025-05-25 13:00:00"
-
-          echo "FAKESTAT=$FAKESTAT" >> $GITHUB_ENV
-          echo "FAKETIME=$FAKETIME" >> $GITHUB_ENV
-
-          SO_DIR=$(pwd)
-
-          export PRELOAD_LIBS="$SO_DIR/libfakestat.so $SO_DIR/libfaketimeMT.so"
-          export REAL_CLANG_PATH="$WORKDIR/kernel_workspace/clang19/bin/clang"
-
-          # Create CC wrapper
-          echo '#!/bin/bash' > cc-wrapper
-          echo 'export LD_PRELOAD="'$PRELOAD_LIBS'"' >> cc-wrapper
-          echo 'export FAKESTAT="'$FAKESTAT'"' >> cc-wrapper
-          echo 'export FAKETIME="'$FAKETIME'"' >> cc-wrapper
-          echo 'ccache $REAL_CLANG_PATH "$@"' >> cc-wrapper
-
-          # Create LD wrapper
-          echo '#!/bin/bash' > ld-wrapper
-          echo 'export LD_PRELOAD="'$PRELOAD_LIBS'"' >> ld-wrapper
-          echo 'export FAKESTAT="'$FAKESTAT'"' >> ld-wrapper
-          echo 'export FAKETIME="'$FAKETIME'"' >> ld-wrapper
-          echo 'ld.lld "$@"' >> ld-wrapper
-
-          # Test time interception
-          echo "--- [Wrapper Test] Creating generic time interception test script ---"
-
-          echo '#!/bin/bash' > test-wrapper.sh
-          echo 'export LD_PRELOAD="'$PRELOAD_LIBS'"' >> test-wrapper.sh
-          echo 'export FAKESTAT="'$FAKESTAT'"' >> test-wrapper.sh
-          echo 'export FAKETIME="'$FAKETIME'"' >> test-wrapper.sh
-          echo 'echo ">>> Wrapper internal environment check completed."' >> test-wrapper.sh
-          echo 'exec "$@"' >> test-wrapper.sh
-
-          chmod +x test-wrapper.sh
-
-          echo "--- [Wrapper Test] Testing date command ---"
-          ./test-wrapper.sh date
-
-          echo "--- [Wrapper Test] Testing stat command ---"
-          ./test-wrapper.sh stat ./Makefile
-
-          echo "--- [Wrapper Test] Test completed ---"
-
-          chmod +x cc-wrapper ld-wrapper
-
-          echo "--- Build start time: $(LD_PRELOAD=$PRELOAD_LIBS date) ---"
-
-          echo "--- Build start file timestamp ---"
-          LD_PRELOAD=$PRELOAD_LIBS stat ./Makefile
-
-          # Kernel 6.12 build configuration:
-          #
-          # 1. Remap physical paths.
-          #
-          # Kernel 6.12 introduces Rust code. The tool used to calculate
-          # kernel symbol versions is now gendwarfksyms, which cannot correctly
-          # preprocess absolute paths. Therefore, absolute paths must be remapped
-          # to relative paths to prevent large-scale kernel symbol checksum errors.
-
-          COMMON_REAL_PATH=$(pwd -P)
-          ROOT_REAL_PATH=$(dirname "$COMMON_REAL_PATH")
-
-          KCFLAGS+=" -fdebug-prefix-map=$ROOT_REAL_PATH=."
-          KCFLAGS+=" -fmacro-prefix-map=$ROOT_REAL_PATH=."
-          KCFLAGS+=" -ffile-prefix-map=$ROOT_REAL_PATH=."
-
-          # 2. Declare Rust tools.
-          #
-          # Without these declarations, the Rust environment pre-check script
-          # scripts/rust_is_available.sh may fail, preventing Rust compilation.
-
-          export RUSTC="rustc"
-          export BINDGEN="bindgen"
-          export CC="clang"
-          export LIBCLANG_PATH="$WORKDIR/kernel_workspace/clang19/lib"
-
-          # 3. Configure KCFLAGS
-          KCFLAGS+=" -no-canonical-prefixes"
-          KCFLAGS+=" -O2"
-          KCFLAGS+=" -pipe"
-          KCFLAGS+=" -Wno-error"
-          KCFLAGS+=" -fno-stack-protector"
-          KCFLAGS+=" -D__ANDROID_COMMON_KERNEL__"
-
-          export KCFLAGS
-
-          # 4. Configure additional tools and options.
-          export HOSTCC=clang
-          export LD="ld.lld"
-          export HOSTLD=ld.lld
-          export LLVM=1 LLVM_IAS=1
-          export ARCH=arm64 SUBARCH=arm64
-          export CROSS_COMPILE=aarch64-linux-gnu-
-
-          export LD=ld.lld
-          export HOSTLD=ld.lld
-          export AR=llvm-ar
-          export NM=llvm-nm
-          export AS=clang
-          export READELF=llvm-readelf
-          export OBJCOPY=llvm-objcopy
-          export OBJDUMP=llvm-objdump
-          export OBJSIZE=llvm-size
-          export STRIP=llvm-strip
-
-          # 5. Run the official environment configuration script.
-          source "./_setup_env.sh" 2>/dev/null || true
-
-          # Remove unnecessary .NET, Android NDK, Haskell, and CodeQL runtimes
-          # while the kernel is being built to free disk space without blocking
-          # subsequent build steps.
-          sudo rm -rf /usr/share/dotnet &
-          sudo rm -rf /usr/local/lib/android &
-          sudo rm -rf /opt/ghc &
-          sudo rm -rf /opt/hostedtoolcache/CodeQL &
-
-          make -j$(nproc --all) LLVM=1 ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- CC="clang" LD="ld.lld" OBJCOPY="llvm-objcopy" O=out gki_defconfig &&
-          export CC="$(pwd)/cc-wrapper" &&
-          export LD="$(pwd)/ld-wrapper" &&
-          make -j$(nproc --all) LLVM=1 ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- CC="$(pwd)/cc-wrapper" LD="$(pwd)/ld-wrapper" OBJCOPY="llvm-objcopy" O=out Image
-
-          # Verify time interception after compilation.
-          echo "--- Build end time: $(LD_PRELOAD=$PRELOAD_LIBS date) ---"
-
-          echo "--- Build end file timestamp ---"
-          LD_PRELOAD=$PRELOAD_LIBS stat ./Makefile
-
-          echo "Kernel build completed!"
-
-          if [[ "${{ github.event.inputs.ccache_debug }}" == "true" ]]; then
-            echo "Packaging ccache logs and debug information..."
-
-            cd ..
-
-            cp ./common/out/vmlinux.symvers ./vmlinux.symvers
-            cp ./common/out/.config ./config
-
-            zip -r9 debug.zip ccache.log config vmlinux.symvers
+          if [[ ! -x "${TOOLCHAIN}/bin/clang" ]]; then
+            echo "❌ Clang not found:"
+            echo "${TOOLCHAIN}/bin/clang"
+            exit 1
           fi
 
-          echo "ccache status:"
+          export PATH="${TOOLCHAIN}/bin:${BUILD_TOOLS}:${RUSTDIR}/bin:${PATH}"
+
+          CLANG_VERSION="$(clang --version | head -n1)"
+          LLD_VERSION="$(ld.lld --version | head -n1)"
+
+          echo "🔧 ${CLANG_VERSION}"
+          echo "🔗 ${LLD_VERSION}"
+
+          if command -v rustc >/dev/null 2>&1; then
+            echo "🦀 Rust: $(rustc --version)"
+          else
+            echo "🦀 Rust: Not Available"
+          fi
+
+          if command -v bindgen >/dev/null 2>&1; then
+            echo "🧬 Bindgen: $(bindgen --version)"
+          else
+            echo "🧬 Bindgen: Not Available"
+          fi
+
+          echo "⚡ Configuring ccache..."
+
+          export CCACHE_DIR="${CCACHE_DIR:-${WORKDIR}/.ccache}"
+          export CCACHE_COMPILERCHECK="${CCACHE_COMPILERCHECK:-none}"
+          export CCACHE_BASEDIR="${KERNELDIR}"
+          export CCACHE_NOHASHDIR="${CCACHE_NOHASHDIR:-true}"
+          export CCACHE_NOHARDLINK="${CCACHE_NOHARDLINK:-true}"
+          export CCACHE_CPP2="${CCACHE_CPP2:-true}"
+          export CCACHE_IS_KERNEL_COMPILING=true
+
+          mkdir -p "${CCACHE_DIR}"
+
+          ccache -M "${CCACHE_MAXSIZE:-3G}"
+
+          ccache --set-config=compiler_check="${CCACHE_COMPILERCHECK}"
+          ccache --set-config=base_dir="${CCACHE_BASEDIR}"
+          ccache --set-config=nohashdir="${CCACHE_NOHASHDIR}"
+          ccache --set-config=nohardlinks="${CCACHE_NOHARDLINK}"
+
+          ccache --set-config=sloppiness="${CCACHE_SLOPPINESS:-time_macros,include_file_mtime,include_file_ctime}"
+
+          echo "📊 Initial ccache statistics:"
           ccache -s
 
-          echo "Disk space after build:"
-          df -h
+          echo "⏱️ Installing fake time/stat libraries..."
 
-      - name: Save New ccache Cache
-        if: inputs.ccache_update || steps.ccache-restore.outputs.cache-hit != 'true'
+          FAKE_DIR="${WORKDIR}/kernel_workspace/faketime"
+          mkdir -p "${FAKE_DIR}"
+
+          if [[ ! -f "${FAKE_DIR}/libfakestat.so" ]]; then
+            wget -q \
+              -O "${FAKE_DIR}/libfakestat.so" \
+              "https://github.com/AndreiMikh/AndreiMikh-Kernel-Lab/raw/refs/heads/${GITHUB_REF_NAME}/tools/libfakestat.so"
+          fi
+
+          if [[ ! -f "${FAKE_DIR}/libfaketimeMT.so" ]]; then
+            wget -q \
+              -O "${FAKE_DIR}/libfaketimeMT.so" \
+              "https://github.com/AndreiMikh/AndreiMikh-Kernel-Lab/raw/refs/heads/${GITHUB_REF_NAME}/tools/libfaketimeMT.so"
+          fi
+
+          export FAKESTAT="${FAKE_DIR}/libfakestat.so"
+          export FAKETIME="${{ github.event.inputs.BUILDTIME }}"
+
+          if [[ "${FAKETIME}" == "F" || -z "${FAKETIME}" ]]; then
+            FAKETIME="$(date -u)"
+          fi
+
+          export LD_PRELOAD="${FAKE_DIR}/libfaketimeMT.so:${FAKESTAT}"
+
+          echo "🕒 Build Time: ${FAKETIME}"
+
+          echo "🧪 Testing fake time environment..."
+
+          date
+          stat "${COMMONDIR}/Makefile" >/dev/null
+
+          echo "🧰 Creating compiler wrapper..."
+
+          cat > "${WORKDIR}/cc-wrapper" <<'EOF'
+          #!/usr/bin/env bash
+          exec ccache clang "$@"
+          EOF
+
+          cat > "${WORKDIR}/ld-wrapper" <<'EOF'
+          #!/usr/bin/env bash
+          exec ld.lld "$@"
+          EOF
+
+          chmod +x \
+            "${WORKDIR}/cc-wrapper" \
+            "${WORKDIR}/ld-wrapper"
+
+          echo "🧩 Configuring kernel build flags..."
+
+          export KCFLAGS="${KCFLAGS:-}"
+          export KCFLAGS="${KCFLAGS} -fdebug-prefix-map=${WORKDIR}=."
+          export KCFLAGS="${KCFLAGS} -ffile-prefix-map=${WORKDIR}=."
+          export KCFLAGS="${KCFLAGS} -fmacro-prefix-map=${WORKDIR}=."
+          export KCFLAGS="${KCFLAGS} -no-canonical-prefixes"
+          export KCFLAGS="${KCFLAGS} -O2"
+          export KCFLAGS="${KCFLAGS} -pipe"
+          export KCFLAGS="${KCFLAGS} -Wno-error"
+          export KCFLAGS="${KCFLAGS} -fno-stack-protector"
+          export KCFLAGS="${KCFLAGS} -D__ANDROID_COMMON_KERNEL__"
+
+          export LLVM=1
+          export LLVM_IAS=1
+          export ARCH=arm64
+          export CROSS_COMPILE=aarch64-linux-gnu-
+
+          export CC="${WORKDIR}/cc-wrapper"
+          export HOSTCC="${WORKDIR}/cc-wrapper"
+          export LD="${WORKDIR}/ld-wrapper"
+          export HOSTLD="${WORKDIR}/ld-wrapper"
+          export OBJCOPY="llvm-objcopy"
+          export OBJDUMP="llvm-objdump"
+          export STRIP="llvm-strip"
+          export NM="llvm-nm"
+          export AR="llvm-ar"
+          export READELF="llvm-readelf"
+          export OBJSIZE="llvm-size"
+
+          if command -v rustc >/dev/null 2>&1; then
+            export RUSTC="$(command -v rustc)"
+            export BINDGEN="$(command -v bindgen || true)"
+            export LIBCLANG_PATH="${TOOLCHAIN}/lib"
+          fi
+
+          if [[ -f "./_setup_env.sh" ]]; then
+            echo "🌎 Loading kernel build environment..."
+            source "./_setup_env.sh"
+          fi
+
+          echo "🧹 Cleaning unnecessary runner packages..."
+
+          (
+            rm -rf \
+              "${RUNNER_TOOL_CACHE}/CodeQL" \
+              "${RUNNER_TOOL_CACHE}/dotnet" \
+              "${RUNNER_TOOL_CACHE}/Android" \
+              "${RUNNER_TOOL_CACHE}/ghc" \
+              2>/dev/null || true
+          ) &
+
+          echo "⚙️ Kernel Configuration..."
+
+          cd "${COMMONDIR}"
+
+          MAKE_ARGS=(
+            LLVM=1
+            LLVM_IAS=1
+            ARCH=arm64
+            CROSS_COMPILE=aarch64-linux-gnu-
+            CC="${WORKDIR}/cc-wrapper"
+            HOSTCC="${WORKDIR}/cc-wrapper"
+            LD="${WORKDIR}/ld-wrapper"
+            HOSTLD="${WORKDIR}/ld-wrapper"
+            OBJCOPY=llvm-objcopy
+            OBJDUMP=llvm-objdump
+            STRIP=llvm-strip
+            NM=llvm-nm
+            AR=llvm-ar
+            READELF=llvm-readelf
+            KCFLAGS="${KCFLAGS}"
+            O=out
+          )
+
+          echo "🧹 Preparing output directory..."
+
+          mkdir -p "${OUTDIR}"
+
+          echo "⚙️ Running gki_defconfig..."
+
+          make \
+            "${MAKE_ARGS[@]}" \
+            gki_defconfig
+
+          echo "🔧 Synchronizing Kernel Configuration..."
+
+          make \
+            "${MAKE_ARGS[@]}" \
+            olddefconfig
+
+          echo "🚀 Starting Kernel Compilation..."
+
+          BUILD_START="$(date +%s)"
+
+          make \
+            -j"$(nproc --all)" \
+            "${MAKE_ARGS[@]}" \
+            Image
+
+          BUILD_END="$(date +%s)"
+          BUILD_TIME=$((BUILD_END - BUILD_START))
+
+          echo "🎉 Kernel Compilation Completed"
+          echo "⏱️ Build Time: ${BUILD_TIME}s"
+
+          IMAGE="${OUTDIR}/arch/arm64/boot/Image"
+
+          echo "🔎 Validating Kernel Image..."
+          if [[ ! -f "${IMAGE}" ]]; then
+            echo "Kernel Image was not generated!"
+            exit 1
+          fi
+
+          echo "📌 Kernel Image:"
+          realpath "${IMAGE}"
+
+          echo "📦 Image Size:"
+          ls -lh "${IMAGE}"
+
+          echo "📊 Image Bytes:"
+          stat -c%s "${IMAGE}"
+
+          echo "📊 Final CCache Statistics:"
+          ccache -s
+
+          echo "💾 CCache Directory:"
+          du -sh "${CCACHE_DIR}" 2>/dev/null || true
+
+          echo "💿 Disk Space:"
+          df -h "${WORKDIR}"
+
+      - name: Save Compiler Cache
+        timeout-minutes: 10
         uses: actions/cache/save@v5
         with:
           path: ${{ env.CCACHE_DIR }}
-          key: ${{ env.CCACHE_REAL_KEY }}-${{ runner.os }}-${{ github.ref_name }}
-
-      - name: Apply KPM and Patch Kernel Image
-        if: inputs.kpm_enable
-        run: |
-          echo "Applying KP-N and patching kernel image..."
-
-          cd kernel_workspace/common/out/arch/arm64/boot
-
-          wget https://github.com/KernelSU-Next/KPatch-Next/releases/latest/download/kptools-linux
-          wget https://github.com/KernelSU-Next/KPatch-Next/releases/latest/download/kpimg-linux
-
-          chmod +x ./kptools-linux
-
-          ./kptools-linux -p -i ./Image -k ./kpimg-linux -o ./oImage
-
-          rm -f Image
-          mv oImage Image
+          key: CCache-SM8850-GKI-${{ runner.os }}-${{ github.ref_name }}
 
       - name: KernelSU-Next KernelPatch-Next
         if: ${{ github.event.inputs.KERNELPATCH == 'KPN' }}
