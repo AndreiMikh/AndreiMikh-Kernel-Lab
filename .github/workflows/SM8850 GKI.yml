@@ -133,10 +133,6 @@ jobs:
       CCACHE_MAXSIZE: 5G   
       TZ: Asia/Shanghai
     
-    outputs:
-      ksuver: ${{ steps.ksu_version.outputs.ksuver }}
-      ak3name: ${{ steps.create_zip.outputs.ak3name }}
-   
     steps:
       - name: Maximize Build Space
         if: ${{ github.event.inputs.CLEANSPACE == 'false' }}
@@ -1672,11 +1668,231 @@ jobs:
           echo ""
           echo "🎉 NT Synchronization (Primitives) Done!"
 
+      - name: 🔧 Kernel Configuration
+        run: |
+          set euo pipefail
+          
+          # Navigate to the Correct Directory
+          cd kernel_workspace/common
+
+          # Set the Path to the Configuration File
+          DEFCONFIG=./arch/arm64/configs/gki_defconfig
+
+          # Get Github Environment Variables and GitHub Actions Inputs        
+          KERNEL="${{ env.KERNELVERSION }}"
+          ROOT="${{ github.event.inputs.ROOTENGINE }}"
+          SUSFS="${{ github.event.inputs.SUSFSREPOSITORY }}"
+          SCHEDULERS="${{ github.event.inputs.SCHEDULERS }}" 
+          FILE="${{ github.event.inputs.FILE }}" 
+          REKERNEL="${{ github.event.inputs.REKERNEL }}" 
+          GKI="${{ env.ANDROIDVERSION }}-${{ env.KERNELVERSION }}"
+          KERNELPATCH="${{ github.event.inputs.KERNELPATCH }}"
+          TCP="${{ github.event.inputs.TCPALGORITHM }}"
+          LSM="${{ github.event.inputs.LSMBBG }}"
+          NET="${{ github.event.inputs.NETFILTER }}"
+          LXC="${{ github.event.inputs.LXCDOCKERSUPPORT }}"
+          NTSYNC="${{ github.event.inputs.NTSYNC }}"
+          CPU="${{ env.CPU }}"
+
+          MAKEFILE=./kernel/Makefile
+          declare -a HIDECONFIGS=()          
+          SETCONFIG() {
+            local value="$1"
+            local key="${value%%=*}"
+          
+              if grep -q "^${key}=" "$DEFCONFIG"; then
+                sed -i "s|^${key}=.*|${value}|" "$DEFCONFIG"
+              elif grep -q "^# ${key} is not set" "$DEFCONFIG"; then
+                sed -i "s|^# ${key} is not set|${value}|" "$DEFCONFIG"
+              else
+                echo "$value" >> "$DEFCONFIG"
+              fi
+          }
+          
+          HIDECONFIG() {
+            local value="$1"
+            local key="${value%%=*}"          
+            SETCONFIG "$value"
+            HIDECONFIGS+=("$key")
+          }          
+          FAKECONFIG() {          
+            [[ ${#HIDECONFIGS[@]} -eq 0 ]] && return          
+            local marker="# --- Fake Config Injector ---"          
+            if ! grep -qF "$marker" "$MAKEFILE"; then
+              cat >> "$MAKEFILE" <<'EOF'
+          
+          # Fake Config Injector
+          ifneq ($(strip $(DISABLEFAKECONFIG)),)
+          $(obj)/config_data: $(KCONFIG_CONFIG) FORCE
+          	$(Q)sed $(foreach opt,$(DISABLEFAKECONFIG),-e 's|^$(opt)=.*|# $(opt) is not set|') $(KCONFIG_CONFIG) > $@
+          endif
+          EOF
+            fi          
+            echo "DISABLEFAKECONFIG=${HIDECONFIGS[*]}" >> "$GITHUB_ENV"
+          }
+          
+          trap FAKECONFIG EXIT
+
+          # Re-Kernel Configuration
+          echo "🚀 Enabling Re-Kernel Support (for Use with Freezer, NoActive and Etc to Improve Background App Freezing)..."
+          # Use Underscore for Variable Name
+          REKERNEL="${REKERNEL:-false}"  # Default to False if Not Set
+          if [[ "$REKERNEL" == "true" ]]; then
+            echo "🎉 Enabling Re-Kernel Support..."
+            SETCONFIG "CONFIG_REKERNEL=y"
+            SETCONFIG "CONFIG_REKERNEL_NETWORK=y"
+            echo "🎉 ReKernel Enabled"
+          else
+            echo "☘️ ReKernel Disabled"
+          fi
+
+          # Check if KSU Root Engine is ReSukiSU
+          if [[ "$ROOT" == "ReSukiSU" ]]; then
+            # Enable Multi-Manager Support if the Condition is True
+            SETCONFIG "CONFIG_KSU_MULTI_MANAGER_SUPPORT=y"
+            SETCONFIG "CONFIG_KSU_TOOLKIT_SUPPORT=y"
+            echo "🎉 Multi-Manager Support Enabled for $ROOT"
+          else
+            echo "☘️ Multi-Manager Support Not Enabled, as KSU Root Engine is Not ReSukiSU"
+          fi
+
+          # Apply SUSFS Core Configuration
+          if [[ "$SUSFS" != "-1" && ! ("$FILE" =~ aosp$|AOSP$) ]]; then                      
+            # Base SUSFS Core Configuration Settings (Common)
+            SETCONFIG "CONFIG_KSU=y"
+            SETCONFIG "CONFIG_KSU_SUSFS=y"
+            SETCONFIG "CONFIG_KSU_SUSFS_HAS_MAGIC_MOUNT=y"
+            SETCONFIG "CONFIG_KSU_SUSFS_SUS_PATH=y"
+            SETCONFIG "CONFIG_KSU_SUSFS_SUS_MOUNT=y"
+            SETCONFIG "CONFIG_KSU_SUSFS_AUTO_ADD_SUS_KSU_DEFAULT_MOUNT=y"
+            SETCONFIG "CONFIG_KSU_SUSFS_AUTO_ADD_SUS_BIND_MOUNT=y"
+            SETCONFIG "CONFIG_KSU_SUSFS_SUS_KSTAT=y"
+            SETCONFIG "CONFIG_KSU_SUSFS_TRY_UMOUNT=y"
+            SETCONFIG "CONFIG_KSU_SUSFS_AUTO_ADD_TRY_UMOUNT_FOR_BIND_MOUNT=y"
+            SETCONFIG "CONFIG_KSU_SUSFS_SPOOF_UNAME=y"
+            SETCONFIG "CONFIG_KSU_SUSFS_ENABLE_LOG=y"
+            SETCONFIG "CONFIG_KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS=y"
+            SETCONFIG "CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG=y"
+            SETCONFIG "CONFIG_KSU_SUSFS_OPEN_REDIRECT=y"
+            SETCONFIG "CONFIG_KSU_SUSFS_SUS_MAP=y"            
+            echo "🎉 SUSFS Core Configuration Applied"       
+          else
+            # Block SUSFS for oneplus_sm8750_lineage_aosp or Disabled SUSFS
+            if [[ ! "$FILE" =~ aosp$|AOSP$ ]]; then
+              SETCONFIG "CONFIG_KSU_SUSFS=n"
+              echo "☘️ SUSFS Core Configuration Settings Disabled"
+            else
+              echo "🧩 SUSFS Core Configuration Skipped for $FILE"
+            fi
+          fi
+          
+          # TMPFS Configuration (Mountify)
+          echo "🚀 Applying TMPFS Configuration..."
+          SETCONFIG "CONFIG_TMPFS_XATTR=y"
+          SETCONFIG "CONFIG_TMPFS_POSIX_ACL=y"
+          echo "🎉 TMPFS Configuration Applied"
+
+          # DroidspacesLXC Support Kernel Configuration
+          if [[ "$LXC" == "DroidSpacesLXC-Inject" ]]; then
+            echo "🚀 Applying DroidspacesLXC Support Kernel Configurations..."
+            SETCONFIG "CONFIG_NTSYNC=y"
+            SETCONFIG "CONFIG_SYSVIPC=y"
+            SETCONFIG "CONFIG_DEVTMPFS=y"
+            SETCONFIG "CONFIG_PID_NS=y"
+            SETCONFIG "CONFIG_IPC_NS=y"
+            SETCONFIG "CONFIG_USER_NS=y"
+            SETCONFIG "CONFIG_NAMESPACES=y"
+            SETCONFIG "CONFIG_POSIX_MQUEUE=y"
+            SETCONFIG "CONFIG_NETFILTER_XT_TARGET_REJECT=y"
+            SETCONFIG "CONFIG_NETFILTER_XT_TARGET_LOG=y"
+            SETCONFIG "CONFIG_NETFILTER_XT_MATCH_RECENT=y"
+            echo "🎉 DroidspacesLXC Support Core Configuration Applied"       
+          else
+            echo "☘️ DroidspacesLXC Support Disabled — Skipping Configuration..."
+          fi
+
+          # BBR + ECN Kernel Configuration with Brutal Default and Cubic Fallback
+          if [[ "$TCP" != "None" ]]; then
+            echo "🚀 Applying BBR + ECN / Brutal Configurations..."          
+            # Base BBR + ECN Settings
+            SETCONFIG "CONFIG_TCP_CONG_BIC=n"
+            SETCONFIG "CONFIG_TCP_CONG_WESTWOOD=n"
+            SETCONFIG "CONFIG_TCP_CONG_HTCP=n"
+            SETCONFIG "CONFIG_IP_ECN=y"
+            SETCONFIG "CONFIG_TCP_ECN=y"
+            SETCONFIG "CONFIG_IPV6_ECN=y"
+            SETCONFIG "CONFIG_IP_NF_TARGET_ECN=y"          
+          else
+            echo "☘️ Congestion Control Disabled, Skipping BBR + ECN Configuration"
+            echo "🧩 Default Congestion Control Remains Unchanged"
+          fi
+
+          # Linux Security Module Baseband Guard Configuration
+          if [[ "$LSM" == "true" ]]; then
+            SETCONFIG "CONFIG_BBG=y"
+            echo "🎉 Linux Security Module Baseband Guard Configuration Applied"
+          else
+            echo "☘️ Linux Security Module Baseband Guard Disabled, Skipping..."
+          fi
+
+          # Netfilter and IPSet Core Configuration
+          if [[ "$NET" == "true" ]]; then
+            SETCONFIG "CONFIG_NETFILTER_XT_MATCH_ADDRTYPE=y"
+            SETCONFIG "CONFIG_NETFILTER_XT_SET=y"
+            SETCONFIG "CONFIG_IP_SET=y"
+            SETCONFIG "CONFIG_IP_SET_MAX=65534"
+            SETCONFIG "CONFIG_IP_SET_BITMAP_IP=y"
+            SETCONFIG "CONFIG_IP_SET_BITMAP_IPMAC=y"
+            SETCONFIG "CONFIG_IP_SET_BITMAP_PORT=y"
+            SETCONFIG "CONFIG_IP_SET_HASH_IP=y"
+            SETCONFIG "CONFIG_IP_SET_HASH_IPMARK=y"
+            SETCONFIG "CONFIG_IP_SET_HASH_IPPORT=y"
+            SETCONFIG "CONFIG_IP_SET_HASH_IPPORTIP=y"
+            SETCONFIG "CONFIG_IP_SET_HASH_IPPORTNET=y"
+            SETCONFIG "CONFIG_IP_SET_HASH_IPMAC=y"
+            SETCONFIG "CONFIG_IP_SET_HASH_MAC=y"
+            SETCONFIG "CONFIG_IP_SET_HASH_NETPORTNET=y"
+            SETCONFIG "CONFIG_IP_SET_HASH_NET=y"
+            SETCONFIG "CONFIG_IP_SET_HASH_NETNET=y"
+            SETCONFIG "CONFIG_IP_SET_HASH_NETPORT=y"
+            SETCONFIG "CONFIG_IP_SET_HASH_NETIFACE=y"
+            SETCONFIG "CONFIG_IP_SET_LIST_SET=y"
+            HIDECONFIG "CONFIG_IP6_NF_NAT=y"
+            SETCONFIG "CONFIG_IP6_NF_TARGET_MASQUERADE=y"
+            SETCONFIG "CONFIG_NETFILTER_XT_TARGET_HL=y"
+            SETCONFIG "CONFIG_IP_NF_TARGET_TTL=y"
+            SETCONFIG "CONFIG_IP6_NF_TARGET_HL=y"
+            SETCONFIG "CONFIG_NETFILTER_XT_MATCH_HL=y"
+            SETCONFIG "CONFIG_IP_NF_MATCH_TTL=y"
+            SETCONFIG "CONFIG_IP6_NF_MATCH_HL=y"
+            SETCONFIG "CONFIG_IP_NF_MANGLE=y"
+            SETCONFIG "CONFIG_IP6_NF_MANGLE=y"
+            echo "🎉 Netfilter and IPSet Core Configuration Applied"
+          fi
+
+          # NT Synchronization (Primitives) Configuration
+          if [[ "$NTSYNC" == "true" ]]; then
+            SETCONFIG "CONFIG_NTSYNC=y"
+            echo "🎉 NT Synchronization (Primitives) Configuration Applied"
+          else
+            echo "☘️ NT Synchronization (Primitives) Disabled, Skipping..."
+          fi
+
+          # Enable Rust Support if Requested
+          if [[ "$ENABLERUSTC" == "true" ]]; then
+            SETCONFIG "CONFIG_RUST=y"
+            SETCONFIG "CONFIG_ANDROID_BINDER_IPC_RUST=m"
+            echo "🎉 Rust Support Request Applied and Granted"
+          else
+            echo "☘️ Rust Support Request Not Granted"
+          fi
+  
+          # Remove Build Review
+          sed -i 's/check_defconfig//' ./build.config.gki                    
+
       - name: Build Kernel
         run: |
           set -Eeuo pipefail
-
-          trap 'echo "❌ Build failed at line $LINENO"; exit 1' ERR
 
           WORKDIR="$(pwd)"
           KERNELDIR="${WORKDIR}/kernel_workspace/kernel_platform"
@@ -1695,9 +1911,8 @@ jobs:
           cd "${KERNELDIR}"
 
           echo "🔎 Checking Clang Toolchain..."
-
           if [[ ! -x "${TOOLCHAIN}/bin/clang" ]]; then
-            echo "❌ Clang not found:"
+            echo "⚠️ Clang Not Found:"
             echo "${TOOLCHAIN}/bin/clang"
             exit 1
           fi
@@ -1722,7 +1937,7 @@ jobs:
             echo "🧬 Bindgen: Not Available"
           fi
 
-          echo "⚡ Configuring ccache..."
+          echo "⚡ Configuring CCache..."
 
           export CCACHE_DIR="${CCACHE_DIR:-${WORKDIR}/.ccache}"
           export CCACHE_COMPILERCHECK="${CCACHE_COMPILERCHECK:-none}"
@@ -1731,22 +1946,18 @@ jobs:
           export CCACHE_NOHARDLINK="${CCACHE_NOHARDLINK:-true}"
           export CCACHE_CPP2="${CCACHE_CPP2:-true}"
           export CCACHE_IS_KERNEL_COMPILING=true
-
           mkdir -p "${CCACHE_DIR}"
-
           ccache -M "${CCACHE_MAXSIZE:-3G}"
-
           ccache --set-config=compiler_check="${CCACHE_COMPILERCHECK}"
           ccache --set-config=base_dir="${CCACHE_BASEDIR}"
           ccache --set-config=nohashdir="${CCACHE_NOHASHDIR}"
           ccache --set-config=nohardlinks="${CCACHE_NOHARDLINK}"
-
           ccache --set-config=sloppiness="${CCACHE_SLOPPINESS:-time_macros,include_file_mtime,include_file_ctime}"
 
           echo "📊 Initial ccache statistics:"
           ccache -s
 
-          echo "⏱️ Installing fake time/stat libraries..."
+          echo "⏱️ Installing fake time/stat Libraries..."
 
           FAKE_DIR="${WORKDIR}/kernel_workspace/faketime"
           mkdir -p "${FAKE_DIR}"
@@ -1774,12 +1985,12 @@ jobs:
 
           echo "🕒 Build Time: ${FAKETIME}"
 
-          echo "🧪 Testing fake time environment..."
+          echo "🧪 Testing Fake Time Environment..."
 
           date
           stat "${COMMONDIR}/Makefile" >/dev/null
 
-          echo "🧰 Creating compiler wrapper..."
+          echo "🧰 Creating Compiler Wrapper..."
 
           cat > "${WORKDIR}/cc-wrapper" <<'EOF'
           #!/usr/bin/env bash
@@ -1795,7 +2006,7 @@ jobs:
             "${WORKDIR}/cc-wrapper" \
             "${WORKDIR}/ld-wrapper"
 
-          echo "🧩 Configuring kernel build flags..."
+          echo "🧩 Configuring Kernel Build Flags..."
 
           export KCFLAGS="${KCFLAGS:-}"
           export KCFLAGS="${KCFLAGS} -fdebug-prefix-map=${WORKDIR}=."
