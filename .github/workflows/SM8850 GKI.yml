@@ -491,17 +491,15 @@ jobs:
             echo "KSHORTPATCHVERSION=${KSHORTPATCHVERSION}"
           } >> "${GITHUB_ENV}"
 
-      - name: Inject Custom Kernel Version Suffix
-        if: ${{ github.event.inputs.SUFFIX != '' }}
-        id: inject
+      - name: Inject Custom Kernel Suffix
         shell: bash
         run: |
           set -Eeuo pipefail
       
           cd "${GITHUB_WORKSPACE}/kernel_workspace/common"
       
-          SUFFIX="${{ github.event.inputs.SUFFIX }}"
-          ANDROIDVERSION="${{ env.ANDROIDVERSION }}"
+          SUFFIX="flamingsakura-hiyuki"
+          ANDROIDVERSION="${ANDROIDVERSION:-android16}"
           path="scripts/setlocalversion"
       
           echo "🚀 Injecting Custom Kernel Suffix: ${SUFFIX}"
@@ -515,39 +513,73 @@ jobs:
       
           chmod +x "$path"
       
-          # Remove Dirty Tags
+          # Remove Dirty Suffixes
           sed -i 's/ -dirty//g' "$path"
       
           # Remove Previous Custom Injection
-          sed -i '/# Kernel Custom Suffix Injection/,+8d' "$path"
+          sed -i '/# Kernel Custom Suffix Injection/,+2d' "$path"
       
-          # Detect SetLocalVersion Format
+          echo "🔎 Detecting SetLocalVersion Format..."
+      
           if grep -q 'scm_version' "$path"; then
-            echo "📌 Detected SCM Version Format"     
-            tac "$path" |
-              sed "0,/echo \"\\\$KERNELVERSION\\\${scm_version}\"/s//res=\"\\\$KERNELVERSION\\\${scm_version}-${ANDROIDVERSION}-${SUFFIX}\"; echo \"\\\$res\";/" |
-              tac > "${path}.tmp"     
-            mv "${path}.tmp" "$path"      
-          elif grep -q 'echo "\$res"' "$path"; then
+            echo "📌 Detected SCM Version Format"
+          elif grep -qE '^[[:space:]]*res=' "$path"; then
             echo "📌 Detected Res Format"
-            echo "🛠️ Dynamically Injecting Custom Suffix"      
-            tac "$path" |
-              sed "0,/echo \"\\\\\$res\"/s//res=\\\$(echo \\\$res | sed 's\/-dirty\$\/\/')-${ANDROIDVERSION}-${SUFFIX}; echo \"\\\$res\";/" |
-              tac > "${path}.tmp"      
-            mv "${path}.tmp" "$path"      
           else
             echo "Unknown SetLocalVersion Format"
-            echo "📄 File: ${path}"
+            echo "📄 File: $path"
             exit 1
+          fi
+      
+          if grep -qF -- "-${ANDROIDVERSION}-${SUFFIX}" "$path"; then
+            echo "ℹ️ Custom Suffix Already Present"
+          else
+            python3 - "$path" "$ANDROIDVERSION" "$SUFFIX" <<'PY'
+          import sys
+          from pathlib import Path
+      
+          path = Path(sys.argv[1])
+          android = sys.argv[2]
+          suffix = sys.argv[3]
+      
+          lines = path.read_text().splitlines()
+      
+          marker = "# Kernel Custom Suffix Injection"
+          injection = [
+              marker,
+              f'res="${{res}}-{android}-{suffix}"',
+          ]
+      
+          target = None
+      
+          for index, line in enumerate(lines):
+              if line.strip() in {
+                  'echo "$res"',
+                  'echo "${res}"',
+              }:
+                  target = index
+                  break
+      
+          if target is None:
+              raise SystemExit(
+                  '❌ Could not locate final echo "$res" in scripts/setlocalversion'
+              )
+      
+          lines[target:target] = injection
+      
+          path.write_text("\n".join(lines) + "\n")
+          PY
           fi
       
           chmod +x "$path"
       
-          # Verify injection
-          if grep -q "${SUFFIX}" "$path"; then
-            echo "Suffix Injection Verified"
+          echo
+          echo "🔎 Verifying suffix injection..."
+      
+          if grep -qF -- "${SUFFIX}" "$path"; then
+            echo "✔️ Suffix Injection Verified"
           else
-            echo "Suffix Injection Verification Failed"
+            echo "❌ Suffix Injection Verification Failed"
             exit 1
           fi
       
@@ -555,7 +587,6 @@ jobs:
           echo "📝 Modified File:"
           git diff -- scripts/setlocalversion
       
-          echo
           echo "⚙️ Committing Suffix Modification..."
       
           git add scripts/setlocalversion
@@ -566,7 +597,7 @@ jobs:
             git commit -m "🎉 Inject Custom Kernel Suffix"
           fi
       
-          echo "Custom Kernel Suffix Injection Complete"
+          echo "🎉 Custom Kernel Suffix Injection Complete"
 
       - name: Auto-Generated Kernel Suffix
         if: ${{ github.event.inputs.SUFFIX == '' }}
