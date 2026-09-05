@@ -3668,31 +3668,46 @@ jobs:
           echo ""
           echo "🎉 DroidSpacesLXC Patch Complete!"
           
-      - name: 🔧 Re-Kernel Setup
+      - name: 🔧 Re-Kernel
         if: ${{ github.event.inputs.REKERNEL == 'true' }}
         run: |
-          set -euo pipefail
-          
+          set -Eeuo pipefail
+
           # Paths
           WS="${GITHUB_WORKSPACE}/kernel_workspace"
           RKREPODIR="${WS}/Re-Kernel"
-          KCDDIR="${WS}/kernel_platform/common/drivers"
+          KDIR="${WS}/kernel_platform/common"
+          KCDDIR="${KDIR}/drivers"
           RKTARGETDIR="${KCDDIR}/rekernel"
           KCONFIGFILE="${KCDDIR}/Kconfig"
           MAKEFILE="${KCDDIR}/Makefile"
+          BUILDBAZEL="${KDIR}/BUILD.bazel"
 
-          # Basic Sanity Checks
-          [[ -d "$KCDDIR" ]] || { echo "⚠️ Missing Drivers Directory"; exit 1; }
-          [[ -f "$KCONFIGFILE" ]] || { echo "⚠️ Missing Kernel Configuration"; exit 1; }
-          [[ -f "$MAKEFILE" ]] || { echo "⚠️ Missing Makefile"; exit 1; }
+          # Validate Kernel Directories / Files
+          [[ -d "$KDIR" ]] || {
+            echo "⚠️ Kernel Common Directory Not Found: $KDIR"
+            exit 1
+          }
 
-          # Clone Repository
+          [[ -f "$KCONFIGFILE" ]] || {
+            echo "⚠️ Kernel Configuration Not Found: $KCONFIGFILE"
+            exit 1
+          }
+
+          [[ -f "$MAKEFILE" ]] || {
+            echo "⚠️ Makefile Not Found: $MAKEFILE"
+            exit 1
+          }
+
+          # Clone Re-Kernel if Needed
           if [[ ! -d "$RKREPODIR/.git" ]]; then
-            echo "📩 Cloning ReKernel Repository..."
-            git clone --depth=1 https://github.com/Sakion-Team/Re-Kernel.git "$RKREPODIR"
-            echo "✔️ Repository Cloned"
+            echo "📩 Cloning Re-Kernel..."
+            git clone --depth=1 \
+              https://github.com/Sakion-Team/Re-Kernel.git \
+              "$RKREPODIR"
+            echo "✔️ Re-Kernel Cloned"
           else
-            echo "⚠️ Repository Already Exists"
+            echo "⚠️ Re-Kernel Repository Already Exists"
           fi
 
           # Resolve Source Directory
@@ -3701,62 +3716,57 @@ jobs:
           else
             RKSRCDIR="$RKREPODIR"
           fi
-          
-          echo "📂 Source: $RKSRCDIR"
 
-          # Skip if Already Applied (Stronger Check)
-          if grep -q 'drivers/rekernel/Kconfig' "$KCONFIGFILE" && \
-             grep -q 'CONFIG_REKERNEL' "$MAKEFILE" && \
-             [[ -d "$RKTARGETDIR" ]] && \
-             [[ -n "$(ls -A "$RKTARGETDIR" 2>/dev/null)" ]]; then
-            echo "⚠️ Re-Kernel Already Applied"
-            exit 0
-          fi
+          echo "📂 Re-Kernel Source: $RKSRCDIR"
 
-          echo "⚙️ Applying Re-Kernel..."
+          [[ -d "$RKSRCDIR" ]] || {
+            echo "⚠️ Re-Kernel Source Directory Not Found"
+            exit 1
+          }
 
-          # Prepare Target Directory
-          mkdir -p "$RKTARGETDIR"
-
-          # Inject Kernel Configuration Entry (Idempotent)
-          if ! grep -q 'drivers/rekernel/Kconfig' "$KCONFIGFILE"; then
+          # Add Kernel Configuration Entry Only if Missing
+          if grep -qF 'source "drivers/rekernel/Kconfig"' "$KCONFIGFILE"; then
+            echo "⚠️ Re-Kernel Kernel Configuration Entry Already Exists"
+          else
             sed -i '/endmenu/i source "drivers/rekernel/Kconfig"' "$KCONFIGFILE"
-            echo "➕ Kernel Configuration Entry Added"
-          else
-            echo "⚠️ Kernel Configuration Already Present"
+            echo "⚙️ Re-Kernel Kconfig Entry Added"
           fi
 
-          # Inject Makefile Entry (Idempotent)
-          if ! grep -q "CONFIG_REKERNEL" "$MAKEFILE"; then
-            printf "\n# ReKernel Support\nobj-\$(CONFIG_REKERNEL) += rekernel/\n" >> "$MAKEFILE"
-            echo "➕ Makefile Entry Added"
+          # Add Makefile Entry Only if Missing
+          if grep -qF 'obj-$(CONFIG_REKERNEL) += rekernel/' "$MAKEFILE"; then
+            echo "⚠️ Re-Kernel Makefile Entry Already Exists"
           else
-            echo "⚠️ Makefile Already Present"
+            printf '\n# Re-Kernel Support\nobj-$(CONFIG_REKERNEL) += rekernel/\n' >> "$MAKEFILE"
+            echo "⚙️ Re-Kernel Makefile Entry Added"
           fi
 
-          # Sync All Re-Kernel Files and Directories
+          # Replace Existing Re-Kernel Source
+          echo "♻️ Syncing Re-Kernel Source..."
+          rm -rf "$RKTARGETDIR"
+          mkdir -p "$RKTARGETDIR"
           cp -af "$RKSRCDIR"/. "$RKTARGETDIR"/
-          echo "♻️ All Re-Kernel Files and Directories Synced!"
 
-          # Update Build Bazel (GKI)
-          BUILDBAZEL="${WS}/kernel_platform/common/BUILD.bazel"          
+          echo "✔️ Re-Kernel Source Synced"
+
+          # Patch BUILD Bazel
           if [[ -f "$BUILDBAZEL" ]]; then
-            if grep -q 'drivers/rekernel/rekernel\.ko' "$BUILDBAZEL"; then
-              echo "⚠️ Build Bazel Already Patched"
+            if grep -qF 'drivers/rekernel/rekernel.ko' "$BUILDBAZEL"; then
+              echo "⚠️ BUILD Bazel Already Patched"
             else
-              echo "⚙️ Patching Build Bazel..."          
+              echo "⚙️ Patching BUILD Bazel..."
               sed -i \
                 '0,/name = "kernel_aarch64",/{/module_implicit_outs/s|,$| + ["drivers/rekernel/rekernel.ko"],|}' \
-                "$BUILDBAZEL"          
-              if grep -q 'drivers/rekernel/rekernel\.ko' "$BUILDBAZEL"; then
-                echo "🚀 Build Bazel Patched"
+                "$BUILDBAZEL"
+
+              if grep -qF 'drivers/rekernel/rekernel.ko' "$BUILDBAZEL"; then
+                echo "🚀 BUILD Bazel Patched Successfully"
               else
-                echo "⚠️ Failed to Patch Build Bazel"
+                echo "⚠️ Failed to Patch BUILD Bazel"
                 exit 1
               fi
             fi
           else
-            echo "ℹ️ Build Bazel Not Found, Skipping..."
+            echo "ℹ️ BUILD Bazel Not Found, Skipping"
           fi
 
           echo ""
@@ -3787,7 +3797,7 @@ jobs:
           # Apply Required Compatibility Patches Only if Function Not Already Present in Source
           if [[ "${GKIVERSION}" == "android12-5.10" ]]; then
             if ! grep -qF 'int proc_dou8vec_minmax(' include/linux/sysctl.h; then
-              echo "Applying PROC-DOU8VEC-MINMAX Compatibility Patches..."
+              echo "⚙️ Applying PROC-DOU8VEC-MINMAX Compatibility Patches..."
               patch -p1 < "${PDIR}/sysctl_add_proc_dou8vec_minmax.patch"
               patch -p1 < "${PDIR}/sysctl_fix_data-races_in_proc_dou8vec_minmax.patch"
             else
