@@ -493,6 +493,7 @@ jobs:
             exit 1
           }
       
+          # Switch to the GitHub Workspace
           cd "$GITHUB_WORKSPACE"
       
           # Normalize Manifest File Name
@@ -513,34 +514,33 @@ jobs:
           ')
       
           # Prepare Manifest Fallback Directory
-          mkdir -p ".repo/manifests_fallback"
+          mkdir -p ".repo/fallbackmanifests"
       
-          XMLPATH=".repo/manifests_fallback/${FILE}.xml"
-          READMEPATH=".repo/manifests_fallback/README.md"
-      
+          # Define Manifest and README Paths
+          XMLPATH=".repo/fallbackmanifests/${FILE}.xml"
+          READMEPATH=".repo/fallbackmanifests/README.md"      
+          # Display Normalized Manifest Information
           echo "FILE                  : $FILE"
           echo "MANIFESTFILECONFIG    : $MANIFESTFILECONFIG"
           echo "MANIFESTBASEFILE      : $MANIFESTBASEFILE"
       
-          # Export Manifest Names
+          # Export Manifest Names for Following Workflow Steps
           {
             echo "MANIFESTFILECONFIG=$MANIFESTFILECONFIG"
             echo "MANIFESTBASEFILE=$MANIFESTBASEFILE"
-          } >> "$GITHUB_ENV"
-      
-          # Build Repository List in Priority Order
+          } >> "$GITHUB_ENV"     
+          # Define Repository Search Priority
           REPOS=(
             "AndreiMikh|Kernel-Manifest"
             "AndreiMikh|AndreiMikh-Kernel-Lab"
           )
       
           # Add Dynamic Repository When Provided
-          if [[ -n "${GITREPOSITORYINPUT:-}" ]]; then
-      
+          if [[ -n "${GITREPOSITORYINPUT:-}" ]]; then      
             # Normalize GitHub Repository Input
             GITREPOSITORYINPUT="${GITREPOSITORYINPUT#https://github.com/}"
-            GITREPOSITORYINPUT="${GITREPOSITORYINPUT%/}"
-      
+            GITREPOSITORYINPUT="${GITREPOSITORYINPUT%/}"      
+            # Parse Owner and Repository Name
             case "$GITREPOSITORYINPUT" in
               */*)
                 OWNER="${GITREPOSITORYINPUT%%/*}"
@@ -551,22 +551,26 @@ jobs:
                 REPO="Kernel-Manifest"
                 ;;
             esac      
-            echo "🚀 Dynamic Repository: ${OWNER}/${REPO}"      
+            # Register Dynamic Repository
+            echo "🚀 Dynamic Repository: ${OWNER}/${REPO}"
             REPOS+=("${OWNER}|${REPO}")
           fi
       
+          # Initialize Manifest Search Results
           MANIFESTFOUNDREPO=""
           MANIFESTFOUNDREPONAME=""
           MANIFESTFOUNDBRANCH=""
       
           # Search Repositories in Deterministic Priority Order
           for ENTRY in "${REPOS[@]}"; do      
+            # Extract Repository Owner and Name
             OWNER="${ENTRY%%|*}"
-            REPOSITORYNAME="${ENTRY##*|}"      
-            echo ""
-            echo "🔎 Checking ${OWNER}/${REPOSITORYNAME}"      
-            BRANCHES=""
+            REPOSITORYNAME="${ENTRY##*|}"
       
+            echo ""
+            echo "🔎 Checking ${OWNER}/${REPOSITORYNAME}"
+      
+            BRANCHES=""     
             # Query GitHub API with Authentication
             if [[ -n "${GITHUB_TOKEN:-}" ]]; then
               BRANCHES=$(curl \
@@ -595,7 +599,7 @@ jobs:
                 2>/dev/null || true)
             fi
       
-            # Fallback to Git LS-Remote
+            # Fallback to Git LS-Remote When API Is Unavailable
             if [[ -z "$BRANCHES" ]]; then
               echo "⚠️ GitHub API Failed"
               echo "🔄 Falling Back to Git LS-Remote..."      
@@ -613,15 +617,15 @@ jobs:
               continue
             fi
       
-            # Search Each Branch for Requested Manifest
+            # Search Each Branch for the Requested Manifest
             while IFS= read -r BRANCH; do      
               [[ -z "$BRANCH" ]] && continue      
-              echo "  → 📃 Trying Branch: $BRANCH"
-      
+              # Display Current Branch Being Checked
+              echo "  → 📃 Trying Branch: $BRANCH"      
+              # Build Raw GitHub URLs
               XMLURL="https://raw.githubusercontent.com/${OWNER}/${REPOSITORYNAME}/${BRANCH}/${FILE}.xml"
-              READMEURL="https://raw.githubusercontent.com/${OWNER}/${REPOSITORYNAME}/${BRANCH}/README.md"
-      
-              # Check Manifest Availability
+              READMEURL="https://raw.githubusercontent.com/${OWNER}/${REPOSITORYNAME}/${BRANCH}/README.md"    
+              # Check Whether the Manifest Exists
               if ! curl \
                 --fail \
                 --silent \
@@ -635,29 +639,29 @@ jobs:
               echo "📂 Repository: ${OWNER}/${REPOSITORYNAME}"
               echo "🌿 Branch    : ${BRANCH}"
       
-              # Download Manifest
-              TMPXML="${XMLPATH}.tmp"      
+              # Download Manifest to a Temporary File
+              TMPXML="${XMLPATH}.tmp"  
               if ! curl \
                 --fail \
                 --silent \
                 --show-error \
                 --location \
                 "$XMLURL" \
-                -o "$TMPXML"; then     
+                -o "$TMPXML"; then      
                 echo "⚠️ Manifest Download Failed"
                 rm -f "$TMPXML"
                 continue
               fi
       
-              # Validate Manifest Before Installing
+              # Verify Downloaded Manifest Is Not Empty
               if [[ ! -s "$TMPXML" ]]; then
                 echo "⚠️ Downloaded Manifest Is Empty"
                 rm -f "$TMPXML"
                 continue
               fi
       
-              mv "$TMPXML" "$XMLPATH"
-      
+              # Move Valid Manifest into Final Location
+              mv "$TMPXML" "$XMLPATH"      
               # Download README When Available
               TMPREADME="${READMEPATH}.tmp"      
               if curl \
@@ -667,11 +671,12 @@ jobs:
                 --location \
                 "$READMEURL" \
                 -o "$TMPREADME"; then      
+                # Store README Only When It Contains Data
                 if [[ -s "$TMPREADME" ]]; then
                   mv "$TMPREADME" "$READMEPATH"
                 else
                   rm -f "$TMPREADME"
-                fi
+                fi      
               else
                 rm -f "$TMPREADME"
               fi
@@ -679,20 +684,24 @@ jobs:
               # Store Successful Repository Information
               MANIFESTFOUNDREPO="$OWNER"
               MANIFESTFOUNDREPONAME="$REPOSITORYNAME"
-              MANIFESTFOUNDBRANCH="$BRANCH"     
+              MANIFESTFOUNDBRANCH="$BRANCH"
+      
+              # Stop Searching After First Successful Match
               break 2      
-            done <<< "$BRANCHES"      
+            done <<< "$BRANCHES"
+      
+            # Report Repository Search Failure
             echo "⚠️ ${FILE}.xml Not Found in ${OWNER}/${REPOSITORYNAME}"      
           done
       
-          # Verify Manifest Was Found
+          # Verify a Manifest Was Successfully Found
           if [[ -z "$MANIFESTFOUNDREPO" || ! -s "$XMLPATH" ]]; then
             echo ""
             echo "⚠️ WARNING: ${FILE}.xml Not Found in Any Repository"
             exit 1
           fi
       
-          # Display Manifest Location
+          # Display Located Manifest Information
           echo ""
           echo "------ Manifest Located ------"
           echo "📂 Repository  : ${MANIFESTFOUNDREPO}/${MANIFESTFOUNDREPONAME}"
@@ -700,7 +709,7 @@ jobs:
           echo "------------------------------"
           echo ""
       
-          # Export Manifest Location
+          # Export Manifest Location for Following Steps
           {
             echo "MANIFESTREPO=$MANIFESTFOUNDREPO"
             echo "MANIFESTREPONAME=$MANIFESTFOUNDREPONAME"
@@ -711,14 +720,15 @@ jobs:
           echo "📌 Parsing Manifest"
       
           if command -v xmllint >/dev/null; then
-            echo "[Info] Using XMLLint for XML Parsing"
-      
+            echo "[Info] Using XMLLint for XML Parsing"    
+            # Extract the First Project Revision
             REVISION=$(xmllint \
               --xpath 'string(//project/@revision)' \
               "$XMLPATH" \
-              2>/dev/null || true)
+              2>/dev/null || true)      
           else
-            echo "⚠️ XMLLint Not Found, Using Grep Fallback"      
+            echo "⚠️ XMLLint Not Found, Using Grep Fallback"     
+            # Extract Revision Using Grep When XMLLint Is Unavailable
             REVISION=$(grep \
               -oP '<project[^>]+revision="\K[^"]+' \
               "$XMLPATH" \
@@ -726,12 +736,16 @@ jobs:
               || true)
           fi
       
-          # Extract CPU and Android Version
-          CPU=$(echo "$REVISION" | cut -d'/' -f2 | cut -d'_' -f1)      
+          # Extract CPU from Manifest Revision
+          CPU=$(echo "$REVISION" | cut -d'/' -f2 | cut -d'_' -f1)
+      
+          # Extract Android Version from Manifest Revision
           VANDROID=$(echo "$REVISION" \
             | grep -oP '\d+\.\d+(\.\d+)?' \
             | head -n1 \
-            || true)      
+            || true)
+      
+          # Extract Android Major Version
           ASHORTVERSION="${VANDROID%%.*}"
       
           # Export Parsed Manifest Information
@@ -742,19 +756,22 @@ jobs:
           } >> "$GITHUB_ENV"
       
           # Parse README Build Information
-          if [[ -s "$READMEPATH" ]]; then      
+          if [[ -s "$READMEPATH" ]]; then
+            # Locate Kernel Build Command
             BUILDLINE=$(grep \
               -m1 \
               'oplus_build_kernel.sh' \
               "$READMEPATH" \
-              || true)      
-            if [[ -n "$BUILDLINE" ]]; then      
+              || true)
+            if [[ -n "$BUILDLINE" ]]; then
+              # Extract Kernel CPU Directory and Build Method
               CPUD=$(awk '{print $(NF-1)}' <<< "$BUILDLINE")
-              BUILDMETHOD=$(awk '{print $NF}' <<< "$BUILDLINE")     
+              BUILDMETHOD=$(awk '{print $NF}' <<< "$BUILDLINE")    
+              # Export README Build Information
               {
                 echo "CPUD=$CPUD"
                 echo "BUILDMETHOD=$BUILDMETHOD"
-              } >> "$GITHUB_ENV"      
+              } >> "$GITHUB_ENV"     
             fi
           fi
       
@@ -1315,7 +1332,7 @@ jobs:
           # Fallback Manifest Injection
           echo "📥 Enforcing Fallback Manifest..."
           mkdir -p .repo/manifests
-          cp "$GITHUB_WORKSPACE/.repo/manifests_fallback/${FILE}.xml" \
+          cp "$GITHUB_WORKSPACE/.repo/fallbackmanifests/${FILE}.xml" \
              ".repo/manifests/${FILE}.xml"
 
           # Remove 'KS-Kernel.LNX.5.0.R3-Rel' Prebuilts Entries
