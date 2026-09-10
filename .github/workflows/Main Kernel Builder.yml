@@ -477,259 +477,290 @@ jobs:
 
           "$KOTLINHOME/bin/kotlinc" -version
 
-      - name: 🔧 Extract Manifest Information (Token/No-Token + LS-Remote Fallback)
-        id: extract_info
+      - name: 🔧 Extract Manifest Information
+        id: extract-info
         env:
           FILE: ${{ github.event.inputs.FILE }}
           GITREPOSITORYINPUT: ${{ github.event.inputs.GITHUBREPOSITORY }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
         run: |
-          set -euo pipefail
-
-          command -v jq >/dev/null || { echo "⚠️ ERROR: JQ Not Installed"; exit 1; }          
+          set -Eeuo pipefail
+      
+          # Verify Required Tools
+          command -v jq >/dev/null || {
+            echo "⚠️ ERROR: JQ Not Installed"
+            exit 1
+          }
+      
           cd "$GITHUB_WORKSPACE"
-
-          # Normalize File Name
+      
+          # Normalize Manifest File Name
           if [[ "$FILE" =~ ^(.+)_([a-zA-Z])$ ]]; then
             MANIFESTFILECONFIG="${BASH_REMATCH[1]}"
           else
             MANIFESTFILECONFIG="$FILE"
           fi
-
+      
+          # Generate Normalized Manifest Base Name
           MANIFESTBASEFILE=$(echo "$MANIFESTFILECONFIG" | sed -E '
             s/_aosp/AOSP/g;
-            s/_custom/CustomBuild/g;           
-            # Uppercase First Letter After Underscore + Keep Rest, But Fix Trailing Letter Case
-            s/_([a-zA-Z0-9])/\U\1/g;        
+            s/_custom/CustomBuild/g;
+            s/_([a-zA-Z0-9])/\U\1/g;
             s/^oneplus/1+/;
             s/^realme/RealMe/;
             s/^oppo/Oppo/
           ')
-
+      
+          # Prepare Manifest Fallback Directory
           mkdir -p ".repo/manifests_fallback"
+      
           XMLPATH=".repo/manifests_fallback/${FILE}.xml"
           READMEPATH=".repo/manifests_fallback/README.md"
-          echo "FILE=$FILE"
-          echo "MANIFESTFILECONFIG=$MANIFESTFILECONFIG"
-          echo "MANIFESTBASEFILE=$MANIFESTBASEFILE"
-
+      
+          echo "FILE                  : $FILE"
+          echo "MANIFESTFILECONFIG    : $MANIFESTFILECONFIG"
+          echo "MANIFESTBASEFILE      : $MANIFESTBASEFILE"
+      
+          # Export Manifest Names
           {
             echo "MANIFESTFILECONFIG=$MANIFESTFILECONFIG"
             echo "MANIFESTBASEFILE=$MANIFESTBASEFILE"
           } >> "$GITHUB_ENV"
-
-          # Repository Priority:
-          # 1. AndreiMikh/Kernel-Manifest
-          # 2. AndreiMikh/AndreiMikh-Kernel-Lab
-          # 3. User Defined Dynamic Repository
-          
-          declare -A REPOS          
-          REPOS["AndreiMikh"]="AndreiMikh|Kernel-Manifest"
-          REPOS["Appendix"]="AndreiMikh|AndreiMikh-Kernel-Lab"
-
-          # Only Register the Dynamic Repository if Input is Not Empty
-          if [[ -n "$GITREPOSITORYINPUT" ]]; then
-            # Normalize GitHub URL
+      
+          # Build Repository List in Priority Order
+          REPOS=(
+            "AndreiMikh|Kernel-Manifest"
+            "AndreiMikh|AndreiMikh-Kernel-Lab"
+          )
+      
+          # Add Dynamic Repository When Provided
+          if [[ -n "${GITREPOSITORYINPUT:-}" ]]; then
+      
+            # Normalize GitHub Repository Input
             GITREPOSITORYINPUT="${GITREPOSITORYINPUT#https://github.com/}"
-          
-            # Remove Trailing Slash
             GITREPOSITORYINPUT="${GITREPOSITORYINPUT%/}"
-          
+      
             case "$GITREPOSITORYINPUT" in
-              # 'Format: Owner / Repository'
               */*)
                 OWNER="${GITREPOSITORYINPUT%%/*}"
                 REPO="${GITREPOSITORYINPUT##*/}"
                 ;;
-              # 'Format: Owner'
-              # 'Default Repository: Kernel-Manifest'
               *)
                 OWNER="$GITREPOSITORYINPUT"
                 REPO="Kernel-Manifest"
                 ;;
-            esac
-          
-            echo "🚀 Dynamic Repository Detected: ${OWNER}/${REPO}"
-          
-            # Register Dynamic Repository
-            REPOS["Dynamic"]="$OWNER|$REPO"
+            esac      
+            echo "🚀 Dynamic Repository: ${OWNER}/${REPO}"      
+            REPOS+=("${OWNER}|${REPO}")
           fi
-
-          # Export Keys and Values for Parallel Jobs
-          export REPOSKEYS="${!REPOS[@]}"
-          export REPOSVALUES="${REPOS[@]}"
-
+      
           MANIFESTFOUNDREPO=""
           MANIFESTFOUNDREPONAME=""
           MANIFESTFOUNDBRANCH=""
-
-          # Function: Check Repository for XML
-          check_repo() {
-            local ENTRY="$1"
-            [[ -z "$ENTRY" ]] && return 1
-            local OWNER="${ENTRY%%|*}"
-            local REPOSITORYNAME="${ENTRY##*|}"
-
+      
+          # Search Repositories in Deterministic Priority Order
+          for ENTRY in "${REPOS[@]}"; do      
+            OWNER="${ENTRY%%|*}"
+            REPOSITORYNAME="${ENTRY##*|}"      
             echo ""
-            echo "🔎 Checking ${OWNER}/${REPOSITORYNAME}"
-            local BRANCHES=""      
-            # 1️⃣ Try GitHub API (Authenticated if Token Exists)
+            echo "🔎 Checking ${OWNER}/${REPOSITORYNAME}"      
+            BRANCHES=""
+      
+            # Query GitHub API with Authentication
             if [[ -n "${GITHUB_TOKEN:-}" ]]; then
-            BRANCHES=$(curl --connect-timeout 10 --max-time 20 -fsSL \
-                        -H "Authorization: token $GITHUB_TOKEN" \
-                        -H "Accept: application/vnd.github.v3+json" \
-                        "https://api.github.com/repos/${OWNER}/${REPOSITORYNAME}/branches?per_page=100" \
-                        | jq -r '.[].name? // empty' 2>/dev/null || true)
+              BRANCHES=$(curl \
+                --connect-timeout 10 \
+                --max-time 20 \
+                --fail \
+                --silent \
+                --show-error \
+                -H "Authorization: Bearer $GITHUB_TOKEN" \
+                -H "Accept: application/vnd.github+json" \
+                "https://api.github.com/repos/${OWNER}/${REPOSITORYNAME}/branches?per_page=100" \
+                | jq -r '.[].name? // empty' \
+                2>/dev/null || true)
             fi
-            # 2️⃣ Fallback to Unauthenticated API if Empty
+      
+            # Fallback to Unauthenticated GitHub API
             if [[ -z "$BRANCHES" ]]; then
-              BRANCHES=$(curl --connect-timeout 10 --max-time 20 -fsSL \
-                          "https://api.github.com/repos/${OWNER}/${REPOSITORYNAME}/branches?per_page=100" \
-                          | jq -r '.[].name? // empty' 2>/dev/null || true)
+              BRANCHES=$(curl \
+                --connect-timeout 10 \
+                --max-time 20 \
+                --fail \
+                --silent \
+                --show-error \
+                "https://api.github.com/repos/${OWNER}/${REPOSITORYNAME}/branches?per_page=100" \
+                | jq -r '.[].name? // empty' \
+                2>/dev/null || true)
             fi
-            # 3️⃣ Fallback to Git LS-Remote
+      
+            # Fallback to Git LS-Remote
             if [[ -z "$BRANCHES" ]]; then
-              echo "⚠️ API Failed, Falling Back to Git LS-Remote..."
-              BRANCHES=$(git ls-remote --heads https://github.com/${OWNER}/${REPOSITORYNAME}.git 2>/dev/null | sed 's|.*refs/heads/||' || true)      
+              echo "⚠️ GitHub API Failed"
+              echo "🔄 Falling Back to Git LS-Remote..."      
+              BRANCHES=$(git ls-remote \
+                --heads \
+                "https://github.com/${OWNER}/${REPOSITORYNAME}.git" \
+                2>/dev/null \
+                | sed 's|.*refs/heads/||' \
+                || true)
             fi
-            [[ -z "$BRANCHES" ]] && { echo "No Branches Found for ${OWNER}/${REPOSITORYNAME}, Skipping..."; return 1; }
-            # Try Each Branch Until XML File is Found
-            for BRANCH in $BRANCHES; do
-              echo "  → 📃 Trying Branch: $BRANCH"            
+      
+            # Skip Repository When No Branches Are Available
+            if [[ -z "$BRANCHES" ]]; then
+              echo "⚠️ No Branches Found"
+              continue
+            fi
+      
+            # Search Each Branch for Requested Manifest
+            while IFS= read -r BRANCH; do      
+              [[ -z "$BRANCH" ]] && continue      
+              echo "  → 📃 Trying Branch: $BRANCH"
+      
               XMLURL="https://raw.githubusercontent.com/${OWNER}/${REPOSITORYNAME}/${BRANCH}/${FILE}.xml"
-              READMEURL="https://raw.githubusercontent.com/${OWNER}/${REPOSITORYNAME}/${BRANCH}/README.md"            
-              if curl -sf --head "$XMLURL" >/dev/null; then
-                echo "🔎 Found ${FILE}.xml in ${OWNER}/${REPOSITORYNAME} (Branch: $BRANCH)"            
-                TMPXML="${XMLPATH}.${OWNER}.${REPOSITORYNAME}.${BRANCH}.tmp"
-                TMPREADME="${READMEPATH}.${OWNER}.${REPOSITORYNAME}.${BRANCH}.tmp"            
-                curl -fsSL -o "$TMPXML" "$XMLURL" || { rm -f "$TMPXML"; continue; }
-                mv "$TMPXML" "$XMLPATH"           
-                curl -fsSL -o "$TMPREADME" "$READMEURL" 2>/dev/null || true
-                [[ -f "$TMPREADME" ]] && mv "$TMPREADME" "$READMEPATH"            
-                echo "$OWNER|$REPOSITORYNAME|$BRANCH" > "$INFOTMP"
-                touch "$FOUNDTMP"
-            
-                return 0
+              READMEURL="https://raw.githubusercontent.com/${OWNER}/${REPOSITORYNAME}/${BRANCH}/README.md"
+      
+              # Check Manifest Availability
+              if ! curl \
+                --fail \
+                --silent \
+                --show-error \
+                --head \
+                "$XMLURL" >/dev/null 2>&1; then
+                continue
               fi
-            done
-
-            echo "⚠️ No Branch Contains ${FILE}.xml in ${OWNER}/${REPOSITORYNAME}, Skipping..."
-            return 1
-          }
-
-          # Parallel Repository Check
-          FOUNDTMP="/tmp/manifest_found.lock"
-          INFOTMP="/tmp/manifest_info.txt"
-          # Remove Old Markers
-          rm -f "$FOUNDTMP" "$INFOTMP"
-          pids=()
-          for key in $REPOSKEYS; do
-            value="${REPOS[$key]-}"
-            [[ -z "$value" ]] && continue          
-            (
-              OWNER="${value%%|*}"
-              REPOSITORYNAME="${value##*|}"          
-                echo "🔎 Checking $OWNER/$REPOSITORYNAME"          
-                # Stop Immediately if Another Worker Already Found a Match
-                [[ -f "$FOUNDTMP" ]] && exit 0          
-                # Get Branches (GitHub API)
-                BRANCHES=$(curl -s "https://api.github.com/repos/$OWNER/$REPOSITORYNAME/branches?per_page=100" \
-                  | jq -r '.[].name? // empty' 2>/dev/null || true)          
-                # Fallback to Git if API Fails
-                if [[ -z "$BRANCHES" ]]; then
-                  BRANCHES=$(git ls-remote --heads "https://github.com/${OWNER}/${REPOSITORYNAME}.git" \
-                    2>/dev/null | sed 's|.*refs/heads/||' || true)
+      
+              echo "✔️ Found ${FILE}.xml"
+              echo "📂 Repository: ${OWNER}/${REPOSITORYNAME}"
+              echo "🌿 Branch    : ${BRANCH}"
+      
+              # Download Manifest
+              TMPXML="${XMLPATH}.tmp"      
+              if ! curl \
+                --fail \
+                --silent \
+                --show-error \
+                --location \
+                "$XMLURL" \
+                -o "$TMPXML"; then     
+                echo "⚠️ Manifest Download Failed"
+                rm -f "$TMPXML"
+                continue
+              fi
+      
+              # Validate Manifest Before Installing
+              if [[ ! -s "$TMPXML" ]]; then
+                echo "⚠️ Downloaded Manifest Is Empty"
+                rm -f "$TMPXML"
+                continue
+              fi
+      
+              mv "$TMPXML" "$XMLPATH"
+      
+              # Download README When Available
+              TMPREADME="${READMEPATH}.tmp"      
+              if curl \
+                --fail \
+                --silent \
+                --show-error \
+                --location \
+                "$READMEURL" \
+                -o "$TMPREADME"; then      
+                if [[ -s "$TMPREADME" ]]; then
+                  mv "$TMPREADME" "$READMEPATH"
+                else
+                  rm -f "$TMPREADME"
                 fi
-                [[ -z "$BRANCHES" ]] && exit 0          
-                for BRANCH in $BRANCHES; do          
-                  # Stop if Already Found by Another Process
-                  [[ -f "$FOUNDTMP" ]] && exit 0       
-                  XMLURL="https://raw.githubusercontent.com/$OWNER/$REPOSITORYNAME/$BRANCH/${FILE}.xml"
-                  READMEURL="https://raw.githubusercontent.com/$OWNER/$REPOSITORYNAME/$BRANCH/README.md"        
-                  if curl -sf --head "$XMLURL" >/dev/null; then          
-                    # Double-Check Race Condition Before Writing
-                    [[ -f "$FOUNDTMP" ]] && exit 0          
-                    curl -fsSL -o "$XMLPATH" "$XMLURL"
-                    curl -fsSL -o "$READMEPATH" "$READMEURL" || true          
-                    echo "$OWNER|$REPOSITORYNAME|$BRANCH" > "$INFOTMP"
-                    touch "$FOUNDTMP"          
-                    exit 0
-                  fi
-                done
-            ) &
-            pids+=($!)
+              else
+                rm -f "$TMPREADME"
+              fi
+      
+              # Store Successful Repository Information
+              MANIFESTFOUNDREPO="$OWNER"
+              MANIFESTFOUNDREPONAME="$REPOSITORYNAME"
+              MANIFESTFOUNDBRANCH="$BRANCH"     
+              break 2      
+            done <<< "$BRANCHES"      
+            echo "⚠️ ${FILE}.xml Not Found in ${OWNER}/${REPOSITORYNAME}"      
           done
-
-          # Wait for All Jobs
-          for pid in "${pids[@]}"; do
-            wait $pid || true
-          done
-
-          # Read Results from Temporary File
-          if [[ -f "$FOUNDTMP" && -s "$INFOTMP" ]]; then
-            IFS='|' read -r MANIFESTFOUNDREPO MANIFESTFOUNDREPONAME MANIFESTFOUNDBRANCH < "$INFOTMP"
-            echo "✔️ Manifest Successfully Found: $MANIFESTFOUNDREPO/$MANIFESTFOUNDREPONAME (Branch: $MANIFESTFOUNDBRANCH)"
-          else
+      
+          # Verify Manifest Was Found
+          if [[ -z "$MANIFESTFOUNDREPO" || ! -s "$XMLPATH" ]]; then
+            echo ""
             echo "⚠️ WARNING: ${FILE}.xml Not Found in Any Repository"
             exit 1
           fi
-
-          # Final Safe Validation
-          if [[ -z "$MANIFESTFOUNDREPO" || ! -s "$XMLPATH" ]]; then
-            echo "⚠️ WARNING: ${FILE}.xml Not Found in Any Repository"
-            exit 1  # Safe, Workflow Continues
-          fi
-
+      
+          # Display Manifest Location
           echo ""
           echo "------ Manifest Located ------"
           echo "📂 Repository  : ${MANIFESTFOUNDREPO}/${MANIFESTFOUNDREPONAME}"
           echo "📂 Branch      : ${MANIFESTFOUNDBRANCH}"
           echo "------------------------------"
           echo ""
-
+      
+          # Export Manifest Location
           {
             echo "MANIFESTREPO=$MANIFESTFOUNDREPO"
             echo "MANIFESTREPONAME=$MANIFESTFOUNDREPONAME"
             echo "MANIFESTBRANCH=$MANIFESTFOUNDBRANCH"
           } >> "$GITHUB_ENV"
-
-          # Parse Revision String
+      
+          # Parse Manifest Revision
           echo "📌 Parsing Manifest"
-          
+      
           if command -v xmllint >/dev/null; then
             echo "[Info] Using XMLLint for XML Parsing"
-            REVISION=$(xmllint --xpath 'string(//project/@revision)' "$XMLPATH" 2>/dev/null || true)
+      
+            REVISION=$(xmllint \
+              --xpath 'string(//project/@revision)' \
+              "$XMLPATH" \
+              2>/dev/null || true)
           else
-            echo "⚠️ XML Lint Not Found, Using Grep Fallback"
-            REVISION=$(grep -oP '<project[^>]+revision="\K[^"]+' "$XMLPATH" | head -n1 || true)
+            echo "⚠️ XMLLint Not Found, Using Grep Fallback"      
+            REVISION=$(grep \
+              -oP '<project[^>]+revision="\K[^"]+' \
+              "$XMLPATH" \
+              | head -n1 \
+              || true)
           fi
-          
-          CPU=$(echo "$REVISION" | cut -d'/' -f2 | cut -d'_' -f1)
-          VANDROID=$(echo "$REVISION" | grep -oP '\d+\.\d+(\.\d+)?' | head -n1 || true)
+      
+          # Extract CPU and Android Version
+          CPU=$(echo "$REVISION" | cut -d'/' -f2 | cut -d'_' -f1)      
+          VANDROID=$(echo "$REVISION" \
+            | grep -oP '\d+\.\d+(\.\d+)?' \
+            | head -n1 \
+            || true)      
           ASHORTVERSION="${VANDROID%%.*}"
-
+      
+          # Export Parsed Manifest Information
           {
             echo "CPU=$CPU"
             echo "VANDROID=$VANDROID"
             echo "ASHORTVERSION=$ASHORTVERSION"
           } >> "$GITHUB_ENV"
-
-          # Parse README for CPUD and Build Method
-          if [[ -s "$READMEPATH" ]]; then
-            BUILDLINE=$(grep -m1 'oplus_build_kernel.sh' "$READMEPATH" || true)
-            if [[ -n "$BUILDLINE" ]]; then
+      
+          # Parse README Build Information
+          if [[ -s "$READMEPATH" ]]; then      
+            BUILDLINE=$(grep \
+              -m1 \
+              'oplus_build_kernel.sh' \
+              "$READMEPATH" \
+              || true)      
+            if [[ -n "$BUILDLINE" ]]; then      
               CPUD=$(awk '{print $(NF-1)}' <<< "$BUILDLINE")
-              BUILDMETHOD=$(awk '{print $NF}' <<< "$BUILDLINE")
+              BUILDMETHOD=$(awk '{print $NF}' <<< "$BUILDLINE")     
               {
                 echo "CPUD=$CPUD"
                 echo "BUILDMETHOD=$BUILDMETHOD"
-              } >> "$GITHUB_ENV"
+              } >> "$GITHUB_ENV"      
             fi
           fi
-
-          # Output Combined Value
-          echo "value=${MANIFESTBASEFILE}_Android${VANDROID:-Unknown}" >> "$GITHUB_OUTPUT"
-
+      
+          # Output Combined Manifest Identity
+          echo "value=${MANIFESTBASEFILE}-Android${VANDROID:-Unknown}" >> "$GITHUB_OUTPUT"
+      
           echo ""
           echo "🎉 Manifest Parsing Complete"
       
