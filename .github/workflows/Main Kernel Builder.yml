@@ -396,43 +396,45 @@ jobs:
       - name: 🔧 Build Dependencies
         shell: bash
         run: |
-          set -euo pipefail
-
+          set -Eeuo pipefail
+      
           # Remove Problematic Third-Party APT Repositories
           echo "🧹 Removing Problematic APT Repositories..."
           sudo rm -f /etc/apt/sources.list.d/google-chrome.list || true
           sudo rm -f /etc/apt/sources.list.d/*chrome* || true
-
+      
           # Clean Stale APT Metadata
           echo "🧹 Cleaning APT Lists..."
           sudo rm -rf /var/lib/apt/lists/*
           sudo apt-get clean
-
+      
           # Refresh Package Indexes with Retry
           echo "🔄 Updating APT Indexes..."
           sudo apt-get update \
             -o Acquire::Retries=5 \
             -o Acquire::http::Pipeline-Depth=0
-
-          # Install Required Build Dependencies with APT Package Caching
+      
+          # Define Required APT Packages
           export APTPACKAGES="bc build-essential bison clang curl dos2unix elfutils flex gawk git kmod lld llvm libdw-dev libelf-dev liblz4-tool libncurses-dev libssl-dev libxml2-utils python3 rsync unzip zip zlib1g-dev"
-
-          SCRIPT="$GITHUB_WORKSPACE/kernel_workspace/AndreiMikh-Kernel-Lab/scripts/APT-Packages.sh"
-
-          mkdir -p "$(dirname "$SCRIPT")"
-
-          # Download APT Package Caching Script
-          wget -qO "$SCRIPT" \
-            "https://raw.githubusercontent.com/AndreiMikh/AndreiMikh-Kernel-Lab/LiquidAndrei/scripts/APT-Packages.sh"
-
-          # Verify Script Exists
-          if [ ! -f "$SCRIPT" ]; then
-            echo "⚠️ APT Packages Script Not Found: $SCRIPT"
+      
+          # Define APT Packages Script Path
+          SCRIPT="${GITHUB_WORKSPACE}/kernel_workspace/AndreiMikh-Kernel-Lab/scripts/APT-Packages.sh"
+      
+          # Verify APT Packages Script Exists
+          if [[ ! -f "$SCRIPT" ]]; then
+            echo "⚠️ APT Packages Script Not Found"
+            echo "📁 Expected Path: $SCRIPT"
             exit 1
           fi
-
-          # Execute APT Package Caching Script
-          bash "$SCRIPT" ~/.apt-pkg-cache
+      
+          # Make APT Packages Script Executable
+          chmod +x "$SCRIPT"
+      
+          # Run APT Packages Installation with Persistent Cache
+          echo "🚀 Running APT Packages Script..."
+          bash "$SCRIPT" "$HOME/.apt-pkg-cache"
+      
+          echo "🎉 Build Dependencies Ready"
     
       - name: 🔧 Setup Kotlin
         run: |
@@ -903,48 +905,51 @@ jobs:
           echo "🔎 Reject Checker: $REJECTCHECKER"
 
       - name: 🔧 Install and Configure Cache-ECS
+        shell: bash
         run: |
-          set -euo pipefail
-
-          # Define Paths
+          set -Eeuo pipefail
+      
+          # Cache-ECS Binary Source and Temporary Path
           ECSURL="https://raw.githubusercontent.com/AndreiMikh/AndreiMikh-Kernel-Lab/LiquidAndrei/lib/ccache-x86-64"
-          SYSCCACHE="/usr/bin/ccache"
-
-          # Download Cache-ECS Binary, Retry on Failure but Avoid Unnecessary Retry Delays
-          echo "📥 Downloading Cache-ECS Binary from $ECSURL..."
-          curl -LfsS --retry 5 --retry-delay 5 --retry-all-errors \
-               --connect-timeout 30 --tcp-fastopen \
-               -H "User-Agent: Mozilla/5.0" "$ECSURL" -o ccache
-
-          # Check if the Download was Successful
-          if [ ! -f "./ccache" ]; then
-            echo "⚠️ Download Failed or File Not Found!"
+          ECSBIN="${RUNNER_TEMP}/ccache-ecs"
+      
+          # Download Cache-ECS Binary with Retry Protection
+          echo "📥 Downloading Cache-ECS..."      
+          curl -fsSL \
+            --retry 5 \
+            --retry-delay 3 \
+            --retry-all-errors \
+            --connect-timeout 30 \
+            -A "Mozilla/5.0" \
+            "$ECSURL" \
+            -o "$ECSBIN"
+      
+          # Verify the Downloaded Binary Exists and Is Not Empty
+          [[ -s "$ECSBIN" ]] || {
+            echo "⚠️ Cache-ECS Download Failed"
             exit 1
-          fi
-
-          # Check if System Compiler Cache Exists, Do Not Overwrite
-          if [ -f "$SYSCCACHE" ]; then
-            echo "🔄 Found Existing System Compiler Cache at $SYSCCACHE, It will Not be Overwritten..."
-          else
-            # Install Cache-ECS
-            echo "🔧 Installing Cache-ECS to $SYSCCACHE..."
-            sudo cp -f ./ccache "$SYSCCACHE"
-            sudo chmod +x "$SYSCCACHE"
-            echo "🎯 Cache-ECS Installed as Compiler Cache!"
-          fi
-
-          rm -f ./ccache
-
-          # Set Environment Variables to Use Cache-ECS
-          echo "🎯 Configuring System to Use Cache-ECS as Compiler Cache..."
+          }
+      
+          # Make Cache-ECS Executable
+          chmod +x "$ECSBIN"
+      
+          # Replace the System ccache with Cache-ECS
+          echo "🔧 Installing Cache-ECS..."      
+          sudo install -m 0755 "$ECSBIN" /usr/bin/ccache
+      
+          # Remove Temporary Binary
+          rm -f "$ECSBIN"
+      
+          # Ensure the System Binary Path Is Used
           export PATH="/usr/bin:$PATH"
-
-          # Verify the Installation and Configuration
-          echo "📜 Cache ECS Version: $(/usr/bin/ccache --version)"
-
+      
+          # Verify Cache-ECS Installation
+          echo "📜 Cache-ECS Version:"
+          ccache --version
+      
           echo ""
           echo "🎉 Cache-ECS Setup Complete"
-
+    
       - name: 🔧 Release Cache Restoration
         id: cache-restoration
         if: ${{ steps.buildprofile.outputs.BUILDCCACHE != 'Disabled' }}
@@ -954,140 +959,123 @@ jobs:
         run: |
           set -Eeuo pipefail
       
-          # Default Output
-          # Always Define the Output so Later Workflow
-          # Steps can Safely Check the Restoration State
+          # Default Cache Restoration State
           echo "cache-restored=false" >> "$GITHUB_OUTPUT"
       
-          # Variables
-          TAG="${{ env.CPU }}"
-          FILE="CCache-${{ env.MANIFESTBASEFILE }}-${{ runner.os }}.tar.zst"
-          REPO="${{ github.repository }}"
-          CACHE_DIR="${{ env.CCACHE_DIR }}"
+          # Define Release and Cache Paths
+          TAG="${CPU}"
+          FILE="CCache-${MANIFESTBASEFILE}-${RUNNER_OS}.tar.zst"
+          REPO="${GITHUB_REPOSITORY}"
+          CACHEDIR="${{ env.CCACHE_DIR }}"
+          ARCHIVE="${RUNNER_TEMP}/${FILE}"
+          RESTOREDIR="${CACHEDIR}.restore"
       
           echo "📦 Release Tag : $TAG"
           echo "📁 Cache File  : $FILE"
-          echo "📂 Cache Path  : $CACHE_DIR"
-          echo ""
+          echo "📂 Cache Path  : $CACHEDIR"
       
           # Prepare Cache Directory
-          echo "📂 Preparing Cache Directory..."      
-          mkdir -p "$CACHE_DIR"
-          chmod -R 775 "$CACHE_DIR"
+          mkdir -p "$CACHEDIR"
+          chmod 775 "$CACHEDIR"
       
-          # Fetch Release Asset Metadata
-          echo "📩 Fetching Release Asset Metadata..."      
+          # Fetch GitHub Release Metadata
+          echo "📩 Fetching Release Metadata..."      
           ASSETJSON=$(curl -fsSL \
+            --retry 3 \
+            --retry-delay 2 \
             -H "Authorization: Bearer $GH_TOKEN" \
             -H "Accept: application/vnd.github+json" \
-            "https://api.github.com/repos/$REPO/releases/tags/$TAG") || {
-              echo "⚠️ Failed to Fetch Release Metadata"
+            "https://api.github.com/repos/${REPO}/releases/tags/${TAG}") || {
+              echo "⚠️ Release Metadata Unavailable"
               exit 0
-            }      
-          ASSETURL=$(echo "$ASSETJSON" | jq -r \
-            ".assets[] | select(.name == \"$FILE\") | .url")
+          }
       
-          # Validate Asset Existence
-          if [[ -z "${ASSETURL:-}" || "$ASSETURL" == "null" ]]; then
+          # Locate the Matching Cache Asset
+          ASSETURL=$(jq -r \
+            --arg FILE "$FILE" \
+            '.assets[] | select(.name == $FILE) | .url' \
+            <<< "$ASSETJSON")
+      
+          # Continue Without Cache if the Asset Does Not Exist
+          if [[ -z "$ASSETURL" || "$ASSETURL" == "null" ]]; then
             echo "⚠️ Cache Asset Not Found"
             echo "➡️ Continuing Without Release Cache"
             exit 0
           fi
       
           echo "🚀 Cache Asset Located"
-          echo ""
       
-          # Download Cache Archive
-          echo "🌐 Downloading Cache Archive..."   
-          DLSUCCESS=false     
-          for ATTEMPT in 1 2 3; do
-            echo "⬇️ Download Attempt: $ATTEMPT"     
-            if curl -fL \
-              -H "Authorization: Bearer $GH_TOKEN" \
-              -H "Accept: application/octet-stream" \
-              -A "Mozilla/5.0" \
-              --retry 3 \
-              --retry-delay 3 \
-              --connect-timeout 30 \
-              "$ASSETURL" \
-              -o "$FILE"; then      
-              DLSUCCESS=true
-              break
-            fi      
-            echo "⚠️ Download Attempt Failed"
-            sleep 2
-          done
+          # Remove Any Previous Temporary Archive
+          rm -f "$ARCHIVE"
       
-          # Validate Download Result
-          if [[ "$DLSUCCESS" != "true" ]]; then
-            echo "⚠️ Failed to Download Cache Archive"
-            rm -f "$FILE"
+          # Download the Cache Archive
+          echo "🌐 Downloading Cache Archive..."      
+          if ! curl -fL \
+            --retry 5 \
+            --retry-delay 3 \
+            --retry-all-errors \
+            --connect-timeout 30 \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            -H "Accept: application/octet-stream" \
+            -A "Mozilla/5.0" \
+            "$ASSETURL" \
+            -o "$ARCHIVE"; then      
+            echo "⚠️ Cache Download Failed"
+            rm -f "$ARCHIVE"
             exit 0
           fi
       
-          echo ""
-          echo "📦 Download Completed"
-      
-          # Validate File Existence
-          if [[ ! -f "$FILE" ]]; then
-            echo "⚠️ Downloaded File Does Not Exist"
+          # Verify the Downloaded Archive Exists and Is Not Empty
+          [[ -s "$ARCHIVE" ]] || {
+            echo "⚠️ Cache Archive Is Empty"
+            rm -f "$ARCHIVE"
             exit 0
-          fi
+          }
       
-          if [[ ! -s "$FILE" ]]; then
-            echo "⚠️ Downloaded File is Empty"
-            rm -f "$FILE"
-            exit 0
-          fi
-      
-          # File Information
+          # Display Archive Information
           echo "📊 Archive Information:"
-          ls -lh "$FILE"
+          ls -lh "$ARCHIVE"
       
-          # Verify Archive Integrity
-          echo "🔍 Testing Archive Integrity..."     
-          if ! zstd --long=30 -t "$FILE"; then
+          # Verify Zstandard Archive Integrity
+          echo "🔍 Testing Archive Integrity..."   
+          if ! zstd -t "$ARCHIVE"; then
             echo "⚠️ Archive Integrity Test Failed"
-            echo "🗑️ Removing Corrupted Archive"      
-            rm -f "$FILE"
+            rm -f "$ARCHIVE"
             exit 0
           fi
       
           echo "🚀 Archive Integrity Verified"
       
-          # Extract Cache Archive
+          # Prepare Temporary Restoration Directory
+          rm -rf "$RESTOREDIR"
+          mkdir -p "$RESTOREDIR"
+      
+          # Extract Cache into Temporary Directory
           echo "📦 Extracting Cache Archive..."      
           if ! tar \
-            --use-compress-program="unzstd --long=30" \
-            -xf "$FILE" \
-            -C "$CACHE_DIR"; then    
+            --use-compress-program=unzstd \
+            -xf "$ARCHIVE" \
+            -C "$RESTOREDIR"; then    
             echo "⚠️ Cache Extraction Failed"
-            echo "🗑️ Removing Invalid Archive"      
-            rm -f "$FILE"
+            rm -rf "$RESTOREDIR"
+            rm -f "$ARCHIVE"
             exit 0
           fi
       
-          echo "🚀 Cache Extraction Completed"
+          # Replace Existing Cache Only After Successful Extraction
+          rm -rf "$CACHEDIR"
+          mv "$RESTOREDIR" "$CACHEDIR"
       
-          # Validate Extracted Cache
-          echo "🔎 Validating Extracted Cache..."      
-          if [[ -n "$(find "$CACHE_DIR" -mindepth 1 -print -quit 2>/dev/null)" ]]; then
-            echo "👾 Cache Restored Successfully"
-            echo "cache-restored=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "⚠️ Cache Directory is Empty After Extraction"
-            echo "🗑️ Cleaning Cache Directory"
+          # Ensure Cache Files Are Accessible by the Build
+          chmod -R 775 "$CACHEDIR"
       
-            rm -rf "$CACHE_DIR"
-            mkdir -p "$CACHE_DIR"
-          fi
+          # Remove Temporary Archive
+          rm -f "$ARCHIVE"
       
-          # Cleanup Archive
-          echo "🧹 Cleaning Temporary Archive..."
-          rm -f "$FILE"
+          echo "🚀 Cache Restoration Completed"
       
-          echo ""
-          echo "🎉 Release Cache Restoration Completed"
+          # Report Successful Cache Restoration
+          echo "cache-restored=true" >> "$GITHUB_OUTPUT"
     
       - name: 🔧 Local Cache Restoration (Fallback)
         id: ccache-restore
