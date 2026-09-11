@@ -1,0 +1,288 @@
+name: Initialize and Sync Repository
+description: Initialize, Sync, Inspect, and Prepare the Kernel Repository
+
+inputs:
+  file:
+    description: Manifest File Name
+    required: true
+
+  manifest-repo:
+    description: Manifest Repository Owner
+    required: true
+
+  manifest-repo-name:
+    description: Manifest Repository Name
+    required: true
+
+  manifest-branch:
+    description: Manifest Branch
+    required: true
+
+runs:
+  using: composite
+
+  steps:
+    - name: 🔧 Initialize and Sync Repository
+      shell: bash
+      env:
+        FILE: ${{ inputs.file }}
+        MANIFESTREPO: ${{ inputs.manifest-repo }}
+        MANIFESTREPONAME: ${{ inputs.manifest-repo-name }}
+        MANIFESTBRANCH: ${{ inputs.manifest-branch }}
+      run: |
+        set -Eeuo pipefail
+
+        echo "=========================================="
+        echo "🔧 Initialize and Sync Repository"
+        echo "=========================================="
+
+        # Set Timezone
+        export TZ=Asia/Shanghai
+
+        timezone() {
+          date '+%Y-%m-%d %H:%M:%S %Z'
+        }
+
+        echo "🕒 Start Time: $(timezone)"
+        echo ""
+
+        # Git Performance Tweaks
+        echo "⚙️ Applying Git Performance Tweaks..."
+
+        git config --global fetch.parallel 16
+        git config --global http.postBuffer 524288000
+        git config --global core.compression 0
+        git config --global protocol.version 2
+
+        export GIT_TERMINAL_PROMPT=0
+        export GIT_HTTP_LOW_SPEED_LIMIT=0
+        export GIT_HTTP_LOW_SPEED_TIME=999999
+        export GIT_RETRY_COUNT=5
+
+        # Workspace Setup
+        WORKDIR="kernel_workspace"
+
+        if [[ ! -d "$GITHUB_WORKSPACE/$WORKDIR" ]]; then
+          echo "⚠️ ERROR: $WORKDIR does not exist"
+          exit 1
+        fi
+
+        cd "$GITHUB_WORKSPACE/$WORKDIR"
+
+        echo "📂 Working Directory: $(pwd)"
+        echo ""
+
+        # Manifest Preparation
+        MANIFESTBASE="https://github.com/${MANIFESTREPO}/${MANIFESTREPONAME}.git"
+
+        echo "📌 Manifest Repository: $MANIFESTBASE"
+        echo "🌿 Manifest Branch    : $MANIFESTBRANCH"
+        echo "📃 Manifest File      : ${FILE}.xml"
+        echo ""
+
+        # Repository Initialize
+        echo "🚀 Initializing Repository..."
+
+        if [[ ! -d ".repo" ]] || \
+           [[ ! -f ".repo/manifests/${FILE}.xml" ]]; then
+
+          echo "🔄 Running Repository Init (Missing or New Manifest)..."
+
+          repo init \
+            -u "$MANIFESTBASE" \
+            -b "$MANIFESTBRANCH" \
+            -m "${FILE}.xml" \
+            --depth=1 \
+            --no-clone-bundle \
+            --no-tags
+
+        else
+          echo "⚡ Repository Initialized, Skipping Init"
+        fi
+
+        # Fallback Manifest Injection
+        echo "📥 Enforcing Fallback Manifest..."
+
+        FALLBACK_MANIFEST="$GITHUB_WORKSPACE/.repo/fallbackmanifests/${FILE}.xml"
+        LOCAL_MANIFEST=".repo/manifests/${FILE}.xml"
+
+        if [[ ! -s "$FALLBACK_MANIFEST" ]]; then
+          echo "⚠️ ERROR: Fallback manifest not found:"
+          echo "    $FALLBACK_MANIFEST"
+          exit 1
+        fi
+
+        mkdir -p .repo/manifests
+
+        cp "$FALLBACK_MANIFEST" "$LOCAL_MANIFEST"
+
+        # Remove KS-Kernel Prebuilt Entries
+        echo "🧹 Removing ks-kernel.lnx.5.0.r3-rel manifest entries..."
+
+        sed -i \
+          -e '/prebuilts\/asuite"/{/ks-kernel\.lnx\.5\.0\.r3-rel/d}' \
+          -e '/tools\/tradefederation\/prebuilts"/{/ks-kernel\.lnx\.5\.0\.r3-rel/d}' \
+          "$LOCAL_MANIFEST"
+
+        echo "📃 Repository List:"
+        repo list || true
+
+        echo ""
+
+        # Sync Jobs Control
+        echo "📁 Syncing Repository..."
+
+        SYNCFLAGS=(
+          -c
+          --force-sync
+          --no-clone-bundle
+          --no-tags
+          --optimized-fetch
+          --prune
+          --retry-fetches=5
+          --verbose
+          "-j$(nproc)"
+        )
+
+        echo "⚡ Using $(nproc) Parallel Jobs"
+
+        # Sync Watchdog
+        (
+          while true; do
+            echo "⏳ Sync Alive... $(timezone)"
+            sleep 60
+          done
+        ) &
+
+        WATCHDOGPID=$!
+
+        # Do NOT allow set -e to terminate before capturing status
+        set +e
+
+        timeout 25m repo sync "${SYNCFLAGS[@]}"
+
+        SYNCSTATUS=$?
+
+        set -e
+
+        # Cleanup Watchdog
+        kill "$WATCHDOGPID" >/dev/null 2>&1 || true
+        wait "$WATCHDOGPID" 2>/dev/null || true
+
+        # Final Sync Check
+        if [[ $SYNCSTATUS -ne 0 ]]; then
+          echo ""
+          echo "⚠️ Repository Sync Failed"
+          echo "⚠️ Exit Status: $SYNCSTATUS"
+          exit "$SYNCSTATUS"
+        fi
+
+        echo ""
+        echo "⚡ Repository Sync Completed"
+        echo ""
+
+        # Repository Inspection
+        echo "📂 Inspecting Repository Directory..."
+
+        echo "------------ Root ------------"
+        ls -la .repo/ || true
+
+        echo "---------- Manifest ----------"
+        ls -la .repo/manifests* || true
+
+        echo "------------ Tool ------------"
+        ls -la .repo/repo || true
+
+        echo "📊 Repository Breakdown:"
+        du -sh .repo/* 2>/dev/null || true
+
+        echo "📊 Repository Size Summary:"
+        du -sh .repo || true
+
+        echo ""
+
+        # Kernel Repository Detection
+        echo "🔎 Detecting Kernel Repository..."
+
+        KREPOSPATH=$(find . \
+          -type f \
+          -name "build.config*" \
+          -not -path "*/.repo/*" \
+          -print \
+          -quit)
+
+        if [[ -z "$KREPOSPATH" ]]; then
+          echo "⚠️ ERROR: No Build Configuration Found"
+          exit 1
+        fi
+
+        echo "📌 Build Configuration Found: $KREPOSPATH"
+
+        KERNELREPOSITORY=$(dirname "${KREPOSPATH#./}")
+
+        echo "🔎 Detected Kernel Repository: $KERNELREPOSITORY"
+
+        echo "KERNELREPOSITORY=$KERNELREPOSITORY" >> "$GITHUB_ENV"
+
+        echo ""
+
+        # Cleanup ABI Protected Exports
+        echo "🧹 Cleaning ABI Protected Exports..."
+
+        for directory in \
+          kernel_platform/common \
+          kernel_platform/msm-kernel; do
+
+          [[ -d "$directory" ]] || continue
+
+          file="$directory/BUILD.bazel"
+
+          if [[ -f "$file" ]]; then
+            if grep -q "protected_exports_list" "$file"; then
+              sed -i '/protected_exports_list/d' "$file"
+            fi
+          fi
+
+          rm -f \
+            "$directory/android/abi_gki_protected_exports_"* \
+            || true
+
+        done
+
+        echo ""
+
+        # Disable Default Config Checks
+        echo "🧹 Disabling Defconfig Checks..."
+
+        # Remove all Default Config Checks references
+        find . \
+          -type f \
+          -name "build.config.gki" \
+          -exec grep -q "check_defconfig" {} \; \
+          -exec sed -i '/check_defconfig/d' {} \; \
+          2>/dev/null \
+          || true
+
+        # Patch KLeaf Configuration
+        find . \
+          -type f \
+          -name "common_kernels.bzl" \
+          -exec sed -i \
+            's/check_defconfig *= *None,/check_defconfig = "disabled",/g' \
+            {} + \
+          2>/dev/null \
+          || true
+
+        # Disable KLeaf Conditional Check
+        find . \
+          -type f \
+          -name "common_kernels.bzl" \
+          -exec sed -i \
+            's/if check_defconfig == None:/if False:  # Disabled by CI/g' \
+            {} + \
+          2>/dev/null \
+          || true
+
+        echo ""
+        echo "🎉 Default Config Checks Disabled"
+        echo "🎉 Kernel Repository Pipeline Complete"
