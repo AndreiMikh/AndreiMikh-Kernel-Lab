@@ -1,0 +1,459 @@
+name: "Root Engine"
+description: "Resolve and Configure the Selected KernelSU Root Engine"
+
+inputs:
+  root-branch-source:
+    description: "Root Engine Manager Branch/Source"
+    required: true
+
+  root-engine:
+    description: "Root Engine"
+    required: true
+
+  susfs-repository:
+    description: "SUSFS Repository Selection"
+    required: true
+
+  kernel-workspace:
+    description: "Kernel Workspace Directory"
+    required: false
+    default: "kernel_workspace"
+
+outputs:
+  manager-branch:
+    description: "Resolved Manager Branch"
+    value: ${{ steps.manager.outputs.MANAGERBRANCH }}
+
+  branch-path:
+    description: "Resolved Setup Repository Path"
+    value: ${{ steps.manager.outputs.BRANCHPATH }}
+
+  manager-artifact:
+    description: "Resolved Manager Artifact"
+    value: ${{ steps.manager.outputs.MANAGERARTIFACT }}
+
+  ksu-repo:
+    description: "Resolved Root Engine Repository"
+    value: ${{ steps.manager.outputs.KSUREPO }}
+
+  ksu-version:
+    description: "Configured KSU Version"
+    value: ${{ steps.configure.outputs.KSUVERSION }}
+
+  git-commit-hash:
+    description: "SukiSU-Ultra Commit Hash"
+    value: ${{ steps.configure.outputs.GITCOMMITHASH }}
+
+runs:
+  using: composite
+
+  steps:
+
+    # ============================================================
+    # Resolve Root Engine Source
+    # ============================================================
+
+    - name: 🔧 Solve Root Engine Source
+      id: manager
+      shell: bash
+      env:
+        ROOTBRANCHSOURCE: ${{ inputs.root-branch-source }}
+        ROOTENGINE: ${{ inputs.root-engine }}
+      run: |
+        set -Eeuo pipefail
+
+        MANAGERBRANCH=""
+        BRANCHPATH=""
+        MANAGERARTIFACT=""
+        KSUREPO=""
+
+        # Resolve Root Source
+        case "$ROOTBRANCHSOURCE" in
+          SukiSU-Ultra-Builtin)
+            MANAGERBRANCH="main"
+            BRANCHPATH="builtin"
+            MANAGERARTIFACT="manager"
+            ;;
+
+          KernelSU-Next-Dev-SUSFS)
+            MANAGERBRANCH="dev-susfs"
+            MANAGERARTIFACT="manager"
+            ;;
+
+          KernelSU-Next-Dev)
+            MANAGERBRANCH="dev"
+            MANAGERARTIFACT="manager-spoofed"
+            ;;
+
+          KernelSU-Main)
+            MANAGERBRANCH="main"
+            MANAGERARTIFACT="manager"
+            ;;
+
+          ReSukiSU-Main)
+            MANAGERBRANCH="main"
+            MANAGERARTIFACT="Manager-release"
+            ;;
+
+          ReSukiSU-Dev)
+            MANAGERBRANCH="dev"
+            MANAGERARTIFACT="Manager-release"
+            ;;
+
+          *)
+            echo "⚠️ Unsupported Root Source: $ROOTBRANCHSOURCE"
+            exit 1
+            ;;
+        esac
+
+        # Resolve Root Engine Repository
+        case "$ROOTENGINE" in
+          SukiSU-Ultra)
+            KSUREPO="SukiSU-Ultra/SukiSU-Ultra"
+            ;;
+
+          KernelSU-Next)
+            KSUREPO="KernelSU-Next/KernelSU-Next"
+            ;;
+
+          ReSukiSU)
+            KSUREPO="ReSukiSU/ReSukiSU"
+            ;;
+
+          KernelSU)
+            KSUREPO="tiann/KernelSU"
+            ;;
+
+          *)
+            echo "⚠️ Unsupported Root Engine: $ROOTENGINE"
+            exit 1
+            ;;
+        esac
+
+        # Validate Resolution
+        [[ -n "$MANAGERBRANCH" ]] || {
+          echo "⚠️ Failed to Resolve Manager Branch"
+          exit 1
+        }
+
+        [[ -n "$KSUREPO" ]] || {
+          echo "⚠️ Failed to Resolve Root Engine Repository"
+          exit 1
+        }
+
+        {
+          echo "MANAGERBRANCH=$MANAGERBRANCH"
+          echo "BRANCHPATH=$BRANCHPATH"
+          echo "MANAGERARTIFACT=$MANAGERARTIFACT"
+          echo "KSUREPO=$KSUREPO"
+        } >> "$GITHUB_OUTPUT"
+
+        echo "------------------------------"
+        echo "✔️ Root Engine Source Resolved"
+        echo "📦 Engine     : $ROOTENGINE"
+        echo "📂 Repository : $KSUREPO"
+        echo "🌿 Branch     : $MANAGERBRANCH"
+        echo "📁 Setup Repo : ${BRANCHPATH:-N/A}"
+        echo "📦 Artifact   : $MANAGERARTIFACT"
+        echo "------------------------------"
+
+    # ============================================================
+    # Configure Root Engine
+    # ============================================================
+
+    - name: 🔧 Configure Root Engine
+      id: configure
+      shell: bash
+      env:
+        ROOTENGINE: ${{ inputs.root-engine }}
+        SUSFS: ${{ inputs.susfs-repository }}
+        MANAGERBRANCH: ${{ steps.manager.outputs.MANAGERBRANCH }}
+        BRANCHPATH: ${{ steps.manager.outputs.BRANCHPATH }}
+        KSUREPO: ${{ steps.manager.outputs.KSUREPO }}
+        KERNEL_WORKSPACE: ${{ inputs.kernel-workspace }}
+      run: |
+        set -Eeuo pipefail
+
+        cd "${GITHUB_WORKSPACE}/${KERNEL_WORKSPACE}/kernel_platform"
+
+        KCDIR="${GITHUB_WORKSPACE}/${KERNEL_WORKSPACE}/kernel_platform/common"
+        DEFCONFIG="${KCDIR}/arch/arm64/configs/gki_defconfig"
+
+        # ------------------------------------------------------------
+        # Helpers
+        # ------------------------------------------------------------
+
+        gitlatesttag() {
+          local repo="$1"
+          local tag
+
+          tag="$(
+            git ls-remote --tags --sort="v:refname" \
+              "https://github.com/${repo}.git" 2>/dev/null \
+              | awk '{print $2}' \
+              | sed 's#refs/tags/##' \
+              | grep -v '\^{}' \
+              | tail -n1 \
+              || true
+          )
+
+          echo "${tag:-v0.0.0}"
+        }
+
+        getcommitcount() {
+          git rev-list --count HEAD 2>/dev/null || echo 0
+        }
+
+        setupengine() {
+          local repo="$1"
+          local branch="$2"
+          local argument="$3"
+
+          echo "🔗 Setup Repository : $repo"
+          echo "🌿 Setup Branch     : $branch"
+          echo "📌 Setup Argument   : $argument"
+
+          curl -fsSL \
+            "https://raw.githubusercontent.com/${repo}/${branch}/kernel/setup.sh" \
+            | bash -s -- "$argument"
+        }
+
+        # ------------------------------------------------------------
+        # SukiSU-Ultra
+        # ------------------------------------------------------------
+
+        if [[ "$ROOTENGINE" == "SukiSU-Ultra" ]]; then
+
+          echo "🚀 Setting Up SukiSU-Ultra..."
+
+          setupengine \
+            "$KSUREPO" \
+            "$MANAGERBRANCH" \
+            "$BRANCHPATH"
+
+          cd KernelSU || {
+            echo "⚠️ SukiSU-Ultra Directory Not Found"
+            exit 1
+          }
+
+          GITCOMMITHASH="$(git rev-parse --short=8 HEAD)"
+          echo "🔖 Current Commit Hash : $GITCOMMITHASH"
+
+          COMMITCOUNT="$(git rev-list --count main 2>/dev/null || echo 0)"
+
+          if [[ "$COMMITCOUNT" =~ ^[0-9]+$ ]]; then
+            KSUVERSION=$((COMMITCOUNT + 37185))
+          else
+            KSUVERSION=114514
+          fi
+
+          echo "📦 SukiSU-Ultra Version : $KSUVERSION"
+          echo "🔖 SukiSU-Ultra Commit  : $GITCOMMITHASH"
+
+          {
+            echo "KSUVERSION=$KSUVERSION"
+            echo "KSUVER=$KSUVERSION"
+            echo "GITCOMMITHASH=$GITCOMMITHASH"
+          } >> "$GITHUB_ENV"
+
+          {
+            echo "KSUVERSION=$KSUVERSION"
+            echo "GITCOMMITHASH=$GITCOMMITHASH"
+          } >> "$GITHUB_OUTPUT"
+
+          echo "🔍 Verifying SukiSU-Ultra Version Definitions..."
+
+          grep -n \
+            '^VERSION_BASE\|^VERSION_OFFSET\|^KSU_VERSION_FULL\|^VERSION_TAG' \
+            kernel/Makefile || true
+
+          echo "🎉 SukiSU-Ultra Setup Complete"
+
+        # ------------------------------------------------------------
+        # ReSukiSU
+        # ------------------------------------------------------------
+
+        elif [[ "$ROOTENGINE" == "ReSukiSU" ]]; then
+
+          echo "🚀 Setting Up ReSukiSU..."
+
+          setupengine \
+            "$KSUREPO" \
+            "$MANAGERBRANCH" \
+            "$MANAGERBRANCH"
+
+          cd KernelSU || {
+            echo "⚠️ ReSukiSU Directory was Not Created"
+            exit 1
+          }
+
+          CURRENTBRANCH="$(git branch --show-current || true)"
+          CURRENTBRANCH="${CURRENTBRANCH:-HEAD}"
+
+          COMMITCOUNT="$(getcommitcount)"
+
+          if [[ "$COMMITCOUNT" =~ ^[0-9]+$ ]]; then
+            KSUVERSION=$((COMMITCOUNT + 30700))
+          else
+            KSUVERSION=30700
+          fi
+
+          echo "KSUVERSION=$KSUVERSION" >> "$GITHUB_ENV"
+          echo "KSUVERSION=$KSUVERSION" >> "$GITHUB_OUTPUT"
+
+          # Force Simple Tag-Based Full-Name Format
+          if [[ -f "$DEFCONFIG" ]]; then
+            sed -i '/^CONFIG_KSU_FULL_NAME_FORMAT=/d' "$DEFCONFIG"
+
+            printf 'CONFIG_KSU_FULL_NAME_FORMAT="%%TAG_NAME%%"\n' \
+              >> "$DEFCONFIG"
+          fi
+
+          echo "🌿 Branch      : $CURRENTBRANCH"
+          echo "🔢 KSU Version : $KSUVERSION"
+
+          echo "🎉 ReSukiSU Setup Complete"
+
+        # ------------------------------------------------------------
+        # KernelSU-Next
+        # ------------------------------------------------------------
+
+        elif [[ "$ROOTENGINE" == "KernelSU-Next" ]]; then
+
+          echo "🚀 Setting Up KernelSU-Next..."
+
+          setupengine \
+            "$KSUREPO" \
+            "$MANAGERBRANCH" \
+            "$MANAGERBRANCH"
+
+          cd KernelSU-Next || {
+            echo "⚠️ KernelSU-Next Directory was Not Created"
+            exit 1
+          }
+
+          COMMITCOUNT="$(getcommitcount)"
+
+          if [[ "$COMMITCOUNT" =~ ^[0-9]+$ ]]; then
+            KSUVERSION=$((COMMITCOUNT + 30000))
+          else
+            KSUVERSION=30000
+          fi
+
+          echo "KSUVERSION=$KSUVERSION" >> "$GITHUB_ENV"
+          echo "KSUVERSION=$KSUVERSION" >> "$GITHUB_OUTPUT"
+
+          # Version Fallback
+          if grep -q '^KSU_VERSION_FALLBACK := ' kernel/Kbuild; then
+            sed -i \
+              "s/^KSU_VERSION_FALLBACK := .*/KSU_VERSION_FALLBACK := $KSUVERSION/" \
+              kernel/Kbuild
+          fi
+
+          # Tag Fallback
+          KSU_GIT_TAG="$(gitlatesttag "$KSUREPO")"
+
+          if grep -q '^KSU_VERSION_TAG_FALLBACK := ' kernel/Kbuild; then
+            sed -i \
+              "s/^KSU_VERSION_TAG_FALLBACK := .*/KSU_VERSION_TAG_FALLBACK := $KSU_GIT_TAG/" \
+              kernel/Kbuild
+          fi
+
+          # KernelSU-Next SELinux Fix
+          STATICSELINUX="kernel/feature/selinux_hide.c"
+
+          if [[ -f "$STATICSELINUX" ]] && \
+            grep -qE \
+              '^static (int|void) security_(context_to_sid|sid_to_context|compute_av_user)_with_policy\(' \
+              "$STATICSELINUX"; then
+
+            perl -0777 -i -pe '
+              s/^static int security_context_to_sid_with_policy\(/int security_context_to_sid_with_policy(/mg;
+              s/^static int security_sid_to_context_with_policy\(/int security_sid_to_context_with_policy(/mg;
+              s/^static void security_compute_av_user_with_policy\(/void security_compute_av_user_with_policy(/mg;
+            ' "$STATICSELINUX"
+
+            echo "✔️ KernelSU-Next SELinux Fix Applied"
+          fi
+
+          # SUSFS Inline Hook Mode
+          if [[ "$SUSFS" != "-1" ]] && \
+            [[ -f kernel/supercall/dispatch.c ]]; then
+
+            perl -0777 -i -pe '
+              s/#ifdef CONFIG_HAVE_SYSCALL_TRACEPOINTS.*?#endif/
+              strscpy(cmd.mode, "Inline", sizeof(cmd.mode));
+              /s
+            ' kernel/supercall/dispatch.c
+
+            echo "✔️ SUSFS Hook Mode Set to Inline"
+          fi
+
+          echo "🌿 Branch      : $MANAGERBRANCH"
+          echo "🏷️ Latest Tag  : $KSU_GIT_TAG"
+          echo "🔢 KSU Version : $KSUVERSION"
+
+          echo "🎉 KernelSU-Next Setup Complete"
+
+        # ------------------------------------------------------------
+        # KernelSU
+        # ------------------------------------------------------------
+
+        elif [[ "$ROOTENGINE" == "KernelSU" ]]; then
+
+          echo "🚀 Setting Up KernelSU..."
+
+          setupengine \
+            "$KSUREPO" \
+            "$MANAGERBRANCH" \
+            "$MANAGERBRANCH"
+
+          cd KernelSU || {
+            echo "⚠️ KernelSU Directory was Not Created"
+            exit 1
+          }
+
+          COMMITCOUNT="$(getcommitcount)"
+
+          if [[ "$COMMITCOUNT" =~ ^[0-9]+$ ]]; then
+            KSUVERSION=$((COMMITCOUNT + 30000))
+          else
+            KSUVERSION=30000
+          fi
+
+          echo "KSUVERSION=$KSUVERSION" >> "$GITHUB_ENV"
+          echo "KSUVERSION=$KSUVERSION" >> "$GITHUB_OUTPUT"
+
+          # KernelSU Version Fallback
+          if grep -q '^KSU_VERSION_FALLBACK := ' kernel/Kbuild; then
+            sed -i \
+              "s/^KSU_VERSION_FALLBACK := .*/KSU_VERSION_FALLBACK := $KSUVERSION/" \
+              kernel/Kbuild
+          fi
+
+          # DKSU Version
+          if grep -qE '^DKSU_VERSION[[:space:]]*=' kernel/Kbuild; then
+            sed -i \
+              -E \
+              "s/^DKSU_VERSION[[:space:]]*=.*$/DKSU_VERSION=${KSUVERSION}/" \
+              kernel/Kbuild
+          fi
+
+          echo "🌿 Branch      : $MANAGERBRANCH"
+          echo "🔢 KSU Version : $KSUVERSION"
+
+          echo "🎉 KernelSU Setup Complete"
+
+        else
+          echo "⚠️ No Supported KSU Root Engine Selected"
+          exit 1
+        fi
+
+        echo ""
+        echo "------------------------------"
+        echo "🎉 Root Engine Configuration Complete"
+        echo "------------------------------"
+        echo "📦 Engine     : $ROOTENGINE"
+        echo "📂 Repository : $KSUREPO"
+        echo "🌿 Branch     : $MANAGERBRANCH"
+        echo "📁 Setup Repo : ${BRANCHPATH:-N/A}"
