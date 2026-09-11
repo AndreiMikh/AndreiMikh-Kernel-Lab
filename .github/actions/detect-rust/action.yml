@@ -1,0 +1,118 @@
+name: "Detect Rust Compiler Requirement"
+description: "Detect Rust Compiler Requirement and Toolchain Version"
+
+runs:
+  using: composite
+
+  steps:
+
+    - name: 🔧 Detect Rust Compiler Requirement
+      shell: bash
+      run: |
+        set -Eeuo pipefail
+
+        # Kernel Platform Directory
+        KDIR="kernel_workspace/kernel_platform"
+
+        # State
+        ENABLERUSTC="false"
+        VERSIONRUSTC=""
+        RAWRUSTC=""
+
+        # Validate Kernel Directory
+        if [[ ! -d "$KDIR" ]]; then
+          echo "⚠️ Kernel Directory Not Found: $KDIR"
+          exit 1
+        fi
+
+        cd "$KDIR"
+
+        # Paths Relative to Kernel Platform
+        FCONFIG="./common/build.config.constants"
+        RUSTBIN="./prebuilts/rust/linux-x86/bin/rustc"
+
+        # Detect Rust from Build Configuration Constants
+        if [[ -f "$FCONFIG" ]]; then
+          echo "🔎 Checking Build Configuration Constants..."
+
+          # Prefer Modern AOSP Key
+          RAWRUSTC="$(
+            awk -F= '/^RUSTC_VERSION=/{print $2}' "$FCONFIG" \
+              | tr -d '"' \
+              | head -n1
+          )"
+
+          # Fallback to Legacy / Custom Key: VERSIONRUSTC
+          if [[ -z "$RAWRUSTC" ]]; then
+            RAWRUSTC="$(
+              awk -F= '/^VERSIONRUSTC=/{print $2}' "$FCONFIG" \
+                | tr -d '"' \
+                | head -n1
+            )"
+          fi
+
+          if [[ -n "$RAWRUSTC" ]]; then
+            echo "📌 RUST Version from Configuration (Raw): $RAWRUSTC"
+
+            # Extract Path-Safe Version
+            # Example: 1.81.0 from 1.81.0-Google
+            VERSIONRUSTC="$(
+              echo "$RAWRUSTC" \
+                | grep -oE '^[0-9]+\.[0-9]+\.[0-9]+' || true
+            )"
+
+            # Fallback if version extraction fails
+            [[ -z "$VERSIONRUSTC" ]] && VERSIONRUSTC="$RAWRUSTC"
+
+            echo "📁 RUST Version for Paths: $VERSIONRUSTC"
+            ENABLERUSTC="true"
+          else
+            echo "⚠️ No RUST Compiler Version Found in Configuration"
+          fi
+        else
+          echo "⚠️ Missing Build Configuration Constants"
+        fi
+
+        # Fallback: Detect Rust Toolchain Directly
+        if [[ "$ENABLERUSTC" == "false" ]]; then
+          if [[ -x "$RUSTBIN" ]]; then
+            echo "📦 Rust Toolchain Detected (Fallback)"
+
+            RAWRUSTC="$("$RUSTBIN" --version | awk '{print $2}')"
+
+            VERSIONRUSTC="$(
+              echo "$RAWRUSTC" \
+                | grep -oE '^[0-9]+\.[0-9]+\.[0-9]+' || true
+            )"
+
+            # Fallback if Version Extraction Fails
+            [[ -z "$VERSIONRUSTC" ]] && VERSIONRUSTC="$RAWRUSTC"
+
+            echo "🔍 Detected Rustc Version: $RAWRUSTC"
+            echo "📁 RUST Version for Paths: $VERSIONRUSTC"
+            ENABLERUSTC="true"
+          else
+            echo "⚠️ RUST Toolchain Not Found: $RUSTBIN"
+          fi
+        fi
+
+        # Final Defaults
+        if [[ "$ENABLERUSTC" != "true" ]]; then
+          VERSIONRUSTC="None"
+          RAWRUSTC="None"
+        fi
+
+        # Export to GitHub Environment
+        echo "ENABLERUSTC=$ENABLERUSTC" >> "$GITHUB_ENV"
+        echo "VERSIONRUSTC=$VERSIONRUSTC" >> "$GITHUB_ENV"
+        echo "RAWRUSTC=$RAWRUSTC" >> "$GITHUB_ENV"
+
+        # Final Summary
+        echo ""
+        echo "------------------------------"
+        echo "🦀 RUST Detection Result"
+        echo "------------------------------"
+        echo "Enabled      : $ENABLERUSTC"
+        echo "Raw Version  : $RAWRUSTC"
+        echo "Path Version : $VERSIONRUSTC"
+        echo "------------------------------"
