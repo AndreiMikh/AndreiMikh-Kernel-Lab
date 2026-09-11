@@ -1,0 +1,227 @@
+name: "Kernel Version Suffix"
+description: "Inject a custom or automatically generated kernel version suffix"
+
+inputs:
+  suffix:
+    description: "Custom kernel version suffix"
+    required: false
+    default: ""
+
+  fast-build:
+    description: "Enable fast-build suffix handling"
+    required: false
+    default: "false"
+
+  android-version:
+    description: "Android version used in kernel suffix"
+    required: true
+
+outputs:
+  localversion:
+    description: "Fallback LOCALVERSION"
+    value: ${{ steps.inject.outputs.LOCALVERSION }}
+
+  autosuffix:
+    description: "Generated automatic suffix"
+    value: ${{ steps.auto.outputs.AUTOSUFFIX }}
+
+runs:
+  using: composite
+
+  steps:
+
+    # Inject the user-provided kernel version suffix
+    - name: 🔧 Inject Custom Kernel Version Suffix
+      id: inject
+      if: ${{ inputs.suffix != '' }}
+      continue-on-error: true
+      shell: bash
+      env:
+        SUFFIX: ${{ inputs.suffix }}
+        FASTBUILD: ${{ inputs.fast-build }}
+        ANDROIDVERSION: ${{ inputs.android-version }}
+      run: |
+        set -Eeuo pipefail
+
+        cd "${GITHUB_WORKSPACE}/kernel_workspace"
+
+        echo "🚀 Injecting Custom Kernel Suffix: $SUFFIX"
+
+        # Kernel setlocalversion scripts
+        FILES=(
+          kernel_platform/common/scripts/setlocalversion
+          kernel_platform/msm-kernel/scripts/setlocalversion
+          kernel_platform/external/dtc/scripts/setlocalversion
+        )
+
+        for path in "${FILES[@]}"; do
+          [[ -f "$path" ]] || continue
+
+          echo "Processing: $path"
+
+          # Remove existing dirty tags
+          sed -i 's/ -dirty//g' "$path"
+          sed -i '$i res=$(echo "$res" | sed '\''s/-dirty//g'\'')' "$path"
+
+          # Handle newer kernel setlocalversion format
+          if grep -q 'KERNELVERSION.*scm_version' "$path"; then
+            echo "📌 New Set Local Version Format Detected"
+
+            sed -i \
+              "s|echo \"\${KERNELVERSION}.*scm_version}\"|echo \"\${KERNELVERSION}-${ANDROIDVERSION}-${SUFFIX}\"|" \
+              "$path"
+
+          # Handle older kernel setlocalversion format
+          elif grep -q 'echo "\$res"' "$path"; then
+            echo "📌 Old Set Local Version Format Detected"
+
+            # Fast-build mode uses a static version value
+            if [[ "$FASTBUILD" == "true" ]]; then
+              echo "✔️ Fast Build Enabled: Setting Static Res Value"
+
+              sed -i \
+                "s/^res=.*/res=\"-${ANDROIDVERSION}-${SUFFIX}\"/" \
+                "$path"
+
+            # Standard mode preserves the existing version logic
+            else
+              echo "🛠️ Standard Build: Dynamically Injecting Suffix"
+
+              # Warn when Bazel may restrict special characters
+              if [[ -f ./kernel_platform/build_with_bazel.py ]]; then
+                echo "⚠️ Note: Using Bazel may Limit Special Characters, Adjust Script if Compilation Fails"
+              fi
+
+              # Inject suffix into the existing res value
+              tac "$path" \
+                | sed \
+                  "0,/echo \"\\\$res\"/s//res=\\\$(echo \\\$res | cut -d- -f1-2)-${SUFFIX}; echo \"\\\$res\";/" \
+                | tac \
+                > "$path.tmp"
+
+              mv "$path.tmp" "$path"
+            fi
+
+          # Fallback for an unknown setlocalversion format
+          else
+            echo "⚠️ Unknown Format: Appending Suffix Manually"
+            echo "echo \"\$res-${SUFFIX}\"" >> "$path"
+          fi
+
+          # Ensure the script remains executable
+          chmod +x "$path"
+        done
+
+        # Commit the modified kernel version scripts
+        echo "⚙️ Committing Suffix Modifications..."
+
+        git add -A
+
+        if git diff --cached --quiet; then
+          echo "✔️ No changes to commit"
+        else
+          git commit -m "🎉 Inject Custom Kernel Suffix and Remove Dirty Tags"
+        fi
+
+    # Use LOCALVERSION/KBUILDVERSION when custom suffix injection fails
+    - name: 🔧 Fallback - Inject Local Kernel Version Suffix
+      id: fallback
+      if: ${{ steps.inject.conclusion == 'failure' && inputs.suffix != '' }}
+      shell: bash
+      env:
+        SUFFIX: ${{ inputs.suffix }}
+        ANDROIDVERSION: ${{ inputs.android-version }}
+      run: |
+        set -Eeuo pipefail
+
+        cd "${GITHUB_WORKSPACE}/kernel_workspace"
+
+        # Build the fallback kernel version suffix
+        FINALSUFFIX="-${ANDROIDVERSION}-${SUFFIX}"
+
+        echo "⚠️ Fallback Triggered → Using Local Version: $FINALSUFFIX"
+
+        # Persist values for subsequent workflow steps
+        echo "LOCALVERSION=$FINALSUFFIX" >> "$GITHUB_ENV"
+        echo "KBUILDVERSION=$FINALSUFFIX" >> "$GITHUB_ENV"
+
+        # Export values for the current shell
+        export LOCALVERSION="$FINALSUFFIX"
+        export KBUILDVERSION="$FINALSUFFIX"
+
+        # Expose the fallback value as a composite output
+        echo "LOCALVERSION=$FINALSUFFIX" >> "$GITHUB_OUTPUT"
+
+        echo "🎉 Local Version is Set to: $LOCALVERSION"
+
+    # Generate a random suffix when no custom suffix was provided
+    - name: 🔧 Auto-Generated Kernel Suffix
+      id: auto
+      if: ${{ inputs.suffix == '' }}
+      shell: bash
+      env:
+        ANDROIDVERSION: ${{ inputs.android-version }}
+      run: |
+        set -Eeuo pipefail
+
+        cd "${GITHUB_WORKSPACE}/kernel_workspace"
+
+        echo "🚀 Generating Random Kernel Suffix..."
+
+        # Generate Random Kernel Suffix Components
+        RANDOMDIGIT=$((RANDOM % 10))
+        RANDOMHASH="$(head -c 7 /dev/urandom | xxd -p)"
+
+        AUTOSUFFIX="${RANDOMDIGIT}-g${RANDOMHASH}"
+
+        echo "🧾 Suffix: $AUTOSUFFIX"
+
+        # Persist Generated Suffix for Later Workflow Steps
+        echo "AUTOSUFFIX=$AUTOSUFFIX" >> "$GITHUB_OUTPUT"
+        echo "AUTOSUFFIX=$AUTOSUFFIX" >> "$GITHUB_ENV"
+
+        # Kernel Set Local Version Scripts
+        FILES=(
+          kernel_platform/common/scripts/setlocalversion
+          kernel_platform/msm-kernel/scripts/setlocalversion
+          kernel_platform/external/dtc/scripts/setlocalversion
+        )
+
+        for path in "${FILES[@]}"; do
+          [[ -f "$path" ]] || continue
+
+          echo "⚙️ Processing: $path"
+
+          # Ensure the Script Remains Executable
+          chmod +x "$path"
+
+          # Remove Existing Dirty Markers
+          sed -i 's/ -dirty//g' "$path"
+
+          # Prevent Duplicate Automatic Suffix Injection
+          if ! grep -q "Kernel Auto Suffix Injection" "$path"; then
+            cat >> "$path" <<EOF
+
+        # Kernel Auto Suffix Injection
+        if [ -n "\$res" ]; then
+          case "\$res" in
+            *"-${AUTOSUFFIX}"*) ;;
+            *)
+              res="\$res-${ANDROIDVERSION}-${AUTOSUFFIX}"
+              ;;
+          esac
+        fi
+        EOF
+          fi
+        done
+
+        # Commit Automatic Suffix Modifications
+        echo "⚙️ Committing Changes..."
+
+        git add -A
+
+        if git diff --cached --quiet; then
+          echo "✔️ No changes to Commit"
+        else
+          git commit -m "🎉 Apply Auto-Generated Kernel Suffix"
+        fi
