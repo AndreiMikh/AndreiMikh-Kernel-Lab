@@ -1,0 +1,494 @@
+name: "SUSFS Patches"
+description: "Apply Fake Patches, SUSFS Patches, Kernel Compatibility Patches, and Revert Fake Patches"
+
+inputs:
+  susfs-repository:
+    description: "SUSFS Repository Selection"
+    required: true
+
+  root-engine:
+    description: "Selected Root Engine"
+    required: true
+
+  susfs-variant:
+    description: "SUSFS Variant"
+    required: true
+
+  susfs-branch-dev:
+    description: "Use SUSFS Development Branch"
+    required: true
+
+  file:
+    description: "Kernel Manifest Configuration File"
+    required: true
+
+  zram-custom-patch:
+    description: "ZRAM Custom Patch Selection"
+    required: true
+
+  android-version:
+    description: "Android Version"
+    required: true
+
+  kernel-version:
+    description: "Kernel Version"
+    required: true
+
+  sublevel:
+    description: "Kernel Sublevel"
+    required: true
+
+  xus:
+    description: "XUS Fix Selection"
+    required: true
+
+  reject-checker:
+    description: "Reject Checker Script"
+    required: true
+
+runs:
+  using: composite
+
+  steps:
+
+    # Apply Fake Patches
+    - name: 🔧 Apply Fake Patches
+      shell: bash
+      env:
+        SUSFSREPOSITORY: ${{ inputs.susfs-repository }}
+      run: |
+        set -Eeuo pipefail
+
+        # Paths
+        PDIR="${GITHUB_WORKSPACE}/kernel_workspace/AndreiMikh-Kernel-Lab/scripts"
+        WORKDIR="${GITHUB_WORKSPACE}/kernel_workspace/kernel_platform/common"
+        SCRIPT="${PDIR}/FakePatches.kts"
+
+        # Kotlin Environment
+        KOTLINHOME="${KOTLINHOME:-$HOME/kotlinc}"
+        KOTLINC="${KOTLINHOME}/bin/kotlinc"
+
+        echo "📌 Script   : $SCRIPT"
+        echo "📌 Work Dir : $WORKDIR"
+        echo "📌 Compiler : $KOTLINC"
+
+        [[ -f "$SCRIPT" ]] || {
+          echo "⚠️ FakePatches Kotlin Script Not Found"
+          exit 1
+        }
+
+        [[ -d "$WORKDIR" ]] || {
+          echo "⚠️ Kernel Common Directory Not Found"
+          exit 1
+        }
+
+        [[ -x "$KOTLINC" ]] || {
+          echo "⚠️ Kotlin Compiler Not Found or Not Executable: $KOTLINC"
+          exit 1
+        }
+
+        # Verify Kotlin
+        echo "☕ Kotlin Compiler:"
+        "$KOTLINC" -version
+
+        echo "🔧 Applying Fake Patches..."
+        "$KOTLINC" -script "$SCRIPT" apply "$WORKDIR"
+
+        echo ""
+        echo "🎉 Fake Patches Applied Successfully"
+
+    # Apply SUSFS and Kernel Compatibility Patches
+    - name: 🔧 SUSFS Patches (Auto Official / Fallback) and Kernel Compatibility Patches
+      shell: bash
+      env:
+        ROOTENGINE: ${{ inputs.root-engine }}
+        SUSFSREPOSITORY: ${{ inputs.susfs-repository }}
+        SUSFSVARIANT: ${{ inputs.susfs-variant }}
+        SUSFSBRANCHDEV: ${{ inputs.susfs-branch-dev }}
+        FILE: ${{ inputs.file }}
+        ZRAMPATCH: ${{ inputs.zram-custom-patch }}
+        ANDROIDVERSION: ${{ inputs.android-version }}
+        KERNELVERSION: ${{ inputs.kernel-version }}
+        SUBLEVEL: ${{ inputs.sublevel }}
+        XUS: ${{ inputs.xus }}
+        REJECTCHECKER: ${{ inputs.reject-checker }}
+      run: |
+        set -euo pipefail
+
+        # Build derived variables in bash
+        GKIVERSION="${ANDROIDVERSION}-${KERNELVERSION}"
+
+        # Navigate to Kernel Directory
+        cd kernel_workspace
+
+        # Clone Required Patch Repositories
+        echo "📥 Cloning Patch Dependencies..."
+
+        # LZ4 / ZSTD Patch Sources
+        case "$ZRAMPATCH" in
+          "LZ4-1.10.0-Patch-Update")
+            git clone --depth=1 \
+              https://github.com/Numbersf/lz4_oplus.git
+            ;;
+        esac
+
+        echo "✔️ Patch Repositories Cloned"
+        echo
+
+        # Environment Information
+        echo "🧾 Android Version       : $ANDROIDVERSION"
+        echo "🧾 Kernel Version        : $KERNELVERSION"
+        echo "🔎 Detected Kernel Base  : $GKIVERSION"
+        echo
+
+        echo "🔎 Detected Kernel Base: $GKIVERSION"
+
+        # Detect Kernel Common Directory
+        if [[ -d "./kernel_platform/common" ]]; then
+          KDIR="./kernel_platform/common"
+        elif [[ -d "./common" ]]; then
+          KDIR="./common"
+        else
+          echo "⚠️ ERROR: Kernel Common Directory Not Found!"
+          exit 1
+        fi
+
+        # Save Absolute Kernel Directory
+        KDIR="$(realpath "$KDIR")"
+
+        echo "📁 Kernel Directory: $KDIR"
+        echo
+
+        # Clone SUSFS Repository
+        echo "📥 Cloning SUSFS..."
+
+        BRANCH="gki-${ANDROIDVERSION}-${KERNELVERSION}"
+
+        if [[ "$SUSFSVARIANT" == "OGKI" ]]; then
+          BRANCH="oki-${ANDROIDVERSION}-${KERNELVERSION}"
+
+          if [[ "$SUSFSBRANCHDEV" == "true" ]]; then
+            BRANCH="${BRANCH}-dev"
+          fi
+
+          git clone \
+            --depth=1 \
+            https://github.com/cctv18/susfs4oki.git \
+            susfs4ksu \
+            -b "$BRANCH"
+        else
+          if [[ "$SUSFSBRANCHDEV" == "true" ]]; then
+            BRANCH="${BRANCH}-dev"
+          fi
+
+          git clone \
+            --depth=1 \
+            https://gitlab.com/simonpunk/susfs4ksu.git \
+            susfs4ksu \
+            -b "$BRANCH"
+        fi
+
+        echo "✔️ SUSFS Branch: $BRANCH"
+
+        # Optional SUSFS Revision Checkout
+        cd susfs4ksu || exit 1
+
+        # Skip if SUSFS Revision is Empty or Disabled
+        if [[ -n "${SUSFSREPOSITORY:-}" && "${SUSFSREPOSITORY}" != "-1" ]]; then
+
+          echo "🔎 SUSFS Revision: $SUSFSREPOSITORY"
+
+          # Numeric Rollback Mode
+          if [[ "$SUSFSREPOSITORY" =~ ^[0-9]+$ ]]; then
+
+            echo "📦 Fetching Additional Git History..."
+
+            git fetch --unshallow ||
+              git fetch --depth=1000 origin "$BRANCH"
+
+            git checkout "HEAD~$SUSFSREPOSITORY" || {
+              echo "⚠️ Failed Checkout HEAD~$SUSFSREPOSITORY"
+              exit 1
+            }
+
+          else
+
+            # SUSFS Commit Hash / Tag / Branch Mode
+            if [[ "$SUSFSREPOSITORY" =~ ^[0-9a-fA-F]{7,40}$ ]]; then
+
+              echo "📦 Expanding Shallow Clone History..."
+
+              git fetch --unshallow origin ||
+                git fetch --deepen=200 origin "$BRANCH"
+            fi
+
+            git checkout "$SUSFSREPOSITORY" || {
+              echo "⚠️ Invalid SUSFS Revision"
+              exit 1
+            }
+
+          fi
+        fi
+
+        # Print Active SUSFS Revision
+        echo "✔️ Active SUSFS Commit: $(git rev-parse --short HEAD)"
+
+        # Detect SUSFS Version
+        SUSFSVER="Unknown"
+        SUSFSHEADER="./kernel_patches/include/linux/susfs.h"
+
+        if [[ -f "$SUSFSHEADER" ]]; then
+          SUSFSVER="$(
+            awk -F'"' '/SUSFS_VERSION/ {print $2; exit}' "$SUSFSHEADER"
+          )"
+
+          SUSFSVER="${SUSFSVER:-Unknown}"
+        fi
+
+        echo ""
+        echo "📦 SUSFS Version: $SUSFSVER"
+        echo "SUSFSVER=$SUSFSVER" >> "$GITHUB_ENV"
+
+        cd ..
+
+        # Find SUSFS Patches
+        echo "🔎 Searching SUSFS Patches..."
+
+        shopt -s nullglob
+
+        SUSFSPATCHLIST=(
+          ./susfs4ksu/kernel_patches/50_add_susfs_in_gki-${ANDROIDVERSION}-${KERNELVERSION}*.patch
+        )
+
+        if [[ ${#SUSFSPATCHLIST[@]} -eq 0 ]]; then
+          echo "⚠️ No SUSFS Patch Found"
+          ls ./susfs4ksu/kernel_patches/ || true
+          exit 1
+        fi
+
+        SUSFSPATCH="${SUSFSPATCHLIST[-1]}"
+
+        echo "🧾 SUSFS Patch Directory: $SUSFSPATCH"
+        echo ""
+
+        if [[ "$SUSFSREPOSITORY" != "-1" ]]; then
+
+          echo "📥 Copying SUSFS Patches..."
+
+          cp "$SUSFSPATCH" "$KDIR/" 2>/dev/null ||
+            echo "⚠️ Failed to Copy SUSFS Patches"
+
+          cp -r ./susfs4ksu/kernel_patches/fs/* "$KDIR/fs/" 2>/dev/null ||
+            echo "⚠️ Failed to Copy SUSFS Patches"
+
+          cp -r ./susfs4ksu/kernel_patches/include/linux/* "$KDIR/include/linux/" 2>/dev/null ||
+            echo "⚠️ Failed to Copy SUSFS Patches"
+
+        fi
+
+        # Navigate to Common Directory
+        cd "$KDIR"
+
+        # SUSFS Core Patch
+        echo "⚙️ Applying SUSFS Core Patch (50 Add SUSFS Patch)"
+
+        if patch -p1 < "$(basename "$SUSFSPATCH")"; then
+          echo "✔️ SUSFS 50 Enable Core Patch Applied"
+        else
+          echo "⚠️ SUSFS Core Patch Already Applied or Failed"
+        fi
+
+        # SUSFS 10 Enable Patch for KernelSU
+        if [[ "$ROOTENGINE" == "KernelSU" ]]; then
+
+          echo "⚙️ Applying KernelSU SUSFS enable patch"
+
+          if [[ "$SUSFSVARIANT" == "OGKI" ]]; then
+            PATCHBRANCH="oki-${ANDROIDVERSION}-${KERNELVERSION}"
+          else
+            PATCHBRANCH="gki-${ANDROIDVERSION}-${KERNELVERSION}"
+          fi
+
+          [[ "$SUSFSBRANCHDEV" == "true" ]] &&
+            PATCHBRANCH="${PATCHBRANCH}-dev"
+
+          case "$SUSFSVARIANT" in
+            GKI)
+              SUSFS10URL="https://gitlab.com/simonpunk/susfs4ksu/-/raw/${PATCHBRANCH}/kernel_patches/${ROOTENGINE}/10_enable_susfs_for_ksu.patch"
+              ;;
+
+            OGKI)
+              SUSFS10URL="https://raw.githubusercontent.com/cctv18/susfs4oki/${PATCHBRANCH}/kernel_patches/${ROOTENGINE}/10_enable_susfs_for_ksu.patch"
+              ;;
+
+            *)
+              echo "⚠️ Invalid SUSFS Variant"
+              exit 1
+              ;;
+          esac
+
+          # Verify Patch URL
+          echo "🔍 Checking Patch URL..."
+
+          if ! wget --spider "$SUSFS10URL"; then
+            echo "⚠️ ERROR: Patch does Not Exist:"
+            echo "$SUSFS10URL"
+            exit 1
+          fi
+
+          echo "🌐 Downloading Patch: $SUSFS10URL"
+
+          if ! wget "$SUSFS10URL" -O enable.patch; then
+            echo "⚠️ ERROR: Failed to Download SUSFS Enable Patch"
+            exit 1
+          fi
+
+          APPLIED=false
+
+          # Save Current Directory
+          ORIGDIR="$(pwd)"
+
+          # KernelSU Source Directory
+          KSUDIR="$(dirname "$KDIR")/KernelSU"
+
+          echo "📂 Current Directory: $(pwd)"
+          echo "🔧 Applying SUSFS Enable Patch..."
+
+          if [[ ! -d "$KSUDIR" ]]; then
+            echo "⚠️ ERROR: KernelSU Directory Not Found:"
+            echo "   $KSUDIR"
+            rm -f "$ORIGDIR/enable.patch"
+            exit 1
+          fi
+
+          echo "📂 Entering KernelSU Directory..."
+          cd "$KSUDIR" || exit 1
+
+          echo "📂 Current Directory: $(pwd)"
+          echo "🔧 Applying SUSFS Enable Patch..."
+
+          if patch -p1 < "$ORIGDIR/enable.patch"; then
+            APPLIED=true
+            echo "✔️ SUSFS Enable Patch Applied Successfully"
+          else
+            echo "⚠️ SUSFS Enable Patch Is Not Compatible with This KernelSU Source Tree"
+            echo "ℹ️ Skipping SUSFS Enable Patch"
+          fi
+
+          echo "📂 Returning to Original Directory..."
+          cd "$ORIGDIR" || exit 1
+
+          rm -f "$ORIGDIR/enable.patch"
+
+          if [[ "$APPLIED" == "true" ]]; then
+            echo "✔️ KernelSU SUSFS Enable Patch Completed"
+          else
+            echo "⚠️ KernelSU SUSFS Enable Patch Skipped"
+          fi
+
+        else
+
+          echo "⚠️ Skipping KernelSU SUSFS Enable Patch (Root = $ROOTENGINE)"
+
+        fi
+
+        echo ""
+        echo "🎉 SUSFS Patches Complete"
+
+        # 5.15 Legacy Fix
+        if [[ "$GKIVERSION" == "android13-5.15" && "$SUBLEVEL" -lt 123 ]]; then
+
+          LEGACYPATCH="${GITHUB_WORKSPACE}/kernel_workspace/AndreiMikh-Kernel-Lab/patches/Legacy-5.15-Fix.patch"
+
+          if [[ ! -f "$LEGACYPATCH" ]]; then
+            echo "⚠️ Patch Not Found: $LEGACYPATCH"
+            exit 1
+          fi
+
+          echo "🚀 Applying Legacy Fix (Kernel 5.15.0–5.15.123)"
+
+          if patch -R -p1 --dry-run < "$LEGACYPATCH" >/dev/null 2>&1; then
+            echo "⚠️ Patch Already Applied — Skipping"
+          else
+            if patch -p1 < "$LEGACYPATCH"; then
+              echo "✔️ Legacy 5.15 Fix Applied"
+            else
+              echo "⚠️ Patch Failed"
+              exit 1
+            fi
+          fi
+        fi
+
+        # Optional XUS Fix
+        if [[ "$XUS" == "Enabled" ]]; then
+
+          echo "🛠️ Applying XUS Fix Patch"
+
+          cp \
+            "${GITHUB_WORKSPACE}/kernel_workspace/AndreiMikh-Kernel-Lab/patches/XUS-Fix.patch" \
+            ./
+
+          patch -p1 < XUS-Fix.patch || true
+
+          echo "✔️ XUS Fix Patch Applied"
+        fi
+
+        # Load Reject Checker and Run Rejection Check
+        source "$REJECTCHECKER"
+        checkrejects .
+
+        echo ""
+        echo "🎉 Kernel Compatibility Fix Stage Completed"
+
+    # Revert Fake Patches
+    - name: 🔧 Revert Fake Patches
+      shell: bash
+      env:
+        SUSFSREPOSITORY: ${{ inputs.susfs-repository }}
+      run: |
+        set -Eeuo pipefail
+
+        # Paths
+        PDIR="${GITHUB_WORKSPACE}/kernel_workspace/AndreiMikh-Kernel-Lab/scripts"
+        WORKDIR="${GITHUB_WORKSPACE}/kernel_workspace/kernel_platform/common"
+        SCRIPT="${PDIR}/FakePatches.kts"
+
+        # Kotlin Environment
+        KOTLINHOME="${KOTLINHOME:-$HOME/kotlinc}"
+        KOTLINC="${KOTLINHOME}/bin/kotlinc"
+
+        echo "📌 Script   : $SCRIPT"
+        echo "📌 Work Dir : $WORKDIR"
+        echo "📌 Compiler : $KOTLINC"
+
+        [[ -f "$SCRIPT" ]] || {
+          echo "⚠️ FakePatches Kotlin Script Not Found"
+          exit 1
+        }
+
+        [[ -d "$WORKDIR" ]] || {
+          echo "⚠️ Kernel Common Directory Not Found"
+          exit 1
+        }
+
+        [[ -x "$KOTLINC" ]] || {
+          echo "⚠️ Kotlin Compiler Not Found or Not Executable: $KOTLINC"
+          exit 1
+        }
+
+        # Verify Kotlin
+        echo "☕ Kotlin Compiler:"
+        "$KOTLINC" -version
+
+        echo "🔧 Reverting Fake Patches..."
+
+        "$KOTLINC" \
+          -script "$SCRIPT" \
+          postfix "$WORKDIR"
+
+        "$KOTLINC" \
+          -script "$SCRIPT" \
+          revert "$WORKDIR"
+
+        echo ""
+        echo "🎉 Fake Patches Reverted"
