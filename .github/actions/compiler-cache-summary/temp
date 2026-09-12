@@ -1,0 +1,234 @@
+name: "Compiler Cache Performance Summary"
+description: "Generate Compiler Cache Performance Statistics"
+
+inputs:
+  # Compiler Cache Configuration
+  buildccache:
+    description: "Compiler Cache Status"
+    required: true
+    default: "Disabled"
+
+  # GitHub Actions Cache Restore Status
+  cache-restored:
+    description: "Whether the GitHub Actions Cache was Restored"
+    required: false
+    default: "false"
+
+  # Local CCache Restore Status
+  ccache-hit:
+    description: "Whether the CCache Restore had a Cache Hit"
+    required: false
+    default: "false"
+
+runs:
+  using: composite
+
+  steps:
+    - name: 🔧 Compiler Cache Performance Summary
+      # Run only when Compiler Cache is Enabled
+      if: ${{ inputs.buildccache != 'Disabled' }}
+      shell: bash
+      env:
+        CACHE_RESTORED: ${{ inputs.cache-restored }}
+        CCACHE_HIT: ${{ inputs.ccache-hit }}
+      run: |
+        set -Eeuo pipefail
+
+        # Collect Raw CCache Statistics
+        echo "📊 Collecting Compiler Cache Statistics..."
+
+        STATS="$(ccache -s 2>/dev/null || true)"
+
+        echo ""
+        echo "━━━━━━━━━━━━━━━━━━━━"
+        echo "📋 Raw CCache Statistics"
+        echo "━━━━━━━━━━━━━━━━━━━━"
+        echo "$STATS"
+        echo "━━━━━━━━━━━━━━━━━━━━"
+        echo ""
+
+        # Extract First Numeric Value From CCache Statistics
+        cachegetstat() {
+          local KEY="$1"
+          local VALUE
+
+          VALUE="$(
+            awk -v key="$KEY" '
+              $0 ~ key {
+                line=$0
+
+                # Handle Formats such as:
+                # Cacheable Calls:      399 / 399
+                # Hits:                 399
+                if (match(line, /[0-9]+[[:space:]]*\/[[:space:]]*[0-9]+/)) {
+                  pair=substr(line, RSTART, RLENGTH)
+                  split(pair, values, "/")
+
+                  gsub(/[^0-9]/, "", values[1])
+
+                  if (values[1] ~ /^[0-9]+$/) {
+                    print values[1]
+                    exit
+                  }
+                }
+
+                # Fallback for Single Numeric Values
+                for (i=NF; i>=1; i--) {
+                  value=$i
+                  gsub(/[^0-9]/, "", value)
+
+                  if (value ~ /^[0-9]+$/) {
+                    print value
+                    exit
+                  }
+                }
+              }
+            ' <<< "$STATS"
+          )"
+
+          [[ "$VALUE" =~ ^[0-9]+$ ]] || VALUE=0
+
+          echo "$VALUE"
+        }
+
+        # Extract Cache Metrics
+        CACHEABLE="$(cachegetstat 'Cacheable calls:')"
+        DIRECTHIT="$(cachegetstat 'Direct:')"
+        PREPROCESSHIT="$(cachegetstat 'Preprocessed:')"
+        MISS="$(cachegetstat 'Misses:')"
+
+        # Safe Numeric Defaults
+        CACHEABLE="${CACHEABLE:-0}"
+        DIRECTHIT="${DIRECTHIT:-0}"
+        PREPROCESSHIT="${PREPROCESSHIT:-0}"
+        MISS="${MISS:-0}"
+
+        # Calculate Total Cache Hits
+        TOTALHITS=$((DIRECTHIT + PREPROCESSHIT))
+
+        # Calculate Total Compiler Requests
+        TOTALREQUESTS=$((TOTALHITS + MISS))
+
+        # Prefer CCache Cacheable Calls When Available
+        if (( CACHEABLE > TOTALREQUESTS )); then
+          TOTALREQUESTS="$CACHEABLE"
+        fi
+
+        # Calculate Hit Rate
+        if (( TOTALREQUESTS > 0 )); then
+          HITRATE="$(
+            awk \
+              -v hits="$TOTALHITS" \
+              -v total="$TOTALREQUESTS" \
+              'BEGIN {
+                printf "%.2f", (hits / total) * 100
+              }'
+          )"
+        else
+          HITRATE="0.00"
+        fi
+
+        # Extract Current Cache Size
+        CACHESIZE="$(
+          awk -F: '
+            /Cache size/ && !/Max cache size/ {
+              value=$2
+              gsub(/^[[:space:]]+|[[:space:]]+$/, "", value)
+              print value
+              exit
+            }
+          ' <<< "$STATS"
+        )"
+
+        # Extract Maximum Cache Size
+        MAXCACHESIZE="$(
+          awk -F: '
+            /Max cache size/ {
+              value=$2
+              gsub(/^[[:space:]]+|[[:space:]]+$/, "", value)
+              print value
+              exit
+            }
+          ' <<< "$STATS"
+        )"
+
+        # Safe Cache Size Defaults
+        CACHESIZE="${CACHESIZE:-0}"
+        MAXCACHESIZE="${MAXCACHESIZE:-0}"
+
+        # Calculate Cache Usage Percentage
+        CACHEUSAGEPERCENT="0.00"
+
+        if [[ "$MAXCACHESIZE" =~ ^[0-9.]+$ ]] &&
+           [[ "$CACHESIZE" =~ ^[0-9.]+$ ]]; then
+          CACHEUSAGEPERCENT="$(
+            awk \
+              -v current="$CACHESIZE" \
+              -v maximum="$MAXCACHESIZE" \
+              'BEGIN {
+                if (maximum > 0)
+                  printf "%.2f", (current / maximum) * 100
+                else
+                  printf "0.00"
+              }'
+          )"
+        fi
+
+        CACHEUSAGE="${CACHESIZE} / ${MAXCACHESIZE} (${CACHEUSAGEPERCENT}%)"
+
+        # Export Hit Rate
+        echo "HITRATE=$HITRATE" >> "$GITHUB_ENV"
+
+        # Display Parsed Statistics
+        echo "📊 Parsed Compiler Cache Statistics"
+        echo "   Cacheable Calls : $CACHEABLE"
+        echo "   Total Hits      : $TOTALHITS"
+        echo "   Direct Hits     : $DIRECTHIT"
+        echo "   Preprocessed    : $PREPROCESSHIT"
+        echo "   Cache Misses    : $MISS"
+        echo "   Total Requests  : $TOTALREQUESTS"
+        echo "   Hit Rate        : ${HITRATE}%"
+        echo "   Cache Usage     : $CACHEUSAGE"
+        echo ""
+
+        # Detect CCache Restore Sources
+        FROMRELEASE="✘ No"
+        FROMLOCAL="✘ No"
+
+        if [[ "$CACHE_RESTORED" == "true" ]]; then
+          FROMRELEASE="✔ Yes"
+        fi
+
+        if [[ "$CCACHE_HIT" == "true" ]]; then
+          FROMLOCAL="✔ Yes"
+        fi
+
+        # Determine Cache Availability
+        if [[ "$FROMLOCAL" == "✔ Yes" || "$FROMRELEASE" == "✔ Yes" ]]; then
+          CACHEAVAIL="✔ Yes"
+        else
+          CACHEAVAIL="✘ No"
+        fi
+
+        # Generate GitHub Actions Step Summary
+        {
+          echo "### ⚡ Compiler Cache Performance Summary"
+          echo ""
+
+          echo "| Metric Description | Reported Value |"
+          echo "|---|---|"
+          echo "| Total Cacheable Compilation Requests | ${CACHEABLE} |"
+          echo "| Total Compiler Requests Processed | ${TOTALREQUESTS} |"
+          echo "| Total Cache Hits | ${TOTALHITS}/${TOTALREQUESTS} |"
+          echo "| Direct Cache Hits (Object Reuse Without Reprocessing) | ${DIRECTHIT}/${TOTALREQUESTS} |"
+          echo "| Preprocessed Cache Hits (After Preprocessor Match) | ${PREPROCESSHIT}/${TOTALREQUESTS} |"
+          echo "| Cache Misses (Full Recompilation Required) | ${MISS}/${TOTALREQUESTS} |"
+          echo "| Overall Compiler Cache Hit Rate | ${HITRATE}% (${TOTALHITS}/${TOTALREQUESTS}) |"
+          echo "| Compiler Cache Usage | ${CACHEUSAGE} |"
+          echo "| Restored From GitHub Actions Cache | ${FROMLOCAL} |"
+          echo "| Restored From Git Release Archive | ${FROMRELEASE} |"
+          echo "| Any Compiler Cache Available | ${CACHEAVAIL} |"
+        } >> "$GITHUB_STEP_SUMMARY"
+
+        echo ""
+        echo "🎉 Compiler Cache Statistics Generated Successfully"
