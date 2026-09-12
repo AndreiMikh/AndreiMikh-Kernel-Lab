@@ -486,23 +486,23 @@ jobs:
         shell: bash
         run: |
           set -Eeuo pipefail
-      
+       
           # Verify Required Tools
           command -v jq >/dev/null || {
             echo "⚠️ ERROR: JQ Not Installed"
             exit 1
           }
-      
+
           # Switch to the GitHub Workspace
           cd "$GITHUB_WORKSPACE"
-      
+
           # Normalize Manifest File Name
           if [[ "$FILE" =~ ^(.+)_([a-zA-Z])$ ]]; then
             MANIFESTFILECONFIG="${BASH_REMATCH[1]}"
           else
             MANIFESTFILECONFIG="$FILE"
           fi
-      
+
           # Generate Normalized Manifest Base Name
           MANIFESTBASEFILE=$(echo "$MANIFESTFILECONFIG" | sed -E '
             s/_aosp/AOSP/g;
@@ -512,34 +512,38 @@ jobs:
             s/^realme/RealMe/;
             s/^oppo/Oppo/
           ')
-      
+
           # Prepare Manifest Fallback Directory
           mkdir -p ".repo/fallbackmanifests"
-      
+
           # Define Manifest and README Paths
           XMLPATH=".repo/fallbackmanifests/${FILE}.xml"
-          READMEPATH=".repo/fallbackmanifests/README.md"      
+          READMEPATH=".repo/fallbackmanifests/README.md"
+
           # Display Normalized Manifest Information
           echo "FILE                  : $FILE"
           echo "MANIFESTFILECONFIG    : $MANIFESTFILECONFIG"
           echo "MANIFESTBASEFILE      : $MANIFESTBASEFILE"
-      
+
           # Export Manifest Names for Following Workflow Steps
           {
             echo "MANIFESTFILECONFIG=$MANIFESTFILECONFIG"
             echo "MANIFESTBASEFILE=$MANIFESTBASEFILE"
-          } >> "$GITHUB_ENV"     
+          } >> "$GITHUB_ENV"
+
           # Define Repository Search Priority
           REPOS=(
             "AndreiMikh|Kernel-Manifest"
             "AndreiMikh|AndreiMikh-Kernel-Lab"
           )
-      
+
           # Add Dynamic Repository When Provided
-          if [[ -n "${GITREPOSITORYINPUT:-}" ]]; then      
+          if [[ -n "${GITREPOSITORYINPUT:-}" ]]; then
+
             # Normalize GitHub Repository Input
             GITREPOSITORYINPUT="${GITREPOSITORYINPUT#https://github.com/}"
-            GITREPOSITORYINPUT="${GITREPOSITORYINPUT%/}"      
+            GITREPOSITORYINPUT="${GITREPOSITORYINPUT%/}"
+
             # Parse Owner and Repository Name
             case "$GITREPOSITORYINPUT" in
               */*)
@@ -550,27 +554,28 @@ jobs:
                 OWNER="$GITREPOSITORYINPUT"
                 REPO="Kernel-Manifest"
                 ;;
-            esac      
+            esac
+
             # Register Dynamic Repository
             echo "🚀 Dynamic Repository: ${OWNER}/${REPO}"
             REPOS+=("${OWNER}|${REPO}")
           fi
-      
+
           # Initialize Manifest Search Results
           MANIFESTFOUNDREPO=""
           MANIFESTFOUNDREPONAME=""
           MANIFESTFOUNDBRANCH=""
-      
+
           # Search Repositories in Deterministic Priority Order
-          for ENTRY in "${REPOS[@]}"; do      
-            # Extract Repository Owner and Name
+          for ENTRY in "${REPOS[@]}"; do
+
             OWNER="${ENTRY%%|*}"
             REPOSITORYNAME="${ENTRY##*|}"
-      
+
             echo ""
             echo "🔎 Checking ${OWNER}/${REPOSITORYNAME}"
-      
-            BRANCHES=""     
+
+            BRANCHES=""
             # Query GitHub API with Authentication
             if [[ -n "${GITHUB_TOKEN:-}" ]]; then
               BRANCHES=$(curl \
@@ -585,7 +590,7 @@ jobs:
                 | jq -r '.[].name? // empty' \
                 2>/dev/null || true)
             fi
-      
+
             # Fallback to Unauthenticated GitHub API
             if [[ -z "$BRANCHES" ]]; then
               BRANCHES=$(curl \
@@ -598,11 +603,11 @@ jobs:
                 | jq -r '.[].name? // empty' \
                 2>/dev/null || true)
             fi
-      
+
             # Fallback to Git LS-Remote When API Is Unavailable
             if [[ -z "$BRANCHES" ]]; then
               echo "⚠️ GitHub API Failed"
-              echo "🔄 Falling Back to Git LS-Remote..."      
+              echo "🔄 Falling Back to Git LS-Remote..."
               BRANCHES=$(git ls-remote \
                 --heads \
                 "https://github.com/${OWNER}/${REPOSITORYNAME}.git" \
@@ -610,21 +615,22 @@ jobs:
                 | sed 's|.*refs/heads/||' \
                 || true)
             fi
-      
+
             # Skip Repository When No Branches Are Available
             if [[ -z "$BRANCHES" ]]; then
               echo "⚠️ No Branches Found"
               continue
             fi
-      
+
             # Search Each Branch for the Requested Manifest
-            while IFS= read -r BRANCH; do      
-              [[ -z "$BRANCH" ]] && continue      
-              # Display Current Branch Being Checked
-              echo "  → 📃 Trying Branch: $BRANCH"      
+            while IFS= read -r BRANCH; do
+              [[ -z "$BRANCH" ]] && continue
+              echo "  → 📃 Trying Branch: $BRANCH"
+
               # Build Raw GitHub URLs
               XMLURL="https://raw.githubusercontent.com/${OWNER}/${REPOSITORYNAME}/${BRANCH}/${FILE}.xml"
-              READMEURL="https://raw.githubusercontent.com/${OWNER}/${REPOSITORYNAME}/${BRANCH}/README.md"    
+              READMEURL="https://raw.githubusercontent.com/${OWNER}/${REPOSITORYNAME}/${BRANCH}/README.md"
+
               # Check Whether the Manifest Exists
               if ! curl \
                 --fail \
@@ -634,73 +640,71 @@ jobs:
                 "$XMLURL" >/dev/null 2>&1; then
                 continue
               fi
-      
+
               echo "✔️ Found ${FILE}.xml"
               echo "📂 Repository: ${OWNER}/${REPOSITORYNAME}"
               echo "🌿 Branch    : ${BRANCH}"
-      
-              # Download Manifest to a Temporary File
-              TMPXML="${XMLPATH}.tmp"  
+
+              # Download Manifest to Temporary File
+              TMPXML="${XMLPATH}.tmp"
               if ! curl \
                 --fail \
                 --silent \
                 --show-error \
                 --location \
                 "$XMLURL" \
-                -o "$TMPXML"; then      
+                -o "$TMPXML"; then
                 echo "⚠️ Manifest Download Failed"
                 rm -f "$TMPXML"
                 continue
               fi
-      
+
               # Verify Downloaded Manifest Is Not Empty
               if [[ ! -s "$TMPXML" ]]; then
                 echo "⚠️ Downloaded Manifest Is Empty"
                 rm -f "$TMPXML"
                 continue
               fi
-      
+
               # Move Valid Manifest into Final Location
-              mv "$TMPXML" "$XMLPATH"      
+              mv "$TMPXML" "$XMLPATH"
+
               # Download README When Available
-              TMPREADME="${READMEPATH}.tmp"      
+              TMPREADME="${READMEPATH}.tmp"
               if curl \
                 --fail \
                 --silent \
                 --show-error \
                 --location \
                 "$READMEURL" \
-                -o "$TMPREADME"; then      
-                # Store README Only When It Contains Data
+                -o "$TMPREADME"; then
                 if [[ -s "$TMPREADME" ]]; then
                   mv "$TMPREADME" "$READMEPATH"
                 else
                   rm -f "$TMPREADME"
-                fi      
+                fi
               else
                 rm -f "$TMPREADME"
               fi
-      
+
               # Store Successful Repository Information
               MANIFESTFOUNDREPO="$OWNER"
               MANIFESTFOUNDREPONAME="$REPOSITORYNAME"
               MANIFESTFOUNDBRANCH="$BRANCH"
-      
+
               # Stop Searching After First Successful Match
-              break 2      
+              break 2
             done <<< "$BRANCHES"
-      
-            # Report Repository Search Failure
-            echo "⚠️ ${FILE}.xml Not Found in ${OWNER}/${REPOSITORYNAME}"      
+            echo "⚠️ ${FILE}.xml Not Found in ${OWNER}/${REPOSITORYNAME}"
           done
-      
+
           # Verify a Manifest Was Successfully Found
           if [[ -z "$MANIFESTFOUNDREPO" || ! -s "$XMLPATH" ]]; then
             echo ""
             echo "⚠️ WARNING: ${FILE}.xml Not Found in Any Repository"
             exit 1
           fi
-      
+
           # Display Located Manifest Information
           echo ""
           echo "------ Manifest Located ------"
@@ -708,70 +712,66 @@ jobs:
           echo "📂 Branch      : ${MANIFESTFOUNDBRANCH}"
           echo "------------------------------"
           echo ""
-      
+
           # Export Manifest Location for Following Steps
           {
             echo "MANIFESTREPO=$MANIFESTFOUNDREPO"
             echo "MANIFESTREPONAME=$MANIFESTFOUNDREPONAME"
             echo "MANIFESTBRANCH=$MANIFESTFOUNDBRANCH"
           } >> "$GITHUB_ENV"
-      
+
           # Parse Manifest Revision
           echo "📌 Parsing Manifest"
-      
           if command -v xmllint >/dev/null; then
-            echo "[Info] Using XMLLint for XML Parsing"    
-            # Extract the First Project Revision
+            echo "[Info] Using XMLLint for XML Parsing"
             REVISION=$(xmllint \
               --xpath 'string(//project/@revision)' \
               "$XMLPATH" \
-              2>/dev/null || true)      
+              2>/dev/null || true)
           else
-            echo "⚠️ XMLLint Not Found, Using Grep Fallback"     
-            # Extract Revision Using Grep When XMLLint Is Unavailable
+            echo "⚠️ XMLLint Not Found, Using Grep Fallback"
             REVISION=$(grep \
               -oP '<project[^>]+revision="\K[^"]+' \
               "$XMLPATH" \
               | head -n1 \
               || true)
           fi
-      
+
           # Extract CPU from Manifest Revision
           CPU=$(echo "$REVISION" | cut -d'/' -f2 | cut -d'_' -f1)
-      
+
           # Extract Android Version from Manifest Revision
           VANDROID=$(echo "$REVISION" \
             | grep -oP '\d+\.\d+(\.\d+)?' \
             | head -n1 \
             || true)
-      
+
           # Extract Android Major Version
           ASHORTVERSION="${VANDROID%%.*}"
-      
+
           # Export Parsed Manifest Information
           {
             echo "CPU=$CPU"
             echo "VANDROID=$VANDROID"
             echo "ASHORTVERSION=$ASHORTVERSION"
           } >> "$GITHUB_ENV"
-      
+
           # Parse README Build Information
+          CPUD=""
+          BUILDMETHOD=""
           if [[ -s "$READMEPATH" ]]; then
-            # Locate Kernel Build Command
             BUILDLINE=$(grep \
               -m1 \
               'oplus_build_kernel.sh' \
               "$READMEPATH" \
               || true)
             if [[ -n "$BUILDLINE" ]]; then
-              # Extract Kernel CPU Directory and Build Method
               CPUD=$(awk '{print $(NF-1)}' <<< "$BUILDLINE")
-              BUILDMETHOD=$(awk '{print $NF}' <<< "$BUILDLINE")    
-              # Export README Build Information
+              BUILDMETHOD=$(awk '{print $NF}' <<< "$BUILDLINE")
               {
                 echo "CPUD=$CPUD"
                 echo "BUILDMETHOD=$BUILDMETHOD"
-              } >> "$GITHUB_ENV"     
+              } >> "$GITHUB_ENV"
             fi
           fi
       
