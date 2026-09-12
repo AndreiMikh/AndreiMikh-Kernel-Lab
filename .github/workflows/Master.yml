@@ -4089,9 +4089,9 @@ jobs:
           cd kernel_workspace/kernel_platform || { echo "⚠️ Kernel Platform Not Found"; exit 1; }
           
           # Detect LLVM IAS
-          USE_LLVM_IAS=false
+          LLVMENABLED=false
           if [[ -f ./common/build.config.arm ]] && grep -q '^LLVM_IAS=1' ./common/build.config.arm; then
-            USE_LLVM_IAS=true
+            LLVMENABLED=true
           fi
 
           # Resolve Clang Toolchain
@@ -4183,7 +4183,7 @@ jobs:
           echo "📂 Clang Version   : $CLANGVERSION"
           echo "📂 Clang Directory : $CLANGDIR"
           echo "📂 Clang Path      : $CLANGPATH"
-          echo "📂 LLVM IAS        : $USE_LLVM_IAS"
+          echo "📂 LLVM IAS        : $LLVMENABLED"
           echo "------------------------------"
           echo ""
 
@@ -4206,16 +4206,22 @@ jobs:
           export CCACHE_NOHASHDIR="$CCACHE_NOHASHDIR" || echo "⚠️ NoHash Directory Not Found"
           export CCACHE_NOHARDLINK="$CCACHE_NOHARDLINK" || echo "⚠️ Cache Hardlink Not Found"    
                                                                                                       
+          # Explicitly Configure CCache Directory
+          ccache --set-config=cache_dir="$CCACHE_DIR"
+
           # Kernel Sloppiness
           CCACHECONF="$CCACHE_DIR/ccache.conf"
 
-          grep -q "sloppiness" "$CCACHECONF" 2>/dev/null || cat >> "$CCACHECONF" <<EOF
-          sloppiness = file_stat_matches,include_file_ctime,include_file_mtime,pch_defines,file_macro,time_macros
-          EOF
+          grep -q "sloppiness" "$CCACHECONF" 2>/dev/null || printf '%s\n' \
+            "sloppiness = file_stat_matches,include_file_ctime,include_file_mtime,pch_defines,file_macro,time_macros" \
+            >> "$CCACHECONF"
         
           # Ensure Size is Respected
           ccache -M "$CCACHE_MAXSIZE" || echo "⚠️ Max Size Not Found"          
 
+          # Reset Statistics for Current Build
+          ccache -z 
+          
           echo "📊 Compiler Cache (Runtime) Configured"
           ccache -p
        
@@ -4334,7 +4340,7 @@ jobs:
           # Kleaf Clang Fallback Detection
           if [[ -z "${CLANGPREBUILTBIN:-}" ]]; then
             echo "🔍 Attempting Kleaf Clang Detection..."
-            _kleaf_clang="$(
+            kleafclang="$(
               grep -rh 'clang-r[0-9a-z]\+' \
                 ./build/kernel/kleaf/ \
                 ./common/build/kernel/kleaf/ \
@@ -4343,8 +4349,8 @@ jobs:
               | sort | uniq -c | sort -rn \
               | awk '{print $2; exit}'
             )"
-            if [[ -n "$_kleaf_clang" ]]; then
-              _kleaf_prebuilts="$(
+            if [[ -n "$kleafclang" ]]; then
+              kleafprebuilts="$(
                 grep -rh 'prebuilts[^ "'"'"']*clang' \
                   ./build/kernel/kleaf/ \
                   ./common/build/kernel/kleaf/ \
@@ -4353,7 +4359,7 @@ jobs:
                 | sort | uniq -c | sort -rn \
                 | awk '{print $2; exit}'
               )"
-              CLANGPREBUILTBIN="${_kleaf_prebuilts:-prebuilts}/clang/host/linux-x86/${_kleaf_clang}/bin"
+              CLANGPREBUILTBIN="${kleafprebuilts:-prebuilts}/clang/host/linux-x86/${kleafclang}/bin"
               echo "✔️ Kleaf Clang Detected"
               echo "📂 Path: $CLANGPREBUILTBIN"
             else
@@ -4418,7 +4424,7 @@ jobs:
             KCFLAGS="$KCFLAGS"
           )
 
-          [[ "$USE_LLVM_IAS" == "true" ]] && MAKE_ARGS=(LLVM_IAS=1 "${MAKE_ARGS[@]}")
+          [[ "$LLVMENABLED" == "true" ]] && MAKE_ARGS=(LLVM_IAS=1 "${MAKE_ARGS[@]}")
           [[ "${ENABLERUSTC:-false}" == "true" ]] && MAKE_ARGS=(RUSTC="$RUSTCPATH" "${MAKE_ARGS[@]}")
           # Kernel Configuration and Compilation
           echo ">> 🚀 Running GKI Default Configuration"
@@ -4455,7 +4461,7 @@ jobs:
             [[ -n "$CONFIGTOOL" ]] && [[ ! -x "$CONFIGTOOL" ]] && CONFIGTOOL=""       
             # 2️⃣ Check Scripts / Configuration Separately
             if [[ -z "$CONFIGTOOL" ]]; then
-              echo "⚠️ Scripts / Configuration Not Found — Skipping Link Time Optimization (LTO) Configuration"
+              echo "🚀 Scripts / Configuration Not Found — Skipping Link Time Optimization (LTO) Configuration"
               echo "📊 Link Time Optimization (LTO) Status: Skipped (Reason: ⚠️ Missing Scripts / Configuration)"
             else
               case "$KERNELVERSION" in
@@ -4470,7 +4476,7 @@ jobs:
                   echo "📊 Link Time Optimization (LTO) Status: Applied (Thin)"
                   ;;          
                 *)
-                  echo "⚠️ Link Time Optimization (LTO) skipped for Kernel $KERNELVERSION"
+                  echo "🚀 Link Time Optimization (LTO) Skipped for Kernel $KERNELVERSION"
                   echo "📊 Link Time Optimization (LTO) Status: Skipped (Reason: ⚠️ Unsupported Kernel Version)"
                   ;;
               esac
