@@ -4720,6 +4720,310 @@ jobs:
       
           } >> "${GITHUB_STEP_SUMMARY}"
 
+      - name: 🔧 Manage Compiler Cache
+        if: ${{ steps.buildprofile.outputs.BUILDCCACHE != 'Disabled' }}
+        shell: bash
+        env:
+          PROFILE: ${{ github.event.inputs.PROFILE }}
+        run: |
+          set -Eeuo pipefail
+
+          # Define compiler cache variables
+          RESTOREDDELTAFILE="$CCACHE_DIR/.deltakey"
+          RESTOREDDELTA=""
+          CCACHESAVE="false"
+
+          # Generate Environment Delta Key
+          echo "🔍 Generating Environment Delta Key..."
+
+          KERNELSHA="$(git rev-parse HEAD 2>/dev/null || echo no-git)"
+          CLANGVER="$(clang --version | sha256sum | awk '{print $1}')"
+          CCACHEVER="$(ccache -V | sha256sum | awk '{print $1}')"
+
+          DELTARAW="${KERNELSHA}|${MANIFESTBASEFILE}|${KERNELVERSION}|${ANDROIDVERSION}|${CLANGVER}|${CCACHEVER}"
+          DELTAKEY="$(printf '%s' "$DELTARAW" | sha256sum | awk '{print $1}')"
+
+          echo "DELTAKEY=$DELTAKEY" >> "$GITHUB_ENV"
+
+          echo ""
+          echo "📦 Delta Key:"
+          echo "$DELTAKEY"
+
+          # Validate restored cache fingerprint
+          echo ""
+          echo "🧪 Checking Existing Cache Fingerprint..."
+
+          if [[ -f "$RESTOREDDELTAFILE" ]]; then
+            RESTOREDDELTA="$(<"$RESTOREDDELTAFILE")"
+
+            echo "📦 Restored Delta:"
+            echo "$RESTOREDDELTA"
+          else
+            echo "⚠️ No Existing Delta Key Found"
+          fi
+
+          # Detect Cache Environment Mismatch
+          if [[ -n "$RESTOREDDELTA" && "$RESTOREDDELTA" != "$DELTAKEY" ]]; then
+            echo ""
+            echo "⚠️ Delta Mismatch Detected"
+            echo "🧨 Build Environment Changed"
+            echo "🧹 Wiping Old Compiler Cache..."
+
+            find "$CCACHE_DIR" -mindepth 1 -delete
+            sync
+
+            echo "🎉 Old Compiler Cache Removed"
+          else
+            echo ""
+            echo "🎉 Compiler Cache Environment Valid"
+          fi
+
+          # Display Cache Statistics
+          echo ""
+          echo "📊 Cache Statistics"
+
+          echo "HITRATE=${HITRATE:-0}"
+          echo "CCACHE_DIR=${CCACHE_DIR:-None}"
+          echo "RELEASE_CACHE_RESTORED=${{ steps.cache-restoration.outputs.cache-restored || 'false' }}"
+          echo "ACTIONS_CACHE_HIT=${{ steps.ccache-restore.outputs.cache-hit || 'false' }}"
+
+          echo ""
+
+          # Validate Compiler Cache Directory
+          if [[ -n "${CCACHE_DIR:-}" && -d "$CCACHE_DIR" ]]; then
+            echo "📊 Cache Directory Found"
+
+            du -sh "$CCACHE_DIR" || true
+
+            FILECOUNT=$(find "$CCACHE_DIR" -type f 2>/dev/null | wc -l)
+            echo "📄 Cached Files: ${FILECOUNT}"
+
+            if [[ "$FILECOUNT" -eq 0 ]]; then
+              echo "⚠️ Cache Directory Is Empty"
+            fi
+          else
+            echo "⚠️ Cache Directory Missing"
+          fi
+
+          echo ""
+
+          # Decide Whether the Compiler Cache Should be Saved
+          if awk "BEGIN {exit !(${HITRATE:-0} < 90)}"; then
+            echo "📉 Cache Hit Rate Below 90%"
+            echo "💾 Cache Refresh Required"
+            CCACHESAVE="true"
+
+          elif [[ "${{ steps.cache-restoration.outputs.cache-restored || 'false' }}" != "true" ]]; then
+            echo "📦 No GitHub Release Cache Restored"
+            echo "💾 Cache Upload Required"
+            CCACHESAVE="true"
+
+          elif [[ "${{ steps.ccache-restore.outputs.cache-hit || 'false' }}" != "true" ]]; then
+            echo "📦 No Actions Cache Restored"
+            echo "💾 Cache Upload Required"
+            CCACHESAVE="true"
+
+          else
+            echo "🎉 Compiler Cache Healthy"
+            echo "⏭️ Skipping Cache Upload"
+            CCACHESAVE="false"
+          fi
+
+          echo ""
+
+          # Display Final Cache Save Decision
+          echo "📌 Final Decision: CCACHESAVE=${CCACHESAVE}"
+
+          if [[ "$CCACHESAVE" == "true" ]]; then
+            echo "🔑 Cache Key:"
+            echo "CCache-${{ runner.os }}-${MANIFESTBASEFILE}-${CPU}-${{ github.ref_name }}"
+          fi
+
+          # Export Cache Save State
+          echo "CCACHESAVE=${CCACHESAVE}" >> "$GITHUB_ENV"
+          echo "CCACHESAVE=${CCACHESAVE}" >> "$GITHUB_OUTPUT"
+
+          # Create Compiler Cache Archive When Required
+          if [[ "$CCACHESAVE" == "true" ]]; then
+
+            echo ""
+            echo "📦 Creating Compiler Cache Archive"
+
+            TAR="CCache-${MANIFESTBASEFILE}-${{ runner.os }}.tar.zst"
+            TMPTAR="${TAR}.tmp"
+
+            echo "TAR=$TAR" >> "$GITHUB_ENV"
+
+            # Verify cache directory
+            echo "📂 Cache Directory: $CCACHE_DIR"
+
+            if [[ ! -d "$CCACHE_DIR" ]]; then
+              echo "⚠️ Cache Directory Missing"
+              exit 1
+            fi
+
+            # Verify Cache Contains Data
+            if [[ -z "$(find "$CCACHE_DIR" -mindepth 1 -print -quit 2>/dev/null)" ]]; then
+              echo "⚠️ Cache Directory Empty"
+              echo "ℹ️ Skipping Cache Archive Creation"
+
+              CCACHESAVE="false"
+              echo "CCACHESAVE=false" >> "$GITHUB_ENV"
+              echo "CCACHESAVE=false" >> "$GITHUB_OUTPUT"
+            else
+
+              # Generate Cache Metadata Fingerprint
+              echo "🧬 Generating Cache Fingerprint..."
+
+              FPFILE="$CCACHE_DIR/.fpccache"
+
+              {
+                echo "Manifest=${MANIFESTBASEFILE}"
+                echo "RunnerOS=${{ runner.os }}"
+                echo "Kernel=${KERNELVERSION}"
+                echo "Android=${ANDROIDVERSION}"
+                echo "KernelModule=${KERNELMODULE}"
+                echo "CompilerProfile=${PROFILE}"
+                echo "BuildMethod=${BUILDMETHOD}"
+                echo "Delta=${DELTAKEY}"
+
+                echo ""
+                echo "---------- Clang ----------"
+                clang --version || true
+
+                echo ""
+                echo "---------- Cache ----------"
+                ccache -V || true
+
+                echo ""
+                echo "-------- Timestamp --------"
+                date -u || true
+              } > "$FPFILE"
+
+              # Store cache delta key
+              printf '%s\n' "$DELTAKEY" > "$CCACHE_DIR/.deltakey"
+
+              sync
+
+              # Remove Previous Archives
+              echo "🧹 Cleaning Old Archives..."
+
+              rm -f "$TAR" "$TMPTAR"
+
+              # Display Cache Statistics
+              echo "📊 Cache Statistics:"
+
+              du -sh "$CCACHE_DIR" || true
+              ccache -s || true
+
+              # Compress Compiler Cache
+              echo "📦 Compressing Compiler Cache..."
+
+              tar \
+                --sort=name \
+                --mtime='UTC 2025-01-01' \
+                --owner=0 \
+                --group=0 \
+                --numeric-owner \
+                -cf - \
+                -C "$CCACHE_DIR" . \
+                | zstd \
+                    -T0 \
+                    -15 \
+                    --force \
+                    -o "$TMPTAR"
+
+              sync
+
+              # Finalize Compiler Cache Archive
+              echo "🔄 Finalizing Archive..."
+
+              mv -f "$TMPTAR" "$TAR"
+              sync
+
+              # Verify Compiler Cache Archive
+              echo "🔍 Verifying Archive..."
+
+              [[ -f "$TAR" ]] || {
+                echo "⚠️ Cache Archive Missing"
+                exit 1
+              }
+
+              [[ -s "$TAR" ]] || {
+                echo "⚠️ Cache Archive Empty"
+                exit 1
+              }
+
+              ls -lh "$TAR"
+
+              # Test ZSTD Compression Integrity
+              echo "🧪 Testing ZSTD Integrity..."
+              zstd -t "$TAR"
+
+              # Test TAR Archive Integrity
+              echo "🧪 Testing TAR Integrity..."
+              tar --use-compress-program=zstd -tf "$TAR" >/dev/null
+
+              # Preview Archive Contents
+              echo "📂 Archive Preview:"
+              tar --use-compress-program=zstd -tf "$TAR" | head -20 || true
+
+              # Display Archive Size and Compression Ratio
+              echo "📈 Archive Summary:"
+
+              ORIGINALSIZE="$(du -sb "$CCACHE_DIR" | awk '{print $1}')"
+              ARCHIVESIZE="$(stat -c '%s' "$TAR")"
+
+              echo "Original Size : $(numfmt --to=iec "$ORIGINALSIZE")"
+              echo "Archive Size  : $(numfmt --to=iec "$ARCHIVESIZE")"
+
+              if [[ "$ORIGINALSIZE" -gt 0 ]]; then
+                RATIO="$(awk "BEGIN { printf \"%.2f\", ($ARCHIVESIZE / $ORIGINALSIZE) * 100 }")"
+                echo "Compression   : ${RATIO}%"
+              fi
+
+              echo ""
+              echo "🎉 Compiler Cache TAR.ZST Created Successfully"
+            fi
+          else
+            echo ""
+            echo "⏭️ Cache Archive Creation Skipped"
+          fi
+
+          # Perform Compiler Cache Maintenance
+          echo ""
+          echo "🧹 Compiler Cache Maintenance"
+
+          command -v ccache >/dev/null 2>&1 || {
+            echo "⚠️ Compiler Cache Not Found, Skipping"
+            exit 0
+          }
+
+          echo "📂 Cache Directory: $CCACHE_DIR"
+          echo ""
+
+          # Display Cache Statistics Before Maintenance
+          echo "📊 Cache Statistics (Before):"
+          ccache -s || true
+
+          # Apply Cache Size Limit
+          echo ""
+          echo "📏 Setting Cache Size Limit..."
+          ccache -M "$CCACHE_MAXSIZE" || true
+
+          # Run Compiler Cache Internal Cleanup
+          echo ""
+          echo "🧹 Running Internal Cleanup..."
+          ccache -c || true
+
+          # Display Cache Statistics After Maintenance
+          echo ""
+          echo "📊 Cache Statistics (After):"
+          ccache -s || true
+
+          echo ""
+          echo "🎉 Compiler Cache Maintenance Complete"
+
       - name: 🔧 AnyKernel3 Packaging Engine
         run: |
           set -euo pipefail
@@ -5278,129 +5582,6 @@ jobs:
           # Retain Artifact for 30 Days
           retention-days: 30
 
-      - name: 🔧 Validate Compiler Cache
-        if: ${{ steps.buildprofile.outputs.BUILDCCACHE != 'Disabled' }}
-        shell: bash
-        run: |
-          set -Eeuo pipefail
-      
-          # Variables 
-          RESTOREDDELTAFILE="$CCACHE_DIR/.deltakey"
-          RESTOREDDELTA=""
-      
-          # Generate Environment Delta Key
-          echo "🔍 Generating Environment Delta Key..."      
-          KERNELSHA="$(git rev-parse HEAD 2>/dev/null || echo no-git)"
-          CLANGVER="$(clang --version | sha256sum | awk '{print $1}')"
-          CCACHEVER="$(ccache -V | sha256sum | awk '{print $1}')"      
-          DELTARAW="${KERNELSHA}|${MANIFESTBASEFILE}|${KERNELVERSION}|${ANDROIDVERSION}|${CLANGVER}|${CCACHEVER}"      
-          DELTAKEY="$(printf '%s' "$DELTARAW" | sha256sum | awk '{print $1}')"      
-          echo "DELTAKEY=$DELTAKEY" >> "$GITHUB_ENV"
-      
-          echo ""
-          echo "📦 Delta Key:"
-          echo "$DELTAKEY"      
-          # Validate Restored Cache
-          echo "🧪 Checking Existing Cache Fingerprint..."             
-          if [[ -f "$RESTOREDDELTAFILE" ]]; then      
-            RESTOREDDELTA="$(<"$RESTOREDDELTAFILE")"      
-            echo "📦 Restored Delta:"
-            echo "$RESTOREDDELTA" 
-          else      
-            echo "⚠️ No Existing Delta Key Found"
-          fi
-      
-          # Detect Environment Mismatch
-          if [[ -n "$RESTOREDDELTA" && "$RESTOREDDELTA" != "$DELTAKEY" ]]; then     
-            echo "⚠️ Delta Mismatch Detected"
-            echo "🧨 Build Environment Changed"
-            echo "🧹 Wiping Old Compiler Cache..."
-            echo ""
-      
-            find "$CCACHE_DIR" -mindepth 1 -delete      
-            sync      
-            echo "🎉 Old Compiler Cache Removed"      
-          else      
-            echo "🎉 Compiler Cache Environment Valid"
-          fi
-      
-      - name: 🔧 Decide Compiler Cache Save Strategy
-        id: ccache-save
-        if: ${{ steps.buildprofile.outputs.BUILDCCACHE != 'Disabled' }}
-        shell: bash
-        run: |
-          set -Eeuo pipefail
-      
-          # Debug Cache Statistics, Show Cache-Related Information to Help Diagnose Save / Restore Issues
-          echo "📊 Cache Statistics"
-          echo "HITRATE=${HITRATE:-0}"
-          echo "CCACHE_DIR=${CCACHE_DIR:-None}"
-          echo "RELEASE_CACHE_RESTORED=${{ steps.cache-restoration.outputs.cache-restored || 'false' }}"
-          echo "ACTIONS_CACHE_HIT=${{ steps.ccache-restore.outputs.cache-hit || 'false' }}"
-          echo ""
-      
-          # Debug Cache Directory
-          # Verify that the Cache Directory Exists, Contains Files and has a Valid Size
-          if [[ -n "${CCACHE_DIR:-}" && -d "$CCACHE_DIR" ]]; then
-            echo "📊 Cache Directory Found"
-            # Display Total Cache Size
-            du -sh "$CCACHE_DIR" || true
-            # Count Cached Files
-            FILECOUNT=$(find "$CCACHE_DIR" -type f 2>/dev/null | wc -l)
-            echo "📄 Cached Files: ${FILECOUNT}"
-            # Warn if Directory Exists but Contains No Files
-            if [[ "${FILECOUNT}" -eq 0 ]]; then
-              echo "⚠️ Cache Directory Is Empty"
-            fi
-          else
-            echo "⚠️ Cache Directory Missing"
-          fi
-      
-          echo ""
-      
-          # Default Save State
-          # Assume cache upload is unnecessary, Unless One of the Conditions Below Explicitly Enables it
-          CCACHESAVE="false"
-      
-          # Cache Save Conditions
-          # Condition 1: Cache Hit Rate is Below 90%, Refresh Cache to Improve Future Builds
-          if awk "BEGIN {exit !(${HITRATE:-0} < 90)}"; then
-            echo "📉 Cache Hit Rate Below 90%"
-            echo "💾 Cache Refresh Required"
-            CCACHESAVE="true"
-          # Condition 2: No GitHub Release Cache was Restored, Upload Cache so Future Builds can Reuse it
-          elif [[ "${{ steps.cache-restoration.outputs.cache-restored || 'false' }}" != "true" ]]; then
-            echo "📦 No GitHub Release Cache Restored"
-            echo "💾 Cache Upload Required"
-            CCACHESAVE="true"
-          # Condition 3: No GitHub Actions Cache was Restored, Create a New Cache Archive
-          elif [[ "${{ steps.ccache-restore.outputs.cache-hit || 'false' }}" != "true" ]]; then
-            echo "📦 No Actions Cache Restored"
-            echo "💾 Cache Upload Required"
-            CCACHESAVE="true"
-          # Condition 4: Cache is Healthy and Already Restored, Skip Cache Upload to Save Time
-          else
-            echo "🎉 Compiler Cache Healthy"
-            echo "⏭️ Skipping Cache Upload"
-            CCACHESAVE="false"
-          fi
-      
-          echo ""
-      
-          # Final Decision Summary
-          echo "📌 Final Decision: CCACHESAVE=${CCACHESAVE}"      
-          # Show the Cache Key that will be Used if an Upload is Required
-          if [[ "${CCACHESAVE}" == "true" ]]; then
-            echo "🔑 Cache Key:"
-            echo "CCache-${{ runner.os }}-${MANIFESTBASEFILE}-${CPU}-${{ github.ref_name }}"
-          fi
-      
-          # Make Cache Saved Available to Subsequent Workflow Steps
-          echo "CCACHESAVE=${CCACHESAVE}" >> "$GITHUB_ENV"
-
-          # Export Cache Save State as Step Output 
-          echo "CCACHESAVE=${CCACHESAVE}" >> "$GITHUB_OUTPUT"
-      
       - name: 🔧 Save Compiler Cache
         if: ${{ success()
               && steps.buildprofile.outputs.BUILDCCACHE != 'Disabled'
@@ -5412,179 +5593,6 @@ jobs:
           path: ${{ env.CCACHE_DIR }}
           key: CCache-${{ runner.os }}-${MANIFESTBASEFILE}-${CPU}-${{ github.ref_name }}
       
-      - name: 🔧 Create Compiler Cache Archive
-        if: ${{ steps.buildprofile.outputs.BUILDCCACHE != 'Disabled' && steps.ccache-save.outputs.CCACHESAVE == 'true' }}
-        shell: bash
-        env:
-          PROFILE: ${{ github.event.inputs.PROFILE }}
-        run: |
-          set -Eeuo pipefail
-
-          # Define Archive File Names
-          TAR="CCache-${MANIFESTBASEFILE}-${{ runner.os }}.tar.zst"
-          TMPTAR="${TAR}.tmp"
-
-          # Export Archive Name for Following Steps
-          echo "TAR=$TAR" >> "$GITHUB_ENV"
-
-          # Verify Cache Directory
-          echo "📂 Cache Directory: $CCACHE_DIR"
-          if [[ ! -d "$CCACHE_DIR" ]]; then
-            echo "⚠️ Cache Directory Missing"
-            exit 1
-          fi
-
-          # Verify Cache Contains Data
-          if [[ -z "$(find "$CCACHE_DIR" -mindepth 1 -print -quit 2>/dev/null)" ]]; then
-            echo "⚠️ Cache Directory Empty"
-            echo "ℹ️ Skipping Cache Archive Creation"
-            echo "CCACHESAVE=false" >> "$GITHUB_ENV"
-            exit 0
-          fi
-
-          # Generate Cache Metadata Fingerprint
-          echo "🧬 Generating Cache Fingerprint..."
-          FPFILE="$CCACHE_DIR/.fpccache"
-
-          {
-            echo "Manifest=${MANIFESTBASEFILE}"
-            echo "RunnerOS=${{ runner.os }}"
-            echo "Kernel=${KERNELVERSION}"
-            echo "Android=${ANDROIDVERSION}"
-            echo "KernelModule=${KERNELMODULE}"
-            echo "CompilerProfile=${PROFILE}"
-            echo "BuildMethod=${BUILDMETHOD}"
-            echo "Delta=${DELTAKEY}"
-
-            # Record Clang Version
-            echo ""
-            echo "---------- Clang ----------"
-            clang --version || true
-
-            # Record CCache Version
-            echo ""
-            echo "---------- Cache ----------"
-            ccache -V || true
-
-            # Record Archive Creation Time
-            echo ""
-            echo "-------- Timestamp --------"
-            date -u || true
-          } > "$FPFILE"
-
-          # Store Delta Key with Cache Metadata
-          printf '%s\n' "$DELTAKEY" > "$CCACHE_DIR/.deltakey"
-
-          # Flush Pending Filesystem Writes
-          sync
-
-          # Remove Previous Archives
-          echo "🧹 Cleaning Old Archives..."
-          rm -f "$TAR" "$TMPTAR"
-
-          # Display Cache Statistics
-          echo "📊 Cache Statistics:"
-          du -sh "$CCACHE_DIR" || true
-          ccache -s || true
-
-          # Create TAR.ZST Archive
-          echo "📦 Compressing Compiler Cache..."
-          tar \
-            --sort=name \
-            --mtime='UTC 2025-01-01' \
-            --owner=0 \
-            --group=0 \
-            --numeric-owner \
-            -cf - \
-            -C "$CCACHE_DIR" . \
-            | zstd \
-                -T0 \
-                -15 \
-                --force \
-                -o "$TMPTAR"
-
-          # Flush Archive Data
-          sync
-
-          # Move Temporary Archive to Final Name
-          echo "🔄 Finalizing Archive..."
-          mv -f "$TMPTAR" "$TAR"
-
-          # Flush Final Archive to Disk
-          sync
-
-          # Verify Archive Exists and Contains Data
-          echo "🔍 Verifying Archive..."
-          if [[ ! -f "$TAR" ]]; then
-            echo "⚠️ Cache Archive Missing"
-            exit 1
-          fi
-
-          if [[ ! -s "$TAR" ]]; then
-            echo "⚠️ Cache Archive Empty"
-            exit 1
-          fi
-
-          # Display Final Archive Size
-          ls -lh "$TAR"
-
-          # Test ZSTD Compression Integrity
-          echo "🧪 Testing ZSTD Integrity..."
-          zstd -t "$TAR"
-
-          # Test TAR Archive Integrity
-          echo "🧪 Testing TAR Integrity..."
-          tar --use-compress-program=zstd -tf "$TAR" >/dev/null
-
-          # Preview Archive Contents
-          echo "📂 Archive Preview:"
-          tar --use-compress-program=zstd -tf "$TAR" | head -20 || true
-         
-          # Calculate Archive Size and Compression Ratio
-          echo "📈 Archive Summary:"
-
-          ORIGINALSIZE="$(du -sb "$CCACHE_DIR" | awk '{print $1}')"
-          ARCHIVESIZE="$(stat -c '%s' "$TAR")"
-
-          echo "Original Size : $(numfmt --to=iec "$ORIGINALSIZE")"
-          echo "Archive Size  : $(numfmt --to=iec "$ARCHIVESIZE")"
-
-          # Calculate Compression Percentage
-          if [[ "$ORIGINALSIZE" -gt 0 ]]; then
-            RATIO="$(awk "BEGIN { printf \"%.2f\", ($ARCHIVESIZE / $ORIGINALSIZE) * 100 }")"
-            echo "Compression   : ${RATIO}%"
-          fi
-
-          echo ""
-          echo "🎉 Compiler Cache TAR.ZST Created Successfully"
-   
-      - name: 🔧 Clean Old Compiler Cache
-        if: ${{ steps.buildprofile.outputs.BUILDCCACHE != 'Disabled' }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          
-          command -v ccache >/dev/null 2>&1 || {
-            echo "⚠️ Compiler Cache Not Found, Skipping"
-            exit 0
-          }                  
-          echo "📂 Cache Directory: $CCACHE_DIR"          
-          echo ""
-          echo "📊 Cache Statistics (Before):"
-          ccache -s || true          
-          echo ""
-          echo "📏 Setting Cache Size Limit..."
-          ccache -M "$CCACHE_MAXSIZE" || true          
-          echo ""
-          echo "🧹 Running Internal Cleanup..."
-          ccache -c || true          
-          echo ""
-          echo "📊 Cache Statistics (After):"
-          ccache -s || true
-          
-          echo ""
-          echo "🎉 Compiler Cache Maintenance Complete"
-
       - name: 🔧 Check KSU Version
         if: env.GITRELEASE == 'Enabled'
         id: ksu-check
