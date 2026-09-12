@@ -1,0 +1,240 @@
+name: "Compiler Cache Performance Summary"
+description: "Generate Compiler Cache Performance Statistics"
+
+inputs:
+  # Compiler Cache Configuration
+  buildccache:
+    description: "Compiler Cache Status"
+    required: true
+    default: "Disabled"
+
+  # GitHub Actions Cache Restore Status
+  cache-restored:
+    description: "Whether the GitHub Actions Cache was Restored"
+    required: false
+    default: "false"
+
+  # Local CCache Restore Status
+  ccache-hit:
+    description: "Whether the CCache Restore had a Cache Hit"
+    required: false
+    default: "false"
+
+runs:
+  using: composite
+
+  steps:
+    - name: 🔧 Compiler Cache Performance Summary
+      if: ${{ inputs.buildccache != 'Disabled' }}
+      shell: bash
+      env:
+        CACHE_RESTORED: ${{ inputs.cache-restored }}
+        CCACHE_HIT: ${{ inputs.ccache-hit }}
+      run: |
+        set -Eeuo pipefail
+
+        echo "📊 Collecting Compiler Cache Statistics..."
+
+        # Verify CCache
+        if ! command -v ccache >/dev/null 2>&1; then
+          echo "⚠️ CCache Binary Not Found"
+          exit 1
+        fi
+
+        echo "📦 CCache Binary : $(command -v ccache)"
+        echo "📦 CCache Version:"
+        ccache --version | head -n1
+
+        # Verify CCache Directory
+        if [[ -z "${CCACHE_DIR:-}" ]]; then
+          echo "⚠️ CCACHE_DIR Is Not Set"
+          echo "📌 Cannot Determine the Compiler Cache Used by the Build"
+          exit 1
+        fi
+
+        if [[ ! -d "$CCACHE_DIR" ]]; then
+          echo "⚠️ CCache Directory Not Found"
+          echo "📂 Expected: $CCACHE_DIR"
+          exit 1
+        fi
+
+        echo "📂 CCache Directory: $CCACHE_DIR"
+
+        # Collect CCache Configuration
+        echo ""
+        echo "📋 CCache Configuration:"
+        ccache -p || true
+
+        # Collect Raw CCache Statistics
+        echo ""
+        echo "------------------------------"
+        echo "📋 Raw CCache Statistics"
+        echo "------------------------------"
+
+        STATS="$(ccache -s 2>&1 || true)"
+
+        echo "$STATS"
+
+        echo "------------------------------"
+        echo ""
+
+        # Extract First Numeric Value From CCache Statistics
+        cachegetstat() {
+          local KEY="$1"
+          local VALUE
+
+          VALUE="$(
+            awk -v key="$KEY" '
+              $0 ~ key {
+                line=$0
+
+                # Handle formats such as:
+                # Cacheable calls: 399 / 399
+                if (match(line, /[0-9]+[[:space:]]*\/[[:space:]]*[0-9]+/)) {
+                  pair=substr(line, RSTART, RLENGTH)
+                  gsub(/[^0-9\/]/, "", pair)
+
+                  split(pair, values, "/")
+
+                  if (values[1] ~ /^[0-9]+$/) {
+                    print values[1]
+                    exit
+                  }
+                }
+
+                # Fallback for single numeric values
+                for (i=NF; i>=1; i--) {
+                  value=$i
+                  gsub(/[^0-9]/, "", value)
+
+                  if (value ~ /^[0-9]+$/) {
+                    print value
+                    exit
+                  }
+                }
+              }
+            ' <<< "$STATS"
+          )"
+
+          [[ "$VALUE" =~ ^[0-9]+$ ]] || VALUE=0
+
+          echo "$VALUE"
+        }
+
+        # Extract Cache Metrics
+        CACHEABLE="$(cachegetstat 'Cacheable calls:')"
+        DIRECTHIT="$(cachegetstat 'Direct:')"
+        PREPROCESSHIT="$(cachegetstat 'Preprocessed:')"
+        MISS="$(cachegetstat 'Misses:')"
+
+        # Safe Numeric Defaults
+        CACHEABLE="${CACHEABLE:-0}"
+        DIRECTHIT="${DIRECTHIT:-0}"
+        PREPROCESSHIT="${PREPROCESSHIT:-0}"
+        MISS="${MISS:-0}"
+
+        # Calculate Total Cache Hits
+        TOTALHITS=$((DIRECTHIT + PREPROCESSHIT))
+
+        # Calculate Total Compiler Requests
+        TOTALREQUESTS=$((TOTALHITS + MISS))
+
+        # Use Cacheable Calls When Available
+        if (( CACHEABLE > TOTALREQUESTS )); then
+          TOTALREQUESTS="$CACHEABLE"
+        fi
+
+        # Calculate Hit Rate
+        if (( TOTALREQUESTS > 0 )); then
+          HITRATE="$(awk -v h="$TOTALHITS" -v t="$TOTALREQUESTS" 'BEGIN { printf "%.2f", (h / t) * 100 }')"
+        else
+          HITRATE="0.00"
+        fi
+
+        # Extract Cache Size
+        CACHEUSAGE="$(
+          awk '
+            /Cache size \(GB\):/ {
+              for (i=1; i<=NF; i++) {
+                if ($i ~ /^[0-9.]+$/ && $(i+1) == "/") {
+                  current=$i
+                  max=$(i+2)
+                  gsub(/[^0-9.]/, "", max)
+                  printf "%s / %s", current, max
+                  exit
+                }
+              }
+            }
+          ' <<< "$STATS"
+        )"
+
+        CACHEUSAGE="${CACHEUSAGE:-0.0 / 0.0}"
+
+        # Extract Cache Usage Percentage
+        CACHEPERCENT="$(
+          awk '
+            /Cache size \(GB\):/ {
+              if (match($0, /\([0-9.]+%\)/)) {
+                value=substr($0, RSTART+1, RLENGTH-2)
+                print value
+                exit
+              }
+            }
+          ' <<< "$STATS"
+        )"
+
+        CACHEPERCENT="${CACHEPERCENT:-0.00}"
+
+        # Cache Restore Status
+        FROMLOCAL="✘ No"
+        FROMRELEASE="✘ No"
+
+        if [[ "$CACHE_RESTORED" == "true" ]]; then
+          FROMLOCAL="✔ Yes"
+        fi
+
+        if [[ "$CCACHE_HIT" == "true" ]]; then
+          FROMRELEASE="✔ Yes"
+        fi
+
+        # Display Parsed Statistics
+        echo ""
+        echo "------------------------------"
+        echo "📊 Parsed Compiler Cache Statistics"
+        echo "------------------------------"
+        echo "   Cacheable Calls : $CACHEABLE"
+        echo "   Total Hits      : $TOTALHITS"
+        echo "   Direct Hits     : $DIRECTHIT"
+        echo "   Preprocessed    : $PREPROCESSHIT"
+        echo "   Cache Misses    : $MISS"
+        echo "   Total Requests  : $TOTALREQUESTS"
+        echo "   Hit Rate        : ${HITRATE}%"
+        echo "   Cache Usage     : ${CACHEUSAGE} (${CACHEPERCENT}%)"
+        echo "------------------------------"
+
+        # GitHub Step Summary
+        {
+          echo "## 📊 Compiler Cache Performance"
+          echo ""
+          echo "| Metric | Value |"
+          echo "|---|---:|"
+          echo "| Cacheable Calls | $CACHEABLE |"
+          echo "| Total Hits | $TOTALHITS |"
+          echo "| Direct Hits | $DIRECTHIT |"
+          echo "| Preprocessed Hits | $PREPROCESSHIT |"
+          echo "| Cache Misses | $MISS |"
+          echo "| Total Requests | $TOTALREQUESTS |"
+          echo "| Hit Rate | ${HITRATE}% |"
+          echo "| Cache Usage | ${CACHEUSAGE} GB (${CACHEPERCENT}%) |"
+          echo ""
+          echo "| Cache Source | Restored |"
+          echo "|---|:---:|"
+          echo "| GitHub Actions Cache | $FROMLOCAL |"
+          echo "| Git Release Archive | $FROMRELEASE |"
+          echo ""
+          echo "### 📂 CCache Directory"
+          echo "\`$CCACHE_DIR\`"
+        } >> "$GITHUB_STEP_SUMMARY"
+
+        echo ""
+        echo "🎉 Compiler Cache Statistics Generated Successfully"
