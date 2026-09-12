@@ -1,0 +1,416 @@
+name: "Compiler Cache"
+description: "Validate, Analyze, Save, Archive, and Clean Compiler Cache"
+
+inputs:
+  # Compiler Cache Configuration
+  buildccache:
+    description: "Compiler Cache Status"
+    required: true
+    default: "Disabled"
+
+  # GitHub Actions Cache Restore Status
+  cache-restored:
+    description: "Whether the GitHub Actions Cache was Restored"
+    required: false
+    default: "false"
+
+  # Local CCache Restore Status
+  ccache-hit:
+    description: "Whether the CCache Restore had a Cache Hit"
+    required: false
+    default: "false"
+
+  # Build Profile
+  profile:
+    description: "Kernel Build Profile"
+    required: false
+    default: ""
+
+runs:
+  using: composite
+
+  steps:
+
+    # Validate Compiler Cache and Generate Delta Key
+    - name: 🔧 Validate Compiler Cache
+      if: ${{ inputs.buildccache != 'Disabled' }}
+      shell: bash
+      run: |
+        set -Eeuo pipefail
+
+        RESTOREDDELTAFILE="$CCACHE_DIR/.deltakey"
+        RESTOREDDELTA=""
+
+        KERNELSHA="$(git rev-parse HEAD 2>/dev/null || echo no-git)"
+        CLANGVER="$(clang --version | sha256sum | awk '{print $1}')"
+        CCACHEVER="$(ccache -V | sha256sum | awk '{print $1}')"
+
+        DELTARAW="${KERNELSHA}|${MANIFESTBASEFILE}|${KERNELVERSION}|${ANDROIDVERSION}|${CLANGVER}|${CCACHEVER}"
+        DELTAKEY="$(printf '%s' "$DELTARAW" | sha256sum | awk '{print $1}')"
+
+        echo "DELTAKEY=$DELTAKEY" >> "$GITHUB_ENV"
+
+        if [[ -f "$RESTOREDDELTAFILE" ]]; then
+          RESTOREDDELTA="$(<"$RESTOREDDELTAFILE")"
+        fi
+
+        if [[ -n "$RESTOREDDELTA" && "$RESTOREDDELTA" != "$DELTAKEY" ]]; then
+          echo "⚠️ Compiler Cache Delta Changed"
+          echo "🧹 Cleaning Stale Compiler Cache..."
+
+          find "$CCACHE_DIR" -mindepth 1 -delete
+          sync
+
+          echo "✔️ Stale Compiler Cache Removed"
+        else
+          echo "✔️ Compiler Cache Delta Valid"
+        fi
+
+    # Generate Compiler Cache Performance Statistics
+    - name: 🔧 Compiler Cache Performance Summary
+      if: ${{ inputs.buildccache != 'Disabled' }}
+      shell: bash
+      env:
+        CACHE_RESTORED: ${{ inputs.cache-restored }}
+        CCACHE_HIT: ${{ inputs.ccache-hit }}
+      run: |
+        set -Eeuo pipefail
+
+        echo "📊 Collecting Compiler Cache Statistics..."
+
+        # Verify Compiler Cache Directory
+        if [[ -z "${CCACHE_DIR:-}" ]]; then
+          echo "⚠️ CCache Dir is Not Set"
+          exit 1
+        fi
+
+        if [[ ! -d "$CCACHE_DIR" ]]; then
+          echo "⚠️ CCache Dir Not Found: $CCACHE_DIR"
+          exit 1
+        fi
+
+        # Collect Raw CCache Statistics
+        STATS="$(ccache -s 2>/dev/null || true)"
+
+        echo ""
+        echo "📦 Raw CCache Statistics:"
+        echo "$STATS"
+        echo ""
+
+        # Extract CCache Statistics
+        cachegetstat() {
+          local LABEL="$1"
+          local LINE
+          local VALUE
+
+          LINE="$(printf '%s\n' "$STATS" | grep -i "$LABEL" | head -1 || true)"
+
+          if [[ -z "$LINE" ]]; then
+            echo "0"
+            return
+          fi
+
+          # Handle formats such as:
+          # Cacheable calls: 399 / 399
+          # Hits:            85 / 85
+          VALUE="$(printf '%s\n' "$LINE" \
+            | grep -oE '[0-9]+[[:space:]]*/[[:space:]]*[0-9]+' \
+            | head -1 \
+            | grep -oE '^[0-9]+' || true)"
+
+          if [[ -n "$VALUE" ]]; then
+            echo "$VALUE"
+            return
+          fi
+
+          # Fallback for Other CCache Output Formats
+          VALUE="$(printf '%s\n' "$LINE" \
+            | grep -oE '[0-9]+' \
+            | head -1 || true)"
+
+          echo "${VALUE:-0}"
+        }
+
+        CACHEABLE="$(cachegetstat "Cacheable calls")"
+        DIRECTHIT="$(cachegetstat "Hits:")"
+        PREPROCESSHIT="$(cachegetstat "Preprocessed cache hit")"
+        MISS="$(cachegetstat "Misses")"
+
+        TOTALHITS=$((DIRECTHIT + PREPROCESSHIT))
+        TOTALREQUESTS=$((TOTALHITS + MISS))
+
+        # Prefer Cacheable Calls When it is Larger
+        if (( CACHEABLE > TOTALREQUESTS )); then
+          TOTALREQUESTS="$CACHEABLE"
+        fi
+
+        if (( TOTALREQUESTS > 0 )); then
+          HITRATE=$((TOTALHITS * 100 / TOTALREQUESTS))
+        else
+          HITRATE=0
+        fi
+
+        # Extract Cache Size
+        CACHE_SIZE="$(printf '%s\n' "$STATS" \
+          | grep -i "Cache size" \
+          | head -1 \
+          | sed -E 's/.*Cache size[^0-9]*([0-9.]+).*/\1/' || true)"
+
+        MAX_CACHE_SIZE="$(printf '%s\n' "$STATS" \
+          | grep -i "Cache size" \
+          | head -1 \
+          | sed -E 's/.*\/[[:space:]]*([0-9.]+).*/\1/' || true)"
+
+        CACHE_SIZE="${CACHE_SIZE:-0}"
+        MAX_CACHE_SIZE="${MAX_CACHE_SIZE:-0}"
+
+        # Determine Cache Restore Sources
+        FROMLOCAL="✘ No"
+        FROMRELEASE="✘ No"
+
+        if [[ "$CACHE_RESTORED" == "true" ]]; then
+          FROMLOCAL="✔ Yes"
+        fi
+
+        if [[ "$CCACHE_HIT" == "true" ]]; then
+          FROMRELEASE="✔ Yes"
+        fi
+
+        # Export Hit Rate for Save Strategy
+        echo "HITRATE=$HITRATE" >> "$GITHUB_ENV"
+
+        # Write GitHub Step Summary
+        {
+          echo "## 📊 Compiler Cache Performance"
+          echo ""
+          echo "| Metric Description | Reported Value |"
+          echo "|---|---:|"
+          echo "| Total Cacheable Compilation Requests | $CACHEABLE |"
+          echo "| Total Compiler Requests Processed | $TOTALREQUESTS |"
+          echo "| Direct Cache Hits | $DIRECTHIT |"
+          echo "| Preprocessed Cache Hits | $PREPROCESSHIT |"
+          echo "| Total Cache Hits | $TOTALHITS |"
+          echo "| Cache Misses | $MISS |"
+          echo "| Overall Cache Hit Rate | ${HITRATE}% |"
+          echo "| Cache Size | ${CACHE_SIZE} / ${MAX_CACHE_SIZE} |"
+          echo "| Restored from GitHub Actions Cache | $FROMLOCAL |"
+          echo "| Restored from Git Release Archive | $FROMRELEASE |"
+          echo "| Cache Directory | \`$CCACHE_DIR\` |"
+          echo ""
+        } >> "$GITHUB_STEP_SUMMARY"
+
+        echo "📊 Cacheable Calls : $CACHEABLE"
+        echo "🎯 Direct Hits     : $DIRECTHIT"
+        echo "🎯 Preprocessed    : $PREPROCESSHIT"
+        echo "❌ Cache Misses    : $MISS"
+        echo "📈 Total Hit Rate  : ${HITRATE}%"
+        echo "📦 Cache Size      : ${CACHE_SIZE} / ${MAX_CACHE_SIZE}"
+        echo "📁 Cache Directory : $CCACHE_DIR"
+
+    # Decide Whether Compiler Cache Should Be Saved
+    - name: 🔧 Decide Compiler Cache Save Strategy
+      id: ccache-save
+      if: ${{ inputs.buildccache != 'Disabled' }}
+      shell: bash
+      env:
+        CACHE_RESTORED: ${{ inputs.cache-restored }}
+        CCACHE_HIT: ${{ inputs.ccache-hit }}
+      run: |
+        set -Eeuo pipefail
+
+        HITRATE="${HITRATE:-0}"
+
+        echo "📊 Compiler Cache Save Strategy"
+        echo "📈 Hit Rate       : ${HITRATE}%"
+        echo "📁 Cache Directory: $CCACHE_DIR"
+        echo "💾 Actions Cache  : $CACHE_RESTORED"
+        echo "📦 Release Cache  : $CCACHE_HIT"
+
+        if [[ ! -d "$CCACHE_DIR" ]]; then
+          echo "⚠️ CCache Directory Not Found"
+          echo "CCACHESAVE=false" >> "$GITHUB_ENV"
+          echo "CCACHESAVE=false" >> "$GITHUB_OUTPUT"
+          exit 0
+        fi
+
+        CACHESIZE="$(du -sh "$CCACHE_DIR" 2>/dev/null | awk '{print $1}' || echo "0")"
+        CACHEFILES="$(find "$CCACHE_DIR" -type f 2>/dev/null | wc -l || echo "0")"
+
+        echo "📦 Cache Size      : $CACHESIZE"
+        echo "📄 Cache Files     : $CACHEFILES"
+
+        CCACHESAVE=false
+
+        # Save When Hit Rate is Below 90%
+        if (( HITRATE < 90 )); then
+          echo "📉 Hit Rate Below 90% → Save Compiler Cache"
+          CCACHESAVE=true
+
+        # Save When No Release Cache was Restored
+        elif [[ "$CCACHE_HIT" != "true" ]]; then
+          echo "📦 No Release Cache Restored → Save Compiler Cache"
+          CCACHESAVE=true
+
+        # Save When No GitHub Actions Cache was Restored
+        elif [[ "$CACHE_RESTORED" != "true" ]]; then
+          echo "💾 No Actions Cache Restored → Save Compiler Cache"
+          CCACHESAVE=true
+
+        else
+          echo "✔️ Existing Compiler Cache Is Sufficient"
+          CCACHESAVE=false
+        fi
+
+        echo "CCACHESAVE=$CCACHESAVE" >> "$GITHUB_ENV"
+        echo "CCACHESAVE=$CCACHESAVE" >> "$GITHUB_OUTPUT"
+
+        echo "📌 Final Save Decision: $CCACHESAVE"
+
+    # Save Compiler Cache to GitHub Actions Cache
+    - name: 🔧 Save Compiler Cache
+      if: ${{ success()
+            && inputs.buildccache != 'Disabled'
+            && steps.ccache-save.outputs.CCACHESAVE == 'true'
+            && inputs.cache-restored != 'true' }}
+      timeout-minutes: 10
+      uses: actions/cache/save@v5
+      with:
+        path: ${{ env.CCACHE_DIR }}
+        key: CCache-${{ runner.os }}-${{ env.MANIFESTBASEFILE }}-${{ env.CPU }}-${{ github.ref_name }}
+
+    # Create Compiler Cache Release Archive
+    - name: 🔧 Create Compiler Cache Archive
+      if: ${{ success()
+            && inputs.buildccache != 'Disabled'
+            && steps.ccache-save.outputs.CCACHESAVE == 'true' }}
+      shell: bash
+      env:
+        PROFILE: ${{ inputs.profile }}
+      run: |
+        set -Eeuo pipefail
+
+        TAR="CCache-${MANIFESTBASEFILE}-${{ runner.os }}.tar.zst"
+
+        echo "TAR=$TAR" >> "$GITHUB_ENV"
+
+        if [[ ! -d "$CCACHE_DIR" ]]; then
+          echo "⚠️ CCache Dir Not Found"
+          exit 1
+        fi
+
+        if [[ -z "$(find "$CCACHE_DIR" -mindepth 1 -print -quit 2>/dev/null)" ]]; then
+          echo "⚠️ CCache Dir Is Empty"
+          exit 1
+        fi
+
+        cd "$CCACHE_DIR"
+
+        # Create Compiler Cache Metadata
+        printf '%s\n' \
+          "MANIFESTBASEFILE=$MANIFESTBASEFILE" \
+          "RUNNEROS=${{ runner.os }}" \
+          "KERNELVERSION=$KERNELVERSION" \
+          "ANDROIDVERSION=$ANDROIDVERSION" \
+          "KERNELMODULE=${KERNELMODULE:-}" \
+          "PROFILE=$PROFILE" \
+          "BUILDMETHOD=${BUILDMETHOD:-}" \
+          "DELTA=${DELTAKEY:-}" \
+          "CLANGVERSION=$(clang --version | head -1)" \
+          "CCACHEVERSION=$(ccache -V | head -1)" \
+          "TIMESTAMP=$(date -u '+%Y-%m-%dT%H:%M:%SZ')" \
+          > .fpccache
+
+        # Store Delta Key Inside Compiler Cache
+        printf '%s\n' "${DELTAKEY:-}" > .deltakey
+
+        cd "$GITHUB_WORKSPACE"
+
+        rm -f "$TAR"
+        rm -rf ccache_archive_tmp
+
+        # Display CCache Statistics Before Archive
+        echo "📊 CCache Statistics Before Archive:"
+        ccache -s || true
+
+        echo "📦 Creating Compiler Cache Archive..."
+
+        tar \
+          --sort=name \
+          --mtime='UTC 2025-01-01' \
+          --owner=0 \
+          --group=0 \
+          --numeric-owner \
+          --use-compress-program="zstd -T0 -15" \
+          -cf "$TAR" \
+          -C "$CCACHE_DIR" .
+
+        # Verify Archive Exists
+        if [[ ! -f "$TAR" ]]; then
+          echo "⚠️ Compiler Cache Archive Was Not Created"
+          exit 1
+        fi
+
+        echo "✔️ Archive Created: $TAR"
+
+        # Verify ZSTD Integrity
+        echo "🔍 Verifying ZSTD Integrity..."
+        zstd -t "$TAR"
+
+        # Verify TAR Integrity
+        echo "🔍 Verifying TAR Integrity..."
+        tar \
+          --use-compress-program=zstd \
+          -tf "$TAR" >/dev/null
+
+        # Archive Preview
+        echo "📂 Archive Preview:"
+        tar \
+          --use-compress-program=zstd \
+          -tf "$TAR" \
+          | head -20 || true
+
+        # Calculate Archive Statistics
+        ORIGINALSIZE="$(du -sh "$CCACHE_DIR" | awk '{print $1}')"
+        ARCHIVESIZE="$(du -sh "$TAR" | awk '{print $1}')"
+
+        ORIGINALBYTES="$(du -sb "$CCACHE_DIR" | awk '{print $1}')"
+        ARCHIVEBYTES="$(stat -c%s "$TAR")"
+
+        if (( ORIGINALBYTES > 0 )); then
+          RATIO="$(awk "BEGIN { printf \"%.2f\", $ARCHIVEBYTES / $ORIGINALBYTES }")"
+        else
+          RATIO="0"
+        fi
+
+        echo ""
+        echo "📊 Compiler Cache Archive Statistics"
+        echo "📁 Original Cache : $ORIGINALSIZE"
+        echo "📦 Archive Size   : $ARCHIVESIZE"
+        echo "📉 Compression    : ${RATIO}x"
+
+    # Clean and Optimize Compiler Cache
+    - name: 🔧 Clean Old Compiler Cache
+      if: ${{ inputs.buildccache != 'Disabled' }}
+      shell: bash
+      run: |
+        set -Eeuo pipefail
+
+        if ! command -v ccache >/dev/null 2>&1; then
+          echo "⚠️ CCache Not Installed"
+          exit 0
+        fi
+
+        # Display CCache Statistics Before Cleanup
+        echo "📊 CCache Statistics Before Cleanup:"
+        ccache -s || true
+
+        echo "🧹 Cleaning Compiler Cache..."
+
+        ccache -M "$CCACHE_MAXSIZE"
+        ccache -c
+
+        # Display CCache Statistics After Cleanup
+        echo "📊 CCache Statistics After Cleanup:"
+        ccache -s || true
+
+        echo "✔️ Compiler Cache Cleanup Completed"
