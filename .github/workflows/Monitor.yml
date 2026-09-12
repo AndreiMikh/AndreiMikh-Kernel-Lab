@@ -1,0 +1,1065 @@
+name: OnePlusOSS Kernel Monitor
+
+on:
+  schedule:
+    - cron: '0 */12 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  issues: write
+
+env:
+  ORG: OnePlusOSS
+  STATEFILE: old-state.json
+  GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+  GH_HTTP_TIMEOUT: 600
+  MAXRETRIES: 4
+  DELAYRETRIES: 5
+  SUMMARYLIMIT: 5000
+  REPOSITORYOWNER: ${{ github.repository_owner }}
+
+  # Repositories that should never be monitored.
+  BLREPOS: |
+    android_kernel_oneplus_one
+    android_kernel_oneplus_msm8974
+    android_kernel_oneplus_msm8994
+    android_kernel_oneplus_msm8996
+    android_kernel_oneplus_msm8998
+    android_kernel_oneplus_sm6350
+    android_kernel_oneplus_sm4250
+    android_kernel_oneplus_sm7250
+    android_kernel_oneplus_sdm845
+    android_kernel_oneplus_sm8150
+    android_kernel_4.19_oneplus_mt6765
+    android_kernel_oneplus_sm8250
+    android_kernel_oneplus_mt6893
+    android_kernel_oneplus_sm4350
+    android_kernel_msm-5.4_oneplus_sm6375
+    android_kernel_oneplus_mt6877
+    android_kernel_oneplus_sm7325
+    android_kernel_oneplus_sm8350
+    android_kernel_oneplus_sw5100
+    android_kernel_oneplus_sm7225
+
+jobs:
+  monitor:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: 📥 Checkout Monitor Repository
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 1
+
+      - name: 🔍 Scan OnePlusOSS Kernels
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+
+          # Basic GitHub CLI configuration.
+          export GH_TOKEN="$GH_TOKEN"
+          export GH_REPO="$REPOSITORYOWNER/${GITHUB_REPOSITORY#*/}"
+
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+
+          mkdir -p main
+          cd main
+
+          # Remove temporary files from previous attempts.
+          rm -f "$STATEFILE"
+          rm -f new-state.json
+          rm -f summary-rows.md
+          rm -f local-summary.md
+          rm -f manifest_summary.md
+
+          # Restore the previous persistent state.
+          #
+          # Authentication is required here. An unauthenticated clone/ls-remote
+          # causes GitHub to ask for a username and fails on Actions runners.
+          rm -rf repostatus
+
+          mkdir -p repostatus
+          cd repostatus
+
+          git init -q
+
+          git remote add origin \
+            "https://github.com/${REPOSITORYOWNER}/${GITHUB_REPOSITORY#*/}.git"
+
+          # Check status-page using the GitHub Actions token.
+          if git \
+            -c "http.extraheader=AUTHORIZATION: bearer ${GH_TOKEN}" \
+            ls-remote \
+            --exit-code \
+            --heads \
+            origin \
+            status-page \
+            >/dev/null 2>&1
+          then
+
+            echo "✅ status-page branch exists."
+
+            git \
+              -c "http.extraheader=AUTHORIZATION: bearer ${GH_TOKEN}" \
+              fetch \
+              --quiet \
+              origin \
+              status-page
+
+            git checkout \
+              --quiet \
+              -B status-page \
+              FETCH_HEAD
+
+            if [[ -f "$STATEFILE" ]]; then
+              cp "$STATEFILE" ../"$STATEFILE"
+              echo "✅ Previous state restored."
+            else
+              echo "⚠️ State file missing, starting with empty state."
+              echo '{}' > ../"$STATEFILE"
+            fi
+
+          else
+
+            echo "ℹ️ Status-Page Does Not Exist, Starting with Empty State..."
+
+            git checkout \
+              --quiet \
+              --orphan \
+              status-page
+
+            git rm -rf . >/dev/null 2>&1 || true
+
+            echo '{}' > ../"$STATEFILE"
+
+          fi
+
+          cd ..
+
+          # Ensure the state file is valid JSON.
+          if ! jq empty "$STATEFILE" >/dev/null 2>&1; then
+            echo "⚠️ Invalid previous state detected."
+            echo '{}' > "$STATEFILE"
+          fi
+
+          echo "📊 Previous state loaded."
+
+          # GraphQL helper with retry support.
+          graphql() {
+            local QUERY="$1"
+            local VARIABLES="${2:-{}}"
+            local ATTEMPT=1
+            local RESPONSE
+
+            while (( ATTEMPT <= MAXRETRIES )); do
+              if RESPONSE="$(
+                gh api graphql \
+                  --hostname github.com \
+                  -f query="$QUERY" \
+                  -f variables="$VARIABLES" \
+                  2>/dev/null
+              )"; then
+                printf '%s\n' "$RESPONSE"
+                return 0
+              fi
+
+              echo "⚠️ GraphQL request failed (attempt ${ATTEMPT}/${MAXRETRIES})." >&2
+
+              if (( ATTEMPT < MAXRETRIES )); then
+                sleep "$DELAYRETRIES"
+              fi
+
+              ((ATTEMPT++))
+            done
+
+            return 1
+          }
+
+          # Determine whether a repository is blacklisted.
+          explblacklisted() {
+            local REPO="$1"
+
+            while IFS= read -r BLACKLIST; do
+              [[ -z "$BLACKLIST" ]] && continue
+
+              if [[ "$REPO" == "$BLACKLIST" ]]; then
+                return 0
+              fi
+            done <<< "$BLREPOS"
+
+            return 1
+          }
+
+          # Extract SMxxxx or MTxxxx from the repository name.
+          #
+          # Examples:
+          #   android_kernel_oneplus_sm8450 -> SM8450
+          #   android_kernel_common_oneplus_sm8750 -> SM8750
+          #   android_kernel_oneplus_mt1263 -> MT1263
+          fetchplatform() {
+            local REPO="$1"
+            local PLATFORM=""
+
+            if [[ "$REPO" == "kernel_manifest" ]]; then
+              echo "MANIFEST"
+              return 0
+            fi
+
+            PLATFORM="$(
+              printf '%s\n' "$REPO" |
+                grep -oEi 'sm[0-9]{4,5}' |
+                head -n1 ||
+                true
+            )"
+
+            if [[ -n "$PLATFORM" ]]; then
+              printf '%s\n' "${PLATFORM^^}"
+              return 0
+            fi
+
+            PLATFORM="$(
+              printf '%s\n' "$REPO" |
+                grep -oEi 'mt[0-9]{4,5}' |
+                head -n1 ||
+                true
+            )"
+
+            if [[ -n "$PLATFORM" ]]; then
+              printf '%s\n' "${PLATFORM^^}"
+              return 0
+            fi
+
+            echo "OTHER"
+          }
+
+          # GitHub GraphQL query for kernel repositories.
+          KERNELQUERY='
+          query($org:String!, $cursor:String) {
+            organization(login:$org) {
+              repositories(first:100, after:$cursor, orderBy:{field:NAME, direction:ASC}) {
+                nodes {
+                  name
+                  isArchived
+                  isDisabled
+                  url
+                  defaultBranchRef {
+                    name
+                  }
+                  refs(
+                    first:100,
+                    refPrefix:"refs/heads/",
+                    orderBy:{field:ALPHABETICAL, direction:ASC}
+                  ) {
+                    nodes {
+                      name
+                      target {
+                        oid
+                      }
+                    }
+                    pageInfo {
+                      hasNextPage
+                      endCursor
+                    }
+                  }
+                }
+                pageInfo {
+                  hasNextPage
+                  endCursor
+                }
+              }
+            }
+          }'
+
+          # GraphQL query for kernel_manifest.
+          MANIFESTQUERY='
+          query($org:String!, $repo:String!, $cursor:String) {
+            repository(owner:$org, name:$repo) {
+              refs(
+                first:100,
+                after:$cursor,
+                refPrefix:"refs/heads/",
+                orderBy:{field:ALPHABETICAL, direction:ASC}
+              ) {
+                nodes {
+                  name
+                  target {
+                    oid
+                  }
+                }
+                pageInfo {
+                  hasNextPage
+                  endCursor
+                }
+              }
+            }
+          }'
+
+          # State counters.
+          NEWREPOS=0
+          NEWBRANCH=0
+          UPDATEDBRANCH=0
+          DELETEDITEM=0
+          DETECTEDCHANGE=0
+
+          TOTALREPOS=0
+          SCANNEDREPOS=0
+          FAILEDREPOS=0
+          TOTALBRANCHES=0
+          NEWBRANCHCOUNT=0
+          UPDATEDBRANCHCOUNT=0
+          DELETEDCOUNT=0
+
+          # Temporary arrays.
+          declare -A PLATFORM_ROWS=()
+          declare -A FLATCOUNT=()
+
+          : > summary-rows.md
+          : > local-summary.md
+          : > manifest_summary.md
+
+          # The new state starts empty and is populated only from
+          # successfully scanned repositories.
+          echo '{}' > new-state.json
+
+          # Fetch all repositories from OnePlusOSS with pagination.
+          REPOSITORIES=()
+          NEXTQUERY="true"
+          NEXTCURSOR="null"
+
+          while [[ "$NEXTQUERY" == "true" ]]; do
+
+            VARIABLES="$(
+              jq -nc \
+                --arg org "$ORG" \
+                --argjson cursor "$NEXTCURSOR" \
+                '{org:$org,cursor:$cursor}'
+            )"
+
+            RESPONSE="$(
+              graphql "$KERNELQUERY" "$VARIABLES"
+            )" || {
+              echo "❌ Unable to retrieve OnePlusOSS repositories."
+              exit 1
+            }
+
+            mapfile -t PAGENODES < <(
+              jq -r '
+                .data.organization.repositories.nodes[]
+                | select(
+                    (.name == "kernel_manifest")
+                    or (
+                      (.name | startswith("android_kernel_"))
+                      and (.name | contains("modules") | not)
+                      and (.name | contains("techpack") | not)
+                    )
+                  )
+                | .name
+              ' <<< "$RESPONSE"
+            )
+
+            for REPO in "${PAGENODES[@]}"; do
+              [[ -z "$REPO" ]] && continue
+
+              if explblacklisted "$REPO"; then
+                continue
+              fi
+
+              REPOSITORIES+=("$REPO")
+            done
+
+            NEXTQUERY="$(
+              jq -r '
+                .data.organization.repositories.pageInfo.hasNextPage
+              ' <<< "$RESPONSE"
+            )"
+
+            NEXTCURSOR="$(
+              jq -c '
+                .data.organization.repositories.pageInfo.endCursor
+              ' <<< "$RESPONSE"
+            )"
+
+          done
+
+          # Remove duplicate repository names.
+          mapfile -t REPOSITORIES < <(
+            printf '%s\n' "${REPOSITORIES[@]}" |
+              sort -u
+          )
+
+          TOTALREPOS="${#REPOSITORIES[@]}"
+
+          if (( TOTALREPOS == 0 )); then
+            echo "❌ No repositories were discovered."
+            exit 1
+          fi
+
+          echo "📦 Repositories discovered: ${TOTALREPOS}"
+
+          # Process one repository.
+          process_repository() {
+            local REPO="$1"
+
+            echo ""
+            echo "🔍 Processing ${REPO}..."
+
+            local REPO_DATA
+            local BRANCHDATA
+            local BRANCHNAME
+            local OLDREPO
+            local OLDREPOSTATE
+            local CURRENTVALUE
+            local OLDVALUE
+            local COMMIT
+            local KERNEL
+            local STATUS
+            local PLATFORM
+            local JSONFILE
+            local BRANCH_COUNT=0
+
+            # Obtain branch information.
+            REPO_DATA="$(
+              gh api \
+                --hostname github.com \
+                "repos/${ORG}/${REPO}/branches?per_page=100" \
+                2>/dev/null
+            )" || {
+              echo "⚠️ Failed to retrieve branches for ${REPO}."
+              ((FAILEDREPOS++))
+              return 0
+            }
+
+            if ! jq -e 'type == "array"' >/dev/null 2>&1 <<< "$REPO_DATA"; then
+              echo "⚠️ Invalid branch response for ${REPO}."
+              ((FAILEDREPOS++))
+              return 0
+            fi
+
+            OLDREPO="$(
+              jq -r \
+                --arg repo "$REPO" \
+                'has($repo)' \
+                "$STATEFILE"
+            )"
+
+            OLDREPOSTATE="$(
+              jq -c \
+                --arg repo "$REPO" \
+                '.[$repo] // {}' \
+                "$STATEFILE"
+            )"
+
+            # Preserve an existing repository's previous state if scanning fails.
+            echo '{}' > "$JSONFILE"
+
+            # Scan each branch.
+            while IFS= read -r BRANCHDATA; do
+              [[ -z "$BRANCHDATA" ]] && continue
+
+              BRANCHNAME="$(
+                jq -r '.name' <<< "$BRANCHDATA"
+              )"
+
+              COMMIT="$(
+                jq -r '.commit.sha' <<< "$BRANCHDATA"
+              )"
+
+              [[ -z "$BRANCHNAME" ]] && continue
+              [[ -z "$COMMIT" ]] && continue
+
+              ((BRANCH_COUNT++))
+              ((TOTALBRANCHES++))
+
+              # Get the kernel version from Makefile at this branch.
+              KERNEL="Unknown"
+
+              MAKEFILE="$(
+                gh api \
+                  --hostname github.com \
+                  "repos/${ORG}/${REPO}/contents/Makefile?ref=$(jq -rn --arg b "$BRANCHNAME" '$b|@uri')" \
+                  2>/dev/null ||
+                  true
+              )"
+
+              if [[ -n "$MAKEFILE" ]]; then
+                MAKE_CONTENT="$(
+                  jq -r '.content // empty' <<< "$MAKEFILE" |
+                    tr -d '\r\n' |
+                    base64 -d 2>/dev/null ||
+                    true
+                )"
+
+                if [[ -n "$MAKE_CONTENT" ]]; then
+                  VERSION="$(
+                    awk -F'=' '
+                      /^[[:space:]]*VERSION[[:space:]]*=/ {
+                        gsub(/[[:space:]]/, "", $2)
+                        print $2
+                        exit
+                      }
+                    ' <<< "$MAKE_CONTENT"
+                  )"
+
+                  PATCHLEVEL="$(
+                    awk -F'=' '
+                      /^[[:space:]]*PATCHLEVEL[[:space:]]*=/ {
+                        gsub(/[[:space:]]/, "", $2)
+                        print $2
+                        exit
+                      }
+                    ' <<< "$MAKE_CONTENT"
+                  )"
+
+                  SUBLEVEL="$(
+                    awk -F'=' '
+                      /^[[:space:]]*SUBLEVEL[[:space:]]*=/ {
+                        gsub(/[[:space:]]/, "", $2)
+                        print $2
+                        exit
+                      }
+                    ' <<< "$MAKE_CONTENT"
+                  )"
+
+                  if [[ -n "$VERSION" && -n "$PATCHLEVEL" ]]; then
+                    KERNEL="${VERSION}.${PATCHLEVEL}"
+
+                    if [[ -n "$SUBLEVEL" ]]; then
+                      KERNEL="${KERNEL}.${SUBLEVEL}"
+                    fi
+                  fi
+                fi
+              fi
+
+              OLDVALUE="$(
+                jq -r \
+                  --arg branch "$BRANCHNAME" \
+                  '.[$branch].commit // empty' \
+                  <<< "$OLDREPOSTATE"
+              )"
+
+              if [[ -z "$OLDVALUE" ]]; then
+                STATUS="🆕"
+                ((NEWBRANCHCOUNT++))
+                ((NEWBRANCH++))
+                DETECTEDCHANGE=1
+
+              elif [[ "$OLDVALUE" != "$COMMIT" ]]; then
+                STATUS="🔄"
+                ((UPDATEDBRANCHCOUNT++))
+                ((UPDATEDBRANCH++))
+                DETECTEDCHANGE=1
+
+              else
+                STATUS="✅"
+              fi
+
+              # Store the current branch state.
+              NEWBRANCHSTATE="$(
+                jq -nc \
+                  --arg commit "$COMMIT" \
+                  --arg kernel "$KERNEL" \
+                  '{
+                    commit:$commit,
+                    kernel:$kernel
+                  }'
+              )"
+
+              jq \
+                --arg branch "$BRANCHNAME" \
+                --argjson value "$NEWBRANCHSTATE" \
+                '.[$branch]=$value' \
+                "$JSONFILE" > "${JSONFILE}.tmp"
+
+              mv "${JSONFILE}.tmp" "$JSONFILE"
+
+              # Add the branch to its platform section.
+              PLATFORM="$(fetchplatform "$REPO")"
+
+              ESCAPED_REPO="${REPO//_/\\_}"
+              ESCAPED_BRANCH="${BRANCHNAME//_/\\_}"
+
+              ROW="|${ESCAPED_REPO}|${ESCAPED_BRANCH}|\`${COMMIT:0:7}\`|${KERNEL}|${STATUS}|"
+
+              PLATFORM_ROWS["${PLATFORM}|${REPO}|${BRANCHNAME}"]="$ROW"
+              ((FLATCOUNT["$PLATFORM"]++))
+
+            done < <(
+              jq -c '.[]' <<< "$REPO_DATA"
+            )
+
+            # A repository that has no branches is still considered scanned.
+            if (( BRANCH_COUNT == 0 )); then
+              echo "⚠️ No branches found for ${REPO}."
+            fi
+
+            # Save successful repository state.
+            jq \
+              --arg repo "$REPO" \
+              --argjson branches "$(<"$JSONFILE")" \
+              '.[$repo]=$branches' \
+              new-state.json > new-state.tmp
+
+            mv new-state.tmp new-state.json
+
+            ((SCANNEDREPOS++))
+          }
+
+          # Process all discovered repositories.
+          for REPO in "${REPOSITORIES[@]}"; do
+            process_repository "$REPO"
+          done
+
+          # Detect repositories that disappeared from the current scan.
+          while IFS= read -r OLDREPO; do
+            [[ -z "$OLDREPO" ]] && continue
+
+            if explblacklisted "$OLDREPO"; then
+              continue
+            fi
+
+            if ! printf '%s\n' "${REPOSITORIES[@]}" |
+              grep -Fxq "$OLDREPO"
+            then
+
+              echo "🗑️ Repository deleted: ${OLDREPO}"
+
+              ((DELETEDITEM++))
+              ((DELETEDCOUNT++))
+              DETECTEDCHANGE=1
+            fi
+          done < <(
+            jq -r 'keys[]' "$STATEFILE"
+          )
+
+          # Generate platform summary.
+          #
+          # Every platform gets its own section:
+          #
+          #   SM6375 -> 📱 SM6375 Branch
+          #   SM8450 -> 📱 SM8450 Branch
+          #   SM8750 -> 📱 SM8750 Branch
+          #   MT1263 -> 📱 MT1263 Branch
+          #
+          # kernel_manifest and unknown repositories have dedicated sections.
+          : > local-summary.md
+
+          if (( ${#PLATFORM_ROWS[@]} > 0 )); then
+
+            mapfile -t PLATFORMS < <(
+              printf '%s\n' "${!PLATFORM_ROWS[@]}" |
+                cut -d'|' -f1 |
+                sort -u -V
+            )
+
+            for PLATFORM in "${PLATFORMS[@]}"; do
+              [[ -z "$PLATFORM" ]] && continue
+
+              BRANCHCOUNT="${FLATCOUNT[$PLATFORM]:-0}"
+
+              case "$PLATFORM" in
+                MANIFEST)
+                  echo "#### 📋 Kernel Manifest" >> local-summary.md
+                  ;;
+
+                OTHER)
+                  echo "#### 📦 Other Branch" >> local-summary.md
+                  ;;
+
+                SM*)
+                  echo "#### 📱 ${PLATFORM} Branch" >> local-summary.md
+                  ;;
+
+                MT*)
+                  echo "#### 📱 ${PLATFORM} Branch" >> local-summary.md
+                  ;;
+
+                *)
+                  echo "#### 📦 ${PLATFORM} Branch" >> local-summary.md
+                  ;;
+              esac
+
+              if (( BRANCHCOUNT == 1 )); then
+                echo "> **1 branch**" >> local-summary.md
+              else
+                echo "> **${BRANCHCOUNT} branches**" >> local-summary.md
+              fi
+
+              echo "" >> local-summary.md
+
+              echo "|Repo|Branch|Latest Commit|Kernel|Status|" >> local-summary.md
+              echo "|:---|:---|:---|:---|:---|" >> local-summary.md
+
+              for KEY in "${!PLATFORM_ROWS[@]}"; do
+                KEYPLATFORM="${KEY%%|*}"
+
+                [[ "$KEYPLATFORM" != "$PLATFORM" ]] && continue
+
+                printf '%s\n' "${PLATFORM_ROWS[$KEY]}"
+              done | sort -V >> local-summary.md
+
+              echo "" >> local-summary.md
+            done
+
+          else
+            echo "> No kernel branches detected." >> local-summary.md
+          fi
+
+          # Manifest summary.
+          if [[ -d "$REPOSITORYOWNER" ]]; then
+            :
+          fi
+
+          echo "### 📋 Manifest Status" > manifest_summary.md
+          echo "" >> manifest_summary.md
+
+          MANIFESTDATA="$(
+            gh api \
+              --hostname github.com \
+              "repos/${ORG}/kernel_manifest/git/trees/oneplus/sm8750?recursive=1" \
+              2>/dev/null ||
+              true
+          )"
+
+          if [[ -n "$MANIFESTDATA" ]] &&
+            jq -e '.tree' >/dev/null 2>&1 <<< "$MANIFESTDATA"
+          then
+
+            echo "|Status|File|" >> manifest_summary.md
+            echo "|:---|:---|" >> manifest_summary.md
+
+            # Compare root-level manifest files against previous state.
+            CURRENT_MANIFEST="$(
+              jq -c '
+                [
+                  .tree[]
+                  | select(.type == "blob")
+                  | select((.path | contains("/")) | not)
+                  | {
+                      path:.path,
+                      oid:.sha
+                    }
+                ]
+              ' <<< "$MANIFESTDATA"
+            )"
+
+            OLD_MANIFEST="$(
+              jq -c '.kernel_manifest.files // []' "$STATEFILE"
+            )"
+
+            # Added and modified files.
+            while IFS= read -r FILE_JSON; do
+              [[ -z "$FILE_JSON" ]] && continue
+
+              FILEPATH="$(jq -r '.path' <<< "$FILE_JSON")"
+              OLDOID="$(
+                jq -r \
+                  --arg path "$FILEPATH" \
+                  '.[] | select(.path == $path) | .oid' \
+                  <<< "$OLD_MANIFEST" |
+                  head -n1
+              )"
+
+              CURRENT_OID="$(jq -r '.oid' <<< "$FILE_JSON")"
+
+              if [[ -z "$OLDOID" || "$OLDOID" == "null" ]]; then
+                FILESTATUS="🆕 Added"
+                DETECTEDCHANGE=1
+
+              elif [[ "$OLDOID" != "$CURRENT_OID" ]]; then
+                FILESTATUS="🔄 Modified"
+                DETECTEDCHANGE=1
+
+              else
+                FILESTATUS="✅ Unchanged"
+              fi
+
+              echo "|${FILESTATUS}|${FILEPATH//_/\\_}|" >> manifest_summary.md
+
+            done < <(
+              jq -c '.[]' <<< "$CURRENT_MANIFEST"
+            )
+
+            # Deleted files.
+            while IFS= read -r FILE_JSON; do
+              [[ -z "$FILE_JSON" ]] && continue
+
+              FILEPATH="$(jq -r '.path' <<< "$FILE_JSON")"
+
+              if ! jq -e \
+                --arg path "$FILEPATH" \
+                '.[] | select(.path == $path)' \
+                <<< "$CURRENT_MANIFEST" >/dev/null
+              then
+                echo "|🗑️ Deleted|${FILEPATH//_/\\_}|" >> manifest_summary.md
+                DETECTEDCHANGE=1
+                ((DELETEDCOUNT++))
+              fi
+
+            done < <(
+              jq -c '.[]' <<< "$OLD_MANIFEST"
+            )
+
+            # Save manifest state into new state.
+            jq \
+              --argjson files "$CURRENT_MANIFEST" \
+              '.kernel_manifest.files=$files' \
+              new-state.json > new-state.tmp
+
+            mv new-state.tmp new-state.json
+
+          else
+            echo "⚠️ Unable to retrieve kernel_manifest." >> manifest_summary.md
+          fi
+
+          # Preserve state for repositories that failed to scan.
+          #
+          # This prevents a temporary API failure from appearing as a
+          # mass repository/branch deletion.
+          if (( FAILEDREPOS > 0 )); then
+            echo "⚠️ ${FAILEDREPOS} repository scan(s) failed."
+            echo "ℹ️ Preserving their previous state."
+
+            while IFS= read -r FAILEDREPO; do
+              [[ -z "$FAILEDREPO" ]] && continue
+
+              if jq -e \
+                --arg repo "$FAILEDREPO" \
+                '.[$repo]' \
+                "$STATEFILE" >/dev/null 2>&1
+              then
+
+                jq \
+                  --arg repo "$FAILEDREPO" \
+                  --argjson value \
+                  "$(jq -c --arg repo "$FAILEDREPO" '.[$repo]' "$STATEFILE")" \
+                  '.[$repo]=$value' \
+                  new-state.json > new-state.tmp
+
+                mv new-state.tmp new-state.json
+              fi
+
+            done < failed-repositories.txt 2>/dev/null || true
+          fi
+
+          # Ensure the generated state is valid.
+          if ! jq empty new-state.json >/dev/null 2>&1; then
+            echo "❌ Generated state is invalid."
+            exit 1
+          fi
+
+          # Limit the summary size.
+          if [[ -f local-summary.md ]]; then
+            SUMMARYROWS="$(wc -c < local-summary.md)"
+
+            if (( SUMMARYROWS > SUMMARYLIMIT )); then
+              echo "⚠️ Summary exceeds ${SUMMARYLIMIT} bytes."
+
+              head -c "$SUMMARYLIMIT" local-summary.md > local-summary.tmp
+              printf '\n\n> ⚠️ Summary truncated.\n' >> local-summary.tmp
+              mv local-summary.tmp local-summary.md
+            fi
+          fi
+
+          # Create the final GitHub Actions summary.
+          {
+            echo "## 📱 OnePlusOSS Kernel Monitor"
+            echo ""
+            echo "**Last Scan:** $(date -u '+%Y-%m-%d %H:%M:%S UTC')"
+            echo ""
+            echo "### 📊 Scan Statistics"
+            echo ""
+            echo "|Metric|Count|"
+            echo "|:---|---:|"
+            echo "|Total Repositories|${TOTALREPOS}|"
+            echo "|Successfully Scanned|${SCANNEDREPOS}|"
+            echo "|Failed Repositories|${FAILEDREPOS}|"
+            echo "|Total Branches|${TOTALBRANCHES}|"
+            echo "|New Branches|${NEWBRANCHCOUNT}|"
+            echo "|Updated Branches|${UPDATEDBRANCHCOUNT}|"
+            echo "|Deleted Items|${DELETEDCOUNT}|"
+            echo ""
+            echo "### Branch Status & Kernel Versions"
+            echo ""
+            cat local-summary.md
+            echo ""
+            echo "### 📋 Manifest"
+            echo ""
+            cat manifest_summary.md
+          } > summary-rows.md
+
+          cat summary-rows.md >> "$GITHUB_STEP_SUMMARY"
+
+          # Save the final state for the status-page update.
+          cp new-state.json "$STATEFILE"
+
+          echo ""
+          echo "📊 Monitor Summary"
+          echo "Repositories: ${TOTALREPOS}"
+          echo "Scanned:      ${SCANNEDREPOS}"
+          echo "Failed:       ${FAILEDREPOS}"
+          echo "Branches:     ${TOTALBRANCHES}"
+          echo "New:          ${NEWBRANCHCOUNT}"
+          echo "Updated:      ${UPDATEDBRANCHCOUNT}"
+          echo "Deleted:      ${DELETEDCOUNT}"
+
+      - name: 📄 Update Status-Page
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+
+          rm -rf repostatus-final
+          mkdir -p repostatus-final
+
+          cd repostatus-final
+
+          git init -q
+
+          git remote add origin \
+            "https://github.com/${REPOSITORYOWNER}/${GITHUB_REPOSITORY#*/}.git"
+
+          # Always authenticate GitHub operations with the Actions token.
+          #
+          # This is important for ls-remote. Without the authorization
+          # header Git tries to prompt for a username, which is impossible
+          # on a non-interactive GitHub Actions runner.
+          if git \
+            -c "http.extraheader=AUTHORIZATION: bearer ${GH_TOKEN}" \
+            ls-remote \
+            --exit-code \
+            --heads \
+            origin \
+            status-page \
+            >/dev/null 2>&1
+          then
+
+            echo "✅ status-page branch exists."
+
+            git \
+              -c "http.extraheader=AUTHORIZATION: bearer ${GH_TOKEN}" \
+              fetch \
+              --quiet \
+              origin \
+              status-page
+
+            git checkout \
+              --quiet \
+              -B status-page \
+              FETCH_HEAD
+
+          else
+
+            echo "ℹ️ Creating status-page branch."
+
+            git checkout \
+              --quiet \
+              --orphan \
+              status-page
+
+            git rm -rf . >/dev/null 2>&1 || true
+
+          fi
+
+          # Generate the persistent status-page README.
+          {
+            echo "# 📱 OnePlusOSS Kernel Tracker"
+            echo
+            echo "> **Last Update:** $(date -u '+%Y-%m-%d %H:%M:%S UTC')"
+            echo
+            echo "Automated monitoring report for OnePlusOSS Android kernel repositories."
+            echo
+            echo "---"
+            echo
+            cat ../main/manifest_summary.md
+            echo
+            echo "---"
+            echo
+            cat ../main/local-summary.md
+          } > README.md
+
+          # Store the successfully scanned persistent state.
+          cp "../main/${STATEFILE}" "$STATEFILE"
+
+          # Commit only when something actually changed.
+          git add README.md "$STATEFILE"
+
+          if git diff --cached --quiet; then
+            echo "ℹ️ No status-page changes detected."
+            exit 0
+          fi
+
+          git commit \
+            --quiet \
+            -m "docs: sync OnePlusOSS kernel status [skip ci]"
+
+          # IMPORTANT:
+          # Authenticate the push exactly like fetch and ls-remote.
+          git \
+            -c "http.extraheader=AUTHORIZATION: bearer ${GH_TOKEN}" \
+            push \
+            --quiet \
+            origin \
+            status-page
+
+          echo "✅ status-page updated successfully."
+
+      - name: 📢 Create or Update Monitor Issue
+        if: always()
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+
+          RUNURL="https://github.com/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+          DATETITLE="$(date -u '+%Y-%m-%d %H:%M UTC')"
+
+          BODYFILE="$(mktemp)"
+
+          {
+            echo "## 📱 OnePlusOSS Kernel Monitor"
+            echo ""
+            echo "**Scan:** ${DATETITLE}"
+            echo ""
+            echo "Automated OnePlusOSS kernel repository monitoring completed."
+            echo ""
+            echo "**Workflow Run:** ${RUNURL}"
+            echo ""
+            echo "### Summary"
+            echo ""
+            cat main/summary-rows.md 2>/dev/null || true
+          } > "$BODYFILE"
+
+          # Find the latest open monitor issue.
+          ISSUEDNUMBER="$(
+            gh issue list \
+              --repo "$GITHUB_REPOSITORY" \
+              --state open \
+              --search "OnePlusOSS Kernel Monitor in:title" \
+              --json number \
+              --jq '.[0].number // empty'
+          )"
+
+          if [[ -n "$ISSUEDNUMBER" ]]; then
+
+            gh issue edit \
+              "$ISSUEDNUMBER" \
+              --repo "$GITHUB_REPOSITORY" \
+              --body-file "$BODYFILE"
+
+            echo "✅ Monitor issue updated: #${ISSUEDNUMBER}"
+
+          else
+
+            gh issue create \
+              --repo "$GITHUB_REPOSITORY" \
+              --title "📱 OnePlusOSS Kernel Monitor" \
+              --body-file "$BODYFILE"
+
+            echo "✅ Monitor issue created."
+
+          fi
+
+          rm -f "$BODYFILE"
