@@ -4114,7 +4114,7 @@ jobs:
           # Route Unexpected Errors Through Fallback
           trap 'error "$LINENO" "$?"' ERR
 
-          # Environment Variables
+          # Build Environment
           FILEBASE="${MANIFESTBASEFILE:-Unknown}"
           BRANCH="${MANIFESTBRANCH:-Unknown}"
           CPU="${CPUD:-Unknown}"
@@ -4139,7 +4139,7 @@ jobs:
           # Enter Kernel Platform
           cd kernel_workspace/kernel_platform || fallback "missingkernelplatform"
 
-          # Detect LLVM IAS
+          # Detect LLVM Integrated Assembler
           LLVMENABLED=false
           if [[ -f ./common/build.config.arm ]] &&
              grep -q '^LLVM_IAS=1' ./common/build.config.arm; then
@@ -4152,7 +4152,6 @@ jobs:
           echo "------------------------------"
           echo ""
 
-          # Clang
           CLANGROOT="prebuilts/clang/host/linux-x86"
           if [[ ! -d "$CLANGROOT" ]]; then
             echo "⚠️ Clang Root Directory Missing"
@@ -4160,7 +4159,7 @@ jobs:
             fallback "missingclangroot"
           fi
 
-          # Dynamic Clang Discovery, Select Newest Valid Clang Toolchain Containing Bin / Clang
+          # Find Newest Valid Clang Toolchain
           echo "🔍 Searching for Valid Clang Toolchains..."
           CLANGDIR="$(
             find "$CLANGROOT" \
@@ -4173,7 +4172,6 @@ jobs:
             tail -n1
           )"
 
-          # Fallback if No Usable Clang Toolchain was Found
           if [[ -z "${CLANGDIR:-}" ]]; then
             echo "⚠️ No Valid Clang Toolchain Found"
             echo "🔍 Available Toolchains:"
@@ -4185,42 +4183,39 @@ jobs:
             fallback "missingclangdir"
           fi
 
-          # Resolve the Selected Clang Binary
+          # Resolve Clang Binary
           CLANGBIN="$CLANGDIR/bin"
           CLANGFULLPATH="$PWD/$CLANGBIN/clang"
+
           echo "📂 Clang Directory : $CLANGDIR"
           echo "📂 Clang Bin       : $CLANGBIN"
 
-          # Verify the Selected Clang Binary is Executable
+          # Validate Clang Binary
           if [[ ! -x "$CLANGFULLPATH" ]]; then
             echo "⚠️ Clang Binary Missing"
             echo "📂 Expected: $CLANGFULLPATH"
-            echo "🔍 Debug: Directory Contents"
+            echo "🔍 Directory Contents:"
             ls -lah "$PWD/$CLANGBIN" 2>/dev/null || true
             fallback "missingclang"
           fi
 
-          # Read the Installed Clang Version
+          # Detect Clang Version
           CLANGVERSION="$(
-            "$CLANGFULLPATH" --version \
-              | head -n1 \
-              | sed -E 's/.*clang version ([0-9.]+).*/\1/' \
-              || true
+            "$CLANGFULLPATH" --version |
+              head -n1 |
+              sed -E 's/.*clang version ([0-9.]+).*/\1/' ||
+              true
           )"
-          # Ensure Clang Version Detection Succeeded
+
           if [[ -z "${CLANGVERSION:-}" ]]; then
             echo "⚠️ Failed to Detect Clang Version"
             fallback "missingclangversion"
           fi
 
-          # Export Runtime Variables, Add the Selected Clang Toolchain to Path
+          # Export Clang Environment
           export PATH="$PWD/$CLANGBIN:$PATH"
           export CCACHE_COMPILER="$(realpath "$CLANGFULLPATH")"
 
-          # Compatibility Variable
-          CLANGPREBUILTBIN="$CLANGBIN"
-
-          # Extract Directory Information
           CLANGDIR="$(basename "$CLANGDIR")"
           CLANGPATH="$(basename "$CLANGBIN")"
 
@@ -4230,20 +4225,18 @@ jobs:
           echo "📂 Clang Path      : $CLANGPATH"
           echo "📂 LLVM IAS        : $LLVMENABLED"
           echo "------------------------------"
+          clang --version | head -n1 || true
           echo ""
 
-          clang --version | head -n1 || true
-
-          # Load Environment Script
+          # Load Kernel Build Environment
           set +u
           source "$GITHUB_WORKSPACE/kernel_workspace/kernel_platform/build/kernel/_setup_env.sh" 2>/dev/null || true
           set -u
 
-          # Export Paths
+          # Export Build Paths
           export PATH="/usr/lib/ccache:$PWD/$CLANGBIN:$PATH"
 
-          # Setup: Enables Compiler Caching to Speed Up Rebuilds
-          # Compiler Cache Runtime Tuning
+          # Configure Compiler Cache
           export CCACHE_LOGFILE="${{ github.workspace }}/kernel_workspace/ccache.log" || echo "⚠️ Cache Log Not Found"
           export CCACHE_DIR="${CCACHE_DIR}" || echo "⚠️ Directory Not Available"
           export CCACHE_COMPILERCHECK="${CCACHE_COMPILERCHECK}" || echo "⚠️ Compiler Check Not Found"
@@ -4251,7 +4244,6 @@ jobs:
           export CCACHE_NOHASHDIR="${CCACHE_NOHASHDIR}" || echo "⚠️ NoHash Directory Not Found"
           export CCACHE_NOHARDLINK="${CCACHE_NOHARDLINK}" || echo "⚠️ Cache Hardlink Not Found"
 
-          # Kernel Sloppiness
           CCACHECONF="$CCACHE_DIR/ccache.conf"
           if ! grep -q '^sloppiness' "$CCACHECONF" 2>/dev/null; then
             printf '%s\n' \
@@ -4259,18 +4251,15 @@ jobs:
               >> "$CCACHECONF"
           fi
 
-          # Ensure Size is Respected
           ccache -M "$CCACHE_MAXSIZE" || echo "⚠️ Max Size Not Found"
-
-          # Reset Statistics for Current Build
           ccache -z
+
           echo "📊 Compiler Cache (Runtime) Configured"
           ccache -p
 
-          # Rust Environment Setup
+          # Configure Rust Environment
           if [[ "${ENABLERUSTC:-false}" == "true" ]]; then
             echo "🦀 Configuring Rust Environment..."
-            # Rust Prebuilts Version
             RUSTPREBUILT="$GITHUB_WORKSPACE/kernel_workspace/kernel_platform/prebuilts/rust/linux-x86"
             RUSTCPATH="$RUSTPREBUILT/$VERSIONRUSTC/bin/rustc"
             # Validate Rust Compiler
@@ -4285,11 +4274,15 @@ jobs:
               echo "📌 Expected: $RUSTCPATH"
               echo "📂 Rust Prebuilt Directory: $RUSTPREBUILT"
               echo "🔍 Available Rust Prebuilts:"
-              find "$RUSTPREBUILT" -maxdepth 4 -type f -name rustc -print 2>/dev/null || true
+              find "$RUSTPREBUILT" \
+                -maxdepth 4 \
+                -type f \
+                -name rustc \
+                -print 2>/dev/null || true
               fallback "missingrustc"
             fi
 
-            # Bindgen Detection and Automatic Fallback
+            # Detect Bindgen
             BINDGENBIN=""
             for f in \
               "$GITHUB_WORKSPACE/kernel_workspace/kernel_platform/prebuilts/clang-tools/linux-x86/bin/bindgen" \
@@ -4297,13 +4290,14 @@ jobs:
             do
               [[ -x "$f" ]] && BINDGENBIN="$f" && break
             done
+
             # Use Prebuilt Bindgen
             if [[ -x "$BINDGENBIN" ]]; then
               export BINDGEN="$BINDGENBIN"
               echo "📌 Bindgen Detected"
               echo "📦 Binary : $BINDGENBIN"
               echo "📦 Version: $($BINDGENBIN --version | head -n1)"
-            # Fallback to Cargo Install
+            # Install Bindgen Fallback
             else
               echo "⚠️ Prebuilt Bindgen Not Found"
               echo "📥 Falling Back to Cargo Installation (bindgen-cli 0.69.5)"
@@ -4312,6 +4306,7 @@ jobs:
                 | sh -s -- -y --default-toolchain none
               source "$HOME/.cargo/env"
               cargo install bindgen-cli --version 0.69.5
+
               echo "📥 Installing Bindgen..."
               BINDGENBIN="$(command -v bindgen || true)"
               if [[ -x "$BINDGENBIN" ]]; then
@@ -4324,12 +4319,13 @@ jobs:
                 fallback "missingbindgen"
               fi
             fi
-            # Configure Lib Clang Path
+
+            # Configure Lib Clang
             export LIBCLANG_PATH="$PWD/$(dirname "$CLANGBIN")/lib"
             echo "📂 Lib Clang Path : $LIBCLANG_PATH"
           fi
 
-          # Pahole Detection and Fallback
+          # Detect Pahole
           PAHOLEBIN=""
           for f in \
             "$GITHUB_WORKSPACE/kernel_workspace/kernel_platform/prebuilts/kernel-build-tools/linux-x86/bin/pahole" \
@@ -4337,7 +4333,8 @@ jobs:
           do
             [[ -x "$f" ]] && PAHOLEBIN="$f" && break
           done
-          # Fallback to Path Lookup
+
+          # Fallback to System Pahole
           if [[ -z "$PAHOLEBIN" ]]; then
             PAHOLEBIN="$(command -v pahole 2>/dev/null || true)"
             if [[ -x "$PAHOLEBIN" ]]; then
@@ -4345,7 +4342,8 @@ jobs:
               echo "📦 Binary : $PAHOLEBIN"
             fi
           fi
-          # Final Validation
+
+          # Validate Pahole
           if [[ -x "$PAHOLEBIN" ]]; then
             export PAHOLE="$PAHOLEBIN"
             echo "📌 Pahole Detected"
@@ -4365,37 +4363,7 @@ jobs:
             fallback "missingpahole"
           fi
 
-          # Kleaf Clang Fallback Detection
-          if [[ -z "${CLANGPREBUILTBIN:-}" ]]; then
-            echo "🔍 Attempting Kleaf Clang Detection..."
-            kleafclang="$(
-              grep -rh 'clang-r[0-9a-z]\+' \
-                ./build/kernel/kleaf/ \
-                ./common/build/kernel/kleaf/ \
-                --include='*.bzl' 2>/dev/null \
-              | grep -oP 'clang-r[0-9a-z]+' \
-              | sort | uniq -c | sort -rn \
-              | awk '{print $2; exit}'
-            )"
-            if [[ -n "$kleafclang" ]]; then
-              kleafprebuilts="$(
-                grep -rh 'prebuilts[^ "'"'"']*clang' \
-                  ./build/kernel/kleaf/ \
-                  ./common/build/kernel/kleaf/ \
-                  --include='*.bzl' 2>/dev/null \
-                | grep -oP 'prebuilts[a-z-]*' \
-                | sort | uniq -c | sort -rn \
-                | awk '{print $2; exit}'
-              )
-              CLANGPREBUILTBIN="${kleafprebuilts:-prebuilts}/clang/host/linux-x86/${kleafclang}/bin"
-              echo "✔️ Kleaf Clang Detected"
-              echo "📂 Path: $CLANGPREBUILTBIN"
-            else
-              echo "⚠️ Kleaf Clang Detection Failed"
-            fi
-          fi
-
-          # Enter Common Kernel Source Directory
+          # Enter Common Kernel Source
           if [[ -f ./common/Makefile ]]; then
             cd ./common
           else
@@ -4403,14 +4371,10 @@ jobs:
             fallback "missingcommon"
           fi
 
-          # Physical Path Remapping
-          # Resolve the Kernel Source Root for Reproducible Compiler Paths
+          # Resolve Kernel Source Root
           ROOTREALPATH=$(realpath ../..) || fallback "realpathfailed"
-          # Normalize Root Real Path
           ROOTREALPATH="${ROOTREALPATH%/}"
-
-          # Build KCFLAGS as Array Structured
-          # Compiler Flags for Reproducible and Cleaner Kernel Builds
+          # Compiler Flags
           KCFLAGS=(
             -fdebug-prefix-map="${ROOTREALPATH}=."
             -fmacro-prefix-map="${ROOTREALPATH}=."
@@ -4422,20 +4386,18 @@ jobs:
             -D__ANDROID_COMMON_KERNEL__
           )
 
-          # Create CCache Compiler Wrapper that Always Invokes the Selected Clang
+          # Create CCache Compiler Wrapper
           REALCLANGBIN="$CLANGFULLPATH"
           CCACHEWRAPPER="$GITHUB_WORKSPACE/kernel_workspace/cc-wrapper"
-          # Generate Wrapper Script
           printf '#!/bin/bash\nexec ccache "%s" "$@"\n' \
             "$REALCLANGBIN" > "$CCACHEWRAPPER"
-          # Make Wrapper Executable
           chmod +x "$CCACHEWRAPPER"
-          # Display Wrapper Configuration
+
           echo "🎉 CCache Wrapper Created"
           echo "📦 Wrapper : $CCACHEWRAPPER"
           echo "📦 Clang   : $REALCLANGBIN"
 
-          # Prepare Common Kernel Make Arguments
+          # Prepare Kernel Make Arguments
           MAKE_ARGS=(
             LLVM=1
             ARCH=arm64
@@ -4448,30 +4410,34 @@ jobs:
             KCFLAGS="${KCFLAGS[*]}"
           )
 
-          # Enable LLVM Integrated Assembler When Requested by the Kernel Tree
-          [[ "$LLVMENABLED" == "true" ]] && MAKE_ARGS=(LLVM_IAS=1 "${MAKE_ARGS[@]}")
-          # Pass the Selected Rust Compiler to Kernel Build
-          [[ "${ENABLERUSTC:-false}" == "true" ]] && MAKE_ARGS=(RUSTC="$RUSTCPATH" "${MAKE_ARGS[@]}")
-          # Optional Fake Disable Configuration
-          [[ -n "${DISABLEFAKECONFIG:-}" ]] && MAKE_ARGS=(DISABLEFAKECONFIG="$DISABLEFAKECONFIG" "${MAKE_ARGS[@]}")
+          # Enable LLVM Integrated Assembler
+          [[ "$LLVMENABLED" == "true" ]] &&
+            MAKE_ARGS=(LLVM_IAS=1 "${MAKE_ARGS[@]}")
 
-          # Kernel Configuration and Compilation
+          # Pass Rust Compiler
+          [[ "${ENABLERUSTC:-false}" == "true" ]] &&
+            MAKE_ARGS=(RUSTC="$RUSTCPATH" "${MAKE_ARGS[@]}")
+
+          # Pass Optional Fake Disable Configuration
+          [[ -n "${DISABLEFAKECONFIG:-}" ]] &&
+            MAKE_ARGS=(DISABLEFAKECONFIG="$DISABLEFAKECONFIG" "${MAKE_ARGS[@]}")
+
+          # Generate GKI Default Configuration
           echo ">> 🚀 Running GKI Default Configuration"
           if ! make O=out ARCH=arm64 "${MAKE_ARGS[@]}" gki_defconfig; then
             echo "⚠️ GKI Default Configuration Failed"
             fallback "gkidefconfigfailed"
           fi
 
-          # Link Time Optimization (LTO) Configuration
+          # Configure Link Time Optimization
           echo "🧾 Configuring Link Time Optimization (LTO) Configuration for Kernel $KERNELVERSION"
-
-          # 1️⃣ Check Kernel Configuration
           if [[ ! -s out/.config ]]; then
             echo "⚠️ Configuration Not Found — Skipping Link Time Optimization (LTO) Configuration"
             echo "📊 Link Time Optimization (LTO) Status: Skipped (Reason: Missing Scripts / Configuration)"
           else
-            # Auto-Detect Scripts / Configuration Location, Check common locations
             CONFIGTOOL=""
+
+            # Check Common scripts/config Locations
             for path in \
               ../scripts/config \
               ./scripts/config \
@@ -4483,7 +4449,7 @@ jobs:
               fi
             done
 
-            # Search the Tree if Scripts / Configuration was Not Found
+            # Search Entire Tree if Needed
             if [[ -z "$CONFIGTOOL" ]]; then
               CONFIGTOOL="$(
                 find .. \
@@ -4495,10 +4461,10 @@ jobs:
               )"
             fi
 
-            # Validation
-            [[ -n "$CONFIGTOOL" ]] && [[ ! -x "$CONFIGTOOL" ]] && CONFIGTOOL=""
-
-            # 2️⃣ Check Scripts / Configuration Separately
+            # Validate Configuration Tool
+            [[ -n "$CONFIGTOOL" ]] &&
+              [[ ! -x "$CONFIGTOOL" ]] &&
+              CONFIGTOOL=""
             if [[ -z "$CONFIGTOOL" ]]; then
               echo "🚀 Scripts / Configuration Not Found — Skipping Link Time Optimization (LTO) Configuration"
               echo "📊 Link Time Optimization (LTO) Status: Skipped (Reason: ⚠️ Missing Scripts / Configuration)"
@@ -4522,69 +4488,69 @@ jobs:
             fi
           fi
 
-          # Final Default Configuration and Build
+          # Generate Final Kernel Configuration
           echo ">> 🚀 Running Old Default Configuration"
           if ! make O=out "${MAKE_ARGS[@]}" olddefconfig; then
             echo "⚠️ Old Default Configuration Failed"
             fallback "olddefconfigfailed"
           fi
 
-          # Store Configuration Files Required by the Fallback Build
+          # Fast Build Cache
           CACHE_DIR="../cache"
           savefastccache() {
             echo "📦 Saving Fast Build Cache..."
-            # Ensure the Fallback Cache Directory Exists
             mkdir -p "$CACHE_DIR" || {
               echo "⚠️ Unable to Create Fast Build Cache"
               return 0
             }
 
-            # Save the Kernel Configuration
             [[ -f out/.config ]] &&
               cp -f out/.config "$CACHE_DIR/.config" || true
-            # Save Generated Kernel Headers
+
             if [[ -d out/include ]]; then
               rm -rf "$CACHE_DIR/include" || true
               cp -rf out/include "$CACHE_DIR/" || true
             fi
-            # Save Module Symbol Information
+
             [[ -f out/Module.symvers ]] &&
               cp -f out/Module.symvers "$CACHE_DIR/Module.symvers" || true
-
             echo "✔️ Fast Build Cache Saved"
           }
 
-          # Save the Final Configuration Before Compilation
+          # Save Configuration Before Compilation
           savefastccache
 
-          # System Resource Information
-          # Start Kernel Compilation
+          # System Resources
           echo ""
           echo "💻 CPU Threads : $(nproc)"
           free -h || true
           echo ""
           echo "🚀 Compiling Kernel with $(nproc) Threads"
 
+          # Compile Kernel
           if ! make -j"$(nproc)" O=out "${MAKE_ARGS[@]}"; then
             echo "⚠️ Kernel Compilation Failed"
             fallback "compilefailed"
           fi
 
-          # Preserve Build Metadata for the Potential Fallback Reuse
+          # Save Build Cache After Compilation
           savefastccache
 
           # Display CCache Statistics
           echo "📊 Compiler Cache Statistics"
           ccache -s || true
 
+          # Calculate Build Time
           FASTBUILDEND=$(date +%s)
           FASTBUILDTIME=$((FASTBUILDEND - FASTBUILDSTART))
+
           echo "fastbuildtime=$FASTBUILDTIME" >> "$GITHUB_OUTPUT"
           echo "⏱️ Fast Build Time: ${FASTBUILDTIME}s"
           echo "fastbuildstatus=success" >> "$GITHUB_OUTPUT"
 
           # GitHub Actions Summary
           CCACHESUMMARY=$(ccache -s 2>&1)
+
           {
             echo "## 🧠 Compiler Cache Performance Summary"
             echo ""
