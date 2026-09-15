@@ -1,6 +1,6 @@
 # 📱 OnePlusOSS Kernel Tracker
 
-> **Last Update:** 2026-09-15 02:57:34 UTC
+> **Last Update:** 2026-09-15 16:03:36 UTC
 
 Automated monitoring report for OnePlusOSS Android kernel repositories.
 
@@ -206,9 +206,27 @@ Automated monitoring report for OnePlusOSS Android kernel repositories.
 ---
 
 ### 🛠 Kernel Trees Report
+<details><summary><b>android_kernel_common_oneplus_sm8845</b></summary>
+
+#### Branch: `oneplus/sm8845_b_16.0.0_ace_6t` 🔄 Updated
+* **Kernel Version:** `6.12.38`
+* **Commit SHA:** `c110289`
+* **Message:** Synchronize code for OnePlus PLR110_16.0.10.500(CN01) 
+
+---
+
+#### Branch: `oneplus/sm8845_b_16.0.0_oneplus_15r` ✅
+* **Kernel Version:** `6.12.38`
+* **Commit SHA:** `2eeabf0`
+* **Message:** Synchronize code for OnePlus CPH2767_16.0.5.701(EX01) CPH2769_16.0.5.701(EX01) CPH2771_16.0.5.702(EX01) 
+
+---
+
+</details>
+
 <details><summary><b>android_kernel_common_oneplus_sm8650</b></summary>
 
-#### Branch: `oneplus/sm8650_b_16.0.0_ace_3_pro` 🔄 Updated
+#### Branch: `oneplus/sm8650_b_16.0.0_ace_3_pro` ✅
 * **Kernel Version:** `6.1.141`
 * **Commit SHA:** `5c8c927`
 * **Message:** Synchronize code for OnePlus PJX110_16.0.5.1001(CN01) 
@@ -222,7 +240,7 @@ Automated monitoring report for OnePlusOSS Android kernel repositories.
 
 ---
 
-#### Branch: `oneplus/sm8650_b_16.0.0_oneplus12` 🔄 Updated
+#### Branch: `oneplus/sm8650_b_16.0.0_oneplus12` ✅
 * **Kernel Version:** `6.1.141`
 * **Commit SHA:** `ebdd164`
 * **Message:** Synchronize code for OnePlus CPH2573_16.0.10.501(EX01) CPH2581_16.0.10.501(EX01) CPH2583_16.0.10.501(EX01) PJD110_16.0.10.501(CN01) 
@@ -317,7 +335,7 @@ Automated monitoring report for OnePlusOSS Android kernel repositories.
 
 <details><summary><b>android_kernel_oneplus_sm8650</b></summary>
 
-#### Branch: `oneplus/sm8650_b_16.0.0_ace_3_pro` 🔄 Updated
+#### Branch: `oneplus/sm8650_b_16.0.0_ace_3_pro` ✅
 * **Kernel Version:** `6.1.141`
 * **Commit SHA:** `3ce62e9`
 * **Message:** Synchronize code for OnePlus PJX110_16.0.5.1001(CN01) 
@@ -331,7 +349,7 @@ Automated monitoring report for OnePlusOSS Android kernel repositories.
 
 ---
 
-#### Branch: `oneplus/sm8650_b_16.0.0_oneplus12` 🔄 Updated
+#### Branch: `oneplus/sm8650_b_16.0.0_oneplus12` ✅
 * **Kernel Version:** `6.1.141`
 * **Commit SHA:** `b2696d4`
 * **Message:** Synchronize code for OnePlus CPH2573_16.0.10.501(EX01) CPH2581_16.0.10.501(EX01) CPH2583_16.0.10.501(EX01) PJD110_16.0.10.501(CN01) 
@@ -1592,24 +1610,6 @@ Automated monitoring report for OnePlusOSS Android kernel repositories.
 * **Kernel Version:** `5.10.226`
 * **Commit SHA:** `e0e7c43`
 * **Message:** Synchronize code for OnePlus NE2211_15.0.0.1302(EX01) NE2213_15.0.0.1302(EX01) 
-
----
-
-</details>
-
-<details><summary><b>android_kernel_common_oneplus_sm8845</b></summary>
-
-#### Branch: `oneplus/sm8845_b_16.0.0_ace_6t` ✅
-* **Kernel Version:** `6.12.38`
-* **Commit SHA:** `e6930bd`
-* **Message:** Synchronize code for OnePlus PLR110_16.0.5.702(CN01) 
-
----
-
-#### Branch: `oneplus/sm8845_b_16.0.0_oneplus_15r` ✅
-* **Kernel Version:** `6.12.38`
-* **Commit SHA:** `2eeabf0`
-* **Message:** Synchronize code for OnePlus CPH2767_16.0.5.701(EX01) CPH2769_16.0.5.701(EX01) CPH2771_16.0.5.702(EX01) 
 
 ---
 
