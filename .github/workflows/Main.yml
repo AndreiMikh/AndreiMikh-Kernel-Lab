@@ -4083,22 +4083,23 @@ jobs:
         id: fastbuild
         run: |
           set -Eeuo pipefail
+
           error() {
             local line="$1"
             local code="$2"
-            
             echo "⚠️ Fast Build Failed"
             echo "📍 Line      : $line"
             echo "📤 Exit Code : $code"
-            
+
             if [[ -z "${FALLBACKSET:-}" ]]; then
               echo "fallbackreason=unexpectederror" >> "$GITHUB_OUTPUT"
               echo "fallback=true" >> "$GITHUB_OUTPUT"
               export FALLBACKSET=1
             fi
+
             exit 0
           }
-          
+
           trap 'error "$LINENO" "$?"' ERR
 
           # Environment Variables
@@ -4121,12 +4122,14 @@ jobs:
           echo "------------------------------"
           echo ""
 
-          FASTBUILDSTART=$(date +%s)          
-
+          FASTBUILDSTART=$(date +%s)
           # Enter Kernel Platform
-          cd kernel_workspace/kernel_platform || { echo "⚠️ Kernel Platform Not Found"; exit 1; }
-          
-          # Detect LLVM IAS
+          cd kernel_workspace/kernel_platform || {
+            echo "⚠️ Kernel Platform Not Found"
+            exit 1
+          }
+
+          # Detect LLVM Integrated Assembler
           LLVMENABLED=false
           if [[ -f ./common/build.config.arm ]] &&
              grep -q '^LLVM_IAS=1' ./common/build.config.arm; then
@@ -4139,7 +4142,6 @@ jobs:
           echo "------------------------------"
           echo ""
 
-          # Clang
           CLANGROOT="prebuilts/clang/host/linux-x86"
           if [[ ! -d "$CLANGROOT" ]]; then
             echo "⚠️ Clang Root Directory Missing"
@@ -4150,8 +4152,8 @@ jobs:
             exit 0
           fi
 
-          # Dynamic Clang Discovery, Select Newest Valid Clang Toolchain Containing Bin / Clang
-          echo "🔍 Searching for Valid Clang Toolchains..."   
+          # Select Newest Valid Clang Toolchain
+          echo "🔍 Searching for Valid Clang Toolchains...
           CLANGDIR="$(
             find "$CLANGROOT" \
               -maxdepth 1 \
@@ -4163,10 +4165,10 @@ jobs:
             tail -n1
           )"
 
-          # Fallback if No Usable Clang Toolchain was Found
+          # Validate Clang Toolchain
           if [[ -z "${CLANGDIR:-}" ]]; then
             echo "⚠️ No Valid Clang Toolchain Found"
-            echo "🔍 Available Toolchains:"     
+            echo "🔍 Available Toolchains:"
             find "$CLANGROOT" \
               -maxdepth 2 \
               -type f \
@@ -4178,33 +4180,33 @@ jobs:
             exit 0
           fi
 
-          # Resolve the Selected Clang Binary
+          # Resolve Selected Clang Binary
           CLANGBIN="$CLANGDIR/bin"
           CLANGFULLPATH="$PWD/$CLANGBIN/clang"
+
           echo "📂 Clang Directory : $CLANGDIR"
           echo "📂 Clang Bin       : $CLANGBIN"
 
-          # Verify the Selected Clang Binary is Executable
           if [[ ! -x "$CLANGFULLPATH" ]]; then
             echo "⚠️ Clang Binary Missing"
             echo "📂 Expected: $CLANGFULLPATH"
-            echo "🔍 Debug: Directory Contents"
+
             ls -lah "$PWD/$CLANGBIN" 2>/dev/null || true
+
             echo "fallbackreason=missingclang" >> "$GITHUB_OUTPUT"
             echo "fallback=true" >> "$GITHUB_OUTPUT"
             export FALLBACKSET=1
             exit 0
           fi
 
-          # Read the Installed Clang Version
+          # Detect Clang Version
           CLANGVERSION="$(
-            "$CLANGFULLPATH" --version \
-              | head -n1 \
-              | sed -E 's/.*clang version ([0-9.]+).*/\1/' \
-              || true
+            "$CLANGFULLPATH" --version |
+              head -n1 |
+              sed -E 's/.*clang version ([0-9.]+).*/\1/' ||
+              true
           )"
 
-          # Ensure Clang Version Detection Succeeded
           if [[ -z "${CLANGVERSION:-}" ]]; then
             echo "⚠️ Failed to Detect Clang Version"
             echo "fallbackreason=missingclangversion" >> "$GITHUB_OUTPUT"
@@ -4213,14 +4215,11 @@ jobs:
             exit 0
           fi
 
-          # Export Runtime Variables, Add the Selected Clang Toolchain to PATH
+          # Export Clang Runtime Environment
           export PATH="$PWD/$CLANGBIN:$PATH"
           export CCACHE_COMPILER="$(realpath "$CLANGFULLPATH")"
 
-          # Compatibility Variable
-          CLANGPREBUILTBIN="$CLANGBIN"
-
-          # Extract Directory Information
+          # Extract Toolchain Names
           CLANGDIR="$(basename "$CLANGDIR")"
           CLANGPATH="$(basename "$CLANGBIN")"
 
@@ -4232,50 +4231,52 @@ jobs:
           echo "------------------------------"
           echo ""
 
-          clang --version | head -n1 || true
+          "$CLANGFULLPATH" --version | head -n1 || true
 
-          # Load Environment Script
+          # Load Kernel Build Environment
           set +u
           source "$GITHUB_WORKSPACE/kernel_workspace/kernel_platform/build/kernel/_setup_env.sh" 2>/dev/null || true
           set -u
 
-          # Export Paths
+          # Export Compiler Paths
           export PATH="/usr/lib/ccache:$PWD/$CLANGBIN:$PATH"
-        
-          # Setup: Enables Compiler Caching to Speed Up Rebuilds
-          # Compiler Cache Runtime Tuning
-          export CCACHE_LOGFILE="${{ github.workspace }}/kernel_workspace/ccache.log" || echo "⚠️ Cache Log Not Found"
-          export CCACHE_DIR="${CCACHE_DIR}" || echo "⚠️ Directory Not Available"
-          export CCACHE_COMPILERCHECK="${CCACHE_COMPILERCHECK}" || echo "⚠️ Compiler Check Not Found"
-          export CCACHE_BASEDIR="${CCACHE_BASEDIR}" || echo "⚠️ Base Directory Not Found"
-          export CCACHE_NOHASHDIR="${CCACHE_NOHASHDIR}" || echo "⚠️ NoHash Directory Not Found"
-          export CCACHE_NOHARDLINK="${CCACHE_NOHARDLINK}" || echo "⚠️ Cache Hardlink Not Found"    
-                                                                                                      
+
+          # Configure CCache
+          export CCACHE_LOGFILE="${CCACHE_LOGFILE:-$GITHUB_WORKSPACE/kernel_workspace/ccache.log}"
+          export CCACHE_DIR="${CCACHE_DIR:-$GITHUB_WORKSPACE/.ccache}"
+          export CCACHE_COMPILERCHECK="${CCACHE_COMPILERCHECK:-content}"
+          export CCACHE_BASEDIR="${CCACHE_BASEDIR:-$GITHUB_WORKSPACE}"
+          export CCACHE_NOHASHDIR="${CCACHE_NOHASHDIR:-true}"
+          export CCACHE_NOHARDLINK="${CCACHE_NOHARDLINK:-true}"
+          export CCACHE_MAXSIZE="${CCACHE_MAXSIZE:-2G}"
+
+          mkdir -p "$CCACHE_DIR"
+
           # Explicitly Configure CCache Directory
           ccache --set-config=cache_dir="$CCACHE_DIR"
 
-          # Kernel Sloppiness
+          # Configure CCache Sloppiness
           CCACHECONF="$CCACHE_DIR/ccache.conf"
+
           if ! grep -q '^sloppiness' "$CCACHECONF" 2>/dev/null; then
             printf '%s\n' \
               'sloppiness = file_stat_matches,include_file_ctime,include_file_mtime,pch_defines,file_macro,time_macros' \
               >> "$CCACHECONF"
           fi
-        
-          # Ensure Size is Respected
-          ccache -M "$CCACHE_MAXSIZE" || echo "⚠️ Max Size Not Found"          
 
-          # Reset Statistics for Current Build
-          ccache -z 
-          
-          echo "📊 Compiler Cache (Runtime) Configured"
+          # Apply CCache Size Limit
+          ccache -M "$CCACHE_MAXSIZE"
+
+          # Reset Statistics
+          ccache -z
+
+          echo "📊 Compiler Cache Runtime Configured"
           ccache -p
-       
-          # Rust Environment Setup
+
+          # Rust Environment
           if [[ "${ENABLERUSTC:-false}" == "true" ]]; then
             echo "🦀 Configuring Rust Environment..."
 
-            # Rust Prebuilts Version           
             RUSTPREBUILT="$GITHUB_WORKSPACE/kernel_workspace/kernel_platform/prebuilts/rust/linux-x86"
             RUSTCPATH="$RUSTPREBUILT/$VERSIONRUSTC/bin/rustc"
 
@@ -4285,49 +4286,71 @@ jobs:
               export RUSTC="$RUSTCPATH"
 
               echo "📌 Rust Compiler Detected"
-              echo "📦 Binary : $RUSTCPATH"
-              echo "📦 Version: $("$RUSTCPATH" --version)"
+              echo "📦 Binary  : $RUSTCPATH"
+              echo "📦 Version : $("$RUSTCPATH" --version)"
             else
               echo "⚠️ Rust Compiler Not Found"
               echo "📌 Expected: $RUSTCPATH"
               echo "📂 Rust Prebuilt Directory: $RUSTPREBUILT"
               echo ""
               echo "🔍 Available Rust Prebuilts:"
-              find "$RUSTPREBUILT" -maxdepth 4 -type f -name rustc -print 2>/dev/null || true
-              exit 1
+
+              find "$RUSTPREBUILT" \
+                -maxdepth 4 \
+                -type f \
+                -name rustc \
+                -print 2>/dev/null || true
+
+              echo "fallbackreason=missingrustc" >> "$GITHUB_OUTPUT"
+              echo "fallback=true" >> "$GITHUB_OUTPUT"
+              export FALLBACKSET=1
+              exit 0
             fi
 
-            # Bindgen Detection and Automatic Fallback
+            # Detect Bindgen
             BINDGENBIN=""
+
             for f in \
               "$GITHUB_WORKSPACE/kernel_workspace/kernel_platform/prebuilts/clang-tools/linux-x86/bin/bindgen" \
               "$GITHUB_WORKSPACE/kernel_workspace/kernel_platform/prebuilts-master/clang-tools/linux-x86/bin/bindgen"
             do
-              [[ -x "$f" ]] && BINDGENBIN="$f" && break
+              if [[ -x "$f" ]]; then
+                BINDGENBIN="$f"
+                break
+              fi
             done
 
             # Use Prebuilt Bindgen
             if [[ -x "$BINDGENBIN" ]]; then
               export BINDGEN="$BINDGENBIN"
+
               echo "📌 Bindgen Detected"
-              echo "📦 Binary : $BINDGENBIN"
-              echo "📦 Version: $($BINDGENBIN --version | head -n1)"
-            # Fallback to Cargo Install
+              echo "📦 Binary  : $BINDGENBIN"
+              echo "📦 Version : $("$BINDGENBIN" --version | head -n1)"
+
+            # Cargo Bindgen Fallback
             else
               echo "⚠️ Prebuilt Bindgen Not Found"
-              echo "📥 Falling Back to Cargo Installation (bindgen-cli 0.69.5)"
-              echo "⚙️ Installing Cargo Fallback..."
-              curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
-                | sh -s -- -y --default-toolchain none
+              echo "📥 Installing bindgen-cli 0.69.5..."
+
+              curl --proto '=https' \
+                --tlsv1.2 \
+                -sSf \
+                https://sh.rustup.rs |
+                sh -s -- -y --default-toolchain none
+
               source "$HOME/.cargo/env"
+
               cargo install bindgen-cli --version 0.69.5
-              echo "📥 Installing Bindgen..."
+
               BINDGENBIN="$(command -v bindgen || true)"
+
               if [[ -x "$BINDGENBIN" ]]; then
                 export BINDGEN="$BINDGENBIN"
+
                 echo "📜 Bindgen Installed Successfully"
                 echo "📦 Binary  : $BINDGENBIN"
-                echo "📦 Version : $($BINDGENBIN --version | head -n1)"
+                echo "📦 Version : $("$BINDGENBIN" --version | head -n1)"
               else
                 echo "⚠️ Bindgen Installation Failed"
                 echo "fallbackreason=missingbindgen" >> "$GITHUB_OUTPUT"
@@ -4337,21 +4360,25 @@ jobs:
               fi
             fi
 
-            # Configure Lib Clang Path
+            # Configure Libclang
             export LIBCLANG_PATH="$PWD/$(dirname "$CLANGBIN")/lib"
-            echo "📂 Lib Clang Path : $LIBCLANG_PATH"
+
+            echo "📂 Libclang Path : $LIBCLANG_PATH"
           fi
 
-          # Pahole Detection and Fallback
+          # Pahole Detection
           PAHOLEBIN=""
           for f in \
             "$GITHUB_WORKSPACE/kernel_workspace/kernel_platform/prebuilts/kernel-build-tools/linux-x86/bin/pahole" \
             "$GITHUB_WORKSPACE/kernel_workspace/kernel_platform/prebuilts-master/kernel-build-tools/linux-x86/bin/pahole"
           do
-            [[ -x "$f" ]] && PAHOLEBIN="$f" && break
+            if [[ -x "$f" ]]; then
+              PAHOLEBIN="$f"
+              break
+            fi
           done
 
-          # Fallback to Path Lookup
+          # Pahole Path Fallback
           if [[ -z "$PAHOLEBIN" ]]; then
             PAHOLEBIN="$(command -v pahole 2>/dev/null || true)"
             if [[ -x "$PAHOLEBIN" ]]; then
@@ -4360,19 +4387,17 @@ jobs:
             fi
           fi
 
-          # Final Validation
+          # Validate Pahole
           if [[ -x "$PAHOLEBIN" ]]; then
             export PAHOLE="$PAHOLEBIN"
             echo "📌 Pahole Detected"
             echo "📦 Binary  : $PAHOLEBIN"
-            echo "🔍 Binary Validation"
-            echo "📦 Pahole  : $PAHOLEBIN"
             echo "📦 Version : $("$PAHOLEBIN" --version | head -n1)"
             echo "🔍 Toolchain Validation"
             echo "📦 Clang   : $(command -v clang)"
             echo "📦 LD.LLD  : $(command -v ld.lld)"
             echo "📦 LLVM-AR : $(command -v llvm-ar)"
-            echo "📦 Pahole  : ${PAHOLEBIN:-Missing}"
+            echo "📦 Pahole  : $PAHOLEBIN"
             echo ""
           else
             echo "⚠️ Pahole Not Found"
@@ -4383,85 +4408,59 @@ jobs:
             exit 0
           fi
 
-          # Kleaf Clang Fallback Detection
-          if [[ -z "${CLANGPREBUILTBIN:-}" ]]; then
-            echo "🔍 Attempting Kleaf Clang Detection..."
-            kleafclang="$(
-              grep -rh 'clang-r[0-9a-z]\+' \
-                ./build/kernel/kleaf/ \
-                ./common/build/kernel/kleaf/ \
-                --include='*.bzl' 2>/dev/null \
-              | grep -oP 'clang-r[0-9a-z]+' \
-              | sort | uniq -c | sort -rn \
-              | awk '{print $2; exit}'
-            )"
-            if [[ -n "$kleafclang" ]]; then
-              kleafprebuilts="$(
-                grep -rh 'prebuilts[^ "'"'"']*clang' \
-                  ./build/kernel/kleaf/ \
-                  ./common/build/kernel/kleaf/ \
-                  --include='*.bzl' 2>/dev/null \
-                | grep -oP 'prebuilts[a-z-]*' \
-                | sort | uniq -c | sort -rn \
-                | awk '{print $2; exit}'
-              )"
-              CLANGPREBUILTBIN="${kleafprebuilts:-prebuilts}/clang/host/linux-x86/${kleafclang}/bin"
-              echo "✔️ Kleaf Clang Detected"
-              echo "📂 Path: $CLANGPREBUILTBIN"
+          # Optional ThinLTO Linker Cache
+          LDWRAPPER=""
+          if [[ "steps.buildprofile.outputs.BUILDCCACHE != 'Disabled' ]] &&
+             [[ "$KERNELVER" == 5.* ]]; then
+            LDCACHEDIR="$GITHUB_WORKSPACE/kernel_workspace/.thinlto-cache"
+            mkdir -p "$LDCACHEDIR"
+            LLDWRAPPERBIN="$(command -v ld.lld 2>/dev/null || true)"
+            if [[ -z "$LLDWRAPPERBIN" || ! -x "$LLDWRAPPERBIN" ]]; then
+              echo "⚠️ LD.LLD Not Found — Skipping ThinLTO Linker Cache"
             else
-              echo "⚠️ Kleaf Clang Detection Failed"
+              LDWRAPPER="$GITHUB_WORKSPACE/kernel_workspace/ld-wrapper"
+              printf '#!/bin/bash\nexec "%s" "$@" --thinlto-cache-dir="%s" --thinlto-cache-policy=cache_size_bytes=3g --thinlto-jobs=%s\n' \
+                "$LLDWRAPPERBIN" \
+                "$LDCACHEDIR" \
+                "$(nproc --all)" > "$LDWRAPPER"
+              chmod +x "$LDWRAPPER"
+              echo "LD Wrapper Created"
+              echo "📦 Wrapper : $LDWRAPPER"
+              echo "📦 LLD     : $LLDWRAPPERBIN"
+              echo "📦 Cache   : $LDCACHEDIR"
             fi
           fi
-         
-          # Enter Common Kernel Source Directory
+
+          # Enter Common Kernel Source
           if [[ -f ./common/Makefile ]]; then
             cd ./common
           else
             echo "⚠️ Common Directory Not Found!"
             echo "fallbackreason=missingcommon" >> "$GITHUB_OUTPUT"
             echo "fallback=true" >> "$GITHUB_OUTPUT"
-            FALLBACKSET=1
+            export FALLBACKSET=1
             exit 0
           fi
 
           # Physical Path Remapping
-          # Resolve the Kernel Source Root for Reproducible Compiler Paths
-          ROOTREALPATH=$(realpath ../..) || {
-            echo "⚠️ Real Path Failed"
-            echo "fallbackreason=realpathfailed" >> "$GITHUB_OUTPUT"
-            echo "fallback=true" >> "$GITHUB_OUTPUT"
-            FALLBACKSET=1
-            exit 0
-          }
+          COMMONREALPATH=$(pwd -P)
+          KERNELPLATFORMREALPATH=$(dirname "$COMMONREALPATH")
+          ROOTREALPATH=$(dirname "$KERNELPLATFORMREALPATH")
 
-          # Normalize Root Real Path
-          ROOTREALPATH="${ROOTREALPATH%/}"
-          
-          # Build KCFLAGS as Array Structured
-          # Compiler Flags for Reproducible and Cleaner Kernel Builds
-          KCFLAGS=(
-            -fdebug-prefix-map="${ROOTREALPATH}=."
-            -fmacro-prefix-map="${ROOTREALPATH}=."
-            -ffile-prefix-map="${ROOTREALPATH}=."
-            -no-canonical-prefixes
-            -Wno-error
-            -O2
-            -pipe
-            -D__ANDROID_COMMON_KERNEL__
-          )
+          MAP="-fdebug-prefix-map=$ROOTREALPATH=."
+          MPMAP="-fmacro-prefix-map=$ROOTREALPATH=."
+          FPMAP="-ffile-prefix-map=$ROOTREALPATH=."
 
-          # Create CCache Compiler Wrapper that Always Invokes the Selected Clang
+          # Kernel Compiler Flags
+          KCFLAGS="$MAP $FPMAP -no-canonical-prefixes -O2 -pipe -Wno-error -fno-stack-protector -D__ANDROID_COMMON_KERNEL__"
+          KCPPFLAGS="$MPMAP"
+
+          # Create Compiler Cache Wrapper
           REALCLANGBIN="$CLANGFULLPATH"
           CCACHEWRAPPER="$GITHUB_WORKSPACE/kernel_workspace/cc-wrapper"
-
-          # Generate Wrapper Script
           printf '#!/bin/bash\nexec ccache "%s" "$@"\n' \
             "$REALCLANGBIN" > "$CCACHEWRAPPER"
-
-          # Make Wrapper Executable
           chmod +x "$CCACHEWRAPPER"
-
-          # Display Wrapper Configuration
           echo "🎉 CCache Wrapper Created"
           echo "📦 Wrapper : $CCACHEWRAPPER"
           echo "📦 Clang   : $REALCLANGBIN"
@@ -4473,38 +4472,49 @@ jobs:
             CROSS_COMPILE=aarch64-linux-gnu-
             CC="$CCACHEWRAPPER"
             HOSTCC="$CCACHEWRAPPER"
-            LD=ld.lld
             HOSTLD=ld.lld
             PAHOLE="$PAHOLEBIN"
-            KCFLAGS="${KCFLAGS[*]}"
+            KCFLAGS="$KCFLAGS"
+            KCPPFLAGS="$KCPPFLAGS"
           )
 
-          # Enable LLVM Integrated Assembler When Requested by the Kernel Tree
-          [[ "$LLVMENABLED" == "true" ]] && MAKE_ARGS=(LLVM_IAS=1 "${MAKE_ARGS[@]}")
-          
-          # Pass the Selected Rust Compiler to Kernel Build
-          [[ "${ENABLERUSTC:-false}" == "true" ]] && MAKE_ARGS=(RUSTC="$RUSTCPATH" "${MAKE_ARGS[@]}")
-          
-          # Kernel Configuration and Compilation
+          # Optional Fake Disable Configuration
+          if [[ -n "${DISABLEFAKECONFIG:-}" ]]; then
+            MAKE_ARGS+=(DISABLEFAKECONFIG="$DISABLEFAKECONFIG")
+          fi
+
+          # Configure Linker
+          if [[ -n "${LDWRAPPER:-}" ]]; then
+            MAKE_ARGS+=(LD="$LDWRAPPER")
+          else
+            MAKE_ARGS+=(LD=ld.lld)
+          fi
+
+          # Enable LLVM Integrated Assembler
+          if [[ "$LLVMENABLED" == "true" ]]; then
+            MAKE_ARGS+=(LLVM_IAS=1)
+          fi
+
+          # Enable Rust
+          if [[ "${ENABLERUSTC:-false}" == "true" ]]; then
+            MAKE_ARGS+=(RUSTC="$RUSTCPATH")
+            MAKE_ARGS+=(BINDGEN="$BINDGENBIN")
+          fi
+
+          # Generate GKI Default Configuration
           echo ">> 🚀 Running GKI Default Configuration"
-          if ! make O=out ARCH=arm64 "${MAKE_ARGS[@]}" gki_defconfig; then
+          if ! make O=out "${MAKE_ARGS[@]}" gki_defconfig --no-print-directory; then
             echo "⚠️ GKI Default Configuration Failed"
             echo "fallbackreason=gkidefconfigfailed" >> "$GITHUB_OUTPUT"
             echo "fallback=true" >> "$GITHUB_OUTPUT"
             export FALLBACKSET=1
             exit 0
           fi
-          
-          # Link Time Optimization (LTO) Configuration
-          echo "🧾 Configuring Link Time Optimization (LTO) Configuration for Kernel $KERNELVERSION"
-          
-          # 1️⃣ Check Kernel Configuration
-          if [[ ! -s out/.config ]]; then
-            echo "⚠️ Configuration Not Found — Skipping Link Time Optimization (LTO) Configuration"
-            echo "📊 Link Time Optimization (LTO) Status: Skipped (Reason: Missing Scripts / Configuration)"         
-          else
-            # Auto-Detect Scripts / Configuration Location, Check common locations
-            CONFIGTOOL=""          
+
+          # Link Time Optimization Configuration
+          if [[ "$KERNELVER" == 5.* ]]; then
+            echo "🧾 Configuring Link Time Optimization (LTO)"
+            CONFIGTOOL=""
             for path in \
               ../scripts/config \
               ./scripts/config \
@@ -4515,8 +4525,7 @@ jobs:
                 break
               fi
             done
-            
-            # Search the Tree if Scripts / Configuration was Not Found
+
             if [[ -z "$CONFIGTOOL" ]]; then
               CONFIGTOOL="$(
                 find .. \
@@ -4528,35 +4537,28 @@ jobs:
               )"
             fi
 
-            # Validation
-            [[ -n "$CONFIGTOOL" ]] && [[ ! -x "$CONFIGTOOL" ]] && CONFIGTOOL=""       
-            # 2️⃣ Check Scripts / Configuration Separately
-            if [[ -z "$CONFIGTOOL" ]]; then
-              echo "🚀 Scripts / Configuration Not Found — Skipping Link Time Optimization (LTO) Configuration"
-              echo "📊 Link Time Optimization (LTO) Status: Skipped (Reason: ⚠️ Missing Scripts / Configuration)"
+            if [[ -n "$CONFIGTOOL" && -x "$CONFIGTOOL" ]]; then
+              echo ">> 🚀 Link Time Optimization (LTO): Thin"
+              "$CONFIGTOOL" \
+                --file out/.config \
+                -e LTO_CLANG \
+                -e LTO_CLANG_THIN \
+                -d LTO_CLANG_NONE \
+                -d LTO_CLANG_FULL \
+                || echo "⚠️ LTO Configuration Apply Failed"
+              echo "📊 LTO Status: Applied (Thin)"
             else
-              case "$KERNELVERSION" in
-                5.*)
-                  echo ">> 🚀 Link Time Optimization (LTO): Thin"
-                  "$CONFIGTOOL" --file out/.config \
-                    -e LTO_CLANG \
-                    -e LTO_CLANG_THIN \
-                    -d LTO_CLANG_NONE \
-                    -d LTO_CLANG_FULL \
-                    || echo "⚠️ Link Time Optimization (LTO) Configuration Apply Failed"              
-                  echo "📊 Link Time Optimization (LTO) Status: Applied (Thin)"
-                  ;;          
-                *)
-                  echo "🚀 Link Time Optimization (LTO) Skipped for Kernel $KERNELVERSION"
-                  echo "📊 Link Time Optimization (LTO) Status: Skipped (Reason: ⚠️ Unsupported Kernel Version)"
-                  ;;
-              esac
+              echo "⚠️ scripts/config Not Found"
+              echo "📊 LTO Status: Skipped"
             fi
+          else
+            echo "🚀 LTO Skipped for Kernel $KERNELVER"
+            echo "📊 LTO Status: Skipped (Unsupported Kernel Version)"
           fi
 
-          # Final Default Configuration and Build
+          # Final Default Configuration
           echo ">> 🚀 Running Old Default Configuration"
-          if ! make O=out "${MAKE_ARGS[@]}" olddefconfig; then
+          if ! make O=out "${MAKE_ARGS[@]}" olddefconfig --no-print-directory; then
             echo "⚠️ Old Default Configuration Failed"
             echo "fallbackreason=olddefconfigfailed" >> "$GITHUB_OUTPUT"
             echo "fallback=true" >> "$GITHUB_OUTPUT"
@@ -4564,63 +4566,93 @@ jobs:
             exit 0
           fi
 
-          # Store Configuration Files Required by the Fallback Build
-          CACHE_DIR="../cache"      
+          # Fast Build Cache
+          CACHE_DIR="../cache"
           savefastccache() {
             echo "📦 Saving Fast Build Cache..."
-            # Ensure the Fallback Cache Directory Exists
             mkdir -p "$CACHE_DIR" || {
               echo "⚠️ Unable to Create Fast Build Cache"
               return 0
             }
-
-            # Save the Kernel Configuration
-            [[ -f out/.config ]] &&
+            
+            # Save Kernel Configuration
+            if [[ -f out/.config ]]; then
               cp -f out/.config "$CACHE_DIR/.config" || true
-            # Save Generated Kernel Headers
+            fi
+            
+            # Save Generated Headers
             if [[ -d out/include ]]; then
               rm -rf "$CACHE_DIR/include" || true
               cp -rf out/include "$CACHE_DIR/" || true
             fi
-            # Save Module Symbol Information
-            [[ -f out/Module.symvers ]] &&
+            
+            # Save Module Symbols
+            if [[ -f out/Module.symvers ]]; then
               cp -f out/Module.symvers "$CACHE_DIR/Module.symvers" || true
+            fi
+
             echo "✔️ Fast Build Cache Saved"
           }
 
-          # Save the Final Configuration Before Compilation
+          # Save Configuration Before Compilation
           savefastccache
-          
-          # System Resource Information          
-          # Start Kernel Compilation
+
+          # System Resources
           echo ""
           echo "💻 CPU Threads : $(nproc)"
           free -h || true
           echo ""
+
+          # Compile Kernel
           echo "🚀 Compiling Kernel with $(nproc) Threads"
           if ! make -j"$(nproc)" O=out "${MAKE_ARGS[@]}"; then
-            echo "⚠️ Kernel Compilation Failed"                                  
+            echo "⚠️ Kernel Compilation Failed"
             echo "fallbackreason=compilefailed" >> "$GITHUB_OUTPUT"
             echo "fallback=true" >> "$GITHUB_OUTPUT"
             export FALLBACKSET=1
             exit 0
           fi
 
-          # Preserve Build Metadata for the Potential Fallback Reuse
+          # Preserve Build Metadata
           savefastccache
 
-          # Display CCache Statistics
+          # CCache Statistics
           echo "📊 Compiler Cache Statistics"
           ccache -s || true
-          
+
           FASTBUILDEND=$(date +%s)
           FASTBUILDTIME=$((FASTBUILDEND - FASTBUILDSTART))
+
           echo "fastbuildtime=$FASTBUILDTIME" >> "$GITHUB_OUTPUT"
-          echo "⏱️ Fast Build Time: ${FASTBUILDTIME}s"
           echo "fastbuildstatus=success" >> "$GITHUB_OUTPUT"
 
+          echo "⏱️ Fast Build Time: ${FASTBUILDTIME}s"
+
           # GitHub Actions Summary
-          CCACHESUMMARY=$(ccache -s 2>&1)
+          CCACHESUMMARY="$(ccache -s 2>&1)"
+          CACHEABLECALLS="$(echo "$CCACHESUMMARY" |
+            grep "Cacheable calls:" |
+            sed 's/.*Cacheable calls:[[:space:]]*//' || true)"
+          CACHEHITS="$(echo "$CCACHESUMMARY" |
+            grep -E "^[[:space:]]*Hits:" |
+            head -n1 |
+            sed 's/.*Hits:[[:space:]]*//' || true)"
+          DIRECTHITS="$(echo "$CCACHESUMMARY" |
+            grep "Direct:" |
+            sed 's/.*Direct:[[:space:]]*//' || true)"
+          PREPROCESSEDHITS="$(echo "$CCACHESUMMARY" |
+            grep "Preprocessed:" |
+            sed 's/.*Preprocessed:[[:space:]]*//' || true)"
+          CACHEMISSES="$(echo "$CCACHESUMMARY" |
+            grep -E "^[[:space:]]*Misses:" |
+            head -n1 |
+            sed 's/.*Misses:[[:space:]]*//' || true)"
+          UNCACHEABLECALLS="$(echo "$CCACHESUMMARY" |
+            grep "Uncacheable calls:" |
+            sed 's/.*Uncacheable calls:[[:space:]]*//' || true)"
+          CACHESIZE="$(echo "$CCACHESUMMARY" |
+            grep "Cache size" |
+            sed 's/.*Cache size (GB):[[:space:]]*//' || true)"
 
           {
             echo "## 🧠 Compiler Cache Performance Summary"
@@ -4629,13 +4661,13 @@ jobs:
             echo "|---|---:|"
             echo "| Build Status | 🚀 Success |"
             echo "| Fast Build Time | **${FASTBUILDTIME}s** |"
-            echo "| Cacheable Calls | $(echo "$CCACHESUMMARY" | grep "Cacheable calls:" | sed 's/.*Cacheable calls:[[:space:]]*//') |"
-            echo "| Cache Hits | $(echo "$CCACHESUMMARY" | grep -E "^[[:space:]]*Hits:" | head -n1 | sed 's/.*Hits:[[:space:]]*//') |"
-            echo "| Direct Hits | $(echo "$CCACHESUMMARY" | grep "Direct:" | sed 's/.*Direct:[[:space:]]*//') |"
-            echo "| Preprocessed Hits | $(echo "$CCACHESUMMARY" | grep "Preprocessed:" | sed 's/.*Preprocessed:[[:space:]]*//') |"
-            echo "| Cache Misses | $(echo "$CCACHESUMMARY" | grep -E "^[[:space:]]*Misses:" | head -n1 | sed 's/.*Misses:[[:space:]]*//') |"
-            echo "| Uncacheable Calls | $(echo "$CCACHESUMMARY" | grep "Uncacheable calls:" | sed 's/.*Uncacheable calls:[[:space:]]*//') |"
-            echo "| Cache Size | $(echo "$CCACHESUMMARY" | grep "Cache size" | sed 's/.*Cache size (GB):[[:space:]]*//') |"
+            echo "| Cacheable Calls | ${CACHEABLECALLS:-Unknown} |"
+            echo "| Cache Hits | ${CACHEHITS:-Unknown} |"
+            echo "| Direct Hits | ${DIRECTHITS:-Unknown} |"
+            echo "| Preprocessed Hits | ${PREPROCESSEDHITS:-Unknown} |"
+            echo "| Cache Misses | ${CACHEMISSES:-Unknown} |"
+            echo "| Uncacheable Calls | ${UNCACHEABLECALLS:-Unknown} |"
+            echo "| Cache Size | ${CACHESIZE:-Unknown} |"
             echo ""
             echo "### ⚡ Build Result"
             echo ""
