@@ -1401,9 +1401,9 @@ fun revert() {
 
 try {
     when (mode) {
-        "apply" -> apply()
-        "postfix" -> postfix()
-        "revert" -> revert()
+        "Apply" -> apply()
+        "PostFix" -> postfix()
+        "Revert" -> revert()
 
         else -> {
             println(
