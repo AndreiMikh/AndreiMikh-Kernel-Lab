@@ -285,7 +285,7 @@ val sublevel =
         .toIntOrNull() ?: 0
 
 val mode =
-    args.getOrNull(0)?.lowercase() ?: "apply"
+    args.getOrNull(0) ?: "Apply"
 
 val workDir =
     args.getOrNull(1)
@@ -1415,7 +1415,7 @@ try {
 
     println(
         "🚀 Fake Patches: $mode Completed " +
-        "(KERNELMODULE=$kernelModule, SUBLEVEL=$sublevel)"
+        "(Kernel Module=$kernelModule, Sub Level=$sublevel)"
     )
 
 } catch (e: Exception) {
