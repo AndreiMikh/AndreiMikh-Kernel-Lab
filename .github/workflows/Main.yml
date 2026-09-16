@@ -2785,6 +2785,64 @@ jobs:
 
           echo ""
           echo "🎉 DRM Atomic Clone Validation Flicker Fix Completed"
+
+      - name: 🩹 Apply RTMutex CVE Fix
+        run: |
+          set -Eeuo pipefail
+
+          # Kernel Source Directory
+          KDIR="${GITHUB_WORKSPACE}/kernel_workspace/kernel_platform/common"
+          cd "$KDIR"
+
+          # RTMutex Source Files Affected by the CVE Fix
+          RTMUTEX="kernel/locking/rtmutex.c"
+          RTMUTEXAPIC="kernel/locking/rtmutex_api.c"
+
+          echo "🩹 Checking RTMutex CVE Fix compatibility..."
+
+          # Check Whether Kernel Matches Expected Pre-Fix RTMutex Code
+          if grep -qF $'raw_spin_lock(&current->pi_lock);\n\trt_mutex_dequeue(lock, waiter);\n\tcurrent->pi_blocked_on = NULL;\n\traw_spin_unlock(&current->pi_lock);' "$RTMUTEX" &&
+             grep -qF 'next_lock, NULL, current);' "$RTMUTEX" &&
+             grep -qF $'if (unlikely(ret))\n\t\tremove_waiter(lock, waiter);' "$RTMUTEXAPIC"; then
+            echo "⚙️ Compatible Kernel Detected..."
+            echo "🩹 Applying RTMutex CVE Fix..."
+
+            # Replace the Unsafe Waiter Task Handling
+            perl -0pi -e '
+              my $old = qr/\traw_spin_lock\(&current->pi_lock\);\n\trt_mutex_dequeue\(lock, waiter\);\n\tcurrent->pi_blocked_on = NULL;\n\traw_spin_unlock\(&current->pi_lock\);/;
+              my $new = "\tstruct task_struct *waiter_task = waiter->task;\n\n\tif (!waiter_task)\n\t\treturn;\n\n\tscoped_guard(raw_spinlock, &waiter_task->pi_lock) {\n\t\trt_mutex_dequeue(lock, waiter);\n\t\twaiter_task->pi_blocked_on = NULL;\n\t}";
+              die "RTMutex waiter block not found\n" unless s/$old/$new/ == 1;
+            ' "$RTMUTEX"
+
+            # Use the Actual Waiter Task for Priority Inheritance
+            perl -0pi -e '
+              die "RTMutex priority chain target not found\n"
+                unless s/next_lock, NULL, current\);/next_lock, NULL, waiter_task);/ == 1;
+            ' "$RTMUTEX"
+
+            # Fix Proxy Lock Error Handling
+            perl -0pi -e '
+              die "RTMutex proxy lock condition not found\n"
+                unless s/if \(unlikely\(ret\)\)\n\t\tremove_waiter\(lock, waiter\);/if (unlikely(ret < 0))\n\t\tremove_waiter(lock, waiter);/ == 1;
+            ' "$RTMUTEXAPIC"
+
+            # Verify All Expected CVE Changes Were Applied
+            if grep -qF 'struct task_struct *waiter_task = waiter->task;' "$RTMUTEX" &&
+               grep -qF 'if (!waiter_task)' "$RTMUTEX" &&
+               grep -qF 'scoped_guard(raw_spinlock, &waiter_task->pi_lock)' "$RTMUTEX" &&
+               grep -qF 'waiter_task->pi_blocked_on = NULL;' "$RTMUTEX" &&
+               grep -qF 'next_lock, NULL, waiter_task);' "$RTMUTEX" &&
+               grep -qF $'if (unlikely(ret < 0))\n\t\tremove_waiter(lock, waiter);' "$RTMUTEXAPIC"; then
+              echo "🎉 RTMutex CVE Fix Applied and Verified"
+            else
+              echo "⚠️ RTMutex CVE Fix Verification Failed"
+              exit 1
+            fi
+          else
+            # Skip Kernels with Incompatible or Already-Fixed RTMutex Code
+            echo "ℹ️ Kernel is Not Compatible with this RTMutex CVE Fix.."
+            echo "⏭️ Skipping..."
+          fi
      
       - name: 🔧 Unicode Bypass
         if: ${{ github.event.inputs.UNICODE == 'true' }}
