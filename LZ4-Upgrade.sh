@@ -56,10 +56,10 @@ for OLD in \
   fi
 done
 
-# Remove the Old F2FS LZ4 Armv8 Implementation
+# Remove the Old F2FS LZ4 ARMv8 Implementation
 if [[ -d "fs/f2fs/lz4armv8" ]]; then
   rm -rf "fs/f2fs/lz4armv8"
-  info "Removed Old Directory: fs/f2fs/lz4armv8/"
+  info "Removed Old Directory: FS/F2FS/LZ4ARMv8/"
 fi
 
 # Create the New LZ4 Armv8 Directory
@@ -93,28 +93,28 @@ pass "Lib/LZ4 Replacement Completed"
 
 # Replace Include/Linux/LZ4H with the Thin Wrapper Header
 echo ""
-echo "[2/5] Replacing Include/Linux/LZ4H"
+echo "[2/5] Replacing Include/Linux/LZ4 H"
 
 if already_has 'lib/lz4/lz4.h' include/linux/lz4.h; then
-  skip "Include/Linux/LZ4H Already Uses the New Format"
+  skip "Include/Linux/LZ4 H Already Uses the New Format"
 else
   cp -f "$WRAPPER" include/linux/lz4.h
-  pass "Include/Linux/LZ4H Replacement Completed"
+  pass "Include/Linux/LZ4 H Replacement Completed"
 fi
 
 # Modify Crypto/LZ4/LZ4HC to Add the Arm64 NEON Branch
 echo ""
-echo "[3/5] Modifying Crypto/LZ4/LZ4HC"
+echo "[3/5] Modifying Crypto/LZ4/LZ4HC C"
 
 for FILE in crypto/lz4.c crypto/lz4hc.c; do
 
   if [[ ! -f "$FILE" ]]; then
-    skip "$FILE Does Not Exist"
+    skip "LZ4HC C Does Not Exist"
     continue
   fi
 
   if already_has 'LZ4_arm64_decompress_safe' "$FILE"; then
-    skip "$FILE Is Already Patched"
+    skip "LZ4HC C Is Already Patched"
     continue
   fi
 
@@ -150,7 +150,7 @@ if [[ -f "$F2FS_MK" ]]; then
 
     # Support Both Block And Single-Line Formats
     perl -i -0777 -pe '
-      # Remove The Ifeq...Endif Block Containing LZ4Armv8
+      # Remove The Ifeq...Endif Block Containing LZ4ARMv8
       s/\nifeq \(\$\(CONFIG_F2FS_FS_COMPRESSION_FIXED_OUTPUT\),y\)\nf2fs-\$\(CONFIG_ARM64\) \+= \$\(addprefix lz4armv8\/,.*?\)\nendif//gs;
 
       # Remove The Single-Line Format If Present
@@ -158,13 +158,13 @@ if [[ -f "$F2FS_MK" ]]; then
     ' "$F2FS_MK"
 
     if grep -q 'lz4armv8' "$F2FS_MK"; then
-      fail "Makefile Failed To Remove LZ4Armv8"
+      fail "Makefile Failed To Remove LZ4ARMv8"
     else
-      pass "Makefile LZ4Armv8 Removal Completed"
+      pass "Makefile LZ4ARMv8 Removal Completed"
     fi
 
   else
-    skip "Makefile Has No LZ4Armv8 Entry (Already Removed Or Not Present)"
+    skip "Makefile Has No LZ4ARMv8 Entry (Already Removed Or Not Present)"
   fi
 fi
 
@@ -178,13 +178,13 @@ if [[ -f "$COMPRESS_C" ]]; then
     sed -i '/#include "lz4armv8\/lz4accel\.h"/d' "$COMPRESS_C"
 
     if grep -q 'lz4armv8/lz4accel.h' "$COMPRESS_C"; then
-      fail "CompressC Failed To Remove The Include"
+      fail "Compress C Failed To Remove The Include"
     else
-      pass "CompressC LZ4Armv8 Include Removal Completed"
+      pass "Compress C LZ4ARMv8 Include Removal Completed"
     fi
 
   else
-    skip "CompressC Has No LZ4Armv8/LZ4Accel-H Include (Already Removed Or Not Present)"
+    skip "Compress C Has No LZ4ARMv8/LZ4Accel H Include (Already Removed Or Not Present)"
   fi
 fi
 
@@ -197,7 +197,7 @@ INCFS="fs/incfs/data_mgmt.c"
 
 if [[ ! -f "$INCFS" ]]; then
 
-  skip "$INCFS Does Not Exist (Kernel Version Has No INCFS)"
+  skip "DataMgmt C Does Not Exist (Kernel Version Has No DataMgmt C)"
 
 else
 
