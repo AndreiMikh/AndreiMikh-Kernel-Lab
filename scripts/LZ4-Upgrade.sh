@@ -10,7 +10,6 @@ set -euo pipefail
 SCRIPTDIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPODIR="$(cd "${SCRIPTDIR}/.." && pwd)"
 LZ4DIR="${REPODIR}/lib/lz4"
-WRAPPER="${REPODIR}/include/linux/lz4.h"
 
 PATCHED=0
 SKIPPED=0
@@ -30,12 +29,6 @@ echo "=== LZ4-Upgrade.sh: Starting LZ4 Upgrade ==="
 # Validate LZ4 Source Directory
 if [[ ! -d "$LZ4DIR" ]]; then
   fail "LZ4 Source Directory Not Found: $LZ4DIR"
-  exit 1
-fi
-
-# Validate LZ4 Wrapper Header
-if [[ ! -f "$WRAPPER" ]]; then
-  fail "LZ4 Wrapper Header Not Found: $WRAPPER"
   exit 1
 fi
 
@@ -62,7 +55,7 @@ if [[ -d "fs/f2fs/lz4armv8" ]]; then
   info "Removed Old Directory: FS/F2FS/LZ4ARMv8/"
 fi
 
-# Create the New LZ4 Armv8 Directory
+# Create the New LZ4 ARMv8 Directory
 mkdir -p lib/lz4/lz4armv8
 
 # Copy the New LZ4 Files
@@ -91,30 +84,52 @@ fi
 
 pass "Lib/LZ4 Replacement Completed"
 
-# Replace Include/Linux/LZ4H with the Thin Wrapper Header
+# Generate Include/Linux/LZ4H Compatibility Wrapper
 echo ""
-echo "[2/5] Replacing Include/Linux/LZ4 H"
+echo "[2/5] Generating Include/Linux/LZ4 H"
 
-if contains 'lib/lz4/lz4.h' include/linux/lz4.h; then
-  skip "Include/Linux/LZ4 H Already Uses the New Format"
+mkdir -p include/linux
+
+cat > include/linux/lz4.h <<'EOF'
+/* SPDX-License-Identifier: BSD-2-Clause */
+// LZ4 compatibility wrapper for Linux kernel
+
+#ifndef __LINUX_LZ4_H__
+#define __LINUX_LZ4_H__
+
+#include "../../lib/lz4/lz4.h"
+#include "../../lib/lz4/lz4hc.h"
+
+#define LZ4_MEM_COMPRESS       LZ4_STREAM_MINSIZE
+#define LZ4HC_MEM_COMPRESS     LZ4_STREAMHC_MINSIZE
+
+#define LZ4HC_MIN_CLEVEL       LZ4HC_CLEVEL_MIN
+#define LZ4HC_DEFAULT_CLEVEL   LZ4HC_CLEVEL_DEFAULT
+#define LZ4HC_MAX_CLEVEL       LZ4HC_CLEVEL_MAX
+
+#endif
+EOF
+
+if contains 'lib/lz4/lz4.h' include/linux/lz4.h &&
+   contains 'lib/lz4/lz4hc.h' include/linux/lz4.h; then
+  pass "Include/Linux/LZ4 H Generated Successfully"
 else
-  cp -f "$WRAPPER" include/linux/lz4.h
-  pass "Include/Linux/LZ4 H Replacement Completed"
+  fail "Include/Linux/LZ4 H Generation Failed"
 fi
 
-# Modify Crypto/LZ4/LZ4HC to Add the Arm64 NEON Branch
+# Modify Crypto/LZ4/LZ4HC to Add the ARM64 NEON Branch
 echo ""
 echo "[3/5] Modifying Crypto/LZ4/LZ4HC C"
 
 for FILE in crypto/lz4.c crypto/lz4hc.c; do
 
   if [[ ! -f "$FILE" ]]; then
-    skip "LZ4HC C Does Not Exist"
+    skip "$(basename "$FILE") Does Not Exist"
     continue
   fi
 
   if contains 'LZ4_arm64_decompress_safe' "$FILE"; then
-    skip "LZ4HC C Is Already Patched"
+    skip "$(basename "$FILE") Is Already Patched"
     continue
   fi
 
