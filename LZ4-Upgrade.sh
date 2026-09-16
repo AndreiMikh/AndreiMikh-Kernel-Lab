@@ -21,7 +21,7 @@ pass()  { echo "[Pass] $*"; ((PATCHED++)) || true; }
 skip()  { echo "[Skip] $*"; ((SKIPPED++)) || true; }
 fail()  { echo "[Fail] $*"; ((FAILED++)) || true; }
 
-already_has() {
+contains() {
   grep -q "$1" "$2" 2>/dev/null
 }
 
@@ -95,7 +95,7 @@ pass "Lib/LZ4 Replacement Completed"
 echo ""
 echo "[2/5] Replacing Include/Linux/LZ4 H"
 
-if already_has 'lib/lz4/lz4.h' include/linux/lz4.h; then
+if contains 'lib/lz4/lz4.h' include/linux/lz4.h; then
   skip "Include/Linux/LZ4 H Already Uses the New Format"
 else
   cp -f "$WRAPPER" include/linux/lz4.h
@@ -113,7 +113,7 @@ for FILE in crypto/lz4.c crypto/lz4hc.c; do
     continue
   fi
 
-  if already_has 'LZ4_arm64_decompress_safe' "$FILE"; then
+  if contains 'LZ4_arm64_decompress_safe' "$FILE"; then
     skip "LZ4HC C Is Already Patched"
     continue
   fi
@@ -129,7 +129,7 @@ for FILE in crypto/lz4.c crypto/lz4hc.c; do
     }
   ' "$FILE"
 
-  if already_has 'LZ4_arm64_decompress_safe' "$FILE"; then
+  if contains 'LZ4_arm64_decompress_safe' "$FILE"; then
     pass "$(basename "$FILE") NEON Branch Added Successfully"
   else
     fail "$(basename "$FILE") Failed To Add NEON Branch"
@@ -202,7 +202,7 @@ if [[ ! -f "$INCFS" ]]; then
 else
 
   # 5a. Add the LZ4 ARM64 NEON Branch
-  if already_has 'LZ4_arm64_decompress_safe' "$INCFS"; then
+  if contains 'LZ4_arm64_decompress_safe' "$INCFS"; then
 
     skip "DataMgmt C LZ4 NEON Branch Is Already Patched"
 
@@ -213,7 +213,7 @@ else
        {#if defined(CONFIG_ARM64) && defined(CONFIG_KERNEL_MODE_NEON)\n${1}result = LZ4_arm64_decompress_safe(src.data, dst.data, src.len, dst.len, false);\n#else\n${1}result = LZ4_decompress_safe(src.data, dst.data, src.len, dst.len);\n#endif}
     ' "$INCFS"
 
-    if already_has 'LZ4_arm64_decompress_safe' "$INCFS"; then
+    if contains 'LZ4_arm64_decompress_safe' "$INCFS"; then
       pass "DataMgmt C LZ4 NEON Branch Added Successfully"
     else
       fail "DataMgmt C Failed To Add LZ4 NEON Branch"
@@ -221,7 +221,7 @@ else
   fi
 
   # 5b. Replace Schedule Delayed Work With Queue Delayed Work
-  if already_has 'system_power_efficient_wq' "$INCFS"; then
+  if contains 'system_power_efficient_wq' "$INCFS"; then
 
     skip "DataMgmt C Queue Delayed Work Is Already Patched"
 
@@ -231,7 +231,7 @@ else
       's/schedule_delayed_work(\&log->ml_wakeup_work,/queue_delayed_work(system_power_efficient_wq, \&log->ml_wakeup_work,/' \
       "$INCFS"
 
-    if already_has 'system_power_efficient_wq' "$INCFS"; then
+    if contains 'system_power_efficient_wq' "$INCFS"; then
       pass "DataMgmt C Queue Delayed Work Replacement Completed"
     else
       fail "DataMgmt C Failed To Replace Queue Delayed Work"
