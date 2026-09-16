@@ -15,16 +15,78 @@ PATCHED=0
 SKIPPED=0
 FAILED=0
 
-info()  { echo "[Info] $*"; }
-pass()  { echo "[Pass] $*"; ((PATCHED++)) || true; }
-skip()  { echo "[Skip] $*"; ((SKIPPED++)) || true; }
-fail()  { echo "[Fail] $*"; ((FAILED++)) || true; }
+info()  { echo "ℹ️ [Info] $*"; }
+pass()  { echo "✔️ [Pass] $*"; ((PATCHED++)) || true; }
+skip()  { echo "⏭️ [Skip] $*"; ((SKIPPED++)) || true; }
+fail()  { echo "⚠️ [Fail] $*"; ((FAILED++)) || true; }
 
 contains() {
   grep -q "$1" "$2" 2>/dev/null
 }
 
-echo "=== LZ4-Upgrade.sh: Starting LZ4 Upgrade ==="
+filedescription() {
+  case "$1" in
+    lib/lz4/lz4.c)
+      echo "Lib/LZ4/LZ4 Source"
+      ;;
+    lib/lz4/lz4.h)
+      echo "Lib/LZ4/LZ4 Header"
+      ;;
+    lib/lz4/lz4hc.c)
+      echo "Lib/LZ4/LZ4HC Source"
+      ;;
+    lib/lz4/lz4hc.h)
+      echo "Lib/LZ4/LZ4HC Header"
+      ;;
+    lib/lz4/Makefile)
+      echo "Lib/LZ4/Makefile"
+      ;;
+    lib/lz4/lz4armv8/lz4accel.c)
+      echo "Lib/LZ4/LZ4ARMv8/LZ4Accel Source"
+      ;;
+    lib/lz4/lz4armv8/lz4accel.h)
+      echo "Lib/LZ4/LZ4ARMv8/LZ4Accel Header"
+      ;;
+    lib/lz4/lz4armv8/lz4armv8.S)
+      echo "Lib/LZ4/LZ4ARMv8/LZ4ARMv8 Assembly Source"
+      ;;
+    lib/lz4/lz4_compress.c)
+      echo "Lib/LZ4/LZ4 Compress Source"
+      ;;
+    lib/lz4/lz4_decompress.c)
+      echo "Lib/LZ4/LZ4 Decompress Source"
+      ;;
+    lib/lz4/lz4defs.h)
+      echo "Lib/LZ4/LZ4 Definitions Header"
+      ;;
+    lib/lz4/lz4hc_compress.c)
+      echo "Lib/LZ4/LZ4HC Compress Source"
+      ;;
+    crypto/lz4.c)
+      echo "Crypto/LZ4 Source"
+      ;;
+    crypto/lz4hc.c)
+      echo "Crypto/LZ4HC Source"
+      ;;
+    fs/f2fs/Makefile)
+      echo "FS/F2FS/Makefile"
+      ;;
+    fs/f2fs/compress.c)
+      echo "FS/F2FS/Compress Source"
+      ;;
+    fs/incfs/data_mgmt.c)
+      echo "FS/INCFS/DataMgmt Source"
+      ;;
+    include/linux/lz4.h)
+      echo "Include/Linux/LZ4 Header"
+      ;;
+    *)
+      echo "$1"
+      ;;
+  esac
+}
+
+echo "=== LZ4-Upgrade.sh: Starting LZ4 Script ==="
 
 # Validate LZ4 Source Directory
 if [[ ! -d "$LZ4DIR" ]]; then
@@ -35,24 +97,22 @@ fi
 # Replace the Lib/LZ4/ Directory with the Unified Upstream LZ4 Implementation
 echo ""
 echo "[1/5] Replacing Lib/LZ4/"
-
 # Remove Old Files
 for OLD in \
   lib/lz4/lz4_compress.c \
   lib/lz4/lz4_decompress.c \
   lib/lz4/lz4defs.h \
   lib/lz4/lz4hc_compress.c; do
-
   if [[ -f "$OLD" ]]; then
     rm -f "$OLD"
-    info "Removed Old File: $OLD"
+    info "Removed: $(filedescription "$OLD")"
   fi
 done
 
 # Remove the Old F2FS LZ4 ARMv8 Implementation
 if [[ -d "fs/f2fs/lz4armv8" ]]; then
   rm -rf "fs/f2fs/lz4armv8"
-  info "Removed Old Directory: FS/F2FS/LZ4ARMv8/"
+  info "Removed: FS/F2FS/LZ4ARMv8 Directory"
 fi
 
 # Create the New LZ4 ARMv8 Directory
@@ -69,22 +129,25 @@ for F in \
   lz4armv8/lz4accel.h \
   lz4armv8/lz4armv8.S; do
 
-  if [[ ! -f "${LZ4DIR}/${F}" ]]; then
-    fail "LZ4 Source File Not Found: ${LZ4DIR}/${F}"
+  SRC="${LZ4DIR}/${F}"
+  DST="lib/lz4/${F}"
+  DESC="lib/lz4/${F}"
+
+  if [[ ! -f "$SRC" ]]; then
+    fail "LZ4 Source File Not Found: $SRC"
     continue
   fi
 
-  cp -f "${LZ4DIR}/${F}" "lib/lz4/${F}"
-  info "Written: lib/lz4/${F}"
+  cp -f "$SRC" "$DST"
+  info "Written: $(filedescription "$DESC")"
 done
-
 if [[ "$FAILED" -gt 0 ]]; then
   exit 1
 fi
 
 pass "Lib/LZ4 Replacement Completed"
 
-# Generate Include/Linux/LZ4H Compatibility Wrapper
+# Generate Include/Linux/LZ4 H Compatibility Wrapper
 echo ""
 echo "[2/5] Generating Include/Linux/LZ4 H"
 
@@ -92,7 +155,7 @@ mkdir -p include/linux
 
 cat > include/linux/lz4.h <<'EOF'
 /* SPDX-License-Identifier: BSD-2-Clause */
-// LZ4 compatibility wrapper for Linux kernel
+// LZ4 Compatibility Wrapper for Linux Kernel
 
 #ifndef __LINUX_LZ4_H__
 #define __LINUX_LZ4_H__
@@ -112,24 +175,22 @@ EOF
 
 if contains 'lib/lz4/lz4.h' include/linux/lz4.h &&
    contains 'lib/lz4/lz4hc.h' include/linux/lz4.h; then
-  pass "Include/Linux/LZ4 H Generated Successfully"
+  pass "$(filedescription "include/linux/lz4.h") Generated Successfully"
 else
-  fail "Include/Linux/LZ4 H Generation Failed"
+  fail "$(filedescription "include/linux/lz4.h") Generation Failed"
 fi
 
-# Modify Crypto/LZ4/LZ4HC to Add the ARM64 NEON Branch
+# Modify Crypto/LZ4/LZ4HC to Add the ARM64 Neon Branch
 echo ""
 echo "[3/5] Modifying Crypto/LZ4/LZ4HC C"
-
 for FILE in crypto/lz4.c crypto/lz4hc.c; do
-
   if [[ ! -f "$FILE" ]]; then
-    skip "$(basename "$FILE") Does Not Exist"
+    skip "$(filedescription "$FILE") Does Not Exist"
     continue
   fi
 
   if contains 'LZ4_arm64_decompress_safe' "$FILE"; then
-    skip "$(basename "$FILE") Is Already Patched"
+    skip "$(filedescription "$FILE") Is Already Patched"
     continue
   fi
 
@@ -143,11 +204,11 @@ for FILE in crypto/lz4.c crypto/lz4hc.c; do
          . "#endif\n";
     }
   ' "$FILE"
-
+ 
   if contains 'LZ4_arm64_decompress_safe' "$FILE"; then
-    pass "$(basename "$FILE") NEON Branch Added Successfully"
+    pass "$(filedescription "$FILE") Neon Branch Added Successfully"
   else
-    fail "$(basename "$FILE") Failed To Add NEON Branch"
+    fail "$(filedescription "$FILE") Failed To Add Neon Branch"
   fi
 done
 
@@ -157,106 +218,81 @@ echo ""
 echo "[4/5] Modifying FS/F2FS/"
 
 # 4a. Remove the LZ4Armv8 Build Entry from FS/F2FS/Makefile
-F2FS_MK="fs/f2fs/Makefile"
-
-if [[ -f "$F2FS_MK" ]]; then
-
-  if grep -q 'lz4armv8' "$F2FS_MK"; then
-
+F2FSMK="fs/f2fs/Makefile"
+if [[ -f "$F2FSMK" ]]; then
+  if grep -q 'lz4armv8' "$F2FSMK"; then
     # Support Both Block And Single-Line Formats
     perl -i -0777 -pe '
       # Remove The Ifeq...Endif Block Containing LZ4ARMv8
       s/\nifeq \(\$\(CONFIG_F2FS_FS_COMPRESSION_FIXED_OUTPUT\),y\)\nf2fs-\$\(CONFIG_ARM64\) \+= \$\(addprefix lz4armv8\/,.*?\)\nendif//gs;
-
       # Remove The Single-Line Format If Present
       s/\nf2fs-\$\(CONFIG_ARM64\) \+= \$\(addprefix lz4armv8\/,.*\)//g;
-    ' "$F2FS_MK"
-
-    if grep -q 'lz4armv8' "$F2FS_MK"; then
-      fail "Makefile Failed To Remove LZ4ARMv8"
+    ' "$F2FSMK"
+    if grep -q 'lz4armv8' "$F2FSMK"; then
+      fail "$(filedescription "$F2FSMK") Failed To Remove LZ4ARMv8"
     else
-      pass "Makefile LZ4ARMv8 Removal Completed"
+      pass "$(filedescription "$F2FSMK") LZ4ARMv8 Removal Completed"
     fi
-
   else
-    skip "Makefile Has No LZ4ARMv8 Entry (Already Removed Or Not Present)"
+    skip "$(filedescription "$F2FSMK") Has No LZ4ARMv8 Entry (Already Removed Or Not Present)"
   fi
 fi
 
 # 4b. Remove the LZ4Armv8 Include from FS/F2FS/CompressC
-COMPRESS_C="fs/f2fs/compress.c"
-
-if [[ -f "$COMPRESS_C" ]]; then
-
-  if grep -q 'lz4armv8/lz4accel.h' "$COMPRESS_C"; then
-
-    sed -i '/#include "lz4armv8\/lz4accel\.h"/d' "$COMPRESS_C"
-
-    if grep -q 'lz4armv8/lz4accel.h' "$COMPRESS_C"; then
-      fail "Compress C Failed To Remove The Include"
+COMPRESSC="fs/f2fs/compress.c"
+if [[ -f "$COMPRESSC" ]]; then
+  if grep -q 'lz4armv8/lz4accel.h' "$COMPRESSC"; then
+    sed -i '/#include "lz4armv8\/lz4accel\.h"/d' "$COMPRESSC"
+    if grep -q 'lz4armv8/lz4accel.h' "$COMPRESSC"; then
+      fail "$(filedescription "$COMPRESSC") Failed To Remove The Include"
     else
-      pass "Compress C LZ4ARMv8 Include Removal Completed"
+      pass "$(filedescription "$COMPRESSC") LZ4ARMv8 Include Removal Completed"
     fi
-
   else
-    skip "Compress C Has No LZ4ARMv8/LZ4Accel H Include (Already Removed Or Not Present)"
+    skip "$(filedescription "$COMPRESSC") Has No LZ4ARMv8/LZ4Accel Header Include (Already Removed Or Not Present)"
   fi
 fi
 
-# Add the ARM64 NEON Branch to the LZ4 Decompression Call
+# Add the ARM64 Neon Branch to the LZ4 Decompression Call
 # Replace Schedule Delayed Work with Queue Delayed Work Using the Power-Efficient Work Queue
 echo ""
-echo "[5/5] Modifying FS/INCFS/DataMgmt C"
-
+echo "[5/5] Modifying FS/INCFS/DataMgmt Source"
 INCFS="fs/incfs/data_mgmt.c"
-
 if [[ ! -f "$INCFS" ]]; then
-
-  skip "DataMgmt C Does Not Exist (Kernel Version Has No DataMgmt C)"
-
+  skip "$(filedescription "$INCFS") Does Not Exist (Kernel Version Has No DataMgmt Source)"
 else
-
-  # 5a. Add the LZ4 ARM64 NEON Branch
+  # 5a. Add the LZ4 ARM64 Neon Branch
   if contains 'LZ4_arm64_decompress_safe' "$INCFS"; then
-
-    skip "DataMgmt C LZ4 NEON Branch Is Already Patched"
-
+    skip "$(filedescription "$INCFS") LZ4 Neon Branch Is Already Patched"
   else
-
     perl -i -0777 -pe '
       s{(\t+)result = LZ4_decompress_safe\(src\.data, dst\.data, src\.len,\s*\n\s*dst\.len\);}
        {#if defined(CONFIG_ARM64) && defined(CONFIG_KERNEL_MODE_NEON)\n${1}result = LZ4_arm64_decompress_safe(src.data, dst.data, src.len, dst.len, false);\n#else\n${1}result = LZ4_decompress_safe(src.data, dst.data, src.len, dst.len);\n#endif}
     ' "$INCFS"
-
     if contains 'LZ4_arm64_decompress_safe' "$INCFS"; then
-      pass "DataMgmt C LZ4 NEON Branch Added Successfully"
+      pass "$(filedescription "$INCFS") LZ4 Neon Branch Added Successfully"
     else
-      fail "DataMgmt C Failed To Add LZ4 NEON Branch"
+      fail "$(filedescription "$INCFS") Failed To Add LZ4 Neon Branch"
     fi
   fi
 
   # 5b. Replace Schedule Delayed Work With Queue Delayed Work
   if contains 'system_power_efficient_wq' "$INCFS"; then
-
-    skip "DataMgmt C Queue Delayed Work Is Already Patched"
-
+    skip "$(filedescription "$INCFS") Queue Delayed Work Is Already Patched"
   else
-
     sed -i \
       's/schedule_delayed_work(\&log->ml_wakeup_work,/queue_delayed_work(system_power_efficient_wq, \&log->ml_wakeup_work,/' \
       "$INCFS"
-
     if contains 'system_power_efficient_wq' "$INCFS"; then
-      pass "DataMgmt C Queue Delayed Work Replacement Completed"
+      pass "$(filedescription "$INCFS") Queue Delayed Work Replacement Completed"
     else
-      fail "DataMgmt C Failed To Replace Queue Delayed Work"
+      fail "$(filedescription "$INCFS") Failed To Replace Queue Delayed Work"
     fi
   fi
 fi
 
 echo ""
 echo "=== LZ4-Neon Completed: ${PATCHED} Successful, ${SKIPPED} Skipped, ${FAILED} Failed ==="
-
 if [[ "$FAILED" -gt 0 ]]; then
   exit 1
 fi
