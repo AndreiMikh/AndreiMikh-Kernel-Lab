@@ -79,7 +79,7 @@ jobs:
           echo "$MATRIX" | jq .
 
 
-  # Build and Cache the Toolchains for Each Manifest
+  # Build and cache the toolchains for each manifest.
   Cache-Tools:
     name: Cache ${{ matrix.file }}
 
@@ -92,7 +92,7 @@ jobs:
 
     runs-on: ubuntu-latest
 
-    # Prevent Multiple Jobs for the Same Manifest from Running Simultaneously
+    # Prevent multiple jobs for the same manifest from running simultaneously.
     concurrency:
       group: clang-tools-${{ matrix.file }}
       cancel-in-progress: false
@@ -102,21 +102,22 @@ jobs:
 
     steps:
 
-      # Checkout Repository
+      # Checkout repository.
       - name: 📥 Checkout Repository
         uses: actions/checkout@v5
         with:
           fetch-depth: 1
 
 
-      # Install Dependencies Required for Manifest Discovery
-      # Android Repo Synchronization, ZIP Creation, and Validation
+      # Install dependencies required for manifest discovery,
+      # Android Repo synchronization, ZIP creation, and validation.
       - name: 📦 Install Dependencies
         shell: bash
         run: |
           set -Eeuo pipefail
 
           sudo apt-get update
+
           sudo apt-get install -y \
             git \
             curl \
@@ -129,24 +130,33 @@ jobs:
             python3 \
             ca-certificates
 
-      # Install Google's Android Repo Tool
+
+      # Install Google's Android Repo tool.
       - name: 🛠️ Install Repo Tool
         shell: bash
         run: |
           set -Eeuo pipefail
 
           mkdir -p "$HOME/bin"
+
           curl -fsSL \
             https://storage.googleapis.com/git-repo-downloads/repo \
             -o "$HOME/bin/repo"
+
           chmod +x "$HOME/bin/repo"
+
+          # Make repo available immediately in this step.
           export PATH="$HOME/bin:$PATH"
+
+          # Make repo available to all following workflow steps.
           echo "$HOME/bin" >> "$GITHUB_PATH"
+
           command -v repo
           repo --version
 
-      # Locate Requested Manifest
-      # Kernel-Manifest is Checked First, Followed by Kernel-Lab
+
+      # Locate the requested manifest.
+      # Kernel-Manifest is checked first, followed by Kernel-Lab.
       - name: 🔎 Discover Manifest
         id: manifest
         shell: bash
@@ -163,9 +173,11 @@ jobs:
           )
 
           echo "Searching for manifest: ${MANIFESTFILECONFIG}.xml"
+
           for REPOSITORY in "${REPOSITORIES[@]}"; do
             echo ""
             echo "Checking repository: $REPOSITORY"
+
             BRANCHES="$(
               curl -fsSL \
                 "https://api.github.com/repos/${REPOSITORY}/branches?per_page=100" \
@@ -173,10 +185,11 @@ jobs:
                 || true
             )"
 
-            # Fallback to Git When the GitHub API Returns No Branches
+            # Fall back to Git when the GitHub API returns no branches.
             if [[ -z "$BRANCHES" ]]; then
-              echo "GitHub API Returned No Branches"
-              echo "Falling Back to Git LS-Remote"
+              echo "GitHub API returned no branches."
+              echo "Falling back to Git LS-Remote."
+
               BRANCHES="$(
                 git ls-remote --heads \
                   "https://github.com/${REPOSITORY}.git" \
@@ -187,47 +200,58 @@ jobs:
 
             while IFS= read -r BRANCH; do
               [[ -z "$BRANCH" ]] && continue
+
               RAWURL="https://raw.githubusercontent.com/${REPOSITORY}/${BRANCH}/${MANIFESTFILECONFIG}.xml"
 
-              # Check whether the manifest exists without downloading it.
+              # Check whether the manifest exists.
               if curl -fsSL --head "$RAWURL" >/dev/null 2>&1; then
                 MANIFESTURL="$RAWURL"
                 MANIFESTBRANCH="$BRANCH"
-                echo "Manifest Found"
+
+                echo "Manifest found."
                 echo "Repository : $REPOSITORY"
                 echo "Branch     : $MANIFESTBRANCH"
                 echo "Manifest   : $MANIFESTURL"
+
                 break 2
               fi
             done <<< "$BRANCHES"
           done
 
           if [[ -z "$MANIFESTURL" ]]; then
-            echo "::error::Unable to Locate ${MANIFESTFILECONFIG}.xml"
+            echo "::error::Unable to locate ${MANIFESTFILECONFIG}.xml"
             exit 1
           fi
 
-          echo "MANIFESTFILECONFIG=${MANIFESTFILECONFIG}" >> "$GITHUB_ENV"
-          echo "MANIFESTURL=${MANIFESTURL}" >> "$GITHUB_ENV"
-          echo "MANIFESTBRANCH=${MANIFESTBRANCH}" >> "$GITHUB_ENV"
+          {
+            echo "MANIFESTFILECONFIG=${MANIFESTFILECONFIG}"
+            echo "MANIFESTURL=${MANIFESTURL}"
+            echo "MANIFESTBRANCH=${MANIFESTBRANCH}"
+          } >> "$GITHUB_ENV"
 
 
-      # Download Discovered Manifest Into Workspace
+      # Download the discovered manifest into the workspace.
       - name: 📄 Download Manifest
         shell: bash
         run: |
           set -Eeuo pipefail
 
           mkdir -p "$REPOROOT"
+
+          MANIFEST="${REPOROOT}/${MANIFESTFILECONFIG}.xml"
+
           curl -fsSL \
             "$MANIFESTURL" \
-            -o "$REPOROOT/${MANIFESTFILECONFIG}.xml"
-          test -s "$REPOROOT/${MANIFESTFILECONFIG}.xml"
-          echo "Manifest Downloaded:"
-          ls -lh "$REPOROOT/${MANIFESTFILECONFIG}.xml"
+            -o "$MANIFEST"
 
-      # Extract Manifest Information Used for Cache Identity
-      # Metadata, and Release Asset Naming
+          test -s "$MANIFEST"
+
+          echo "Manifest downloaded:"
+          ls -lh "$MANIFEST"
+
+
+      # Extract manifest information used for cache identity,
+      # metadata, and release asset naming.
       - name: 🔍 Detect Manifest Information
         id: manifest-info
         shell: bash
@@ -235,21 +259,23 @@ jobs:
           set -Eeuo pipefail
 
           MANIFEST="${REPOROOT}/${MANIFESTFILECONFIG}.xml"
+
           MANIFESTBASEFILE="$(
             basename "$MANIFESTFILECONFIG" \
               | tr '[:upper:]' '[:lower:]' \
               | sed 's/[^a-z0-9._-]/-/g'
           )"
+
           CPU="$(
             grep -oE 'sm[0-9]+' "$MANIFEST" \
               | head -n 1 \
               || true
           )"
-          
+
           if [[ -z "$CPU" ]]; then
             CPU="unknown"
           fi
-          
+
           ANDROIDVERSION="$(
             grep -oE 'android[0-9]+' "$MANIFEST" \
               | head -n 1 \
@@ -270,15 +296,15 @@ jobs:
             KERNELVERSION="unknown"
           fi
 
-          # Sanitize Branch for Safe Use in Cache Keys and Filenames
+          # Sanitize branch for safe use in cache keys and filenames.
           SAFE_BRANCH="$(
             printf '%s' "$MANIFESTBRANCH" \
               | tr '[:upper:]' '[:lower:]' \
               | sed 's/[^a-z0-9._-]/-/g'
           )"
 
-          # Use First 16 Characters of the Manifest SHA256
-          # Part of Cache Identity
+          # Use the first 16 characters of the manifest SHA256
+          # as part of the cache identity.
           MANIFESTHASH="$(
             sha256sum "$MANIFEST" \
               | awk '{print substr($1,1,16)}'
@@ -286,7 +312,7 @@ jobs:
 
           CACHEKEY="CLANG-TOOLS-${RUNNER_OS}-${MANIFESTBASEFILE}-${CPU}-${SAFE_BRANCH}-${MANIFESTHASH}"
 
-          # Asset Name Inside the Clang-Version-Specific Release
+          # Asset name inside the Clang-version-specific release.
           RELEASEASSETNAME="CLANG-TOOLS-${MANIFESTBASEFILE}-${CPU}-${SAFE_BRANCH}-${MANIFESTHASH}"
 
           {
@@ -310,13 +336,15 @@ jobs:
           echo "Manifest Hash  : $MANIFESTHASH"
           echo "Cache Key      : $CACHEKEY"
 
-      # Initialize Android Source Tree Using Discovered Manifest
+
+      # Initialize the Android source tree using the discovered manifest.
       - name: 🧰 Initialize Android Repo
         shell: bash
         run: |
           set -Eeuo pipefail
 
           cd "$REPOROOT"
+
           repo init \
             -u "https://github.com/AndreiMikh/Kernel-Manifest.git" \
             -b "$MANIFESTBRANCH" \
@@ -324,25 +352,35 @@ jobs:
             --depth=1 \
             --no-repo-verify
 
-      # Remove Obsolete Kernel Project if it Exists
+
+      # Remove obsolete kernel project if it exists.
       - name: 🧹 Remove Obsolete Project
         shell: bash
         run: |
           set -Eeuo pipefail
 
           cd "$REPOROOT"
+
           rm -rf \
             ".repo/local_manifests/ks-kernel.lnx.5.0.r3-rel" \
             "ks-kernel.lnx.5.0.r3-rel" \
             || true
 
-      # Synchronize Android Source Tree
+
+      # Synchronize the Android source tree.
       - name: 🔄 Sync Android Source
         shell: bash
         run: |
           set -Eeuo pipefail
 
           cd "$REPOROOT"
+
+          echo "Repository root:"
+          pwd
+
+          echo ""
+          echo "Starting repo sync..."
+
           timeout 30m repo sync \
             --force-sync \
             --no-clone-bundle \
@@ -350,21 +388,58 @@ jobs:
             --optimized-fetch \
             --prune \
             -j"$(nproc --all)"
-          test -d "$REPOROOT/kernel_workspace/kernel_platform"
+
+          echo ""
+          echo "Repo sync completed successfully."
+
+          # Locate kernel_platform dynamically inside the synced tree.
+          KERNELPLATFORM="$(
+            find "$REPOROOT" \
+              -type d \
+              -path '*/kernel_platform' \
+              -print \
+              -quit
+          )"
+
+          if [[ -z "$KERNELPLATFORM" ]]; then
+            echo "::error::Unable to locate kernel_platform after repo sync."
+
+            echo ""
+            echo "Available directories:"
+            find "$REPOROOT" \
+              -maxdepth 5 \
+              -type d \
+              | sort \
+              | head -n 200
+
+            exit 1
+          fi
+
+          # Convert the discovered path to an absolute path.
+          KERNELPLATFORM="$(cd "$KERNELPLATFORM" && pwd)"
+
+          echo ""
+          echo "Kernel Platform:"
+          echo "$KERNELPLATFORM"
+
+          test -d "$KERNELPLATFORM"
+
+          # Export the discovered path for all following steps.
+          echo "KERNELPLATFORM=${KERNELPLATFORM}" >> "$GITHUB_ENV"
 
 
-      # Detect Newest Clang-r* Toolchain
-      # Sort -V Ensures Numerical Version Ordering
+      # Detect the newest clang-r* toolchain.
+      # sort -V provides numerical version ordering.
       - name: 🔎 Detect Clang Toolchain
         id: clang
         shell: bash
         run: |
           set -Eeuo pipefail
 
-          KERNELPLATFORM="${REPOROOT}/kernel_workspace/kernel_platform"
           CLANGROOT="${KERNELPLATFORM}/prebuilts/clang/host/linux-x86"
+
           if [[ ! -d "$CLANGROOT" ]]; then
-            echo "::error::Clang Directory Not Found: $CLANGROOT"
+            echo "::error::Clang directory not found: $CLANGROOT"
             exit 1
           fi
 
@@ -375,33 +450,34 @@ jobs:
               -type d \
               -name 'clang-r*' \
               -printf '%f\n' \
-            | sort -V
+              | sort -V
           )
 
           if (( ${#CLANG_DIRS[@]} == 0 )); then
-            echo "::error::No Clang-r* Toolchain Found"
+            echo "::error::No clang-r* toolchain found."
             exit 1
           fi
 
-          # Select Newest Clang-r* Directory
           CLANGVERSION="${CLANG_DIRS[-1]}"
           CLANGPATH="${CLANGROOT}/${CLANGVERSION}"
 
           if [[ ! -x "${CLANGPATH}/bin/clang" ]]; then
-            echo "::error::Clang Compiler Not Found: ${CLANGPATH}/bin/clang"
+            echo "::error::Clang compiler not found: ${CLANGPATH}/bin/clang"
             exit 1
           fi
 
-          # Create a Release Tag Based on the Exact Clang Version
-          TOOLCHAINRELEASETAG="Clang-Build-Tools-${CLANGVERSION}"
+          # Release tag is based on the exact detected Clang version.
+          TOOLCHAIN_RELEASE_TAG="Clang-Build-Tools-${CLANGVERSION}"
 
           echo "Selected Clang : ${CLANGVERSION}"
           echo "Clang Path     : ${CLANGPATH}"
-          echo "Release Tag    : ${TOOLCHAINRELEASETAG}"
+          echo "Release Tag    : ${TOOLCHAIN_RELEASE_TAG}"
 
-          echo "CLANGVERSION=${CLANGVERSION}" >> "$GITHUB_ENV"
-          echo "CLANGPATH=${CLANGPATH}" >> "$GITHUB_ENV"
-          echo "TOOLCHAINRELEASETAG=${TOOLCHAINRELEASETAG}" >> "$GITHUB_ENV"
+          {
+            echo "CLANGVERSION=${CLANGVERSION}"
+            echo "CLANGPATH=${CLANGPATH}"
+            echo "TOOLCHAIN_RELEASE_TAG=${TOOLCHAIN_RELEASE_TAG}"
+          } >> "$GITHUB_ENV"
 
 
       # Detect which Android build-tool directories are available.
@@ -410,8 +486,6 @@ jobs:
         shell: bash
         run: |
           set -Eeuo pipefail
-
-          KERNELPLATFORM="${REPOROOT}/kernel_workspace/kernel_platform"
 
           declare -a CANDIDATE_PATHS=(
             "prebuilts/clang/host/linux-x86/${CLANGVERSION}"
@@ -427,6 +501,7 @@ jobs:
 
           for RELATIVEPATH in "${CANDIDATE_PATHS[@]}"; do
             FULL_PATH="${KERNELPLATFORM}/${RELATIVEPATH}"
+
             if [[ -e "$FULL_PATH" ]]; then
               EXISTINGPATHS+=("$RELATIVEPATH")
               echo "Found: $RELATIVEPATH"
@@ -436,7 +511,7 @@ jobs:
           done
 
           if (( ${#EXISTINGPATHS[@]} == 0 )); then
-            echo "::error::No Build Toolchains Were Found"
+            echo "::error::No build toolchains were found."
             exit 1
           fi
 
@@ -447,35 +522,43 @@ jobs:
           } >> "$GITHUB_ENV"
 
 
-      # Create a ZIP Archive Containing the Detected Toolchains
-      # Original Prebuilts Directory Structure is Preserved
+      # Create a ZIP archive containing the detected toolchains.
+      # The original prebuilts directory structure is preserved.
       - name: 📦 Create Toolchain ZIP Archive
         shell: bash
         run: |
           set -Eeuo pipefail
 
-          cd "$REPOROOT/kernel_workspace/kernel_platform"
+          cd "$KERNELPLATFORM"
+
           TEMPARCHIVE="${RUNNER_TEMP}/toolchain-cache.zip"
           FINALARCHIVE="${CACHEROOT}/toolchain-cache.zip"
+
           mkdir -p "$CACHEROOT"
+
           rm -f "$TEMPARCHIVE"
           rm -f "$FINALARCHIVE"
-          echo "Creating ZIP Archive..."
+
+          echo "Creating ZIP archive..."
+
           zip -qr \
             "$TEMPARCHIVE" \
             "${EXISTINGPATHS[@]}"
+
           test -s "$TEMPARCHIVE"
+
           cp "$TEMPARCHIVE" "$FINALARCHIVE"
 
           echo ""
-          echo "Archive Created:"
+          echo "Archive created:"
           ls -lh "$FINALARCHIVE"
 
           echo ""
           echo "ZIP contents:"
           unzip -l "$FINALARCHIVE" | head -n 80
 
-      # Generate mMetadata and SHA256 Checksums for the Archive
+
+      # Generate metadata and SHA256 checksums for the archive.
       - name: 📝 Generate Metadata
         shell: bash
         run: |
@@ -484,10 +567,14 @@ jobs:
           ARCHIVE="${CACHEROOT}/toolchain-cache.zip"
           METADATA="${CACHEROOT}/metadata.json"
           CHECKSUMS="${CACHEROOT}/SHA256SUMS"
+
+          test -s "$ARCHIVE"
+
           ARCHIVESHA256="$(
             sha256sum "$ARCHIVE" \
               | awk '{print $1}'
           )"
+
           cat > "$METADATA" <<EOF
           {
             "manifest": "${MANIFESTFILECONFIG}",
@@ -498,7 +585,7 @@ jobs:
             "android_version": "${ANDROIDVERSION}",
             "kernel_version": "${KERNELVERSION}",
             "clang_version": "${CLANGVERSION}",
-            "release_tag": "${TOOLCHAINRELEASETAG}",
+            "release_tag": "${TOOLCHAIN_RELEASE_TAG}",
             "archive": "toolchain-cache.zip",
             "archive_sha256": "${ARCHIVESHA256}",
             "created_at": "$(date -u '+%Y-%m-%dT%H:%M:%SZ')",
@@ -507,10 +594,12 @@ jobs:
           EOF
 
           cd "$CACHEROOT"
+
           sha256sum \
             toolchain-cache.zip \
             metadata.json \
             > SHA256SUMS
+
           echo "Metadata:"
           cat metadata.json
 
@@ -518,14 +607,16 @@ jobs:
           echo "Checksums:"
           cat SHA256SUMS
 
-      # Save Generated Cache to GitHub Actions Cache
+
+      # Save generated cache to GitHub Actions cache.
       - name: 💾 Save Actions Cache
         uses: actions/cache/save@v5
         with:
           path: ${{ env.CACHEROOT }}
           key: ${{ env.CACHEKEY }}
 
-      # Upload Archive and Metadata to the Clang-Version-Specific Release
+
+      # Upload archive and metadata to the Clang-version-specific release.
       - name: 🚀 Upload Release Assets
         env:
           GH_TOKEN: ${{ github.token }}
@@ -537,25 +628,33 @@ jobs:
           METADATA="${CACHEROOT}/metadata.json"
           CHECKSUMS="${CACHEROOT}/SHA256SUMS"
 
+          test -s "$ARCHIVE"
+          test -s "$METADATA"
+          test -s "$CHECKSUMS"
+
           RELEASEASSET="${RELEASEASSETNAME}.zip"
           RELEASEMETADATA="${RELEASEASSETNAME}.json"
           RELEASECHECKSUMS="${RELEASEASSETNAME}.SHA256SUMS"
 
-          echo "Release Tag       : ${TOOLCHAINRELEASETAG}"
+          echo "Release Tag       : ${TOOLCHAIN_RELEASE_TAG}"
           echo "Release ZIP       : ${RELEASEASSET}"
           echo "Release Metadata  : ${RELEASEMETADATA}"
           echo "Release Checksums : ${RELEASECHECKSUMS}"
 
-          # Create Clang-Version-Specific Release if it Does Not Exist
-          gh release view "$TOOLCHAINRELEASETAG" \
+          # Create the Clang-version-specific release if it does not exist.
+          if ! gh release view \
+            "$TOOLCHAIN_RELEASE_TAG" \
             --repo "${GITHUB_REPOSITORY}" \
-            >/dev/null 2>&1 \
-            || gh release create "$TOOLCHAINRELEASETAG" \
+            >/dev/null 2>&1; then
+
+            gh release create \
+              "$TOOLCHAIN_RELEASE_TAG" \
               --repo "${GITHUB_REPOSITORY}" \
               --title "Clang & Android Build Tools - ${CLANGVERSION}" \
-              --notes "Automatically Generated Clang and Android build tool caches for ${CLANGVERSION}"
+              --notes "Automatically generated Clang and Android build tool caches for ${CLANGVERSION}"
+          fi
 
-          # Create Manifest-Specific Asset Names
+          # Create manifest-specific asset names.
           cp "$ARCHIVE" \
             "${CACHEROOT}/${RELEASEASSET}"
 
@@ -565,16 +664,17 @@ jobs:
           cp "$CHECKSUMS" \
             "${CACHEROOT}/${RELEASECHECKSUMS}"
 
-          # Upload Assets and Replace Existing Files with the Same Names
+          # Upload assets and replace existing files with the same names.
           gh release upload \
-            "$TOOLCHAINRELEASETAG" \
+            "$TOOLCHAIN_RELEASE_TAG" \
             "${CACHEROOT}/${RELEASEASSET}" \
             "${CACHEROOT}/${RELEASEMETADATA}" \
             "${CACHEROOT}/${RELEASECHECKSUMS}" \
             --repo "${GITHUB_REPOSITORY}" \
             --clobber
 
-      # Upload Generated Files as a Workflow Artifact
+
+      # Upload generated files as a workflow artifact.
       - name: 📤 Upload Workflow Artifact
         uses: actions/upload-artifact@v4
         with:
@@ -584,12 +684,10 @@ jobs:
             ${{ env.CACHEROOT }}/metadata.json
             ${{ env.CACHEROOT }}/SHA256SUMS
           if-no-files-found: error
-
-          # ZIP Compression Level
           compression-level: 0
 
 
-      # Generate a Workflow Summary Containing Cache and Release Information
+      # Generate a workflow summary containing cache and release information.
       - name: 📊 Generate Summary
         shell: bash
         run: |
@@ -609,7 +707,7 @@ jobs:
             echo "| Android | \`${ANDROIDVERSION}\` |"
             echo "| Kernel | \`${KERNELVERSION}\` |"
             echo "| Clang | \`${CLANGVERSION}\` |"
-            echo "| Release Tag | \`${TOOLCHAINRELEASETAG}\` |"
+            echo "| Release Tag | \`${TOOLCHAIN_RELEASE_TAG}\` |"
             echo "| Manifest SHA256 | \`${MANIFESTHASH}\` |"
             echo "| Cache Key | \`${CACHEKEY}\` |"
             echo "| Release Asset | \`${RELEASEASSETNAME}.zip\` |"
