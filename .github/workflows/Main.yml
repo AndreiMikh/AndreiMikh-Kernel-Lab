@@ -443,47 +443,6 @@ jobs:
           bash "$SCRIPT" "$HOME/.apt-pkg-cache"
       
           echo "🎉 Build Dependencies Ready"
-    
-      - name: 🔧 Setup Kotlin
-        run: |
-          set -euo pipefail
-
-          KOTLINVER="2.4.10"
-          KOTLINHOME="$HOME/kotlinc"
-          KOTLINURL="https://github.com/JetBrains/kotlin/releases/download/v${KOTLINVER}/kotlin-compiler-${KOTLINVER}.zip"
-
-          # Reuse the Installed Compiler when the Requested Version is Already Available
-          if [[ -x "$KOTLINHOME/bin/kotlinc" ]] && \
-             "$KOTLINHOME/bin/kotlinc" -version 2>&1 | grep -q "$KOTLINVER"; then
-            echo "✔️ Kotlin ${KOTLINVER} is Already Installed"
-          else
-            echo "⚙️ Installing Kotlin Compiler ${KOTLINVER}..."
-            rm -rf "$KOTLINHOME"
-            rm -f kotlinc.zip
-            curl --fail \
-                 --location \
-                 --silent \
-                 --show-error \
-                 --retry 3 \
-                 --retry-delay 2 \
-                 "$KOTLINURL" \
-                 -o kotlinc.zip
-            unzip -q kotlinc.zip -d "$HOME"
-            rm -f kotlinc.zip
-
-            [[ -x "$KOTLINHOME/bin/kotlinc" ]] || {
-              echo "⚠️ ERROR: Kotlin Compiler Installation Failed"
-              exit 1
-            }
-          fi
-
-          # Make Kotlin Available to All Following Workflow Steps
-          echo "$KOTLINHOME/bin" >> "$GITHUB_PATH"
-
-          echo "KOTLINHOME=$KOTLINHOME" >> "$GITHUB_ENV"
-          echo "🎉 Kotlin Installation Completed Successfully..."
-
-          "$KOTLINHOME/bin/kotlinc" -version
 
       - name: 🔧 Extract Manifest Information
         id: extract-info
@@ -943,18 +902,6 @@ jobs:
           echo ""
           echo "--- Memory ---"
           free -h
-
-      - name: 🔧 Setup Reject Checker
-        shell: bash
-        run: |
-          set -Eeuo pipefail
-
-          REJECTCHECKER="${GITHUB_WORKSPACE}/kernel_workspace/AndreiMikh-Kernel-Lab/scripts/RejectChecker.sh"
-          chmod +x "$REJECTCHECKER"
-          echo "REJECTCHECKER=$REJECTCHECKER" >> "$GITHUB_ENV"
-
-          echo ""
-          echo "🔎 Reject Checker: $REJECTCHECKER"
 
       - name: 🔧 Install and Configure Cache-ECS
         shell: bash
@@ -1615,6 +1562,130 @@ jobs:
 
           echo ""
           echo "🎉 Kernel Version Setup Complete"
+
+      - name: 🔧 Inject Custom Kernel Version Suffix
+        if: ${{ github.event.inputs.SUFFIX != '' }}
+        id: inject
+        continue-on-error: true
+        run: |
+          cd kernel_workspace
+
+          # Inputs
+          SUFFIX="${{ github.event.inputs.SUFFIX }}"
+          FASTBUILD="${{ github.event.inputs.FASTBUILD }}"
+
+          echo "🚀 Injecting Custom Kernel Suffix: $SUFFIX"
+          for path in \
+            kernel_platform/common/scripts/setlocalversion \
+            kernel_platform/msm-kernel/scripts/setlocalversion \
+            kernel_platform/external/dtc/scripts/setlocalversion; do
+            [ -f "$path" ] || continue
+            echo "Processing: $path"
+
+            # Remove Dirty Tags
+            sed -i 's/ -dirty//g' "$path"
+            sed -i '$i res=$(echo "$res" | sed '\''s/-dirty//g'\'')' "$path"
+            if grep -q 'KERNELVERSION.*scm_version' "$path"; then
+              echo "📌 New Set Local Version Format Detected"
+              sed -i "s|echo \"\${KERNELVERSION}.*scm_version}\"|echo \"\${KERNELVERSION}-${ANDROIDVERSION}-${SUFFIX}\"|" "$path"
+            elif grep -q 'echo "\$res"' "$path"; then
+              echo "Old Set Local Version Format Detected"
+              if [ "$FASTBUILD" = "true" ]; then
+                echo "✔️ Fast Build Enabled: Setting Static Res Value"
+                sed -i "s/^res=.*/res=\"-${ANDROIDVERSION}-${SUFFIX}\"/" "$path"
+              else
+                echo "🛠️ Standard Build: Dynamically Injecting Suffix"
+                if [[ -f ./kernel_platform/build_with_bazel.py ]]; then
+                  echo "⚠️ Note: Using Bazel may Limit Special Characters, Adjust Script if Compilation Fails"
+                fi
+                tac "$path" | sed "0,/echo \"\\\$res\"/s//res=\\\$(echo \\\$res | cut -d- -f1-2)-${SUFFIX}; echo \"\\\$res\";/" | tac > "$path.tmp"
+                mv "$path.tmp" "$path"
+              fi
+
+            else
+              echo "⚠️ Unknown Format: Appending Suffix Manually"
+              echo "echo \"\$res-${SUFFIX}\"" >> "$path"
+            fi
+            chmod +x "$path"
+          done
+
+          echo "⚙️ Committing Suffix Modifications..."
+          git add -A
+          git commit -m "🎉 Inject Custom Kernel Suffix and Remove Dirty Tags"
+
+      - name: 🔧 Fallback - Inject Local Kernel Version Suffix (Bazel Safe)
+        if: ${{ steps.inject.conclusion == 'failure' && github.event.inputs.SUFFIX != '' }}
+        run: |
+          cd kernel_workspace
+
+          SUFFIX="${{ github.event.inputs.SUFFIX }}"
+          FINALSUFFIX="-${ANDROIDVERSION}-${SUFFIX}"
+          echo "⚠️ Fallback Triggered → Using Local Version: $FINALSUFFIX"
+          echo ""
+
+          # Persist to Next Steps
+          echo "LOCALVERSION=$FINALSUFFIX" >> $GITHUB_ENV
+          echo "KBUILDVERSION=$FINALSUFFIX" >> $GITHUB_ENV
+
+          # Also for Current Shell
+          export LOCALVERSION="$FINALSUFFIX"
+          export KBUILDVERSION="$FINALSUFFIX"
+
+          echo ""
+          echo "🎉 Local Version is Set to: $LOCALVERSION"
+
+      - name: 🔧 Auto-Generated Kernel Suffix
+        if: ${{ github.event.inputs.SUFFIX == '' }}
+        run: |
+          cd kernel_workspace
+
+          # Inputs and Variables
+          FASTBUILD="${{ github.event.inputs.FASTBUILD }}"
+          echo "🚀 Generating Random Kernel Suffix..."
+          
+          # Random Generation
+          RANDOMDIGIT=$((RANDOM % 10))
+          RANDOMHASH=$(head -c 7 /dev/urandom | xxd -p)
+      
+          AUTOSUFFIX="${RANDOMDIGIT}-g${RANDOMHASH}"      
+          echo "🧾 Suffix: $AUTOSUFFIX"      
+          FILES=(
+            kernel_platform/common/scripts/setlocalversion
+            kernel_platform/msm-kernel/scripts/setlocalversion
+            kernel_platform/external/dtc/scripts/setlocalversion
+          )
+      
+          for path in "${FILES[@]}"; do
+            [[ -f "$path" ]] || continue
+            echo "⚙️ Processing: $path"      
+            # Ensure Executable
+            chmod +x "$path"      
+            # Remove Dirty Markers
+            sed -i 's/ -dirty//g' "$path"      
+            # Append Suffix Logic in a Safe Way (No Rewriting Core Logic)
+            if ! grep -q "Kernel Auto Suffix Injection" "$path"; then
+              cat >> "$path" <<EOF              
+              # Kernel Auto Suffix Injection
+              if [ -n "\$res" ]; then
+                case "\$res" in
+                  *"-${AUTOSUFFIX}"*) ;;
+                  *)
+                    res="\$res-${ANDROIDVERSION}-${AUTOSUFFIX}"
+                    ;;
+                esac
+              fi
+              EOF
+            fi
+      
+          done      
+          echo "⚙️ Committing changes..."    
+          git add -A
+      
+          if git diff --cached --quiet; then
+            echo "✔️ No changes to commit"
+          else
+            git commit -m "🎉 Apply Auto-Generated Kernel Suffix"
+          fi
     
       - name: 🔧 Detect Rust Compiler Requirement
         shell: bash
@@ -1988,130 +2059,18 @@ jobs:
 
           echo ""
           echo "🎉 Rust + Bindgen Ready"
-    
-      - name: 🔧 Inject Custom Kernel Version Suffix
-        if: ${{ github.event.inputs.SUFFIX != '' }}
-        id: inject
-        continue-on-error: true
+
+      - name: 🔧 Setup Reject Checker
+        shell: bash
         run: |
-          cd kernel_workspace
+          set -Eeuo pipefail
 
-          # Inputs
-          SUFFIX="${{ github.event.inputs.SUFFIX }}"
-          FASTBUILD="${{ github.event.inputs.FASTBUILD }}"
-
-          echo "🚀 Injecting Custom Kernel Suffix: $SUFFIX"
-          for path in \
-            kernel_platform/common/scripts/setlocalversion \
-            kernel_platform/msm-kernel/scripts/setlocalversion \
-            kernel_platform/external/dtc/scripts/setlocalversion; do
-            [ -f "$path" ] || continue
-            echo "Processing: $path"
-
-            # Remove Dirty Tags
-            sed -i 's/ -dirty//g' "$path"
-            sed -i '$i res=$(echo "$res" | sed '\''s/-dirty//g'\'')' "$path"
-            if grep -q 'KERNELVERSION.*scm_version' "$path"; then
-              echo "📌 New Set Local Version Format Detected"
-              sed -i "s|echo \"\${KERNELVERSION}.*scm_version}\"|echo \"\${KERNELVERSION}-${ANDROIDVERSION}-${SUFFIX}\"|" "$path"
-            elif grep -q 'echo "\$res"' "$path"; then
-              echo "Old Set Local Version Format Detected"
-              if [ "$FASTBUILD" = "true" ]; then
-                echo "✔️ Fast Build Enabled: Setting Static Res Value"
-                sed -i "s/^res=.*/res=\"-${ANDROIDVERSION}-${SUFFIX}\"/" "$path"
-              else
-                echo "🛠️ Standard Build: Dynamically Injecting Suffix"
-                if [[ -f ./kernel_platform/build_with_bazel.py ]]; then
-                  echo "⚠️ Note: Using Bazel may Limit Special Characters, Adjust Script if Compilation Fails"
-                fi
-                tac "$path" | sed "0,/echo \"\\\$res\"/s//res=\\\$(echo \\\$res | cut -d- -f1-2)-${SUFFIX}; echo \"\\\$res\";/" | tac > "$path.tmp"
-                mv "$path.tmp" "$path"
-              fi
-
-            else
-              echo "⚠️ Unknown Format: Appending Suffix Manually"
-              echo "echo \"\$res-${SUFFIX}\"" >> "$path"
-            fi
-            chmod +x "$path"
-          done
-
-          echo "⚙️ Committing Suffix Modifications..."
-          git add -A
-          git commit -m "🎉 Inject Custom Kernel Suffix and Remove Dirty Tags"
-
-      - name: 🔧 Fallback - Inject Local Kernel Version Suffix (Bazel Safe)
-        if: ${{ steps.inject.conclusion == 'failure' && github.event.inputs.SUFFIX != '' }}
-        run: |
-          cd kernel_workspace
-
-          SUFFIX="${{ github.event.inputs.SUFFIX }}"
-          FINALSUFFIX="-${ANDROIDVERSION}-${SUFFIX}"
-          echo "⚠️ Fallback Triggered → Using Local Version: $FINALSUFFIX"
-          echo ""
-
-          # Persist to Next Steps
-          echo "LOCALVERSION=$FINALSUFFIX" >> $GITHUB_ENV
-          echo "KBUILDVERSION=$FINALSUFFIX" >> $GITHUB_ENV
-
-          # Also for Current Shell
-          export LOCALVERSION="$FINALSUFFIX"
-          export KBUILDVERSION="$FINALSUFFIX"
+          REJECTCHECKER="${GITHUB_WORKSPACE}/kernel_workspace/AndreiMikh-Kernel-Lab/scripts/RejectChecker.sh"
+          chmod +x "$REJECTCHECKER"
+          echo "REJECTCHECKER=$REJECTCHECKER" >> "$GITHUB_ENV"
 
           echo ""
-          echo "🎉 Local Version is Set to: $LOCALVERSION"
-
-      - name: 🔧 Auto-Generated Kernel Suffix
-        if: ${{ github.event.inputs.SUFFIX == '' }}
-        run: |
-          cd kernel_workspace
-
-          # Inputs and Variables
-          FASTBUILD="${{ github.event.inputs.FASTBUILD }}"
-          echo "🚀 Generating Random Kernel Suffix..."
-          
-          # Random Generation
-          RANDOMDIGIT=$((RANDOM % 10))
-          RANDOMHASH=$(head -c 7 /dev/urandom | xxd -p)
-      
-          AUTOSUFFIX="${RANDOMDIGIT}-g${RANDOMHASH}"      
-          echo "🧾 Suffix: $AUTOSUFFIX"      
-          FILES=(
-            kernel_platform/common/scripts/setlocalversion
-            kernel_platform/msm-kernel/scripts/setlocalversion
-            kernel_platform/external/dtc/scripts/setlocalversion
-          )
-      
-          for path in "${FILES[@]}"; do
-            [[ -f "$path" ]] || continue
-            echo "⚙️ Processing: $path"      
-            # Ensure Executable
-            chmod +x "$path"      
-            # Remove Dirty Markers
-            sed -i 's/ -dirty//g' "$path"      
-            # Append Suffix Logic in a Safe Way (No Rewriting Core Logic)
-            if ! grep -q "Kernel Auto Suffix Injection" "$path"; then
-              cat >> "$path" <<EOF              
-              # Kernel Auto Suffix Injection
-              if [ -n "\$res" ]; then
-                case "\$res" in
-                  *"-${AUTOSUFFIX}"*) ;;
-                  *)
-                    res="\$res-${ANDROIDVERSION}-${AUTOSUFFIX}"
-                    ;;
-                esac
-              fi
-              EOF
-            fi
-      
-          done      
-          echo "⚙️ Committing changes..."    
-          git add -A
-      
-          if git diff --cached --quiet; then
-            echo "✔️ No changes to commit"
-          else
-            git commit -m "🎉 Apply Auto-Generated Kernel Suffix"
-          fi
+          echo "🔎 Reject Checker: $REJECTCHECKER"
 
       - name: 🔧 Solve Root Engine Source
         id: manager
@@ -2451,6 +2410,47 @@ jobs:
           echo "📂 Repository : $KSUREPO"
           echo "🌿 Branch     : $MANAGERBRANCH"
           echo "📁 Setup Repo : $BRANCHPATH"
+
+      - name: 🔧 Setup Kotlin
+        run: |
+          set -euo pipefail
+
+          KOTLINVER="2.4.10"
+          KOTLINHOME="$HOME/kotlinc"
+          KOTLINURL="https://github.com/JetBrains/kotlin/releases/download/v${KOTLINVER}/kotlin-compiler-${KOTLINVER}.zip"
+
+          # Reuse Installed Compiler when the Requested Version is Already Available
+          if [[ -x "$KOTLINHOME/bin/kotlinc" ]] && \
+             "$KOTLINHOME/bin/kotlinc" -version 2>&1 | grep -q "$KOTLINVER"; then
+            echo "✔️ Kotlin ${KOTLINVER} is Already Installed"
+          else
+            echo "⚙️ Installing Kotlin Compiler ${KOTLINVER}..."
+            rm -rf "$KOTLINHOME"
+            rm -f kotlinc.zip
+            curl --fail \
+                 --location \
+                 --silent \
+                 --show-error \
+                 --retry 3 \
+                 --retry-delay 2 \
+                 "$KOTLINURL" \
+                 -o kotlinc.zip
+            unzip -q kotlinc.zip -d "$HOME"
+            rm -f kotlinc.zip
+
+            [[ -x "$KOTLINHOME/bin/kotlinc" ]] || {
+              echo "⚠️ ERROR: Kotlin Compiler Installation Failed"
+              exit 1
+            }
+          fi
+
+          # Make Kotlin Available to All Following Workflow Steps
+          echo "$KOTLINHOME/bin" >> "$GITHUB_PATH"
+
+          echo "KOTLINHOME=$KOTLINHOME" >> "$GITHUB_ENV"
+          echo "🎉 Kotlin Installation Completed Successfully..."
+
+          "$KOTLINHOME/bin/kotlinc" -version
       
       - name: 🔧 Apply Fake Patches
         if: ${{ github.event.inputs.SUSFSREPOSITORY != '-1' }}
