@@ -286,66 +286,209 @@ jobs:
             ccache-sm8750-lineage-${{ runner.os }}-
             ccache-sm8750-lineage-
 
-      - name: Pull Public CCache
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          if [ "${{ steps.ccache-restore.outputs.cache-hit }}" = "true" ]; then
-            echo "GitHub Cache Hit (Fingerprint Match), Skip Public Pull"
-            exit 0
-          fi
 
-          mkdir -p "${{ env.CCACHE_DIR }}"
-          if gh release download "ccache-sm8750-lineage" \
-            -p "ccache-sm8750-lineage.tar.zst" \
-            -R $GITHUB_REPOSITORY 2>/dev/null; then
-            echo "Public CCache Downloaded, Extracting..."
-            tar -I zstd -xf ccache-sm8750-lineage.tar.zst \
-              -C "${{ env.CCACHE_DIR }}"
-            echo "Public CCache Merged!"
-          else
-            echo "Public CCache Absent (First Build), Skip"
-          fi
-
-      - name: Prepare Kernel Sources
+      - name: 📥 Prepare Kernel Sources
+        shell: bash
         run: |
-          mkdir -p work
-          cd work
+          mkdir -p "${GITHUB_WORKSPACE}/work"
+          cd "${GITHUB_WORKSPACE}/work"
+
           SRC_COMMIT="${SRC_COMMIT:-}"
-          echo "SRC_COMMIT=$SRC_COMMIT" >> "$GITHUB_ENV"
-          echo "Source Commit: $SRC_COMMIT"
-          [ -n "$SRC_COMMIT" ] || {
-            echo "Warn: Failed to Get Commit, Using Plain Approach"
-            SRC_COMMIT=""
-          }
 
-          curl -sL \
+          echo "📥 Preparing Kernel Sources..."
+          echo "📂 Working Directory: $(pwd)"
+
+          if [ -n "$SRC_COMMIT" ]; then
+            echo "📌 Source Commit: $SRC_COMMIT"
+          else
+            echo "⚠️ Failed to Get Source Commit"
+            echo "📌 Using Plain Source Approach"
+          fi
+
+          echo "📥 Downloading Kernel Source..."
+
+          curl -fsSL \
             "${{ vars.KERNELSOURCE || 'https://github.com' }}/LineageOS/android_kernel_oneplus_sm8750/archive/refs/heads/lineage-23.2.zip" \
             -o src.zip &
-          curl -sL \
+
+          curl -fsSL \
             "${{ vars.KERNELSOURCE || 'https://github.com' }}/LineageOS/android_kernel_oneplus_sm8750-modules/archive/refs/heads/lineage-23.2.zip" \
             -o modules.zip &
-          curl -sL \
+
+          curl -fsSL \
             "${{ vars.KERNELSOURCE || 'https://github.com' }}/LineageOS/android_kernel_oneplus_sm8750-devicetrees/archive/refs/heads/lineage-23.2.zip" \
             -o dt.zip &
 
           wait
+
+          echo "📦 Extracting Kernel Source..."
+
           unzip -q src.zip
           mv android_kernel_oneplus_sm8750-lineage-23.2 src
+
+          echo "📦 Extracting Kernel Modules..."
+
           unzip -q modules.zip
           mv android_kernel_oneplus_sm8750-modules-lineage-23.2 sm8750-modules
+
+          echo "📦 Extracting Device Trees..."
+
           unzip -q dt.zip
           mv android_kernel_oneplus_sm8750-devicetrees-lineage-23.2 sm8750-devicetrees
+
           rm -f src.zip modules.zip dt.zip
-          for t in \
-            src/drivers/base/kernelFwUpdate/Kconfig \
-            src/arch/arm64/boot/dts/vendor; do
-            [ -e "$t" ] || {
-              echo "MISSING SYMLINK TARGET: $t"
+
+          echo "✔️ Kernel Sources Extracted"
+
+          SRC="${GITHUB_WORKSPACE}/work/src"
+          MODULES="${GITHUB_WORKSPACE}/work/sm8750-modules"
+          DEVICETREES="${GITHUB_WORKSPACE}/work/sm8750-devicetrees"
+
+          echo "📂 Kernel Source : $SRC"
+          echo "📂 Kernel Modules: $MODULES"
+          echo "📂 Device Trees  : $DEVICETREES"
+
+          echo "SRC_COMMIT=$SRC_COMMIT" >> "$GITHUB_ENV"
+          echo "KERNELSRC=$SRC" >> "$GITHUB_ENV"
+          echo "KERNELMODULES=$MODULES" >> "$GITHUB_ENV"
+          echo "DEVICETREES=$DEVICETREES" >> "$GITHUB_ENV"
+
+          echo "🔍 Validating Kernel Source..."
+          for target in \
+            "$SRC/drivers/base/kernelFwUpdate/Kconfig" \
+            "$SRC/arch/arm64/boot/dts/vendor"; do
+            if [ ! -e "$target" ]; then
+              echo "⚠️ Missing Kernel Source Target:"
+              echo "📌 $target"
               exit 1
-            }
+            fi
+
+            echo "✔️ Found: $target"
           done
 
+          echo "🎉 Kernel Sources Prepared Successfully"
+
+    
+      - name: 🔎 Detect Kernel Version
+        id: kernelversion
+        shell: bash
+        run: |
+          KDIR="${GITHUB_WORKSPACE}/work/src"
+          KERNELMAKEFILE="$KDIR/Makefile"
+
+          echo "🔎 Detecting Kernel Version..."
+          echo "📂 Kernel Source: $KDIR"
+
+          if [[ ! -d "$KDIR" ]]; then
+            echo "⚠️ Kernel Source Directory Not Found"
+            echo "📂 Expected: $KDIR"
+            exit 1
+          fi
+
+          if [[ ! -f "$KERNELMAKEFILE" ]]; then
+            echo "⚠️ Kernel Makefile Not Found"
+            echo "📂 Expected: $KERNELMAKEFILE"
+            exit 1
+          fi
+
+          VERSION=$(awk '
+            /^VERSION[[:space:]]*=/ {
+              print $3
+              exit
+            }
+          ' "$KERNELMAKEFILE")
+
+          PATCHLEVEL=$(awk '
+            /^PATCHLEVEL[[:space:]]*=/ {
+              print $3
+              exit
+            }
+          ' "$KERNELMAKEFILE")
+
+          SUBLEVEL=$(awk '
+            /^SUBLEVEL[[:space:]]*=/ {
+              print $3
+              exit
+            }
+          ' "$KERNELMAKEFILE")
+
+          EXTRAVERSION=$(awk '
+            /^EXTRAVERSION[[:space:]]*=/ {
+              print $3
+              exit
+            }
+          ' "$KERNELMAKEFILE")
+
+          VERSION="${VERSION:-0}"
+          PATCHLEVEL="${PATCHLEVEL:-0}"
+          SUBLEVEL="${SUBLEVEL:-0}"
+          EXTRAVERSION="${EXTRAVERSION:-}"
+
+          if ! [[ "$VERSION" =~ ^[0-9]+$ ]]; then
+            echo "⚠️ Invalid VERSION: $VERSION"
+            exit 1
+          fi
+
+          if ! [[ "$PATCHLEVEL" =~ ^[0-9]+$ ]]; then
+            echo "⚠️ Invalid PATCHLEVEL: $PATCHLEVEL"
+            exit 1
+          fi
+
+          if ! [[ "$SUBLEVEL" =~ ^[0-9]+$ ]]; then
+            echo "⚠️ Invalid SUBLEVEL: $SUBLEVEL"
+            exit 1
+          fi
+
+          FULLVERSION="${VERSION}.${PATCHLEVEL}.${SUBLEVEL}${EXTRAVERSION}"
+          KSHORTVERSION="${VERSION}.${PATCHLEVEL}"
+          KSHORTPATCHVERSION="${VERSION}_${PATCHLEVEL}"
+
+          KV1="$VERSION"
+          KV2="${VERSION}${PATCHLEVEL}"
+          KV3="${VERSION}${PATCHLEVEL}${SUBLEVEL}"
+
+          echo "🚀 Kernel Version Detected"
+          echo "📌 VERSION       : $VERSION"
+          echo "📌 PATCHLEVEL    : $PATCHLEVEL"
+          echo "📌 SUBLEVEL      : $SUBLEVEL"
+          echo "📌 EXTRAVERSION  : ${EXTRAVERSION:-None}"
+          echo "📌 FULL VERSION  : $FULLVERSION"
+          echo "📌 KV1           : $KV1"
+          echo "📌 KV2           : $KV2"
+          echo "📌 KV3           : $KV3"
+          echo "📌 Short Version : $KSHORTVERSION"
+          echo "📌 Patch Version : $KSHORTPATCHVERSION"
+
+          {
+            echo "KERNEL_VERSION=$VERSION"
+            echo "KERNEL_PATCHLEVEL=$PATCHLEVEL"
+            echo "KERNEL_SUBLEVEL=$SUBLEVEL"
+            echo "KERNEL_EXTRAVERSION=$EXTRAVERSION"
+            echo "FULLVERSION=$FULLVERSION"
+            echo "KV1=$KV1"
+            echo "KV2=$KV2"
+            echo "KV3=$KV3"
+            echo "KSHORTVERSION=$KSHORTVERSION"
+            echo "KSHORTPATCHVERSION=$KSHORTPATCHVERSION"
+          } >> "$GITHUB_ENV"
+
+          {
+            echo "version=$VERSION"
+            echo "patchlevel=$PATCHLEVEL"
+            echo "sublevel=$SUBLEVEL"
+            echo "extraversion=$EXTRAVERSION"
+            echo "fullversion=$FULLVERSION"
+            echo "kv1=$KV1"
+            echo "kv2=$KV2"
+            echo "kv3=$KV3"
+            echo "shortversion=$KSHORTVERSION"
+            echo "shortpatchversion=$KSHORTPATCHVERSION"
+          } >> "$GITHUB_OUTPUT"
+
+          echo ""
+          echo "🎉 Kernel Version Detection Complete"
+
+     
       - name: Apply Compile Fixes
         run: |
           patch -p1 -F3 --batch -f \
