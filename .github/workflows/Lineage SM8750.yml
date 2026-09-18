@@ -153,6 +153,7 @@ jobs:
         with:
           fetch-depth: 1
 
+ 
       - name: 🔎 Resolve Clang Revision
         id: clang-meta
         shell: bash
@@ -161,6 +162,7 @@ jobs:
           echo "Archive: ${CLANG_ARCHIVE}"
           echo "clang_key=aosp-clang-${CLANG_VERSION}-${{ runner.os }}-${{ runner.arch }}" >> "$GITHUB_OUTPUT"
 
+  
       - name: 💾 Restore AOSP Clang Cache
         id: clang-cache
         uses: actions/cache/restore@v4
@@ -168,6 +170,7 @@ jobs:
           path: clang
           key: ${{ steps.clang-meta.outputs.clang_key }}
 
+   
       - name: 📥 Download AOSP Clang 21
         if: steps.clang-cache.outputs.cache-hit != 'true'
         run: |
@@ -204,6 +207,7 @@ jobs:
           echo "Clang Version:"
           clang/bin/clang --version
 
+   
       - name: 💾 Save AOSP Clang Cache
         if: steps.clang-cache.outputs.cache-hit != 'true'
         uses: actions/cache/save@v4
@@ -211,80 +215,162 @@ jobs:
           path: clang
           key: ${{ steps.clang-meta.outputs.clang_key }}
 
-      - name: Install Build Dependencies
+  
+      - name: 📦 Install Build Dependencies
+        shell: bash
         run: |
           sudo apt-get update
           sudo apt-get install -y \
-            zip zstd patch bc flex bison \
-            libssl-dev libncurses-dev libelf-dev \
-            dwarves python3 ccache mkbootimg
+            zip \
+            zstd \
+            patch \
+            bc \
+            flex \
+            bison \
+            libssl-dev \
+            libncurses-dev \
+            libelf-dev \
+            libdw-dev \
+            dwarves \
+            python3 \
+            ccache \
+            mkbootimg
+          echo "🎉 Build Dependencies Installed"
 
-      - name: Configure Clang Path
+   
+      - name: 🔧 Configure Clang Path
+        shell: bash
         run: |
-          echo "$GITHUB_WORKSPACE/clang/bin" >> "$GITHUB_PATH"
+          CLANGBIN="$GITHUB_WORKSPACE/clang/bin"
+          echo "$CLANGBIN" >> "$GITHUB_PATH"
+          export PATH="$CLANGBIN:$PATH"
+
+          echo "🔧 Configuring LLVM Clang..."
+          echo "📂 Clang Path: $CLANGBIN"
+          if [ ! -x "$CLANGBIN/clang" ]; then
+            echo "⚠️ Clang Binary Not Found"
+            echo "📂 Expected: $CLANGBIN/clang"
+            exit 1
+          fi
 
           echo "🔍 Verifying Clang..."
           clang --version
+          echo "🔍 Verifying LLD..."
+          ld.lld --version
+
           mkdir -p /tmp/gki
-          printf 'def generate_gki_certificate(*args, **kwargs):\n    raise SystemExit("GKI SIGNING NOT SUPPORTED (STUB)")\n' \
+          printf '%s\n' \
+            'def generate_gki_certificate(*args, **kwargs):' \
+            '    raise SystemExit("GKI SIGNING NOT SUPPORTED (STUB)")' \
             > /tmp/gki/generate_gki_certificate.py
-
           echo "PYTHONPATH=/tmp" >> "$GITHUB_ENV"
+          echo "📌 GKI Certificate Stub: /tmp/gki/generate_gki_certificate.py"
+          echo "📌 PYTHONPATH: /tmp"
 
-      - name: Verify Toolchain
+          echo "🎉 Clang Configuration Complete"
+
+ 
+      - name: 🔎 Verify Toolchain
+        shell: bash
         run: |
+          echo "🔎 Verifying LLVM Toolchain..."
+          echo "📌 Clang:"
           clang --version
+
+          echo "📌 LLD:"
+          ld.lld --version
+
+          echo "📌 Clang LLD Path:"
           clang -print-prog-name=ld.lld
 
-      - name: Clean Runner Space
+          echo "🎉 Toolchain Verification Complete"
+
+    
+      - name: 🧹 Clean Runner Space
+        shell: bash
         run: |
+          echo "🧹 Cleaning Unused Runner Components..."
           (setsid sudo rm -rf /usr/share/dotnet >/dev/null 2>&1 &)
           (setsid sudo rm -rf /usr/local/lib/android >/dev/null 2>&1 &)
           (setsid sudo rm -rf /opt/ghc >/dev/null 2>&1 &)
           (setsid sudo rm -rf /opt/hostedtoolcache/CodeQL >/dev/null 2>&1 &)
+          echo "📊 Runner Storage:"
           df -h
 
-      - name: Configure CCache
-        run: |
-          sudo cp -f $GITHUB_WORKSPACE/lib/ccache-ecs /usr/local/bin/ccache
-          sudo chmod +x /usr/local/bin/ccache
-          echo "CCACHE_DIR=$GITHUB_WORKSPACE/.ccache" >> "$GITHUB_ENV"
-          echo "CCACHE_MAXSIZE=3G" >> "$GITHUB_ENV"
-          echo "CCACHE_IS_KERNEL_COMPILING=true" >> "$GITHUB_ENV"
+          echo "🎉 Runner Cleanup Started"
 
-          mkdir -p "$GITHUB_WORKSPACE/.ccache"
-          echo "sloppiness = file_stat_matches,include_file_ctime,include_file_mtime,pch_defines,file_macro,time_macros" \
-            > "$GITHUB_WORKSPACE/.ccache/ccache.conf"
+
+      - name: 🔧 Configure CCache
+        shell: bash
+        env:
+          CCACHE_DIR: ${{ github.workspace }}/.ccache
+          CCACHE_MAXSIZE: 8G
+        run: |
+          if [ -f "$GITHUB_WORKSPACE/lib/ccache-ecs" ]; then
+            sudo install -m 0755 \
+              "$GITHUB_WORKSPACE/lib/ccache-ecs" \
+              /usr/local/bin/ccache
+          fi
+
+          mkdir -p "$CCACHE_DIR"
+          export CCACHE_DIR
+          export CCACHE_MAXSIZE
+          export CCACHE_IS_KERNEL_COMPILING=true
+          export CCACHE_COMPILERCHECK=content
+          cat > "$CCACHE_DIR/ccache.conf" <<'EOF'
+          max_size = 8G
+          compression = true
+          compression_level = 5
+          compiler_check = content
+          sloppiness = file_stat_matches,include_file_ctime,include_file_mtime,pch_defines,file_macro,time_macros
+          EOF
+
+          echo "🔧 CCache Configuration"
+          echo "📂 Cache Directory : $CCACHE_DIR"
+          echo "📦 Maximum Size    : $CCACHE_MAXSIZE"
+          echo "🗜️ Compression     : Enabled"
+          echo "🔍 Compiler Check  : Content"
+
           ccache --version
+          ccache -z
 
-      - name: Compute CCache Fingerprint
-        id: ccache-fp
-        run: |
-          SRC=$(curl -sL \
-            "${{ vars.KERNELSOURCE || 'https://api.github.com' }}/repos/LineageOS/android_kernel_oneplus_sm8750/commits/lineage-23.2" \
-            -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" |
-            grep -oE '"sha": "[0-9a-f]{40}"' |
-            head -1 |
-            grep -oE '[0-9a-f]{40}' || true)
-          echo "SRC_COMMIT=$SRC" >> "$GITHUB_ENV"
-          FP=$(printf '%s' \
-            "${{ inputs.ksumeta }}|${{ inputs.susfsmeta }}|${{ inputs.neonlz4 }}|${{ inputs.droidspaces }}|${{ inputs.basebandguard }}|${{ inputs.netfilter }}|${{ inputs.bbr }}|${{ inputs.kpmodule }}|${{ inputs.rekernel }}|${{ inputs.ksuffix }}|$SRC" |
-            md5sum |
-            cut -d' ' -f1)
 
-          echo "CCACHE_FP=$FP" >> "$GITHUB_ENV"
-          echo "CCache Fingerprint: $FP (src $SRC)"
-
-      - name: Load CCache Cache
-        uses: actions/cache/restore@v5
+      - name: 💾 Restore GitHub CCache
         id: ccache-restore
+        uses: actions/cache/restore@v4
         with:
           path: .ccache
-          key: ccache-sm8750-lineage-${{ runner.os }}-${{ github.ref_name }}-${{ env.CCACHE_FP }}
+          key: ccache-sm8750-lineage-${{ runner.os }}-${{ runner.arch }}-${{ github.ref_name }}-${{ env.CCACHE_FP }}
           restore-keys: |
-            ccache-sm8750-lineage-${{ runner.os }}-${{ github.ref_name }}-
-            ccache-sm8750-lineage-${{ runner.os }}-
+            ccache-sm8750-lineage-${{ runner.os }}-${{ runner.arch }}-${{ github.ref_name }}-
+            ccache-sm8750-lineage-${{ runner.os }}-${{ runner.arch }}-
             ccache-sm8750-lineage-
+
+
+      - name: 📦 Pull Public CCache
+        if: steps.ccache-restore.outputs.cache-hit != 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CCACHE_DIR: ${{ github.workspace }}/.ccache
+          CCACHE_MAXSIZE: 8G
+        shell: bash
+        run: |
+          mkdir -p "$CCACHE_DIR"
+          ARCHIVE="ccache-sm8750-lineage.tar.zst"
+          if gh release download ccache-sm8750-lineage \
+            --repo "$GITHUB_REPOSITORY" \
+            --pattern "$ARCHIVE" \
+            --clobber; then
+            echo "📦 Public CCache found; merging..."
+            tar -I zstd -xf "$ARCHIVE" -C "$CCACHE_DIR"
+            rm -f "$ARCHIVE"
+            ccache -M "$CCACHE_MAXSIZE"
+            echo "📊 CCache Status"
+            ccache -s
+            echo "✔️ Public CCache merged"
+          else
+            echo "ℹ️ No public CCache release found"
+          fi
 
 
       - name: 📥 Prepare Kernel Sources
@@ -292,12 +378,9 @@ jobs:
         run: |
           mkdir -p "${GITHUB_WORKSPACE}/work"
           cd "${GITHUB_WORKSPACE}/work"
-
           SRC_COMMIT="${SRC_COMMIT:-}"
-
           echo "📥 Preparing Kernel Sources..."
           echo "📂 Working Directory: $(pwd)"
-
           if [ -n "$SRC_COMMIT" ]; then
             echo "📌 Source Commit: $SRC_COMMIT"
           else
@@ -306,38 +389,26 @@ jobs:
           fi
 
           echo "📥 Downloading Kernel Source..."
-
           curl -fsSL \
             "${{ vars.KERNELSOURCE || 'https://github.com' }}/LineageOS/android_kernel_oneplus_sm8750/archive/refs/heads/lineage-23.2.zip" \
             -o src.zip &
-
           curl -fsSL \
             "${{ vars.KERNELSOURCE || 'https://github.com' }}/LineageOS/android_kernel_oneplus_sm8750-modules/archive/refs/heads/lineage-23.2.zip" \
             -o modules.zip &
-
           curl -fsSL \
             "${{ vars.KERNELSOURCE || 'https://github.com' }}/LineageOS/android_kernel_oneplus_sm8750-devicetrees/archive/refs/heads/lineage-23.2.zip" \
             -o dt.zip &
-
           wait
-
           echo "📦 Extracting Kernel Source..."
-
           unzip -q src.zip
           mv android_kernel_oneplus_sm8750-lineage-23.2 src
-
           echo "📦 Extracting Kernel Modules..."
-
           unzip -q modules.zip
           mv android_kernel_oneplus_sm8750-modules-lineage-23.2 sm8750-modules
-
           echo "📦 Extracting Device Trees..."
-
           unzip -q dt.zip
           mv android_kernel_oneplus_sm8750-devicetrees-lineage-23.2 sm8750-devicetrees
-
           rm -f src.zip modules.zip dt.zip
-
           echo "✔️ Kernel Sources Extracted"
 
           SRC="${GITHUB_WORKSPACE}/work/src"
@@ -362,7 +433,6 @@ jobs:
               echo "📌 $target"
               exit 1
             fi
-
             echo "✔️ Found: $target"
           done
 
@@ -375,10 +445,8 @@ jobs:
         run: |
           KDIR="${GITHUB_WORKSPACE}/work/src"
           KERNELMAKEFILE="$KDIR/Makefile"
-
           echo "🔎 Detecting Kernel Version..."
           echo "📂 Kernel Source: $KDIR"
-
           if [[ ! -d "$KDIR" ]]; then
             echo "⚠️ Kernel Source Directory Not Found"
             echo "📂 Expected: $KDIR"
@@ -397,33 +465,28 @@ jobs:
               exit
             }
           ' "$KERNELMAKEFILE")
-
           PATCHLEVEL=$(awk '
             /^PATCHLEVEL[[:space:]]*=/ {
               print $3
               exit
             }
           ' "$KERNELMAKEFILE")
-
           SUBLEVEL=$(awk '
             /^SUBLEVEL[[:space:]]*=/ {
               print $3
               exit
             }
           ' "$KERNELMAKEFILE")
-
           EXTRAVERSION=$(awk '
             /^EXTRAVERSION[[:space:]]*=/ {
               print $3
               exit
             }
           ' "$KERNELMAKEFILE")
-
           VERSION="${VERSION:-0}"
           PATCHLEVEL="${PATCHLEVEL:-0}"
           SUBLEVEL="${SUBLEVEL:-0}"
           EXTRAVERSION="${EXTRAVERSION:-}"
-
           if ! [[ "$VERSION" =~ ^[0-9]+$ ]]; then
             echo "⚠️ Invalid VERSION: $VERSION"
             exit 1
@@ -499,7 +562,6 @@ jobs:
       - name: 📥 Deploy Base Configuration
         run: |
           cd work/src
-
           echo "📥 Deploying SM8750 Base AOSP Configuration..."
           cp "$GITHUB_WORKSPACE/patches/AOSP/Config-SM8750-AOSP.config" .config
 
