@@ -352,47 +352,169 @@ jobs:
             < "$GITHUB_WORKSPACE/patches/AOSP/001-Compiler-Fix-AOSP.patch"
         working-directory: work/src
 
-      - name: Integrate KSU Meta
+      - name: 🔧 Solve Root Engine Source
+        id: manager
         if: ${{ inputs.ksumeta != 'none' }}
+        shell: bash
         run: |
-          cd work/src
-          case "${{ inputs.ksumeta }}" in
+          ROOTBRANCHSOURCE="${{ inputs.ksumeta }}"
+
+          MANAGERBRANCH=""
+          BRANCHPATH=""
+          MANAGERARTIFACT=""
+          KSUREPO=""
+
+          # Resolve Root Source
+          case "$ROOTBRANCHSOURCE" in
             resukisu)
-              KSUREPO="https://github.com/ReSukiSU/ReSukiSU.git"
+              MANAGERBRANCH="main"
+              MANAGERARTIFACT="Manager-release"
               ;;
-            none)
-              echo "No KSU Integration"
-              exit 0
+            *)
+              echo "⚠️ Unsupported Root Source: $ROOTBRANCHSOURCE"
+              exit 1
               ;;
           esac
-          rm -rf KernelSU drivers/kernelsu
-          git clone "$KSUREPO" KernelSU
-          ln -sfn ../KernelSU/kernel drivers/kernelsu
-          grep -q "kernelsu" drivers/Makefile ||
-            echo 'obj-$(CONFIG_KSU) += kernelsu/' >> drivers/Makefile
-          grep -q "drivers/kernelsu/Kconfig" drivers/Kconfig ||
-            sed -i '/endmenu/i\source "drivers/kernelsu/Kconfig"' \
-              drivers/Kconfig
-        env:
-          KSUREPO: ""
 
-      - name: Compute KSU Version
+          # Resolve Root Engine Repository
+          case "$ROOTBRANCHSOURCE" in
+            resukisu)
+              KSUREPO="ReSukiSU/ReSukiSU"
+              ;;
+            *)
+              echo "⚠️ Unsupported Root Engine: $ROOTBRANCHSOURCE"
+              exit 1
+              ;;
+          esac
+
+          # Validate Resolution
+          [[ -n "$MANAGERBRANCH" ]] || {
+            echo "⚠️ Failed to Resolve Manager Branch"
+            exit 1
+          }
+
+          [[ -n "$KSUREPO" ]] || {
+            echo "⚠️ Failed to Resolve Root Engine Repository"
+            exit 1
+          }
+
+          {
+            echo "MANAGERBRANCH=$MANAGERBRANCH"
+            echo "BRANCHPATH=$BRANCHPATH"
+            echo "MANAGERARTIFACT=$MANAGERARTIFACT"
+            echo "KSUREPO=$KSUREPO"
+          } >> "$GITHUB_OUTPUT"
+
+          echo "------------------------------"
+          echo "✔️ Root Engine Source Resolved"
+          echo "📦 Engine     : ReSukiSU"
+          echo "📂 Repository : $KSUREPO"
+          echo "🌿 Branch     : $MANAGERBRANCH"
+          echo "📦 Artifact   : $MANAGERARTIFACT"
+          echo "------------------------------"
+
+
+      - name: 🔧 Configure Root Engine
+        id: rootengine
+        if: ${{ inputs.ksumeta != 'none' }}
+        shell: bash
+        run: |
+          cd "${GITHUB_WORKSPACE}/work/src"
+
+          MANAGERBRANCH="${{ steps.manager.outputs.MANAGERBRANCH }}"
+          KSUREPO="${{ steps.manager.outputs.KSUREPO }}"
+
+          # Helpers
+          getcommitcount() {
+            git rev-list --count HEAD 2>/dev/null || echo 0
+          }
+
+          setupengine() {
+            local repo="$1"
+            local branch="$2"
+            local argument="$3"
+
+            echo "🔗 Setup Repository : $repo"
+            echo "🌿 Setup Branch     : $branch"
+            echo "📌 Setup Argument   : $argument"
+
+            curl -fsSL \
+              "https://raw.githubusercontent.com/${repo}/${branch}/kernel/setup.sh" \
+              | bash -s -- "$argument"
+          }
+
+          # ReSukiSU
+          echo "🚀 Setting Up ReSukiSU..."
+
+          setupengine \
+            "$KSUREPO" \
+            "$MANAGERBRANCH" \
+            "$MANAGERBRANCH"
+
+          cd KernelSU || {
+            echo "⚠️ ReSukiSU Directory was Not Created"
+            exit 1
+          }
+
+          CURRENTBRANCH="$(git branch --show-current || true)"
+          CURRENTBRANCH="${CURRENTBRANCH:-HEAD}"
+
+          GITCOMMITHASH="$(git rev-parse --short=8 HEAD)"
+          COMMITCOUNT="$(getcommitcount)"
+
+          if [[ "$COMMITCOUNT" =~ ^[0-9]+$ ]]; then
+            KSUVERSION=$((COMMITCOUNT + 30700))
+          else
+            KSUVERSION=30700
+          fi
+
+          echo "KSUVERSION=$KSUVERSION" >> "$GITHUB_ENV"
+          echo "GITCOMMITHASH=$GITCOMMITHASH" >> "$GITHUB_ENV"
+
+          # Force Simple Tag-Based Full-Name Format
+          DEFCONFIG="${GITHUB_WORKSPACE}/work/src/arch/arm64/configs/gki_defconfig"
+
+          if [[ -f "$DEFCONFIG" ]]; then
+            sed -i '/^CONFIG_KSU_FULL_NAME_FORMAT=/d' "$DEFCONFIG"
+            printf 'CONFIG_KSU_FULL_NAME_FORMAT="%%TAG_NAME%%"\n' >> "$DEFCONFIG"
+          fi
+
+          echo "------------------------------"
+          echo "🌿 Branch          : $CURRENTBRANCH"
+          echo "🔢 KSU Version     : $KSUVERSION"
+          echo "🔖 Commit           : $GITCOMMITHASH"
+          echo "------------------------------"
+
+          echo "🎉 ReSukiSU Setup Complete"
+
+
+      - name: 🔢 Compute KSU Version
         id: ksuversion
         if: ${{ inputs.ksumeta != 'none' }}
+        shell: bash
         run: |
-          COUNT=$(git -C work/src/KernelSU rev-list --count HEAD)
-          VER=$((30000 + COUNT + 700))
-          echo "ksuver=$VER" >> "$GITHUB_OUTPUT"
-          echo "KSU Version: $VER ($COUNT Commits)"
+          COUNT="$(git -C work/src/KernelSU rev-list --count HEAD)"
 
-      - name: 🔧 Apply SUSFS KSU Adaptation
-        if: ${{ inputs.susfsmeta && inputs.ksumeta != 'none' }}
-        run: |
-          cd KernelSU
-          git apply --check "$GITHUB_WORKSPACE/patches/AOSP/002-SUSFS-Main-AOSP.patch" 2>/dev/null &&
-            git apply "$GITHUB_WORKSPACE/patches/AOSP/002-SUSFS-Main-AOSP.patch" ||
-            echo "WARN: 002-SUSFS-Main-AOSP.patch was Not Applied Automatically" >&2
+          if [[ "$COUNT" =~ ^[0-9]+$ ]]; then
+            VER=$((COUNT + 30700))
+          else
+            VER=30700
+          fi
+
+          echo "ksuver=$VER" >> "$GITHUB_OUTPUT"
+
+          echo "------------------------------"
+          echo "🔢 KSU Version : $VER"
+          echo "📊 Commits     : $COUNT"
+          echo "------------------------------"
+
+      - name: 🔧 Apply KSU Hooks
+        if: ${{ inputs.ksumeta != 'none' }}
         working-directory: work/src
+        shell: bash
+        run: |
+          patch -p1 -F3 --batch -f \
+            < "$GITHUB_WORKSPACE/patches/AOSP/001-KSUMeta-Hooks-AOSP.patch"
 
       - name: Configure Attribution
         run: |
@@ -409,13 +531,6 @@ jobs:
             echo "builduser=" >> "$GITHUB_ENV"
             echo "buildhost=" >> "$GITHUB_ENV"
           fi
-
-      - name: Apply KSU Hooks
-        if: ${{ inputs.ksumeta != 'none' }}
-        run: |
-          patch -p1 -F3 --batch -f \
-            < "$GITHUB_WORKSPACE/patches/AOSP/001-KSUMeta-Hooks-AOSP.patch"
-        working-directory: work/src
 
       - name: 🔧 Integrate SUSFS
         run: |
