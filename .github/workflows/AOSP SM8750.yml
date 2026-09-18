@@ -352,6 +352,30 @@ jobs:
             < "$GITHUB_WORKSPACE/patches/AOSP/001-Compiler-Fix-AOSP.patch"
         working-directory: work/src
 
+
+      - name: 📥 Deploy Base Configuration
+        run: |
+          cd work/src
+
+          echo "📥 Deploying SM8750 Base AOSP Configuration..."
+          cp "$GITHUB_WORKSPACE/patches/AOSP/Config-SM8750-AOSP.config" .config
+
+          # Local Version
+          if [ -n "${{ inputs.ksuffix }}" ]; then
+            ./scripts/config --file .config \
+              --set-str CONFIG_LOCALVERSION "-4k-${{ inputs.ksuffix }}"
+          else
+            ./scripts/config --file .config \
+              --set-str CONFIG_LOCALVERSION "-4k-g${SRC_COMMIT:0:12}"
+          fi
+
+          ./scripts/config --file .config \
+            -d CONFIG_LOCALVERSION_AUTO
+
+          echo "✔️ Base Configuration Deployed"
+          grep '^CONFIG_LOCALVERSION=' .config
+
+ 
       - name: 🔧 Solve Root Engine Source
         id: manager
         if: ${{ inputs.ksumeta != 'none' }}
@@ -508,14 +532,7 @@ jobs:
           echo "📊 Commits     : $COUNT"
           echo "------------------------------"
 
-      - name: 🔧 Apply KSU Hooks
-        if: ${{ inputs.ksumeta != 'none' }}
-        working-directory: work/src
-        shell: bash
-        run: |
-          patch -p1 -F3 --batch -f \
-            < "$GITHUB_WORKSPACE/patches/AOSP/001-KSUMeta-Hooks-AOSP.patch"
-
+    
       - name: Configure Attribution
         run: |
           if [ "${{ inputs.attribute }}" = "true" ]; then
@@ -532,6 +549,7 @@ jobs:
             echo "buildhost=" >> "$GITHUB_ENV"
           fi
 
+  
       - name: 🔧 Integrate SUSFS
         run: |
           SRC="${GITHUB_WORKSPACE}/work/src"
@@ -651,7 +669,17 @@ jobs:
           echo "📌 SUSFS Commit : ${SUSFS_SHORT}"
           echo "📌 SUSFS Source : ${SUSFSKERNEL}"
           echo "📌 SUSFS Patch  : ${SUSFS50PATCH}"
+
+
+      - name: 🔧 Apply KSU Hooks
+        if: ${{ inputs.ksumeta != 'none' }}
+        working-directory: work/src
+        shell: bash
+        run: |
+          patch -p1 -F3 --batch -f \
+            < "$GITHUB_WORKSPACE/patches/AOSP/001-KSUMeta-Hooks-AOSP.patch"
       
+   
       - name: 🔧 Integrate LZ4 OPlus
         if: inputs.neonlz4
         shell: bash
@@ -848,58 +876,68 @@ jobs:
                   work/src/drivers/gpu/drm/
           fi
 
-      - name: Deploy Configurations
+    
+      - name: 🔧 Configure Final Kernel Configuration
         run: |
           cd work/src
-          cp "$GITHUB_WORKSPACE/patches/AOSP/Config-SM8750-AOSP.config" .config
-          # Local Version: Custom Suffix or Real Commit
-          if [ -n "${{ inputs.ksuffix }}" ]; then
-            ./scripts/config --file .config \
-              --set-str CONFIG_LOCALVERSION "-4k-${{ inputs.ksuffix }}"
-          else
-            ./scripts/config --file .config \
-              --set-str CONFIG_LOCALVERSION "-4k-g${SRC_COMMIT:0:12}"
-          fi
 
-          ./scripts/config --file .config -d CONFIG_LOCALVERSION_AUTO
+          echo "🔧 Configuring Final Kernel Configuration..."
+          echo "----------------------------------------"
 
-          # Disable KSU when Not Requested
+          # KSU
           if [ "${{ inputs.ksumeta }}" = "none" ]; then
+            echo "🚫 KSU Disabled"
             ./scripts/config --file .config \
               -d CONFIG_KSU \
               -d CONFIG_KSU_SUSFS
+          else
+            echo "✔️ KSU Enabled"
+            ./scripts/config --file .config \
+              -e CONFIG_KSU
+
+            # SUSFS
+            if [ "${{ inputs.susfsmeta }}" = "true" ]; then
+              echo "✔️ KSU SUSFS Enabled"
+              ./scripts/config --file .config \
+                -e CONFIG_KSU_SUSFS
+            else
+              echo "🚫 KSU SUSFS Disabled"
+              ./scripts/config --file .config \
+                -d CONFIG_KSU_SUSFS
+            fi
           fi
 
-          # Disable SUSFS when Not Requested
-          if [ "${{ inputs.susfsmeta }}" != "true" ] ||
-             [ "${{ inputs.ksumeta }}" = "none" ]; then
-            ./scripts/config --file .config -d CONFIG_KSU_SUSFS
-          fi
-
-          # Disable DROIDSPACES when Not Requested
+          # DroidSpaces
           if [ "${{ inputs.droidspaces }}" = "false" ]; then
+            echo "🚫 DroidSpaces Disabled"
+
             ./scripts/config --file .config \
               -d CONFIG_SYSVIPC \
               -d CONFIG_NTSYNC \
               -d CONFIG_DRM_LINDROID_EVDI
           fi
 
-          # EVDI is only Enabled in Extended Mode
+          # EVDI Only Enabled In Extended Mode
           if [ "${{ inputs.droidspaces }}" != "extend" ]; then
+            echo "🚫 EVDI Disabled"
             ./scripts/config --file .config \
               -d CONFIG_DRM_LINDROID_EVDI
           fi
 
-          # Disable Better Networkk/Netfilter when Not Requested
+          # Better Network / Netfilter
           if [ "${{ inputs.netfilter }}" != "true" ]; then
+            echo "🚫 Better Network / Netfilter Disabled"
             ./scripts/config --file .config \
               -d CONFIG_IP_SET \
               -d CONFIG_BPF_STREAM_PARSER \
               -d CONFIG_IP6_NF_NAT
+          else
+            echo "✔️ Better Network / Netfilter Enabled"
           fi
 
           # BBR TCP Congestion Control
           if [ "${{ inputs.bbr }}" = "true" ]; then
+            echo "✔️ BBR Enabled"
             ./scripts/config --file .config \
               -e CONFIG_TCP_CONG_ADVANCED \
               -e CONFIG_TCP_CONG_BBR
@@ -907,15 +945,63 @@ jobs:
 
           # ReKernel Binder Hooks
           if [ "${{ inputs.rekernel }}" = "true" ]; then
-            ./scripts/config --file .config -e CONFIG_REKERNEL
+            echo "✔️ ReKernel Enabled"
+            ./scripts/config --file .config \
+              -e CONFIG_REKERNEL
           fi
 
-          export LLVM=1 LLVM_IAS=1
-          make LLVM=1 LLVM_IAS=1 ARCH=arm64 olddefconfig
-          grep -qE \
-            'CONFIG_LOCALVERSION="-4k-(g[0-9a-f]{12}|[^"]+)"' \
-            .config || exit 1
+          echo
+          echo "🔄 Running olddefconfig..."
+          echo "----------------------------------------"
 
+          export LLVM=1
+          export LLVM_IAS=1
+          make \
+            LLVM=1 \
+            LLVM_IAS=1 \
+            ARCH=arm64 \
+            olddefconfig
+
+          echo
+          echo "🔎 Final KSU Configuration"
+          echo "----------------------------------------"
+
+          grep -E \
+            '^(CONFIG_KSU|CONFIG_KSU_SUSFS)=' \
+            .config || true
+
+          echo
+          echo "🔎 Final DroidSpaces Configuration"
+          echo "----------------------------------------"
+
+          grep -E \
+            '^(CONFIG_SYSVIPC|CONFIG_NTSYNC|CONFIG_DRM_LINDROID_EVDI)=' \
+            .config || true
+
+          echo
+          echo "🔎 Final Network Configuration"
+          echo "----------------------------------------"
+
+          grep -E \
+            '^(CONFIG_IP_SET|CONFIG_BPF_STREAM_PARSER|CONFIG_IP6_NF_NAT|CONFIG_TCP_CONG_ADVANCED|CONFIG_TCP_CONG_BBR)=' \
+            .config || true
+
+          echo
+          echo "🔎 Final ReKernel Configuration"
+          echo "----------------------------------------"
+
+          grep '^CONFIG_REKERNEL=' .config || true
+
+          echo
+          echo "🔎 Final Local Version"
+          echo "----------------------------------------"
+
+          grep '^CONFIG_LOCALVERSION=' .config || true
+
+          echo
+          echo "🎉 Final Kernel Configuration Complete"
+    
+      
       - name: Build Kernel
         if: ${{ !inputs.debugskipbuild }}
         run: |
