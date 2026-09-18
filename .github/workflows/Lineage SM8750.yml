@@ -1260,59 +1260,91 @@ jobs:
           echo "🎉 Final Kernel Configuration Complete"
     
       
-      - name: Build Kernel
+      - name: 🔨 Build Kernel
         if: ${{ !inputs.debugskipbuild }}
+        shell: bash
         run: |
           sudo sysctl -w vm.max_map_count=1048576
-          export LLVM=1 LLVM_IAS=1
-          export KBUILD_BUILD_USER="$builduser"
+          export LLVM=1
+          export LLVM_IAS=1
+          export KBUILD_BUILD_USER="${{ inputs.builduser }}"
+          export KBUILD_BUILD_HOST="${{ inputs.buildhost }}"
+
           if [ "${{ inputs.buildccachedebug }}" = "true" ]; then
             export CCACHE_LOGFILE="$GITHUB_WORKSPACE/ccache.log"
           fi
 
-          export KBUILD_BUILD_HOST="$buildhost"
-
-          # Custom Build Time
           if [[ -n "${{ inputs.kbuildtime }}" &&
                 "${{ inputs.kbuildtime }}" != "N" &&
                 "${{ inputs.kbuildtime }}" != "n" ]]; then
             export KBUILD_BUILD_TIMESTAMP="${{ inputs.kbuildtime }}"
-            echo "Build Time: ${{ inputs.kbuildtime }}"
+            echo "🕒 Build Time: ${KBUILD_BUILD_TIMESTAMP}"
           fi
 
-          # Faketime Time-Fixing for Reproducibles Builds
           cd "$GITHUB_WORKSPACE"
 
-          chmod 777 lib/*.so
+          chmod 755 lib/*.so
           export FAKESTAT="2025-05-25 12:00:00"
           export FAKETIME="@2025-05-25 13:00:00"
+
           LIBDIR="$GITHUB_WORKSPACE/lib"
-          export PRELOAD_LIBS="$LIBDIR/libfakestat.so $LIBDIR/libfaketimeMT.so"
-          echo '#!/bin/bash' > cc-wrapper
-          echo 'export LD_PRELOAD="'$PRELOAD_LIBS'"' >> cc-wrapper
-          echo 'export FAKESTAT="'$FAKESTAT'"' >> cc-wrapper
-          echo 'export FAKETIME="'$FAKETIME'"' >> cc-wrapper
-          echo 'ccache clang "$@"' >> cc-wrapper
-          echo '#!/bin/bash' > ld-wrapper
-          echo 'export LD_PRELOAD="'$PRELOAD_LIBS'"' >> ld-wrapper
-          echo 'export FAKESTAT="'$FAKESTAT'"' >> ld-wrapper
-          echo 'export FAKETIME="'$FAKETIME'"' >> ld-wrapper
-          echo 'ld.lld "$@"' >> ld-wrapper
+          export PRELOAD_LIBS="$LIBDIR/libfakestat.so:$LIBDIR/libfaketimeMT.so"
+
+          cat > cc-wrapper <<EOF
+          #!/bin/bash
+          export LD_PRELOAD="$PRELOAD_LIBS"
+          export FAKESTAT="$FAKESTAT"
+          export FAKETIME="$FAKETIME"
+          exec ccache clang "\$@"
+          EOF
+
+          cat > ld-wrapper <<EOF
+          #!/bin/bash
+          export LD_PRELOAD="$PRELOAD_LIBS"
+          export FAKESTAT="$FAKESTAT"
+          export FAKETIME="$FAKETIME"
+          exec ld.lld "\$@"
+          EOF
+
           chmod +x cc-wrapper ld-wrapper
-          cd work/src
-          set -o pipefail
-          make LLVM=1 LLVM_IAS=1 ARCH=arm64 \
+          echo "🔧 Build Environment"
+          echo "📌 LLVM       : $LLVM"
+          echo "📌 LLVM IAS   : $LLVM_IAS"
+          echo "📌 Build User : $KBUILD_BUILD_USER"
+          echo "📌 Build Host : $KBUILD_BUILD_HOST"
+          echo "📌 Fake Stat  : $FAKESTAT"
+          echo "📌 Fake Time  : $FAKETIME"
+          echo "📌 CCache     : $(ccache --version | head -1)"
+
+          cd "$GITHUB_WORKSPACE/work/src"
+
+          echo "🔨 Building Kernel Image..."
+          make \
+            LLVM=1 \
+            LLVM_IAS=1 \
+            ARCH=arm64 \
             CC="$GITHUB_WORKSPACE/cc-wrapper" \
             LD="$GITHUB_WORKSPACE/ld-wrapper" \
-            HOSTLD=ld.lld \
+            HOSTLD="$GITHUB_WORKSPACE/ld-wrapper" \
             KCFLAGS+=-O2 \
-            -j$(nproc --all) \
+            -j"$(nproc --all)" \
             Image
-          echo "CCache Status:"
+
+          echo "📊 CCache Status:"
           ccache -s
-          [ -f arch/arm64/boot/Image ] || exit 1
 
+          IMAGE="arch/arm64/boot/Image"
+          if [ ! -s "$IMAGE" ]; then
+            echo "⚠️ Kernel Image Missing or Empty"
+            echo "📂 Expected: $GITHUB_WORKSPACE/work/src/$IMAGE"
+            exit 1
+          fi
 
+          echo "📦 Kernel Image:"
+          ls -lh "$IMAGE"
+          echo "🎉 Kernel Build Complete"
+
+   
       - name: 🧪 Debug Create Dummy Image
         if: ${{ inputs.debugskipbuild }}
         shell: bash
