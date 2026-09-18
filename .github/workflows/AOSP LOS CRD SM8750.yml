@@ -132,21 +132,12 @@ jobs:
     timeout-minutes: 120
     outputs:
       ak3name: ${{ steps.package.outputs.ak3name }}
-      ksuver: ${{ steps.ksuversion.outputs.ksuver }}
-      
+      ksuver: ${{ steps.ksuversion.outputs.ksuver }}      
     env:
-      CLANG_VERSION: r563880c
-      CLANG_ARCHIVE: clang-r563880c.tar.gz
-      CLANG_URL: https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/b5f16aee7b8af4c339972027e91e7e793c2e55d9/clang-r563880c.tar.gz
-      SUSFS_REPO: https://gitlab.com/simonpunk/susfs4ksu.git
-      SUSFS_BRANCH: gki-android15-6.6
-      KSU_REPO: https://github.com/ReSukiSU/ReSukiSU.git
-      KSU_REF: ''
       CCACHE_DIR: ${{ github.workspace }}/.ccache
       CCACHE_MAXSIZE: 8G
       SOURCE_DIR: ${{ github.workspace }}/work/src
       WORK_DIR: ${{ github.workspace }}/work
-
     steps:
       - name: 📥 Checkout Workflow Repository
         uses: actions/checkout@v4
@@ -393,22 +384,22 @@ jobs:
           echo "🌿 Branch     : ${KERNELBRANCH}"
 
           echo "🔎 Detecting Source Commit..."
-          FULLSRC_COMMIT="$(git ls-remote \
+          FULLSRCCOMMIT="$(git ls-remote \
             "${KERNELBASE}/${KERNELORG}/${KERNELREPO}.git" \
             "refs/heads/${KERNELBRANCH}" |
             awk 'NR==1 {print $1}')"
-          if [ -z "$FULLSRC_COMMIT" ]; then
+          if [ -z "$FULLSRCCOMMIT" ]; then
             echo "⚠️ Failed to Detect Source Commit"
             echo "📦 Repository: ${KERNELORG}/${KERNELREPO}"
             echo "🌿 Branch    : ${KERNELBRANCH}"
             exit 1
           fi
 
-          SRC_COMMIT="${FULLSRC_COMMIT:0:8}"
+          SRCCOMMIT="${FULLSRCCOMMIT:0:8}"
 
           echo "✔️ Source Commit Detected"
-          echo "📌 Full Commit : $FULLSRC_COMMIT"
-          echo "📌 Short Commit: $SRC_COMMIT"
+          echo "📌 Full Commit : $FULLSRCCOMMIT"
+          echo "📌 Short Commit: $SRCCOMMIT"
 
           echo "📥 Downloading Kernel Sources..."
           curl -fsSL \
@@ -444,7 +435,7 @@ jobs:
           echo "📂 Kernel Modules: $MODULES"
           echo "📂 Device Trees  : $DEVICETREES"
 
-          echo "SRC_COMMIT=$SRC_COMMIT" >> "$GITHUB_ENV"
+          echo "SRCCOMMIT=$SRCCOMMIT" >> "$GITHUB_ENV"
           echo "KERNELSRC=$SRC" >> "$GITHUB_ENV"
           echo "KERNELMODULES=$MODULES" >> "$GITHUB_ENV"
           echo "DEVICETREES=$DEVICETREES" >> "$GITHUB_ENV"
@@ -484,22 +475,22 @@ jobs:
           echo "🌿 Branch     : ${KERNELBRANCH}"
 
           echo "🔎 Detecting Source Commit..."
-          FULLSRC_COMMIT="$(git ls-remote \
+          FULLSRCCOMMIT="$(git ls-remote \
             "${KERNELBASE}/${KERNELORG}/${KERNELREPO}.git" \
             "refs/heads/${KERNELBRANCH}" |
             awk 'NR==1 {print $1}')"
-          if [ -z "$FULLSRC_COMMIT" ]; then
+          if [ -z "$FULLSRCCOMMIT" ]; then
             echo "⚠️ Failed to Detect Source Commit"
             echo "📦 Repository: ${KERNELORG}/${KERNELREPO}"
             echo "🌿 Branch    : ${KERNELBRANCH}"
             exit 1
           fi
 
-          SRC_COMMIT="${FULLSRC_COMMIT:0:8}"
+          SRCCOMMIT="${FULLSRCCOMMIT:0:8}"
 
           echo "✔️ Source Commit Detected"
-          echo "📌 Full Commit : $FULLSRC_COMMIT"
-          echo "📌 Short Commit: $SRC_COMMIT"
+          echo "📌 Full Commit : $FULLSRCCOMMIT"
+          echo "📌 Short Commit: $SRCCOMMIT"
 
           echo "📥 Downloading Kernel Sources..."
           curl -fsSL \
@@ -535,7 +526,7 @@ jobs:
           echo "📂 Kernel Modules: $MODULES"
           echo "📂 Device Trees  : $DEVICETREES"
 
-          echo "SRC_COMMIT=$SRC_COMMIT" >> "$GITHUB_ENV"
+          echo "SRCCOMMIT=$SRCCOMMIT" >> "$GITHUB_ENV"
           echo "KERNELSRC=$SRC" >> "$GITHUB_ENV"
           echo "KERNELMODULES=$MODULES" >> "$GITHUB_ENV"
           echo "DEVICETREES=$DEVICETREES" >> "$GITHUB_ENV"
@@ -668,11 +659,57 @@ jobs:
           echo "🎉 Kernel Version Detection Complete"
 
      
-      - name: Apply Compile Fixes
-        run: |
-          patch -p1 -F3 --batch -f \
-            < "$GITHUB_WORKSPACE/patches/AOSP/001-Compiler-Fix-AOSP.patch"
+      - name: 🔧 Apply Compile Fixes
         working-directory: work/src
+        shell: bash
+        run: |
+          FILE="certs/extract-cert.c"
+          echo "🔧 Checking Extract-Cert PKCS#11 Compile Fix..."
+          if [ ! -f "$FILE" ]; then
+            echo "⚠️ File Not Found: $FILE"
+            exit 1
+          fi
+
+          if grep -q 'USE_PKCS11_ENGINE' "$FILE"; then
+            echo "✔️ Compile Fix Already Present"
+          else
+            echo "🔎 Checking Original Code..."
+            if ! grep -q \
+              'ERR(!ENGINE_ctrl_cmd_string(e, "PIN", key_pass, 0), "Set PKCS#11 PIN");' \
+              "$FILE"; then
+              echo "⚠️ Expected PKCS#11 Code Not Found"
+              echo "📂 $FILE"
+              exit 1
+            fi
+
+            echo "✔️ Original PKCS#11 Code Found"
+            echo "🔧 Applying Compile Fix..."
+            perl -0pi -e \
+              's/(\n\t\tif \(key_pass\)\n\t\t\tERR\(!ENGINE_ctrl_cmd_string\(e, "PIN", key_pass, 0\), "Set PKCS#11 PIN"\);)/\n#ifdef USE_PKCS11_ENGINE$1\n#endif/' \
+              "$FILE"
+            echo "✔️ Compile Fix Applied"
+          fi
+
+          echo "🔎 Verifying Compile Fix..."
+          if grep -q '^[[:space:]]*#ifdef USE_PKCS11_ENGINE' "$FILE" &&
+             grep -q \
+              'ERR(!ENGINE_ctrl_cmd_string(e, "PIN", key_pass, 0), "Set PKCS#11 PIN");' \
+              "$FILE" &&
+             grep -q '^[[:space:]]*#endif' "$FILE"; then
+
+            echo "✔️ USE PKCS11 ENGINE Guard Found"
+            echo "✔️ PKCS#11 PIN Code Found"
+            echo "✔️ #ENDIF Guard Found"
+          else
+            echo "⚠️ Compile Fix Verification Failed"
+            exit 1
+          fi
+
+          echo "🔎 Applied Code:"
+          grep -n -A5 -B2 \
+            'USE_PKCS11_ENGINE' \
+            "$FILE"
+          echo "🎉 Compile Fix Complete"
 
 
       - name: 📥 Generate Base Kernel Configuration
@@ -747,7 +784,6 @@ jobs:
 
           echo "📊 Base Configuration:"
           echo "📌 Total Options: $(grep -c '^CONFIG_' .config || true)"
-
           echo "🎉 Base Kernel Configuration Generated Successfully"
  
     
@@ -757,7 +793,6 @@ jobs:
         shell: bash
         run: |
           ROOTBRANCHSOURCE="${{ inputs.ksumeta }}"
-
           MANAGERBRANCH=""
           BRANCHPATH=""
           MANAGERARTIFACT=""
@@ -872,7 +907,6 @@ jobs:
 
           # Force Simple Tag-Based Full-Name Format
           DEFCONFIG="${GITHUB_WORKSPACE}/work/src/arch/arm64/configs/gki_defconfig"
-
           if [[ -f "$DEFCONFIG" ]]; then
             sed -i '/^CONFIG_KSU_FULL_NAME_FORMAT=/d' "$DEFCONFIG"
             printf 'CONFIG_KSU_FULL_NAME_FORMAT="%%TAG_NAME%%"\n' >> "$DEFCONFIG"
@@ -893,7 +927,6 @@ jobs:
         shell: bash
         run: |
           COUNT="$(git -C work/src/KernelSU rev-list --count HEAD)"
-
           if [[ "$COUNT" =~ ^[0-9]+$ ]]; then
             VER=$((COUNT + 30700))
           else
@@ -901,7 +934,6 @@ jobs:
           fi
 
           echo "ksuver=$VER" >> "$GITHUB_OUTPUT"
-
           echo "------------------------------"
           echo "🔢 KSU Version : $VER"
           echo "📊 Commits     : $COUNT"
@@ -946,9 +978,7 @@ jobs:
           fi
 
           echo "📥 Cloning SUSFS..."
-
           rm -rf "${SUSFSKERNEL}"
-
           if git clone \
             --depth 1 \
             --branch "${SUSFSBRANCH}" \
@@ -960,11 +990,11 @@ jobs:
             exit 1
           fi
 
-          SUSFS_COMMIT="$(git -C "${SUSFSKERNEL}" rev-parse HEAD 2>/dev/null || echo unknown)"
-          SUSFS_SHORT="$(git -C "${SUSFSKERNEL}" rev-parse --short HEAD 2>/dev/null || echo unknown)"
+          SUSFSCOMMIT="$(git -C "${SUSFSKERNEL}" rev-parse HEAD 2>/dev/null || echo Unknown)"
+          SUSFSSHORT="$(git -C "${SUSFSKERNEL}" rev-parse --short HEAD 2>/dev/null || echo Unknown)"
 
-          echo "📌 SUSFS Commit  : ${SUSFS_SHORT}"
-          echo "📌 SUSFS Revision: ${SUSFS_COMMIT}"
+          echo "📌 SUSFS Commit  : ${SUSFSSHORT}"
+          echo "📌 SUSFS Revision: ${SUSFSCOMMIT}"
 
           SUSFSDIR="${SUSFSKERNEL}/kernel_patches"
           SUSFSFS="${SUSFSDIR}/fs"
@@ -972,7 +1002,6 @@ jobs:
 
           echo
           echo "🔎 Checking SUSFS Source Layout..."
-
           if [ ! -d "${SUSFSFS}" ]; then
             echo "⚠️ SUSFS fs Directory Was Not Found:"
             echo "${SUSFSFS}"
@@ -998,31 +1027,23 @@ jobs:
 
           echo
           echo "📥 Copying SUSFS Files..."
-
           mkdir -p "${SRC}/fs"
           mkdir -p "${SRC}/include/linux"
-
           cp -r "${SUSFSFS}/"* "${SRC}/fs/" 2>/dev/null || \
             echo "⚠️ Failed to Copy SUSFS fs Files"
-
           cp -r "${SUSFSINCLUDE}/"* "${SRC}/include/linux/" 2>/dev/null || \
             echo "⚠️ Failed to Copy SUSFS Linux Headers"
-
           echo "✔️ SUSFS Files Copied"
 
           echo
           echo "📥 Copying SUSFS 50 Patch..."
-
           cp "${SUSFS50PATCH}" "${SRC}/" 2>/dev/null || \
             echo "⚠️ Failed to Copy SUSFS 50 Patch"
-
           echo "✔️ SUSFS 50 Patch Copied"
 
           echo
           echo "🔧 Applying SUSFS 50 Patch..."
-
           cd "${SRC}"
-
           if patch \
             -p1 \
             -F3 \
@@ -1033,7 +1054,7 @@ jobs:
           else
             echo "⚠️ SUSFS 50 Patch Failed"
             echo
-            echo "📌 SUSFS Commit : ${SUSFS_SHORT}"
+            echo "📌 SUSFS Commit : ${SUSFSSHORT}"
             echo "📌 Patch        : ${SUSFS50PATCH}"
             exit 1
           fi
@@ -1041,7 +1062,7 @@ jobs:
           echo
           echo "🎉 SUSFS Integration Complete"
           echo "📌 SUSFS Branch : ${SUSFSBRANCH}"
-          echo "📌 SUSFS Commit : ${SUSFS_SHORT}"
+          echo "📌 SUSFS Commit : ${SUSFSSHORT}"
           echo "📌 SUSFS Source : ${SUSFSKERNEL}"
           echo "📌 SUSFS Patch  : ${SUSFS50PATCH}"
 
