@@ -1104,12 +1104,124 @@ jobs:
           echo "LZ4 OPlus Integration Complete"
 
   
-      - name: 🔧 Apply Droidspaces Patch
-        if: ${{ inputs.droidspaces != 'false' }}
-        run: |
-          patch -p1 -F3 --batch -f \
-            < "$GITHUB_WORKSPACE/patches/AOSP/001-Droidspaces-AOSP.patch"
+      - name: 🔧 Apply DroidSpaces / NTSync / EVDI Kernel Integration
         working-directory: work/src
+        shell: bash
+        run: |
+          echo "🔧 Applying DroidSpaces Kernel Integration..."
+          EVDIKCONFIG="drivers/gpu/drm/Kconfig"
+          EVDIMAKEFILE="drivers/gpu/drm/Makefile"
+          MISCKCONFIG="drivers/misc/Kconfig"
+          MISCMAKEFILE="drivers/misc/Makefile"
+          SCHEDFILE="include/linux/sched.h"
+          PIDFILE="kernel/pid.c"
+          EXTRA="${GITHUB_WORKSPACE}/extra-files/patches/extra"
+
+          echo "📥 Cloning Extra Files..."
+          rm -rf "${GITHUB_WORKSPACE}/extra-files"
+          git clone --depth=1 \
+            https://github.com/GuLingguang/oneplus-sm8750-kernel-pro-build.git \
+            "${GITHUB_WORKSPACE}/extra-files"
+          if [ "${{ inputs.droidspaces }}" = "false" ]; then
+            echo "🚫 DroidSpaces Disabled"
+            exit 0
+          fi
+
+          echo "📦 Installing DroidSpaces Sources..."
+          cp -f "$EXTRA/drivers/misc/ntsync.c" \
+            drivers/misc/
+          cp -f "$EXTRA/include/uapi/linux/ntsync.h" \
+            include/uapi/linux/
+          rm -rf drivers/gpu/drm/evdi
+          cp -r "$EXTRA/drivers/gpu/drm/evdi" \
+            drivers/gpu/drm/
+
+          echo "✔️ DroidSpaces Sources Installed"
+          for FILE in \
+            "$EVDIKCONFIG" "$EVDIMAKEFILE" \
+            "$MISCKCONFIG" "$MISCMAKEFILE" \
+            "$SCHEDFILE" "$PIDFILE" \
+            "drivers/misc/ntsync.c" \
+            "include/uapi/linux/ntsync.h" \
+            "drivers/gpu/drm/evdi/Kconfig" \
+            "drivers/gpu/drm/evdi/Makefile"; do
+            [ -f "$FILE" ] || {
+              echo "⚠️ Missing: $FILE"
+              exit 1
+            }
+          done
+
+          echo "🔧 EVDI Kconfig..."
+          if ! grep -qF 'source "drivers/gpu/drm/evdi/Kconfig"' "$EVDIKCONFIG"; then
+            grep -qF 'source "drivers/gpu/drm/nouveau/Kconfig"' "$EVDIKCONFIG" || exit 1
+            sed -i \
+              '/source "drivers\/gpu\/drm\/nouveau\/Kconfig"/i source "drivers/gpu/drm/evdi/Kconfig"' \
+              "$EVDIKCONFIG"
+          fi
+
+          echo "🔧 EVDI Makefile..."
+          if ! grep -qF 'obj-$(CONFIG_DRM_LINDROID_EVDI)+= evdi/' "$EVDIMAKEFILE"; then
+            grep -qF 'obj-y			+= display/' "$EVDIMAKEFILE" || exit 1
+            sed -i \
+              '/obj-y[[:space:]]*+= display\//a obj-$(CONFIG_DRM_LINDROID_EVDI)+= evdi/' \
+              "$EVDIMAKEFILE"
+          fi
+
+          echo "🔧 NTSYNC Kconfig..."
+          if ! grep -qE '^config NTSYNC$' "$MISCKCONFIG"; then
+            grep -qF 'config APDS9802ALS' "$MISCKCONFIG" || exit 1
+            perl -0pi -e \
+              's/(\nconfig APDS9802ALS\n)/\nconfig NTSYNC\n\ttristate "NT synchronization primitive emulation"\n\tdefault m\n\thelp\n\t  This module provides kernel support for emulation of Windows NT synchronization primitives.\n\n$1/' \
+              "$MISCKCONFIG"
+          fi
+         
+          echo "🔧 NTSYNC Makefile..."
+          if ! grep -qF 'obj-$(CONFIG_NTSYNC)' "$MISCMAKEFILE"; then
+            grep -qF 'obj-$(CONFIG_SMPRO_ERRMON)' "$MISCMAKEFILE" || exit 1
+            sed -i \
+              '/obj-$(CONFIG_SMPRO_ERRMON)/i obj-$(CONFIG_NTSYNC)		+= ntsync.o' \
+              "$MISCMAKEFILE"
+          fi
+
+          echo "🔧 SYSVIPC KABI..."
+          if ! grep -qF 'ANDROID_KABI_USE(6, struct sysv_sem sysvsem);' "$SCHEDFILE"; then
+            grep -qF 'struct sysv_sem			sysvsem;' "$SCHEDFILE" || exit 1
+            grep -qF 'struct sysv_shm			sysvshm;' "$SCHEDFILE" || exit 1
+            perl -0pi -e \
+              's/\tstruct sysv_sem\s+sysvsem;\n\tstruct sysv_shm\s+sysvshm;/\t\/\/ struct sysv_sem\t\t\tsysvsem;\n\t\/\/ struct sysv_shm\t\t\tsysvshm;/' \
+              "$SCHEDFILE"
+            perl -0pi -e \
+              's/\tANDROID_KABI_RESERVE\(6\);\n\tANDROID_KABI_RESERVE\(7\);\n\tANDROID_KABI_RESERVE\(8\);/\t#ifdef CONFIG_SYSVIPC\n\tANDROID_KABI_USE(6, struct sysv_sem sysvsem);\n\t_ANDROID_KABI_REPLACE(ANDROID_KABI_RESERVE(7); ANDROID_KABI_RESERVE(8), struct sysv_shm sysvshm);\n#else\n\tANDROID_KABI_RESERVE(6);\n\tANDROID_KABI_RESERVE(7);\n\tANDROID_KABI_RESERVE(8);\n#endif/' \
+              "$SCHEDFILE"
+          fi
+
+          echo "👻 Ghost Task..."
+          if ! grep -qF 'ghost-task-sentinel' "$PIDFILE"; then
+            perl -0pi -e \
+              's/(#include <uapi\/linux\/pidfd\.h>\n)/$1#include <linux\/version.h>\n#include <linux\/refcount.h>\n#include <linux\/module.h>\n/' \
+              "$PIDFILE"
+            perl -0pi -e \
+              's/(EXPORT_SYMBOL_GPL\(init_pid_ns\);\n)/$1\nstatic struct task_struct ghost_task;\nstatic bool ghost_task_ready;\n\n#define set_task_usage(target, value) _Generic((target), refcount_t: refcount_set, atomic_t: atomic_set)(&(target), (value))\n\nvoid __init init_ghost_task(void)\n{\n\tmemcpy(\&ghost_task, \&init_task, sizeof(struct task_struct));\n\tstrncpy(ghost_task.comm, "ghost-task-sentinel", TASK_COMM_LEN);\n\tghost_task.pid = -1;\n\tghost_task.tgid = -1;\n\tset_task_usage(ghost_task.usage, 1000);\n#ifdef CONFIG_REFCOUNT_FULL\n\trefcount_set(\&ghost_task.refcount, 1000);\n#endif\n\tghost_task_ready = true;\n}\n/' \
+              "$PIDFILE"
+            perl -0pi -e \
+              's/\treturn find_task_by_pid_ns\(vnr, task_active_pid_ns\(current\)\);/\tstruct task_struct *task;\n\tstruct module *mod;\n\tunsigned long caller_ip = _RET_IP_;\n\n\ttask = find_task_by_pid_ns(vnr, task_active_pid_ns(current));\n\tif (unlikely(!task)) {\n\t\tpreempt_disable();\n\t\tmod = __module_address(caller_ip);\n\t\tif (mod \&\& strcmp(mod->name, "oplus_bsp_midas") == 0) {\n\t\t\tpreempt_enable();\n\t\t\treturn ghost_task_ready ? \&ghost_task : \&init_task;\n\t\t}\n\t\tpreempt_enable();\n\t}\n\treturn task;/' \
+              "$PIDFILE"
+            perl -0pi -e \
+              's/(void __init pid_idr_init\(void\)\n\{\n)/$1\tinit_ghost_task();\n/' \
+              "$PIDFILE"
+          fi
+
+          echo "🔎 Verifying Integration..."
+          grep -qF 'source "drivers/gpu/drm/evdi/Kconfig"' "$EVDIKCONFIG"
+          grep -qF 'CONFIG_DRM_LINDROID_EVDI' "$EVDIMAKEFILE"
+          grep -qE '^config NTSYNC$' "$MISCKCONFIG"
+          grep -qF 'obj-$(CONFIG_NTSYNC)' "$MISCMAKEFILE"
+          grep -qF 'ANDROID_KABI_USE(6, struct sysv_sem sysvsem);' "$SCHEDFILE"
+          grep -qF 'ghost-task-sentinel' "$PIDFILE"
+          grep -qF 'oplus_bsp_midas' "$PIDFILE"
+          grep -qF 'init_ghost_task();' "$PIDFILE"
+          echo "✔️ All DroidSpaces / NTSync / EVDI Modifications Verified"
+          echo "🎉 DroidSpaces / NTSync / EVDI Kernel Integration Complete"
 
    
       - name: 🔧 Integrate Linux Security Module Baseband Guard
@@ -1247,21 +1359,6 @@ jobs:
           patch -p1 -F3 --batch -f \
             < "$GITHUB_WORKSPACE/patches/AOSP/001-ReKernel-AOSP.patch"
         working-directory: work/src
-          
-      - name: Copy Extra Files
-        run: |
-          git clone --depth=1 https://github.com/GuLingguang/oneplus-sm8750-kernel-pro-build.git extra-files
-          EXTRA="${GITHUB_WORKSPACE}/extra-files/patches/extra"
-
-          # Droidspaces New Files
-          if [ "${{ inputs.droidspaces }}" != "false" ]; then
-            cp -r "$EXTRA/drivers/misc/ntsync.c" \
-                  work/src/drivers/misc/
-            cp -r "$EXTRA/include/uapi/linux/ntsync.h" \
-                  work/src/include/uapi/linux/
-            cp -r "$EXTRA/drivers/gpu/drm/evdi" \
-                  work/src/drivers/gpu/drm/
-          fi
 
     
       - name: 🔧 Configure Final Kernel Configuration
