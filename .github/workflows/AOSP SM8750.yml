@@ -534,8 +534,6 @@ jobs:
 
       - name: 🔧 Integrate SUSFS
         run: |
-          set -Eeuo pipefail
-
           SRC="${GITHUB_WORKSPACE}/work/src"
           SUSFSKERNEL="${GITHUB_WORKSPACE}/work/susfs"
 
@@ -553,35 +551,41 @@ jobs:
             exit 1
           fi
 
-          for FILE in \
-            "${SUSFSPATCH}" \
-            "${KSUPATCH}"; do
+          if [ -z "${SUSFSPATCH:-}" ]; then
+            echo "⚠️ SUSFSPATCH Is Not Set"
+            exit 1
+          fi
 
-            if [ ! -f "${FILE}" ]; then
-              echo "⚠️ Missing Required Patch:"
-              echo "${FILE}"
-              exit 1
-            fi
-          done
+          if [ ! -f "${SUSFSPATCH}" ]; then
+            echo "⚠️ SUSFS Patch Does Not Exist:"
+            echo "${SUSFSPATCH}"
+            exit 1
+          fi
 
           echo "📥 Cloning SUSFS..."
+
           rm -rf "${SUSFSKERNEL}"
-          git clone \
+
+          if git clone \
             --depth 1 \
             --branch "${SUSFSBRANCH}" \
             "${SUSFSREPO}" \
-            "${SUSFSKERNEL}"
-          echo "📎 SUSFS Cloned Successfully"
+            "${SUSFSKERNEL}"; then
+            echo "📎 SUSFS Cloned Successfully"
+          else
+            echo "⚠️ Failed to Clone SUSFS"
+            exit 1
+          fi
 
-          SUSFS_COMMIT="$(git -C "${SUSFSKERNEL}" rev-parse HEAD)"
-          SUSFS_SHORT="$(git -C "${SUSFSKERNEL}" rev-parse --short HEAD)"
+          SUSFS_COMMIT="$(git -C "${SUSFSKERNEL}" rev-parse HEAD 2>/dev/null || echo unknown)"
+          SUSFS_SHORT="$(git -C "${SUSFSKERNEL}" rev-parse --short HEAD 2>/dev/null || echo unknown)"
 
-          echo "📌 SUSFS Commit : ${SUSFS_SHORT}"
+          echo "📌 SUSFS Commit  : ${SUSFS_SHORT}"
           echo "📌 SUSFS Revision: ${SUSFS_COMMIT}"
 
           echo "🔎 Inspecting SUSFS Source Layout..."
 
-          find "${SUSFSKERNEL}" \
+          find "${SUSFSKERNEL}/kernel_patches" \
             -type f \
             \( \
               -name "susfs.c" \
@@ -589,72 +593,66 @@ jobs:
               -o -name "susfs_def.h" \
             \) \
             -print \
+            2>/dev/null \
             | sort
 
-          echo "🔎 Locating SUSFS Source Files..."
+          SUSFSDIR="${SUSFSKERNEL}/kernel_patches"
 
-          SUSFSC="$(
-            find "${SUSFSKERNEL}" \
-              -type f \
-              -name "susfs.c" \
-              -print \
-              | head -n 1 || true
-          )"
+          SUSFSFS="${SUSFSDIR}/fs"
+          SUSFSINCLUDE="${SUSFSDIR}/include/linux"
 
-          SUSFSH="$(
-            find "${SUSFSKERNEL}" \
-              -type f \
-              -name "susfs.h" \
-              -print \
-              | head -n 1 || true
-          )"
-
-          SUSFSDEFH="$(
-            find "${SUSFSKERNEL}" \
-              -type f \
-              -name "susfs_def.h" \
-              -print \
-              | head -n 1 || true
-          )"
-
-          if [ -z "${SUSFSC}" ]; then
-            echo "⚠️ SUSFS Source File 'SUSFS C' Was Not Found"
-            echo
-            echo "The Selected SUSFS Revision is Incompatible with"
-            echo "the Expected SUSFS Integration"
-            echo
-            echo "SUSFS Commit:"
-            echo "${SUSFS_COMMIT}"
-            echo
-            echo "Available SUSFS Files:"
-            find "${SUSFSKERNEL}" \
-              -maxdepth 4 \
-              -type f \
-              | sort \
-              | head -n 200
+          if [ ! -d "${SUSFSFS}" ]; then
+            echo "⚠️ SUSFS fs Directory Was Not Found:"
+            echo "${SUSFSFS}"
             exit 1
           fi
 
-          if [ -z "${SUSFSH}" ]; then
-            echo "⚠️ SUSFS Header Was Not Found"
+          if [ ! -d "${SUSFSINCLUDE}" ]; then
+            echo "⚠️ SUSFS include/linux Directory Was Not Found:"
+            echo "${SUSFSINCLUDE}"
             exit 1
           fi
 
-          if [ -z "${SUSFSDEFH}" ]; then
-            echo "⚠️ SUSFS Definition Header Was Not Found."
+          echo "✔️ SUSFS Source Directories Found"
+
+          echo "📌 SUSFS fs        : ${SUSFSFS}"
+          echo "📌 SUSFS include   : ${SUSFSINCLUDE}"
+
+          echo "📥 Copying SUSFS Files..."
+
+          mkdir -p "${SRC}/fs"
+          mkdir -p "${SRC}/include/linux"
+
+          if cp -r "${SUSFSFS}/"* "${SRC}/fs/" 2>/dev/null; then
+            echo "✔️ SUSFS fs Files Copied"
+          else
+            echo "⚠️ Failed to Copy SUSFS fs Files"
             exit 1
           fi
 
-          echo "🛠️ SUSFS Source Files Found"
+          if cp -r "${SUSFSINCLUDE}/"* "${SRC}/include/linux/" 2>/dev/null; then
+            echo "✔️ SUSFS Linux Headers Copied"
+          else
+            echo "⚠️ Failed to Copy SUSFS Linux Headers"
+            exit 1
+          fi
 
-          echo "📌 SUSFS Source      : ${SUSFSC}"
-          echo "📌 SUSFS Header      : ${SUSFSH}"
-          echo "📌 SUSFS Def Header  : ${SUSFSDEFH}"
+          echo "📥 Copying SUSFS Patch..."
+
+          if cp "${SUSFSPATCH}" "${SRC}/" 2>/dev/null; then
+            echo "✔️ SUSFS Patch Copied"
+          else
+            echo "⚠️ Failed to Copy SUSFS Patch"
+            exit 1
+          fi
 
           echo "🔎 Checking SUSFS API Compatibility..."
-          if ! grep -Rqs \
+
+          if grep -Rqs \
             "susfs_is_current_proc_no_su" \
             "${SUSFSKERNEL}"; then
+            echo "✔️ SUSFS API Compatibility Check Passed"
+          else
             echo "⚠️ Required SUSFS API Was Not Found:"
             echo "susfs_is_current_proc_no_su"
             echo
@@ -663,9 +661,10 @@ jobs:
             exit 1
           fi
 
-          echo "✔️ SUSFS API Compatibility Check Passed"
           echo "🔧 Applying SUSFS Meta Patch..."
+
           cd "${SRC}"
+
           if patch \
             -p1 \
             -F3 \
@@ -687,8 +686,9 @@ jobs:
           echo "🎉 SUSFS Integration Complete"
           echo "📌 SUSFS Branch : ${SUSFSBRANCH}"
           echo "📌 SUSFS Commit : ${SUSFS_SHORT}"
-          echo "📌 SUSFS Source : ${SUSFSC}"
-          
+          echo "📌 SUSFS Source : ${SUSFSKERNEL}"
+    
+      
       - name: 🔧 Integrate LZ4 OPlus
         if: inputs.neonlz4
         shell: bash
@@ -725,6 +725,7 @@ jobs:
       
           echo "LZ4 OPlus Integration Complete"
 
+  
       - name: 🔧 Apply Droidspaces Patch
         if: ${{ inputs.droidspaces != 'false' }}
         run: |
@@ -732,6 +733,7 @@ jobs:
             < "$GITHUB_WORKSPACE/patches/AOSP/001-Droidspaces-AOSP.patch"
         working-directory: work/src
 
+   
       - name: 🔧 Integrate Linux Security Module Baseband Guard
         if: ${{ inputs.basebandguard == 'true' }}
         shell: bash
