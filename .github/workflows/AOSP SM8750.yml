@@ -352,13 +352,70 @@ jobs:
             < "$GITHUB_WORKSPACE/patches/AOSP/001-Compiler-Fix-AOSP.patch"
         working-directory: work/src
 
+      - name: Integrate KSU Meta
+        if: ${{ inputs.ksumeta != 'none' }}
+        run: |
+          cd work/src
+          case "${{ inputs.ksumeta }}" in
+            resukisu)
+              KSUREPO="https://github.com/ReSukiSU/ReSukiSU.git"
+              ;;
+            none)
+              echo "No KSU Integration"
+              exit 0
+              ;;
+          esac
+          rm -rf KernelSU drivers/kernelsu
+          git clone "$KSUREPO" KernelSU
+          ln -sfn ../KernelSU/kernel drivers/kernelsu
+          grep -q "kernelsu" drivers/Makefile ||
+            echo 'obj-$(CONFIG_KSU) += kernelsu/' >> drivers/Makefile
+          grep -q "drivers/kernelsu/Kconfig" drivers/Kconfig ||
+            sed -i '/endmenu/i\source "drivers/kernelsu/Kconfig"' \
+              drivers/Kconfig
+        env:
+          KSUREPO: ""
+
+      - name: Compute KSU Version
+        id: ksuversion
+        if: ${{ inputs.ksumeta != 'none' }}
+        run: |
+          COUNT=$(git -C work/src/KernelSU rev-list --count HEAD)
+          VER=$((30000 + COUNT + 700))
+          echo "ksuver=$VER" >> "$GITHUB_OUTPUT"
+          echo "KSU Version: $VER ($COUNT Commits)"
+
+      - name: 🔧 Apply SUSFS KSU Adaptation
+        if: ${{ inputs.susfsmeta && inputs.ksumeta != 'none' }}
+        run: |
+          cd KernelSU
+          git apply --check "$GITHUB_WORKSPACE/patches/AOSP/002-SUSFS-Main-AOSP.patch" 2>/dev/null &&
+            git apply "$GITHUB_WORKSPACE/patches/AOSP/002-SUSFS-Main-AOSP.patch" ||
+            echo "WARN: 002-SUSFS-Main-AOSP.patch was Not Applied Automatically" >&2
+        working-directory: work/src
+
+      - name: Configure Attribution
+        run: |
+          if [ "${{ inputs.attribute }}" = "true" ]; then
+            echo "builduser=${{ inputs.builduser }}" >> "$GITHUB_ENV"
+            echo "buildhost=${{ inputs.buildhost }}" >> "$GITHUB_ENV"
+            # KSU Version Attribution
+            if [ "${{ inputs.ksumeta }}" != "none" ]; then
+              sed -i \
+                "s/^REPO_NAME := .*/REPO_NAME := ${{ inputs.builduser }}/" \
+                work/src/KernelSU/kernel/Kbuild
+            fi
+          else
+            echo "builduser=" >> "$GITHUB_ENV"
+            echo "buildhost=" >> "$GITHUB_ENV"
+          fi
+
       - name: Apply KSU Hooks
         if: ${{ inputs.ksumeta != 'none' }}
         run: |
           patch -p1 -F3 --batch -f \
             < "$GITHUB_WORKSPACE/patches/AOSP/001-KSUMeta-Hooks-AOSP.patch"
         working-directory: work/src
-
 
       - name: 🔧 Integrate SUSFS
         run: |
@@ -822,64 +879,6 @@ jobs:
                   work/src/include/uapi/linux/
             cp -r "$EXTRA/drivers/gpu/drm/evdi" \
                   work/src/drivers/gpu/drm/
-          fi
-
-      - name: Integrate KSU Meta
-        if: ${{ inputs.ksumeta != 'none' }}
-        run: |
-          cd work/src
-          case "${{ inputs.ksumeta }}" in
-            resukisu)
-              KSUREPO="https://github.com/ReSukiSU/ReSukiSU.git"
-              ;;
-            none)
-              echo "No KSU Integration"
-              exit 0
-              ;;
-          esac
-          rm -rf KernelSU drivers/kernelsu
-          git clone "$KSUREPO" KernelSU
-          ln -sfn ../KernelSU/kernel drivers/kernelsu
-          grep -q "kernelsu" drivers/Makefile ||
-            echo 'obj-$(CONFIG_KSU) += kernelsu/' >> drivers/Makefile
-          grep -q "drivers/kernelsu/Kconfig" drivers/Kconfig ||
-            sed -i '/endmenu/i\source "drivers/kernelsu/Kconfig"' \
-              drivers/Kconfig
-        env:
-          KSUREPO: ""
-
-      - name: Compute KSU Version
-        id: ksuversion
-        if: ${{ inputs.ksumeta != 'none' }}
-        run: |
-          COUNT=$(git -C work/src/KernelSU rev-list --count HEAD)
-          VER=$((30000 + COUNT + 700))
-          echo "ksuver=$VER" >> "$GITHUB_OUTPUT"
-          echo "KSU Version: $VER ($COUNT Commits)"
-
-      - name: 🔧 Apply SUSFS KSU Adaptation
-        if: ${{ inputs.susfsmeta && inputs.ksumeta != 'none' }}
-        run: |
-          cd KernelSU
-          git apply --check "$GITHUB_WORKSPACE/patches/AOSP/002-SUSFS-Main-AOSP.patch" 2>/dev/null &&
-            git apply "$GITHUB_WORKSPACE/patches/AOSP/002-SUSFS-Main-AOSP.patch" ||
-            echo "WARN: 002-SUSFS-Main-AOSP.patch was Not Applied Automatically" >&2
-        working-directory: work/src
-
-      - name: Configure Attribution
-        run: |
-          if [ "${{ inputs.attribute }}" = "true" ]; then
-            echo "builduser=${{ inputs.builduser }}" >> "$GITHUB_ENV"
-            echo "buildhost=${{ inputs.buildhost }}" >> "$GITHUB_ENV"
-            # KSU Version Attribution
-            if [ "${{ inputs.ksumeta }}" != "none" ]; then
-              sed -i \
-                "s/^REPO_NAME := .*/REPO_NAME := ${{ inputs.builduser }}/" \
-                work/src/KernelSU/kernel/Kbuild
-            fi
-          else
-            echo "builduser=" >> "$GITHUB_ENV"
-            echo "buildhost=" >> "$GITHUB_ENV"
           fi
 
       - name: Deploy Configurations
