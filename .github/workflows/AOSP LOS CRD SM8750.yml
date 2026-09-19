@@ -845,8 +845,7 @@ jobs:
           echo "🎉 Base Kernel Configuration Generated Successfully"
 
 
-    
-      - name: 🔧 Solve Root Engine Source
+      - name: 🆘 Solve Root Engine Source
         id: manager
         if: ${{ inputs.ksumeta != 'None' }}
         shell: bash
@@ -857,21 +856,11 @@ jobs:
           MANAGERARTIFACT=""
           KSUREPO=""
 
-          # Resolve Root Source
+          # Resolve Root Engine
           case "$ROOTBRANCHSOURCE" in
             ReSukiSU)
               MANAGERBRANCH="main"
               MANAGERARTIFACT="Manager-release"
-              ;;
-            *)
-              echo "⚠️ Unsupported Root Source: $ROOTBRANCHSOURCE"
-              exit 1
-              ;;
-          esac
-
-          # Resolve Root Engine Repository
-          case "$ROOTBRANCHSOURCE" in
-            ReSukiSU)
               KSUREPO="ReSukiSU/ReSukiSU"
               ;;
             *)
@@ -891,108 +880,116 @@ jobs:
             exit 1
           }
 
+          # Export Root Engine Metadata
           {
             echo "MANAGERBRANCH=$MANAGERBRANCH"
             echo "BRANCHPATH=$BRANCHPATH"
             echo "MANAGERARTIFACT=$MANAGERARTIFACT"
             echo "KSUREPO=$KSUREPO"
           } >> "$GITHUB_OUTPUT"
-
-          echo "------------------------------"
           echo "✔️ Root Engine Source Resolved"
-          echo "📦 Engine     : ${{ inputs.ksumeta }}"
+          echo "📦 Engine     : $ROOTBRANCHSOURCE"
           echo "📂 Repository : $KSUREPO"
           echo "🌿 Branch     : $MANAGERBRANCH"
           echo "📦 Artifact   : $MANAGERARTIFACT"
-          echo "------------------------------"
 
 
-      - name: 🔧 Configure Root Engine
+      - name: 🏍️ Configure Root Engine
         id: rootengine
         if: ${{ inputs.ksumeta != 'None' }}
         shell: bash
         run: |
+          # Define Root Engine Source
           cd "$SOURCEDIR"
 
           MANAGERBRANCH="${{ steps.manager.outputs.MANAGERBRANCH }}"
           KSUREPO="${{ steps.manager.outputs.KSUREPO }}"
 
-          # Helpers
+          # Get Repository Commit Count
           getcommitcount() {
             git rev-list --count HEAD 2>/dev/null || echo 0
           }
 
+          # Setup Root Engine
           setupengine() {
             local repo="$1"
             local branch="$2"
             local argument="$3"
-
             echo "🔗 Setup Repository : $repo"
             echo "🌿 Setup Branch     : $branch"
             echo "📌 Setup Argument   : $argument"
-
             curl -fsSL \
               "https://raw.githubusercontent.com/${repo}/${branch}/kernel/setup.sh" \
               | bash -s -- "$argument"
           }
 
-          # ReSukiSU
+          # Configure ReSukiSU
           echo "🚀 Setting Up ReSukiSU..."
-
           setupengine \
             "$KSUREPO" \
             "$MANAGERBRANCH" \
             "$MANAGERBRANCH"
-          cd KernelSU || {
-            echo "⚠️ KSU ReSukiSU Directory was Not Created"
-            exit 1
-          }
 
+          # Validate ReSukiSU Installation
+          if [[ ! -d "$SOURCEDIR/KernelSU" ]]; then
+            echo "⚠️ KSU ReSukiSU Directory Was Not Created"
+            exit 1
+          fi
+
+          cd "$SOURCEDIR/KernelSU"
+
+          # Resolve Repository Metadata
           CURRENTBRANCH="$(git branch --show-current || true)"
           CURRENTBRANCH="${CURRENTBRANCH:-HEAD}"
-
           GITCOMMITHASH="$(git rev-parse --short=8 HEAD)"
           COMMITCOUNT="$(getcommitcount)"
 
+          # Calculate KSU Version
           if [[ "$COMMITCOUNT" =~ ^[0-9]+$ ]]; then
             KSUVERSION=$((COMMITCOUNT + 30700))
           else
             KSUVERSION=30700
           fi
 
+          # Export Root Engine Variables
           echo "KSUVERSION=$KSUVERSION" >> "$GITHUB_ENV"
           echo "GITCOMMITHASH=$GITCOMMITHASH" >> "$GITHUB_ENV"
 
-          # Force Simple Tag-Based Full-Name Format
+          # Configure KSU Full Name Format
           DEFCONFIG="${SOURCEDIR}/arch/arm64/configs/gki_defconfig"
           if [[ -f "$DEFCONFIG" ]]; then
             sed -i '/^CONFIG_KSU_FULL_NAME_FORMAT=/d' "$DEFCONFIG"
             printf 'CONFIG_KSU_FULL_NAME_FORMAT="%%TAG_NAME%%"\n' >> "$DEFCONFIG"
           fi
 
-          echo "------------------------------"
-          echo "🌿 Branch          : $CURRENTBRANCH"
-          echo "🔢 KSU Version     : $KSUVERSION"
-          echo "🔖 Commit          : $GITCOMMITHASH"
-          echo "------------------------------"
-
+          echo "🌿 Branch      : $CURRENTBRANCH"
+          echo "🔢 KSU Version : $KSUVERSION"
+          echo "🔖 Commit      : $GITCOMMITHASH"
           echo "🎉 ReSukiSU Setup Complete"
 
-  
-      - name: 🔧 Integrate SUSFS
+
+      - name: 📲 Integrate SUSFS
+        shell: bash
         run: |
+          # Define SUSFS Paths
           SRC="${SOURCEDIR}"
           SUSFSKERNEL="${WORKDIR}/susfs"
-
           SUSFSREPO="https://gitlab.com/simonpunk/susfs4ksu.git"
-          SUSFSBRANCH="gki-android15-6.6"
-          SUSFS50PATCH="${SUSFSKERNEL}/kernel_patches/50_add_susfs_in_gki-android15-6.6.patch"
 
+          # Resolve SUSFS Branch
+          SUSFSBRANCH="gki-${KERNELMODULE}"
+          SUSFS50PATCH="${SUSFSKERNEL}/kernel_patches/50_add_susfs_in_${SUSFSBRANCH}.patch"
+
+          # Display SUSFS Configuration
           echo "🔧 SUSFS Integration"
+          echo "📌 Kernel Module    : ${KERNELMODULE}"
+          echo "📌 Android Version  : ${ANDROIDVERSION}"
+          echo "📌 Kernel Version   : ${KERNELVERSION}"
           echo "📌 SUSFS Repository : ${SUSFSREPO}"
           echo "📌 SUSFS Branch     : ${SUSFSBRANCH}"
           echo "📌 Kernel Source    : ${SOURCEDIR}"
 
+          # Clone SUSFS
           echo "📥 Cloning SUSFS..."
           rm -rf "${SUSFSKERNEL}"
           if git clone \
@@ -1006,60 +1003,69 @@ jobs:
             exit 1
           fi
 
+          # Resolve SUSFS Commit
           SUSFSCOMMIT="$(git -C "${SUSFSKERNEL}" rev-parse HEAD 2>/dev/null || echo Unknown)"
           SUSFSSHORT="$(git -C "${SUSFSKERNEL}" rev-parse --short HEAD 2>/dev/null || echo Unknown)"
-
           echo "📌 SUSFS Commit  : ${SUSFSSHORT}"
           echo "📌 SUSFS Revision: ${SUSFSCOMMIT}"
 
+          # Define SUSFS Source Paths
           SUSFSDIR="${SUSFSKERNEL}/kernel_patches"
           SUSFSFS="${SUSFSDIR}/fs"
           SUSFSINCLUDE="${SUSFSDIR}/include/linux"
 
-          echo
+          # Validate SUSFS Source Layout and Patch
           echo "🔎 Checking SUSFS Source Layout..."
-          if [ ! -d "${SUSFSFS}" ]; then
-            echo "⚠️ SUSFS fs Directory Was Not Found:"
-            echo "${SUSFSFS}"
-            exit 1
+          if [[ ! -d "${SUSFSFS}" ]]; then
+            echo "⚠️ SUSFS fs Directory Was Not Found"
+            echo "📂 Creating: ${SUSFSFS}"
+            mkdir -p "${SUSFSFS}"
           fi
 
-          if [ ! -d "${SUSFSINCLUDE}" ]; then
-            echo "⚠️ SUSFS include/linux Directory Was Not Found:"
-            echo "${SUSFSINCLUDE}"
-            exit 1
+          if [[ ! -d "${SUSFSINCLUDE}" ]]; then
+            echo "⚠️ SUSFS include/linux Directory Was Not Found"
+            echo "📂 Creating: ${SUSFSINCLUDE}"
+            mkdir -p "${SUSFSINCLUDE}"
           fi
 
-          if [ ! -f "${SUSFS50PATCH}" ]; then
+          echo "✔️ SUSFS Source Layout Verified"
+
+          if [[ ! -f "${SUSFS50PATCH}" ]]; then
             echo "⚠️ SUSFS 50 Patch Was Not Found:"
             echo "${SUSFS50PATCH}"
             exit 1
           fi
 
-          echo "✔️ SUSFS Source Layout Verified"
-          echo "📌 SUSFS fs      : ${SUSFSFS}"
+          echo "✔️ SUSFS Source Patch Found"
+          echo "📌 SUSFS FS      : ${SUSFSFS}"
           echo "📌 SUSFS Headers : ${SUSFSINCLUDE}"
           echo "📌 SUSFS Patch   : ${SUSFS50PATCH}"
 
-          echo
+          # Copy SUSFS Files
           echo "📥 Copying SUSFS Files..."
-          mkdir -p "${SOURCEDIR}/fs"
-          mkdir -p "${SOURCEDIR}/include/linux"
-          cp -r "${SUSFSFS}/"* "${SOURCEDIR}/fs/" 2>/dev/null || \
+          cp -r "${SUSFSFS}/"* "${SOURCEDIR}/fs/" || {
             echo "⚠️ Failed to Copy SUSFS FS Files"
-          cp -r "${SUSFSINCLUDE}/"* "${SOURCEDIR}/include/linux/" 2>/dev/null || \
+            exit 1
+          }
+          cp -r "${SUSFSINCLUDE}/"* "${SOURCEDIR}/include/linux/" || {
             echo "⚠️ Failed to Copy SUSFS Linux Headers"
+            exit 1
+          }
+
           echo "✔️ SUSFS Files Copied"
 
-          echo
+          # Copy SUSFS Patch
           echo "📥 Copying SUSFS 50 Patch..."
-          cp "${SUSFS50PATCH}" "${SOURCEDIR}/" 2>/dev/null || \
+          cp "${SUSFS50PATCH}" "${SOURCEDIR}/" || {
             echo "⚠️ Failed to Copy SUSFS 50 Patch"
+            exit 1
+          }
+
           echo "✔️ SUSFS 50 Patch Copied"
 
-          echo
+          # Apply SUSFS 50 Patch
           echo "🔧 Applying SUSFS 50 Patch..."
-          cd "$SOURCEDIR"
+          cd "${SOURCEDIR}"
           if patch \
             -p1 \
             -F3 \
@@ -1075,12 +1081,14 @@ jobs:
             exit 1
           fi
 
+          # Display SUSFS Result
           echo
           echo "🎉 SUSFS Integration Complete"
-          echo "📌 SUSFS Branch : ${SUSFSBRANCH}"
-          echo "📌 SUSFS Commit : ${SUSFSSHORT}"
-          echo "📌 SUSFS Source : ${SUSFSKERNEL}"
-          echo "📌 SUSFS Patch  : ${SUSFS50PATCH}"
+          echo "📌 Kernel Module : ${KERNELMODULE}"
+          echo "📌 SUSFS Branch  : ${SUSFSBRANCH}"
+          echo "📌 SUSFS Commit  : ${SUSFSSHORT}"
+          echo "📌 SUSFS Source  : ${SUSFSKERNEL}"
+          echo "📌 SUSFS Patch   : ${SUSFS50PATCH}"
 
    
       - name: 🔧 Integrate LZ4 OPlus
