@@ -577,78 +577,99 @@ jobs:
       - name: 🔎 Detect Android Security Patch Level
         shell: bash
         run: |
-          KERNELMAKEFILE="$SOURCEDIR/Makefile"
-          echo "🔎 Detecting Android Security Patch Level..."
-          echo "📂 Kernel Makefile: $KERNELMAKEFILE"
-          if [[ ! -f "$KERNELMAKEFILE" ]]; then
-            echo "⚠️ Kernel Makefile Not Found"
-            echo "📂 Expected: $KERNELMAKEFILE"
-            exit 1
-          fi
-
+          echo "🔎 Detecting Android Security Patch Level From Boot Image..."
           AOSPPATCHLEVEL=""
-          # Check Kernel Makefile
-          AOSPPATCHLEVEL="$(
-            grep -Ehs \
-              '^[[:space:]]*(BOARD_OS_PATCH_LEVEL|BOOT_SECURITY_PATCH|PLATFORM_SECURITY_PATCH|ANDROID_SECURITY_PATCH|SECURITY_PATCH)[[:space:]]*[:?+]?=' \
-              "$KERNELMAKEFILE" |
-            grep -oE '20[0-9]{2}-[0-9]{2}(-[0-9]{2})?' |
-            head -n1 ||
-            true
+          BOOTIMG=""
+
+          # Locate Original Boot Image
+          echo "🔎 Searching Workspace For Boot Image..."
+          BOOTIMG="$(
+            find "$GITHUB_WORKSPACE" \
+              -type f \
+              -name "boot.img" \
+              -not -path "*/out/*" \
+              -not -path "*/pack/*" \
+              -print \
+              -quit \
+              2>/dev/null
           )"
 
-          # Search Kernel Source For Android Patch-Level Metadata
-          if [[ -z "$AOSPPATCHLEVEL" ]]; then
-            echo "⚠️ Android Patch Variable Not Found In Makefile"
-            echo "🔎 Searching Kernel Source..."
-            AOSPPATCHLEVEL="$(
-              grep -RIEhs \
-                --exclude-dir=.git \
-                --exclude-dir=out \
-                --exclude-dir=clang \
-                --exclude='*.o' \
-                --exclude='*.ko' \
-                --exclude='Image' \
-                --exclude='Image.gz' \
-                --exclude='Image.lz4' \
-                'BOARD_OS_PATCH_LEVEL|BOOT_SECURITY_PATCH|PLATFORM_SECURITY_PATCH|ANDROID_SECURITY_PATCH|SECURITY_PATCH' \
-                "$SOURCEDIR" 2>/dev/null |
-              grep -oE '20[0-9]{2}-[0-9]{2}(-[0-9]{2})?' |
-              head -n1 ||
-              true
-            )"
+          if [[ -n "$BOOTIMG" && -f "$BOOTIMG" ]]; then
+            echo "✔️ Boot Image Found:"
+            echo "📂 $BOOTIMG"
+          else
+            echo "⚠️ Original Boot Image Not Found"
           fi
 
-          # Generic Android Patch-Level Date Search
-          if [[ -z "$AOSPPATCHLEVEL" ]]; then
-            echo "⚠️ Named Android Security Patch Variable Not Found"
-            echo "🔎 Searching Source For Android Patch-Level Date..."
-            AOSPPATCHLEVEL="$(
-              grep -RIEhs \
-                --exclude-dir=.git \
-                --exclude-dir=out \
-                --exclude-dir=clang \
-                --exclude='*.o' \
-                --exclude='*.ko' \
-                --exclude='Image' \
-                --exclude='Image.gz' \
-                --exclude='Image.lz4' \
-                'PATCH|SECURITY|ANDROID|OS_PATCH' \
-                "$SOURCEDIR" 2>/dev/null |
-              grep -oE '20[0-9]{2}-[0-9]{2}(-[0-9]{2})?' |
-              head -n1 ||
-              true
-            )"
+          # Inspect Boot Image AVB Metadata
+          if [[ -n "$BOOTIMG" && -f "$BOOTIMG" ]]; then
+            echo "🔎 Inspecting Boot Image Metadata..."
+            AVBTOOL=""
+            if command -v avbtool >/dev/null 2>&1; then
+              AVBTOOL="$(command -v avbtool)"
+            elif [[ -x "$GITHUB_WORKSPACE/avbtool" ]]; then
+              AVBTOOL="$GITHUB_WORKSPACE/avbtool"
+            elif [[ -f "$GITHUB_WORKSPACE/avbtool.py" ]]; then
+              AVBTOOL="python3 $GITHUB_WORKSPACE/avbtool.py"
+            fi
+
+            if [[ -n "$AVBTOOL" ]]; then
+              echo "📦 AVB Tool: $AVBTOOL"
+              AVBINFO="$(
+                $AVBTOOL info_image \
+                  --image "$BOOTIMG" \
+                  2>/dev/null ||
+                  true
+              )"
+
+              if [[ -n "$AVBINFO" ]]; then
+                echo "$AVBINFO"
+                AOSPPATCHLEVEL="$(
+                  printf '%s\n' "$AVBINFO" |
+                  grep -oE \
+                    'com\.android\.build\.boot\.security_patch[^0-9]*20[0-9]{2}-[0-9]{2}(-[0-9]{2})?' |
+                  grep -oE \
+                    '20[0-9]{2}-[0-9]{2}(-[0-9]{2})?' |
+                  head -n1 ||
+                  true
+                )"
+              fi
+            else
+              echo "⚠️ avbtool Not Available"
+            fi
           fi
 
-          # Workflow Fallback
+          # Inspect Boot Image Header
+          if [[ -z "$AOSPPATCHLEVEL" && -n "$BOOTIMG" ]]; then
+            echo "🔎 Checking Boot Image Header..."
+            if command -v unpack_bootimg >/dev/null 2>&1; then
+              BOOTINFO="$(
+                unpack_bootimg \
+                  --boot_img "$BOOTIMG" \
+                  --out /tmp/bootimg-info \
+                  2>/dev/null ||
+                  true
+              )"
+
+              echo "$BOOTINFO"
+              AOSPPATCHLEVEL="$(
+                printf '%s\n' "$BOOTINFO" |
+                grep -oE \
+                  '20[0-9]{2}-[0-9]{2}(-[0-9]{2})?' |
+                head -n1 ||
+                true
+              )"
+            fi
+          fi
+
+          # Use Explicit Workflow Fallback
           if [[ -z "$AOSPPATCHLEVEL" ]]; then
-            echo "ℹ️ Kernel/Device-Tree Sources Do Not Provide Platform Security Patch Level"
-            echo "ℹ️ Using Workflow Fallback: 2026-07"
+            echo "ℹ️ Boot Image Does Not Provide A Detectable Android Security Patch Level"
+            echo "ℹ️ Using Workflow Fallback: 2026-08"
             AOSPPATCHLEVEL="2026-08"
           fi
 
-          # Normalize YYYY-MM-DD -> YYYY-MM
+          # Normalize YYYY-MM-DD To YYYY-MM
           AOSPPATCHLEVEL="${AOSPPATCHLEVEL:0:7}"
           if ! [[ "$AOSPPATCHLEVEL" =~ ^20[0-9]{2}-[0-9]{2}$ ]]; then
             echo "⚠️ Invalid Android Security Patch Level: $AOSPPATCHLEVEL"
@@ -658,9 +679,9 @@ jobs:
           echo "AOSPPATCHLEVEL=$AOSPPATCHLEVEL" >> "$GITHUB_ENV"
           echo "📲 Android Security Patch Level: $AOSPPATCHLEVEL"
           echo "✔️ Android Security Patch Level Ready"
-   
-    
-      - name: 🔎 Detect Kernel Version
+
+
+      - name: 🤖 Detect Kernel Version
         id: kernelversion
         shell: bash
         run: |
