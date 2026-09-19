@@ -586,6 +586,8 @@ jobs:
             exit 1
           fi
 
+          AOSPPATCHLEVEL=""
+          # Check Kernel Makefile
           AOSPPATCHLEVEL="$(
             grep -Ehs \
               '^[[:space:]]*(BOARD_OS_PATCH_LEVEL|BOOT_SECURITY_PATCH|PLATFORM_SECURITY_PATCH|ANDROID_SECURITY_PATCH|SECURITY_PATCH)[[:space:]]*[:?+]?=' \
@@ -595,25 +597,58 @@ jobs:
             true
           )"
 
+          # Search Kernel Source For Android Patch-Level Metadata
           if [[ -z "$AOSPPATCHLEVEL" ]]; then
-            echo "⚠️ Named Android Security Patch Variable Not Found"
-            echo "🔎 Searching Makefile for Android Patch-Level Date..."
+            echo "⚠️ Android Patch Variable Not Found In Makefile"
+            echo "🔎 Searching Kernel Source..."
             AOSPPATCHLEVEL="$(
-              grep -Ehs \
-                'PATCH|SECURITY|ANDROID|OS_PATCH' \
-                "$KERNELMAKEFILE" |
+              grep -RIEhs \
+                --exclude-dir=.git \
+                --exclude-dir=out \
+                --exclude-dir=clang \
+                --exclude='*.o' \
+                --exclude='*.ko' \
+                --exclude='Image' \
+                --exclude='Image.gz' \
+                --exclude='Image.lz4' \
+                'BOARD_OS_PATCH_LEVEL|BOOT_SECURITY_PATCH|PLATFORM_SECURITY_PATCH|ANDROID_SECURITY_PATCH|SECURITY_PATCH' \
+                "$SOURCEDIR" 2>/dev/null |
               grep -oE '20[0-9]{2}-[0-9]{2}(-[0-9]{2})?' |
               head -n1 ||
               true
             )"
           fi
 
+          # Generic Android Patch-Level Date Search
+          if [[ -z "$AOSPPATCHLEVEL" ]]; then
+            echo "⚠️ Named Android Security Patch Variable Not Found"
+            echo "🔎 Searching Source For Android Patch-Level Date..."
+            AOSPPATCHLEVEL="$(
+              grep -RIEhs \
+                --exclude-dir=.git \
+                --exclude-dir=out \
+                --exclude-dir=clang \
+                --exclude='*.o' \
+                --exclude='*.ko' \
+                --exclude='Image' \
+                --exclude='Image.gz' \
+                --exclude='Image.lz4' \
+                'PATCH|SECURITY|ANDROID|OS_PATCH' \
+                "$SOURCEDIR" 2>/dev/null |
+              grep -oE '20[0-9]{2}-[0-9]{2}(-[0-9]{2})?' |
+              head -n1 ||
+              true
+            )"
+          fi
+
+          # Workflow Fallback
           if [[ -z "$AOSPPATCHLEVEL" ]]; then
             echo "ℹ️ Kernel/Device-Tree Sources Do Not Provide Platform Security Patch Level"
             echo "ℹ️ Using Workflow Fallback: 2026-07"
-            AOSPPATCHLEVEL="2026-07"
+            AOSPPATCHLEVEL="2026-08"
           fi
 
+          # Normalize YYYY-MM-DD -> YYYY-MM
           AOSPPATCHLEVEL="${AOSPPATCHLEVEL:0:7}"
           if ! [[ "$AOSPPATCHLEVEL" =~ ^20[0-9]{2}-[0-9]{2}$ ]]; then
             echo "⚠️ Invalid Android Security Patch Level: $AOSPPATCHLEVEL"
@@ -623,8 +658,8 @@ jobs:
           echo "AOSPPATCHLEVEL=$AOSPPATCHLEVEL" >> "$GITHUB_ENV"
           echo "📲 Android Security Patch Level: $AOSPPATCHLEVEL"
           echo "✔️ Android Security Patch Level Ready"
-     
    
+    
       - name: 🔎 Detect Kernel Version
         id: kernelversion
         shell: bash
@@ -1266,127 +1301,143 @@ jobs:
    
     
       - name: 🔧 Integrate Linux Security Module Baseband Guard
-        if: ${{ inputs.basebandguard == 'true' }}
+        if: ${{ inputs.basebandguard }}
         shell: bash
         run: |
-          MAXRETRIES=3       
-          cd "$SOURCEDIR"     
-          
+          MAXRETRIES=3
+          cd "$SOURCEDIR"
+
           echo "🔧 Baseband Guard Integration"
           echo "📌 Source: VC-Teahouse/Baseband-guard"
           echo "📌 Kernel: $SOURCEDIR"
 
-          # Download and Execute VC-Teahouse Setup Script
-          URLBBG="https://raw.githubusercontent.com/vc-teahouse/Baseband-guard/main/setup.sh"      
-          echo "🖇️ Fetching Baseband Guard Setup Script..."      
-          BBGAPPLIED=false     
+          # Download and Execute Baseband Guard Setup
+          URLBBG="https://raw.githubusercontent.com/vc-teahouse/Baseband-guard/main/setup.sh"
+          echo "📥 Fetching BBG Setup Script..."
+          BBGAPPLIED=false
           for i in $(seq 1 "$MAXRETRIES"); do
             if curl -fsSL "$URLBBG" | bash -s -- main; then
               BBGAPPLIED=true
               break
             fi
-      
-            echo "⚠️ Baseband Guard Setup Failed"
-            echo "Retry $i/$MAXRETRIES..."      
+
+            echo "⚠️ BBG Setup Failed"
+            echo "🔁 Retry $i/$MAXRETRIES..."
             if [ "$i" -lt "$MAXRETRIES" ]; then
               sleep 2
             fi
           done
-      
+
           if [ "$BBGAPPLIED" != "true" ]; then
-            echo "⚠️ Failed to Apply Baseband Guard"
+            echo "⚠️ Failed to Apply BBG"
             exit 1
           fi
-      
-          echo "🚀 Baseband Guard Setup Script Completed"
-      
+
+          echo "🎉 BBG Setup Completed"
+
           # Locate Baseband Guard Source
-          echo "Locating Baseband Guard Source..."      
-          BBGPATHDIR=""     
+          echo "🔎 Locating Baseband Guard Source..."
+          BBGPATHDIR=""
           if [ -d "$SOURCEDIR/Baseband-guard" ]; then
             BBGPATHDIR="$SOURCEDIR/Baseband-guard"
           elif [ -L "$SOURCEDIR/Baseband-guard" ]; then
             BBGPATHDIR="$(readlink -f "$SOURCEDIR/Baseband-guard")"
           else
-            BBGPATHDIR="$(find "$SOURCEDIR" -maxdepth 3 \
-              -type d \
-              -name "Baseband-guard" \
-              -print -quit)"
+            BBGPATHDIR="$(
+              find "$SOURCEDIR" \
+                -maxdepth 3 \
+                -type d \
+                -name "Baseband-guard" \
+                -print \
+                -quit
+            )"
           fi
-      
+
           if [ -z "$BBGPATHDIR" ] || [ ! -d "$BBGPATHDIR" ]; then
-            echo "Baseband Guard Directory was Not Found"
+            echo "⚠️ Baseband Guard Directory Not Found"
             exit 1
           fi
-      
-          echo "Baseband Guard Directory:"
+
+          echo "📂 BBG Directory:"
           echo "$BBGPATHDIR"
-      
+
           # Validate Baseband Guard Source
           if [ ! -f "$BBGPATHDIR/baseband_guard.c" ]; then
-            echo "Baseband Guard C was Not Found"      
-            echo "Baseband Guard Contents:"
-            ls -la "$BBGPATHDIR"      
+            echo "⚠️ BBG Source Not Found"
+            echo "📂 BBG Contents:"
+            ls -la "$BBGPATHDIR"
             exit 1
           fi
-      
-          echo "🧾 Baseband Guard Source Detected"
-      
-          # Ensure Baseband Guard is Included in LSM Defaults
-          BBGCONFIGFILE="$SRC/security/Kconfig"      
+
+          echo "✔️ Baseband Guard Source Detected"
+
+          # Validate Linux Security Kconfig
+          BBGCONFIGFILE="$SOURCEDIR/security/Kconfig"
           if [ ! -f "$BBGCONFIGFILE" ]; then
-            echo "Kernel Security Kconfig Not Found:"
+            echo "⚠️ Linux Security Kconfig Not Found:"
             echo "$BBGCONFIGFILE"
             exit 1
           fi
-      
-          echo "⚙️ Updating Linux Security Module Configuration..."      
-          awk '
-            BEGIN { in_block=0 }      
-            /^config LSM$/ {
-              in_block=1
-            }      
-            in_block && /^[[:space:]]*default/ {
-              if ($0 !~ /baseband_guard/) {
-                sub(/selinux/, "selinux,baseband_guard")
+
+          # Add Baseband Guard to LSM Default List
+          echo "⚙️ Updating Linux Security Module Configuration..."
+          if grep -qF "baseband_guard" "$BBGCONFIGFILE"; then
+            echo "ℹ️ Baseband Guard Already Present"
+          else
+            awk '
+              /^config LSM$/ {
+                in_lsm=1
               }
-            }      
-            in_block && /^help$/ {
-              in_block=0
-            }      
-            {
-              print
-            }
-          ' "$BBGCONFIGFILE" > "${BBGCONFIGFILE}.tmp"      
-          mv "${BBGCONFIGFILE}.tmp" "$BBGCONFIGFILE"      
-          echo "Linux Security Configuration Updated"
-      
-          # Enable Baseband Guard
+
+              in_lsm && /^[[:space:]]*default[[:space:]]/ {
+                if ($0 ~ /selinux/ && $0 !~ /baseband_guard/) {
+                  sub(/selinux/, "selinux,baseband_guard")
+                }
+              }
+
+              in_lsm && /^config[[:space:]]/ && $0 !~ /^config LSM$/ {
+                in_lsm=0
+              }
+
+              {
+                print
+              }
+            ' "$BBGCONFIGFILE" > "$BBGCONFIGFILE.tmp"
+            mv -f \
+              "$BBGCONFIGFILE.tmp" \
+              "$BBGCONFIGFILE"
+            echo "✔️ Linux Security Configuration Updated"
+          fi
+
+          # Enable Baseband Guard If Kernel Config Already Exists
           if [ -f "$SOURCEDIR/.config" ]; then
-            echo "⚙️ Enabling CONFIG_BBG..."      
+            echo "⚙️ Enabling CONFIG BBG..."
             ./scripts/config \
               --file "$SOURCEDIR/.config" \
-              -e CONFIG_BBG      
-            echo "✔️ Config BBG Enabled"
+              -e CONFIG_BBG
+            echo "✔️ CONFIG BBG Enabled"
           else
-            echo "⚠️ Config Not Present Yet"
-            echo "⚠️ Config BBG will be Resolved During Kernel Configuration"
+            echo "ℹ️ Kernel Config Not Present Yet"
+            echo "ℹ️ CONFIG BBG Will Be Resolved During Kernel Configuration"
           fi
-      
+
           # Final Validation
-          echo "⚙️ Validating Baseband Guard Integration..."      
+          echo "🔎 Validating Baseband Guard Integration..."
           if [ ! -f "$BBGPATHDIR/baseband_guard.c" ]; then
             echo "⚠️ Baseband Guard Source Validation Failed"
             exit 1
           fi
-      
-          if ! grep -q "baseband_guard" "$BBGCONFIGFILE"; then
-            echo "⚠️ Baseband Guard was Not Added to Security / Kconfig"
+
+          if ! grep -qF "baseband_guard" "$BBGCONFIGFILE"; then
+            echo "⚠️ Baseband Guard Was Not Added To Security/Kconfig"
             exit 1
           fi
-      
-          echo "🎉 Baseband Guard Fully Integrated"
 
+          echo "✔️ Baseband Guard Source: OK"
+          echo "✔️ Baseband Guard Kconfig: OK"
+          echo "🎉 Baseband Guard Fully Integrated"
+    
+      
       - name: Apply ReKernel Patch
         if: ${{ inputs.rekernel }}
         run: |
