@@ -1932,180 +1932,154 @@ jobs:
           if-no-files-found: ignore
 
     
-      - name: 📥 Clone AnyKernel3
+      - name: 📦 Clone and Package AnyKernel3
+        id: package
         shell: bash
         run: |
+          # Define AnyKernel3 Paths
+          AK3DIR="${GITHUB_WORKSPACE}/anykernel3"
+          PACKDIR="${GITHUB_WORKSPACE}/pack"
+          OUTDIR="${GITHUB_WORKSPACE}/out"
+          IMAGE="${SOURCEDIR}/arch/arm64/boot/Image"
+
+          # Define LineageOS Build Repository
+          LINEAGEBUILDREPO="https://raw.githubusercontent.com/LineageOS/android_build"
+          LINEAGEBUILDREF="${LINEAGEBRANCH}"
+          VERSIONDEFAULTS="${RUNNER_TEMP}/version_defaults.mk"
+          VERSIONDEFAULTSURL="${LINEAGEBUILDREPO}/${LINEAGEBUILDREF}/core/version_defaults.mk"
+          # Validate LineageOS Build Branch
+          if [[ -z "${LINEAGEBRANCH:-}" ]]; then
+            echo "⚠️ LINEAGEBRANCH Is Not Set"
+            exit 1
+          fi
+
+          # Display Package Configuration
+          echo "📦 AnyKernel3 Packaging"
+          echo "📂 Kernel Source     : ${SOURCEDIR}"
+          echo "📂 AnyKernel3        : ${AK3DIR}"
+          echo "📂 Package Directory : ${PACKDIR}"
+          echo "📂 Output Directory  : ${OUTDIR}"
+          echo "📌 LineageOS Branch  : ${LINEAGEBUILDREF}"
+
+          # Clone AnyKernel3
           echo "📥 Cloning AnyKernel3..."
+          rm -rf "$AK3DIR"
           git clone \
             --depth=1 \
             --branch master \
             https://github.com/AndreiMikh/AnyKernel3.git \
-            anykernel3
-          echo "✔️ AnyKernel3 Cloned"
+            "$AK3DIR"
+          echo "✔️ AnyKernel3 Cloned Successfully"
 
-   
-      - name: 📦 Package AnyKernel3
-        id: package
-        shell: bash
-        run: |
-          # Create Directories Used for AnyKernel3 Package and Output Files
-          mkdir -p out pack
-
-          IMAGE="$SOURCEDIR/arch/arm64/boot/Image"
-
-          # Verify Compiled Kernel Image Exists and Contains Data
-          if [ ! -s "$IMAGE" ]; then
+          # Validate Kernel Image
+          echo "🔎 Validating Kernel Image..."
+          if [[ ! -s "$IMAGE" ]]; then
             echo "⚠️ Kernel Image Missing or Empty"
             echo "📂 Expected: $IMAGE"
             exit 1
           fi
 
-          echo "📥 Preparing AnyKernel3 Package..."
-          # Copy AnyKernel3 Template Into Temporary Package Directory
-          cp -a anykernel3/. pack/
-
-          # Copy Compiled Kernel Image Into AnyKernel3 Package
-          cp "$IMAGE" pack/Image
           SIZE="$(stat -c%s "$IMAGE")"
-          echo "📌 Kernel Image Size: $SIZE bytes"
-
-          # Verify Kernel Image is Not Empty
-          if [ "$SIZE" -le 0 ]; then
-            echo "⚠️ Kernel Image Is Empty"
-            exit 1
-          fi
-
           echo "✔️ Kernel Image Verified"
+          echo "📌 Kernel Image Size: ${SIZE} bytes"
 
-          # Set Kernel Name Displayed by AnyKernel3
-          if [ "${{ inputs.attribute }}" = "true" ]; then
+          # Prepare AnyKernel3 Package
+          echo "📥 Preparing AnyKernel3 Package..."
+          rm -rf "$PACKDIR"
+          cp -a "$AK3DIR"/. "$PACKDIR"/
+          cp "$IMAGE" "$PACKDIR/Image"
+          echo "✔️ AnyKernel3 Package Prepared"
+
+          # Configure AnyKernel3 Kernel Name
+          echo "🔧 Configuring AnyKernel3 Kernel Name..."
+          if [[ "${{ inputs.attribute }}" == "true" ]]; then
             sed -i \
               "s#kernel.string=.*#kernel.string=AOSP ${{ inputs.aospsource }} Kernel | Build by ${{ inputs.builduser }}#" \
-              pack/anykernel.sh
+              "$PACKDIR/anykernel.sh"
           else
             sed -i \
               "s#kernel.string=.*#kernel.string=${{ inputs.aospsource }} OPlus AOSP SM8750 Kernel#" \
-              pack/anykernel.sh
+              "$PACKDIR/anykernel.sh"
           fi
 
-          # Start Detecting Android Security Patch Level From Source Files
-          echo "🔎 Detecting Android Security Patch Level From Source..."
-          AOSPPATCHLEVEL=""
-          # Search the workspace for Android build metadata that can contain the security patch level.
-          while IFS= read -r FILE; do
-            [ -f "$FILE" ] || continue
-            echo "🔎 Checking: $FILE"
-            PATCH="$(
-              grep -hE \
-                '(PLATFORM_SECURITY_PATCH|PRODUCT_SECURITY_PATCH|RO_BUILD_VERSION_SECURITY_PATCH|ro\.build\.version\.security\.patch)' \
-                "$FILE" 2>/dev/null |
-              grep -oE \
-                '20[0-9]{2}-[0-9]{2}(-[0-9]{2})?' |
+          echo "✔️ AnyKernel3 Kernel Name Configured"
+
+          # Fetch LineageOS Build Metadata
+          echo "🔎 Fetching LineageOS Build Metadata..."
+          echo "📂 Source: ${VERSIONDEFAULTSURL}"
+          rm -f "$VERSIONDEFAULTS"
+          if ! curl -fsSL \
+            "$VERSIONDEFAULTSURL" \
+            -o "$VERSIONDEFAULTS"; then
+            echo "⚠️ Failed To Fetch LineageOS Build Metadata"
+            echo "📂 URL: ${VERSIONDEFAULTSURL}"
+            echo "ℹ️ Continuing With Workflow Fallback"
+          else
+            echo "✔️ LineageOS Build Metadata Downloaded"
+          fi
+
+          # Detect PLATFORM SECURITY PATCH
+          echo "🔎 Detecting Android Security Patch Level..."
+          AOSPPATCHFULL=""
+          if [[ -s "$VERSIONDEFAULTS" ]]; then
+            AOSPPATCHFULL="$(
+              sed -nE \
+                's/^[[:space:]]*PLATFORM_SECURITY_PATCH[[:space:]]*:?=[[:space:]]*([0-9]{4}-[0-9]{2}-[0-9]{2}).*/\1/p' \
+                "$VERSIONDEFAULTS" |
               head -n1 ||
               true
             )"
-
-            if [ -n "$PATCH" ]; then
-              AOSPPATCHLEVEL="${PATCH:0:7}"
-              echo "✔️ Android Security Patch Level Detected"
-              echo "📂 Source File: $FILE"
-              echo "📲 Patch Level: $AOSPPATCHLEVEL"
-              break
-            fi
-          done < <(
-            find "$GITHUB_WORKSPACE" \
-              -type f \
-              \( \
-                -name "version_defaults.mk" \
-                -o -name "security_patch.mk" \
-                -o -name "build.prop" \
-                -o -name "system.prop" \
-                -o -name "vendor.prop" \
-                -o -name "product.prop" \
-                -o -name "*.mk" \
-                -o -name "*.prop" \
-              \) \
-              -print \
-              2>/dev/null
-          )
-
-          # Search Common Android Build Property Files if First Source Search Did Not Find a Valid Security Patch Level
-          if [ -z "$AOSPPATCHLEVEL" ]; then
-            echo "🔎 Searching Android Build Properties..."
-            while IFS= read -r FILE; do
-              [ -f "$FILE" ] || continue
-              PATCH="$(
-                grep -hE \
-                  '^ro\.build\.version\.security\.patch[[:space:]]*=' \
-                  "$FILE" 2>/dev/null |
-                grep -oE \
-                  '20[0-9]{2}-[0-9]{2}(-[0-9]{2})?' |
-                head -n1 ||
-                true
-              )"
-
-              if [ -n "$PATCH" ]; then
-                AOSPPATCHLEVEL="${PATCH:0:7}"
-                echo "✔️ Android Security Patch Level Detected"
-                echo "📂 Source File: $FILE"
-                echo "📲 Patch Level: $AOSPPATCHLEVEL"
-                break
-              fi
-            done < <(
-              find "$GITHUB_WORKSPACE" \
-                -type f \
-                \( \
-                  -name "build.prop" \
-                  -o -name "system.prop" \
-                  -o -name "vendor.prop" \
-                  -o -name "product.prop" \
-                \) \
-                -print \
-                2>/dev/null
-            )
           fi
 
-          # Use Workflow Fallback if No Valid Patch Level was Detected
-          if ! [[ "$AOSPPATCHLEVEL" =~ ^20[0-9]{2}-[0-9]{2}$ ]]; then
+          # Validate Security Patch Level
+          if [[ "$AOSPPATCHFULL" =~ ^20[0-9]{2}-[0-9]{2}-[0-9]{2}$ ]]; then
+            # Convert Security Patch Level
+            AOSPPATCHLEVEL="${AOSPPATCHFULL:0:7}"
+            echo "✔️ Android Security Patch Level Detected"
+            echo "📲 Full Patch Level : ${AOSPPATCHFULL}"
+            echo "📲 Boot Patch Level : ${AOSPPATCHLEVEL}"
+          else
+            # Use Workflow Fallback if No Valid Patch Level was Detected
             echo "⚠️ Android Security Patch Level Not Found In Source"
             echo "ℹ️ Using Workflow Fallback: 2026-08"
             AOSPPATCHLEVEL="2026-08"
           fi
 
-          # Export Patch Level for Later Workflow Steps
+          # Export Security Patch Level
           echo "AOSPPATCHLEVEL=$AOSPPATCHLEVEL" >> "$GITHUB_ENV"
-          echo "📲 Android Security Patch Level: $AOSPPATCHLEVEL"
-          echo "✔️ Android Security Patch Level Ready"
+          echo "📲 Final Boot Patch Level: ${AOSPPATCHLEVEL}"
 
-          # Generate AnyKernel3 Package File Name
+          # Generate AnyKernel3 Package Name
           STAMP="$(date +%Y%m%d)"
           ZIP="AK3-(${FULLVERSION})-${{ inputs.aospsource }}(SM8750)-${{ inputs.ksumeta }}(${KSUVERSION})(${STAMP}).zip"
           echo "📦 Creating AnyKernel3 ZIP..."
-          echo "📌 Package: $ZIP"
+          echo "📌 Package: ${ZIP}"
 
           # Compress AnyKernel3 Package
-          cd pack
+          cd "$PACKDIR"
           zip -r9 \
-            "../out/$ZIP" \
+            "${OUTDIR}/${ZIP}" \
             . \
             -x "*.git*" \
             >/dev/null
 
-          cd ..
+          cd "$GITHUB_WORKSPACE"
 
-          # Export Package Name for Later Workflow Steps
+          # Export Package Name
           echo "ak3name=$ZIP" >> "$GITHUB_OUTPUT"
           echo "✔️ AnyKernel3 Package Created"
-          ls -lh "out/$ZIP"
+          ls -lh "${OUTDIR}/${ZIP}"
 
-          # Generate Raw Kernel Image and Boot Image When All Artifacts are Requested
-          if [ "${{ inputs.artifactmode }}" = "all" ]; then
-            echo "📦 Generating Raw Kernel Image..."
-            cp "$IMAGE" out/Image
+          # Generate Additional Artifacts
+          if [[ "${{ inputs.artifactmode }}" == "all" ]]; then
+            echo "📦 Generating Additional Kernel Artifacts..."
+            # Copy Raw Kernel Image
+            cp "$IMAGE" "${OUTDIR}/Image"
+            echo "✔️ Raw Kernel Image Generated"
+            echo "📂 ${OUTDIR}/Image"
+            # Generate Boot Image
             echo "📦 Generating Boot Image..."
-            echo "📲 Using Android Security Patch Level: $AOSPPATCHLEVEL"
-
-            # Build Boot Image Using Compiled Kernel and Detected Android Security Patch Level
+            echo "📲 Android Security Patch Level: ${AOSPPATCHLEVEL}"
             mkbootimg \
               --kernel "$IMAGE" \
               --header_version 4 \
@@ -2113,21 +2087,28 @@ jobs:
               --os_patch_level "$AOSPPATCHLEVEL" \
               --pagesize 4096 \
               --base 0x80000000 \
-              -o out/boot.img
+              -o "${OUTDIR}/boot.img"
 
-            # Verify Mkbootimg Produced a Valid Non-Empty Boot Image
-            if [ ! -s out/boot.img ]; then
+            # Validate Boot Image
+            if [[ ! -s "${OUTDIR}/boot.img" ]]; then
               echo "⚠️ Failed To Generate Boot Image"
               exit 1
             fi
 
+            echo "✔️ Boot Image Generated"
+            echo "📂 ${OUTDIR}/boot.img"
+
+            # Display Generated Artifacts
             echo "🚀 All Mode: Image + Boot Image Generated"
             echo "📌 Generated Files:"
             ls -lh \
-              out/Image \
-              out/boot.img
-            echo "📲 Boot Image Patch Level: $AOSPPATCHLEVEL"
+              "${OUTDIR}/Image" \
+              "${OUTDIR}/boot.img"
+            echo "📲 Boot Image Patch Level: ${AOSPPATCHLEVEL}"
           fi
+
+          echo
+          echo "🎉 AnyKernel3 Packaging Complete"
 
    
       - name: 📤 Upload Kernel Artifacts
