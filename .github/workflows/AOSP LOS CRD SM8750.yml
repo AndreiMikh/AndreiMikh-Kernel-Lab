@@ -1733,13 +1733,12 @@ jobs:
         id: package
         shell: bash
         run: |
-          set -Eeuo pipefail
-
-          # Create the Output and Temporary AnyKernel3 Directories
+          # Create Directories Used for AnyKernel3 Package and Output Files
           mkdir -p out pack
+
           IMAGE="$SOURCEDIR/arch/arm64/boot/Image"
 
-          # Verify the Compiled Kernel Image Exists and is Not Empty
+          # Verify Compiled Kernel Image Exists and Contains Data
           if [ ! -s "$IMAGE" ]; then
             echo "⚠️ Kernel Image Missing or Empty"
             echo "📂 Expected: $IMAGE"
@@ -1748,15 +1747,15 @@ jobs:
 
           echo "📥 Preparing AnyKernel3 Package..."
 
-          # Copy the AnyKernel3 Template Into the Packaging Directory
+          # Copy AnyKernel3 Template Into Temporary Package Directory
           cp -a anykernel3/. pack/
 
-          # Copy the Compiled Kernel Image Into the AnyKernel3 Package
+          # Copy Compiled Kernel Image into AnyKernel3 Package
           cp "$IMAGE" pack/Image
           SIZE="$(stat -c%s "$IMAGE")"
           echo "📌 Kernel Image Size: $SIZE bytes"
 
-          # Make Sure the Kernel Image Contains Data
+          # Make Sure Kernel Image is Not Empty
           if [ "$SIZE" -le 0 ]; then
             echo "⚠️ Kernel Image Is Empty"
             exit 1
@@ -1764,7 +1763,7 @@ jobs:
 
           echo "✔️ Kernel Image Verified"
 
-          # Set the Kernel Name Shown by AnyKernel3
+          # Set Kernel Name Displayed by AnyKernel3
           if [ "${{ inputs.attribute }}" = "true" ]; then
             sed -i \
               "s#kernel.string=.*#kernel.string=AOSP ${{ inputs.aospsource }} Kernel | Build by ${{ inputs.builduser }}#" \
@@ -1775,126 +1774,105 @@ jobs:
               pack/anykernel.sh
           fi
 
-          # Start Detecting the Android Security Patch Level
+          # Start Detecting Android Security Patch Level From Source Files
           echo
-          echo "🔎 Detecting Android Security Patch Level..."
+          echo "🔎 Detecting Android Security Patch Level From Source..."
           AOSPPATCHLEVEL=""
-          BOOTIMG=""
 
-          # Search for an Existing Boot Image While Excluding the Boot Image
-          # That will be Generated Later by this Step
-          while IFS= read -r IMG; do
-            [[ -f "$IMG" ]] || continue
-            BOOTIMG="$IMG"
-            break
+          # Search the workspace for Android build metadata that can contain the security patch level.
+          while IFS= read -r FILE; do
+            [ -f "$FILE" ] || continue
+            echo "🔎 Checking: $FILE"
+            PATCH="$(
+              grep -hE \
+                '(PLATFORM_SECURITY_PATCH|PRODUCT_SECURITY_PATCH|RO_BUILD_VERSION_SECURITY_PATCH|ro\.build\.version\.security\.patch)' \
+                "$FILE" 2>/dev/null |
+              grep -oE \
+                '20[0-9]{2}-[0-9]{2}(-[0-9]{2})?' |
+              head -n1 ||
+              true
+            )"
+
+            if [ -n "$PATCH" ]; then
+              AOSPPATCHLEVEL="${PATCH:0:7}"
+              echo "✔️ Android Security Patch Level Detected"
+              echo "📂 Source File: $FILE"
+              echo "📲 Patch Level: $AOSPPATCHLEVEL"
+              break
+            fi
           done < <(
             find "$GITHUB_WORKSPACE" \
               -type f \
               \( \
-                -iname "boot.img" \
-                -o -iname "boot-*.img" \
+                -name "version_defaults.mk" \
+                -o -name "security_patch.mk" \
+                -o -name "build.prop" \
+                -o -name "system.prop" \
+                -o -name "vendor.prop" \
+                -o -name "product.prop" \
+                -o -name "*.mk" \
+                -o -name "*.prop" \
               \) \
-              ! -path "$GITHUB_WORKSPACE/out/boot.img" \
               -print \
               2>/dev/null
           )
 
-          if [[ -n "$BOOTIMG" ]]; then
-            echo "✔️ Existing Boot Image Found:"
-            echo "📂 $BOOTIMG"
-
-            # Try to Read the Security Patch Information from AVB Metadata
-            if command -v avbtool >/dev/null 2>&1; then
-              echo "🔐 Inspecting AVB Metadata..."
-              AVBINFO="$(
-                avbtool info_image \
-                  --image "$BOOTIMG" \
-                  2>/dev/null ||
-                  true
-              )"
-
-              if [[ -n "$AVBINFO" ]]; then
-                AOSPPATCHLEVEL="$(
-                  printf '%s\n' "$AVBINFO" |
-                  grep -oE \
-                    '20[0-9]{2}-[0-9]{2}(-[0-9]{2})?' |
-                  head -n1 ||
-                  true
-                )"
-              fi
-            else
-              echo "ℹ️ AVB Tool is Not Available"
-            fi
-
-            # If AVB Metadata Did Not Provide Patch Level
-            # Inspect the Boot Image Header
-            if [[ -z "$AOSPPATCHLEVEL" ]] &&
-               command -v unpack_bootimg >/dev/null 2>&1; then
-              echo "📦 Inspecting Boot Image Header..."
-              BOOTINFO="$(
-                unpack_bootimg \
-                  --boot_img "$BOOTIMG" \
-                  --format=info \
-                  2>/dev/null ||
-                  true
-              )"
-
-              if [[ -n "$BOOTINFO" ]]; then
-                AOSPPATCHLEVEL="$(
-                  printf '%s\n' "$BOOTINFO" |
-                  grep -oE \
-                    '20[0-9]{2}-[0-9]{2}(-[0-9]{2})?' |
-                  head -n1 ||
-                  true
-                )"
-              fi
-            elif [[ -z "$AOSPPATCHLEVEL" ]]; then
-              echo "ℹ️ unpack_bootimg is not available"
-            fi
-
-            # As a Final Attempt, Search Readable Metadata Inside the Boot Image
-            if [[ -z "$AOSPPATCHLEVEL" ]] &&
-               command -v strings >/dev/null 2>&1; then
-              echo "🔎 Searching Raw Boot Image Metadata..."
-              AOSPPATCHLEVEL="$(
-                strings -a "$BOOTIMG" 2>/dev/null |
+          # Search Common Android Build Property Files if First Source Search Did Not Find a Valid Security Patch Level
+          if [ -z "$AOSPPATCHLEVEL" ]; then
+            echo "🔎 Searching Android Build Properties..."
+            while IFS= read -r FILE; do
+              [ -f "$FILE" ] || continue
+              PATCH="$(
+                grep -hE \
+                  '^ro\.build\.version\.security\.patch[[:space:]]*=' \
+                  "$FILE" 2>/dev/null |
                 grep -oE \
                   '20[0-9]{2}-[0-9]{2}(-[0-9]{2})?' |
                 head -n1 ||
                 true
               )"
-            fi
-          else
-            echo "⚠️ Existing Boot Image Not Found"
+
+              if [ -n "$PATCH" ]; then
+                AOSPPATCHLEVEL="${PATCH:0:7}"
+                echo "✔️ Android Security Patch Level Detected"
+                echo "📂 Source File: $FILE"
+                echo "📲 Patch Level: $AOSPPATCHLEVEL"
+                break
+              fi
+            done < <(
+              find "$GITHUB_WORKSPACE" \
+                -type f \
+                \( \
+                  -name "build.prop" \
+                  -o -name "system.prop" \
+                  -o -name "vendor.prop" \
+                  -o -name "product.prop" \
+                \) \
+                -print \
+                2>/dev/null
+            )
           fi
 
-          # Convert a Full YYYY-MM-DD Value to YYYY-MM for Mkbootimg
-          if [[ -n "$AOSPPATCHLEVEL" ]]; then
-            AOSPPATCHLEVEL="${AOSPPATCHLEVEL:0:7}"
-          fi
-
-          # Use the Workflow Fallback When No Valid Patch Level was Detected
+          # Use Workflow Fallback if No Valid Patch Level was Detected
           if ! [[ "$AOSPPATCHLEVEL" =~ ^20[0-9]{2}-[0-9]{2}$ ]]; then
-            echo "⚠️ Android Security Patch Level Not Detected"
+            echo "⚠️ Android Security Patch Level Not Found In Source"
             echo "ℹ️ Using Workflow Fallback: 2026-08"
             AOSPPATCHLEVEL="2026-08"
           fi
 
-          # Export the Detected Value so Later Workflow Steps can Use it
+          # Export Patch Level for Later Workflow Steps
           echo "AOSPPATCHLEVEL=$AOSPPATCHLEVEL" >> "$GITHUB_ENV"
-
           echo "📲 Android Security Patch Level: $AOSPPATCHLEVEL"
           echo "✔️ Android Security Patch Level Ready"
 
-          # Generate the AnyKernel3 ZIP filename
+          # Generate AnyKernel3 Package File Name
           STAMP="$(date +%Y%m%d)"
-
           ZIP="AnyKernel3-(${FULLVERSION})-SM8750-${{ inputs.aospsource }}-ReSukiSU(${KSUVERSION})(${STAMP}).zip"
 
           echo "📦 Creating AnyKernel3 ZIP..."
           echo "📌 Package: $ZIP"
 
-          # Build the AnyKernel3 ZIP
+          # Compress AnyKernel3 Package
           cd pack
           zip -r9 \
             "../out/$ZIP" \
@@ -1904,20 +1882,19 @@ jobs:
 
           cd ..
 
-          # Export the Generated ZIP Name for Later Workflow Steps
+          # Export Package Name for Later Workflow Steps
           echo "ak3name=$ZIP" >> "$GITHUB_OUTPUT"
           echo "✔️ AnyKernel3 Package Created"
           ls -lh "out/$ZIP"
 
-          # Generate the Raw Kernel Image and Boot image When All Artifacts
-          # Requested
+          # Generate Raw Kernel Image and Boot Image When All Artifacts are Requested
           if [ "${{ inputs.artifactmode }}" = "all" ]; then
             echo "📦 Generating Raw Kernel Image..."
             cp "$IMAGE" out/Image
             echo "📦 Generating Boot Image..."
+            echo "📲 Using Android Security Patch Level: $AOSPPATCHLEVEL"
 
-            # Build a Boot Image Using the Compiled Kernel and Detected
-            # Android Security Patch Level
+            # Build Boot Image Using Compiled Kernel and Detected Android Security Patch Level
             mkbootimg \
               --kernel "$IMAGE" \
               --header_version 4 \
@@ -1927,7 +1904,7 @@ jobs:
               --base 0x80000000 \
               -o out/boot.img
 
-            # Verify that Mkbootimg Produced a Valid Non-Empty File
+            # Verify Mkbootimg Produced a Valid Non-Empty Boot Image
             if [ ! -s out/boot.img ]; then
               echo "⚠️ Failed To Generate Boot Image"
               exit 1
