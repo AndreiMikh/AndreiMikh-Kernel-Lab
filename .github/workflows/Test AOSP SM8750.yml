@@ -192,6 +192,7 @@ jobs:
           # Prepare Kernel Feature Directories
           mkdir -p \
             "$GITHUB_WORKSPACE/susfs" \
+            "$SOURCEDIR/drivers/rekernel" \
             "$GITHUB_WORKSPACE/extra-files"
 
           # Clone Kernel Lab Repository
@@ -1464,12 +1465,341 @@ jobs:
           echo "🎉 Baseband Guard Fully Integrated"
     
       
-      - name: Apply ReKernel Patch
+      - name: 🔧 ReKernel Integration
         if: ${{ inputs.rekernel }}
+        shell: bash
         run: |
-          cd "$SOURCEDIR"
-          patch -p1 -F3 --batch -f \
-            < "$GITHUB_WORKSPACE/patches/AOSP/001-ReKernel-AOSP.patch"
+          echo "🔧 Adding ReKernel Integration"
+          REKERNELDIR="$SOURCEDIR/drivers/rekernel"
+
+          # Create ReKernel Header
+          cat > "$REKERNELDIR/rekernel.h" <<'EOF'
+          /* SPDX-License-Identifier: GPL-2.0-only */
+          /* Re:Kernel netlink server (from Sakion-Team/Re-Kernel Integrate guide) */
+          #include <linux/init.h>
+          #include <linux/types.h>
+          #include <net/sock.h>
+          #include <linux/netlink.h>
+          #include <linux/proc_fs.h>
+          #include <linux/freezer.h>
+          #ifdef CONFIG_CGROUP_FREEZER
+          #include <linux/sched/jobctl.h>
+          #endif
+
+          #define NETLINK_REKERNEL_MAX          26
+          #define NETLINK_REKERNEL_MIN          22
+          #define USER_PORT                    100
+          #define PACKET_SIZE                  128
+          #define MIN_USERAPP_UID              (10000)
+          #define MAX_SYSTEM_UID               (2000)
+          #define RESERVE_ORDER                17
+          #define WARN_AHEAD_SPACE             (1 << RESERVE_ORDER)
+
+          static struct sock *rekernel_netlink = NULL;
+          extern struct net init_net;
+          static int netlink_unit = NETLINK_REKERNEL_MIN;
+
+          static inline bool line_is_frozen(struct task_struct *task)
+          {
+              return frozen(task->group_leader) || freezing(task->group_leader);
+          }
+
+          static int send_netlink_message(char *msg, uint16_t len)
+          {
+              struct sk_buff *skbuffer;
+              struct nlmsghdr *nlhdr;
+
+              skbuffer = nlmsg_new(len, GFP_ATOMIC);
+              if (!skbuffer) {
+                  printk("netlink alloc failure.\n");
+                  return -1;
+              }
+
+              nlhdr = nlmsg_put(skbuffer, 0, 0, netlink_unit, len, 0);
+              if (!nlhdr) {
+                  printk("nlmsg_put failaure.\n");
+                  nlmsg_free(skbuffer);
+                  return -1;
+              }
+
+              memcpy(nlmsg_data(nlhdr), msg, len);
+              return netlink_unicast(
+                  rekernel_netlink,
+                  skbuffer,
+                  USER_PORT,
+                  MSG_DONTWAIT
+              );
+          }
+
+          static void netlink_rcv_msg(struct sk_buff *skbuffer)
+          {
+              /* Ignore recv msg */
+          }
+
+          static struct netlink_kernel_cfg rekernel_cfg = {
+              .input = netlink_rcv_msg,
+          };
+
+          static int rekernel_unit_show(struct seq_file *m, void *v)
+          {
+              seq_printf(m, "%d\n", netlink_unit);
+              return 0;
+          }
+
+          static int rekernel_unit_open(struct inode *inode, struct file *file)
+          {
+              return single_open(file, rekernel_unit_show, NULL);
+          }
+
+          static const struct proc_ops rekernel_unit_fops = {
+              .proc_open    = rekernel_unit_open,
+              .proc_read    = seq_read,
+              .proc_lseek   = seq_lseek,
+              .proc_release = single_release,
+          };
+
+          static struct proc_dir_entry *rekernel_dir, *rekernel_unit_entry;
+          static int start_rekernel_server(void)
+          {
+              if (rekernel_netlink != NULL)
+                  return 0;
+
+              for (netlink_unit = NETLINK_REKERNEL_MIN;
+                   netlink_unit < NETLINK_REKERNEL_MAX;
+                   netlink_unit++) {
+                  rekernel_netlink = (struct sock *)netlink_kernel_create(
+                      &init_net,
+                      netlink_unit,
+                      &rekernel_cfg
+                  );
+
+                  if (rekernel_netlink != NULL)
+                      break;
+              }
+
+              if (rekernel_netlink == NULL) {
+                  printk("⚠️ Failed to Create ReKernel Server!\n");
+                  return -1;
+              }
+
+              printk(
+                  "✔️ Created ReKernel Server! Netlink Unit: %d\n",
+                  netlink_unit
+              );
+
+              rekernel_dir = proc_mkdir("rekernel", NULL);
+
+              if (!rekernel_dir)
+                  printk("⚠️ Create Proc/ReKernel Failed!\n");
+              else {
+                  char buff[32];
+                  sprintf(buff, "%d", netlink_unit);
+                  rekernel_unit_entry = proc_create(
+                      buff,
+                      0644,
+                      rekernel_dir,
+                      &rekernel_unit_fops
+                  );
+
+                  if (!rekernel_unit_entry)
+                      printk("create rekernel unit failed!\n");
+              }
+              return 0;
+          }
+          EOF
+
+          # Modify Binder Source
+          BINDER="$SOURCEDIR/drivers/android/binder.c"
+          if ! grep -qF '#include "../rekernel/rekernel.h"' "$BINDER"; then
+            perl -0pi -e '
+              my $anchor = "#include <linux/file.h>\n";
+              my $insert = "#include <linux/file.h>\n\n#ifdef CONFIG_REKERNEL\n#include \"../rekernel/rekernel.h\"\n#endif\n";
+              die "⚠️ ReKernel Binder Source Include Anchor Not Found\n"
+                unless index($_, $anchor) >= 0;
+              s/\Q$anchor\E/$insert/;
+            ' "$BINDER"
+          fi
+
+          if ! grep -qF 'type=Binder,bindertype=reply' "$BINDER"; then
+            perl -0pi -e '
+              my $anchor =
+                "trace_android_vh_binder_reply(target_proc, proc, thread, tr);\n";
+              my $insert = <<'\''CODE'\'';
+          trace_android_vh_binder_reply(target_proc, proc, thread, tr);
+
+          #ifdef CONFIG_REKERNEL
+          if (start_rekernel_server() == 0) {
+            if (target_proc
+              && (NULL != target_proc->tsk)
+              && (NULL != proc->tsk)
+              && (task_uid(target_proc->tsk).val <= MAX_SYSTEM_UID)
+              && (proc->pid != target_proc->pid)
+              && line_is_frozen(target_proc->tsk)) {
+                char binder_kmsg[PACKET_SIZE];
+                snprintf(binder_kmsg, sizeof(binder_kmsg), "type=Binder,bindertype=reply,oneway=0,from_pid=%d,from=%d,target_pid=%d,target=%d;", proc->pid, task_uid(proc->tsk).val, target_proc->pid, task_uid(target_proc->tsk).val);
+                send_netlink_message(binder_kmsg, strlen(binder_kmsg));
+            }
+          }
+          #endif
+          CODE
+
+              die "⚠️ ReKernel Binder Reply Anchor Not Found\n"
+                unless index($_, $anchor) >= 0;
+              s/\Q$anchor\E/$insert/;
+            ' "$BINDER"
+          fi
+
+          if ! grep -qF 'type=Binder,bindertype=transaction' "$BINDER"; then
+            perl -0pi -e '
+              my $anchor = "e->to_node = target_node->debug_id;\n";
+              my $insert = <<'\''CODE'\'';
+          e->to_node = target_node->debug_id;
+
+          #ifdef CONFIG_REKERNEL
+          if (start_rekernel_server() == 0) {
+            if (target_proc
+              && (NULL != target_proc->tsk)
+              && (NULL != proc->tsk)
+              && (task_uid(target_proc->tsk).val > MIN_USERAPP_UID)
+              && (proc->pid != target_proc->pid)
+              && line_is_frozen(target_proc->tsk)) {
+                char binder_kmsg[PACKET_SIZE];
+                snprintf(binder_kmsg, sizeof(binder_kmsg), "type=Binder,bindertype=transaction,oneway=%d,from_pid=%d,from=%d,target_pid=%d,target=%d;", tr->flags & TF_ONE_WAY, proc->pid, task_uid(proc->tsk).val, target_proc->pid, task_uid(target_proc->tsk).val);
+                send_netlink_message(binder_kmsg, strlen(binder_kmsg));
+            }
+          }
+          #endif
+          CODE
+
+              die "⚠️ ReKernel Binder Transaction Anchor Not Found\n"
+                unless index($_, $anchor) >= 0;
+              s/\Q$anchor\E/$insert/;
+            ' "$BINDER"
+          fi
+
+          # Modify Binder Alloc Source
+          BINDERALLOC="$SOURCEDIR/drivers/android/binder_alloc.c"
+          if ! grep -qF '#include "../rekernel/rekernel.h"' "$BINDERALLOC"; then
+            perl -0pi -e '
+              my $anchor = "#include <linux/slab.h>\n";
+              my $insert = "#include <linux/slab.h>\n\n#ifdef CONFIG_REKERNEL\n#include \"../rekernel/rekernel.h\"\n#endif\n";
+              die "⚠️ ReKernel Binder Alloc Source Include Anchor Not Found\n"
+                unless index($_, $anchor) >= 0;
+              s/\Q$anchor\E/$insert/;
+            ' "$BINDERALLOC"
+          fi
+
+          if ! grep -qF 'type=Binder,bindertype=free_buffer_full' "$BINDERALLOC"; then
+            perl -0pi -e '
+              my $anchor =
+                "if (is_async && alloc->free_async_space < size) {\n";
+              my $insert = <<'\''CODE'\'';
+          if (is_async && alloc->free_async_space < size) {
+          #ifdef CONFIG_REKERNEL
+              if (alloc->free_async_space < 3 * (size + sizeof(struct binder_buffer))
+                || (alloc->free_async_space < WARN_AHEAD_SPACE)) {
+                  struct task_struct *proc_task = NULL;
+                  rcu_read_lock();
+                  proc_task = find_task_by_vpid(alloc->pid);
+                  rcu_read_unlock();
+                  if (proc_task != NULL && start_rekernel_server() == 0) {
+                    if (line_is_frozen(proc_task)) {
+                      char binder_kmsg[PACKET_SIZE];
+                      snprintf(
+                          binder_kmsg,
+                          sizeof(binder_kmsg),
+                          "type=Binder,bindertype=free_buffer_full,oneway=1,from_pid=%d,from=%d,target_pid=%d,target=%d;",
+                          current->pid,
+                          task_uid(current).val,
+                          proc_task->pid,
+                          task_uid(proc_task).val
+                      );
+
+                      send_netlink_message(
+                          binder_kmsg,
+                          strlen(binder_kmsg)
+                      );
+                    }
+                  }
+              }
+          #endif
+          CODE
+
+              die "⚠️ ReKernel Binder Alloc Source Anchor Not Found\n"
+                unless index($_, $anchor) >= 0;
+              s/\Q$anchor\E/$insert/;
+            ' "$BINDERALLOC"
+          fi
+
+          # Modify Signal Source
+          SIGNAL="$SOURCEDIR/kernel/signal.c"
+          if ! grep -qF '#include "../drivers/rekernel/rekernel.h"' "$SIGNAL"; then
+            perl -0pi -e '
+              my $anchor = "#include <linux/file.h>\n";
+              my $insert = "#include <linux/file.h>\n\n#ifdef CONFIG_REKERNEL\n#include \"../drivers/rekernel/rekernel.h\"\n#endif\n";
+              die "⚠️ ReKernel Signal Source Include Anchor Not Found\n"
+                unless index($_, $anchor) >= 0;
+              s/\Q$anchor\E/$insert/;
+            ' "$SIGNAL"
+          fi
+
+          if ! grep -qF 'type=Signal,signal=' "$SIGNAL"; then
+            perl -0pi -e '
+              my $anchor =
+                "trace_android_vh_do_send_sig_info(sig, current, p);\n";
+              my $insert = <<'\''CODE'\'';
+          trace_android_vh_do_send_sig_info(sig, current, p);
+
+          #ifdef CONFIG_REKERNEL
+          if (start_rekernel_server() == 0) {
+            if (line_is_frozen(current) &&
+                (sig == SIGKILL ||
+                 sig == SIGTERM ||
+                 sig == SIGABRT ||
+                 sig == SIGQUIT)) {
+              char binder_kmsg[PACKET_SIZE];
+              snprintf(
+                  binder_kmsg,
+                  sizeof(binder_kmsg),
+                  "type=Signal,signal=%d,killer_pid=%d,killer=%d,dst_pid=%d,dst=%d;",
+                  sig,
+                  task_tgid_nr(p),
+                  task_uid(p).val,
+                  task_tgid_nr(current),
+                  task_uid(current).val
+              );
+
+              send_netlink_message(
+                  binder_kmsg,
+                  strlen(binder_kmsg)
+              );
+            }
+          }
+          #endif
+          CODE
+
+              die "⚠️ ReKernel Signal Source Anchor Not Found\n"
+                unless index($_, $anchor) >= 0;
+              s/\Q$anchor\E/$insert/;
+            ' "$SIGNAL"
+          fi
+
+          # Validate ReKernel Integration
+          echo "🔎 Validating ReKernel Integration"
+          test -s "$REKERNELDIR/rekernel.h"
+          grep -qF '#include "../rekernel/rekernel.h"' "$BINDER"
+          grep -qF 'type=Binder,bindertype=reply' "$BINDER"
+          grep -qF 'type=Binder,bindertype=transaction' "$BINDER"
+          grep -qF '#include "../rekernel/rekernel.h"' "$BINDERALLOC"
+          grep -qF 'type=Binder,bindertype=free_buffer_full' "$BINDERALLOC"
+          grep -qF '#include "../drivers/rekernel/rekernel.h"' "$SIGNAL"
+          grep -qF 'type=Signal,signal=' "$SIGNAL"
+
+          echo "📂 Header               : $REKERNELDIR/rekernel.h"
+          echo "📄 Binder Source        : OK"
+          echo "📄 Binder Alloc Source  : OK"
+          echo "📄 Signal Source        : OK"
+          echo "🎉 ReKernel Integration Complete"
 
 
       - name: 🔧 NoMount Built-in Integration
