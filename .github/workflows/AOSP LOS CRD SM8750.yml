@@ -1693,16 +1693,20 @@ jobs:
         if: ${{ !inputs.debugskipbuild }}
         shell: bash
         run: |
+          # Configure Kernel Build Environment
           sudo sysctl -w vm.max_map_count=1048576
+
           export LLVM=1
           export LLVM_IAS=1
           export KBUILD_BUILD_USER="${{ inputs.builduser }}"
           export KBUILD_BUILD_HOST="${{ inputs.buildhost }}"
 
-          if [ "${{ inputs.buildccachedebug }}" = "true" ]; then
+          # Configure CCache Debug Logging
+          if [[ "${{ inputs.buildccachedebug }}" == "true" ]]; then
             export CCACHE_LOGFILE="$GITHUB_WORKSPACE/ccache.log"
           fi
 
+          # Configure Build Timestamp
           if [[ -n "${{ inputs.kbuildtime }}" &&
                 "${{ inputs.kbuildtime }}" != "N" &&
                 "${{ inputs.kbuildtime }}" != "n" ]]; then
@@ -1710,16 +1714,48 @@ jobs:
             echo "🕒 Build Time: ${KBUILD_BUILD_TIMESTAMP}"
           fi
 
-          cd "$GITHUB_WORKSPACE"
-
-          chmod 755 lib/*.so
+          # Define Fake Time Environment
           export FAKESTAT="2025-05-25 12:00:00"
           export FAKETIME="@2025-05-25 13:00:00"
 
+          # Define Build Paths
           LIBDIR="$GITHUB_WORKSPACE/lib"
+          CCWRAPPER="$GITHUB_WORKSPACE/cc-wrapper"
+          LDWRAPPER="$GITHUB_WORKSPACE/ld-wrapper"
+
           export PRELOAD_LIBS="$LIBDIR/libfakestat.so:$LIBDIR/libfaketimeMT.so"
 
-          cat > cc-wrapper <<EOF
+          # Validate Build Tools
+          echo "🔎 Validating Build Tools..."
+          command -v clang >/dev/null || {
+            echo "⚠️ clang Not Found"
+            exit 1
+          }
+          command -v ld.lld >/dev/null || {
+            echo "⚠️ ld.lld Not Found"
+            exit 1
+          }
+          command -v ccache >/dev/null || {
+            echo "⚠️ ccache Not Found"
+            exit 1
+          }
+
+          # Validate Fake Time Libraries
+          if [[ ! -f "$LIBDIR/libfakestat.so" ||
+                ! -f "$LIBDIR/libfaketimeMT.so" ]]; then
+            echo "⚠️ Fake Time Libraries Not Found"
+            echo "📂 Library Directory: $LIBDIR"
+            exit 1
+          fi
+
+          # Prepare Fake Time Libraries
+          chmod 755 \
+            "$LIBDIR/libfakestat.so" \
+            "$LIBDIR/libfaketimeMT.so"
+
+          # Create Clang Wrapper
+          cd "$GITHUB_WORKSPACE"
+          cat > "$CCWRAPPER" <<EOF
           #!/bin/bash
           export LD_PRELOAD="$PRELOAD_LIBS"
           export FAKESTAT="$FAKESTAT"
@@ -1727,7 +1763,8 @@ jobs:
           exec ccache clang "\$@"
           EOF
 
-          cat > ld-wrapper <<EOF
+          # Create LLD Wrapper
+          cat > "$LDWRAPPER" <<EOF
           #!/bin/bash
           export LD_PRELOAD="$PRELOAD_LIBS"
           export FAKESTAT="$FAKESTAT"
@@ -1735,98 +1772,139 @@ jobs:
           exec ld.lld "\$@"
           EOF
 
-          chmod +x cc-wrapper ld-wrapper
-          echo "🔧 Build Environment"
-          echo "📌 LLVM       : $LLVM"
-          echo "📌 LLVM IAS   : $LLVM_IAS"
-          echo "📌 Build User : $KBUILD_BUILD_USER"
-          echo "📌 Build Host : $KBUILD_BUILD_HOST"
-          echo "📌 Fake Stat  : $FAKESTAT"
-          echo "📌 Fake Time  : $FAKETIME"
-          echo "📌 CCache     : $(ccache --version | head -1)"
+          chmod +x "$CCWRAPPER" "$LDWRAPPER"
+          # Validate Wrappers
+          "$CCWRAPPER" --version >/dev/null
+          "$LDWRAPPER" --version >/dev/null
 
+          # Display Build Environment
+          echo
+          echo "🔧 Build Environment"
+          echo "📌 LLVM        : $LLVM"
+          echo "📌 LLVM IAS    : $LLVM_IAS"
+          echo "📌 Architecture: arm64"
+          echo "📌 Build User  : $KBUILD_BUILD_USER"
+          echo "📌 Build Host  : $KBUILD_BUILD_HOST"
+          echo "📌 Fake Stat   : $FAKESTAT"
+          echo "📌 Fake Time   : $FAKETIME"
+          echo "📌 Clang       : $(clang --version | sed -n '1p')"
+          echo "📌 LLD         : $(ld.lld --version | sed -n '1p')"
+          echo "📌 CCache      : $(ccache --version | sed -n '1p')"
+
+          # Move Into Kernel Source
           cd "$SOURCEDIR"
 
+          # Start Build Timer
+          BUILDSTART="$(date +%s)"
+
+          # Build Kernel Image
+          echo
           echo "🔨 Building Kernel Image..."
           make \
             LLVM=1 \
             LLVM_IAS=1 \
             ARCH=arm64 \
-            CC="$GITHUB_WORKSPACE/cc-wrapper" \
-            LD="$GITHUB_WORKSPACE/ld-wrapper" \
-            HOSTLD="$GITHUB_WORKSPACE/ld-wrapper" \
+            CC="$CCWRAPPER" \
+            LD="$LDWRAPPER" \
+            HOSTLD="$LDWRAPPER" \
             KCFLAGS+=-O2 \
             -j"$(nproc --all)" \
             Image
 
+          # Calculate Build Duration
+          BUILDEND="$(date +%s)"
+          BUILDTIME="$((BUILDEND - BUILDSTART))"
+
+          # Display CCache Status
+          echo
           echo "📊 CCache Status:"
           ccache -s
 
+          # Validate Kernel Image
           IMAGE="arch/arm64/boot/Image"
-          if [ ! -s "$IMAGE" ]; then
+          if [[ ! -s "$IMAGE" ]]; then
             echo "⚠️ Kernel Image Missing or Empty"
-            echo "📂 Expected: $GITHUB_WORKSPACE/work/src/$IMAGE"
+            echo "📂 Expected: $SOURCEDIR/$IMAGE"
             exit 1
           fi
 
+          # Display Build Result
+          echo
           echo "📦 Kernel Image:"
           ls -lh "$IMAGE"
+
+          echo "⏱️ Build Duration: ${BUILDTIME}s"
           echo "🎉 Kernel Build Complete"
 
    
-      - name: 🧪 Debug Create Dummy Image
+      - name: 🧪 Create Debug Dummy Image
         if: ${{ inputs.debugskipbuild }}
         shell: bash
         run: |
+          # Define Kernel Image
           IMAGE="$SOURCEDIR/arch/arm64/boot/Image"
+
+          # Prepare Kernel Image Directory
           mkdir -p "$(dirname "$IMAGE")"
+
+          # Create Dummy Kernel Image
           printf '%s\n' "DEBUG DUMMY IMAGE" > "$IMAGE"
 
-          SIZE=$(stat -c%s "$IMAGE")
+          # Validate Dummy Kernel Image
+          SIZE="$(stat -c%s "$IMAGE")"
           echo "🧪 Debug Mode: Kernel Build Skipped"
           echo "📂 Dummy Image: $IMAGE"
-          echo "📦 Image Size : $SIZE Bytes"
-          if [ "$SIZE" -le 0 ]; then
+          echo "📦 Image Size  : ${SIZE} Bytes"
+          if [[ "$SIZE" -le 0 ]]; then
             echo "⚠️ Failed to Create Dummy Image"
             exit 1
           fi
 
-          echo "🚀 Dummy Image Created Successfully"
-   
+          echo "🎉 Dummy Image Created Successfully"
     
+      
       - name: 🔎 Verify Kernel Build
         id: kernelverify
         shell: bash
         run: |
+          # Move Into Kernel Source
           cd "$SOURCEDIR"
+
           echo "🔎 Verifying Kernel Build..."
           echo "📌 Expected Kernel Version: $FULLVERSION"
-          if [ ! -f "arch/arm64/boot/Image" ]; then
-            echo "⚠️ Kernel Image Not Found"
+
+          # Define Kernel Image
+          IMAGE="arch/arm64/boot/Image"
+          # Validate Kernel Image
+          if [[ ! -s "$IMAGE" ]]; then
+            echo "⚠️ Kernel Image Missing or Empty"
+            echo "📂 Expected: $SOURCEDIR/$IMAGE"
             exit 1
           fi
 
           # Get Real Kernel Release
-          REL=$(cat include/config/kernel.release 2>/dev/null || true)
-
+          REL="$(cat include/config/kernel.release 2>/dev/null || true)"
           # Get UTS Version
-          VER=$(grep -oE \
-            '#[0-9]+ SMP[^"]*' \
-            include/generated/utsversion.h 2>/dev/null |
-            head -1 || true)
+          VER="$(
+            grep -oE '#[0-9]+ SMP[^"]*' \
+              include/generated/utsversion.h 2>/dev/null |
+              sed -n '1p' || true
+          )"
 
           # Fallback: Read UTS Version From Kernel Image
-          if [ -z "$VER" ]; then
-            VER=$(strings arch/arm64/boot/Image |
-              grep -oE '#[0-9]+ SMP[^"]*' |
-              head -1 || true)
+          if [[ -z "$VER" ]]; then
+            VER="$(
+              strings "$IMAGE" |
+                grep -oE '#[0-9]+ SMP[^"]*' |
+                sed -n '1p' || true
+            )
           fi
 
           echo "📌 Kernel Release : ${REL:-Unknown}"
           echo "📌 UTS Version    : ${VER:-Unknown}"
 
           # Verify Kernel Release
-          if [ -n "$REL" ]; then
+          if [[ -n "$REL" ]]; then
             case "$REL" in
               "$FULLVERSION"*)
                 echo "✔️ Kernel Version Matches: $FULLVERSION"
@@ -1839,14 +1917,20 @@ jobs:
                 ;;
             esac
           else
-            echo "⚠️ Kernel Release Not Found"
+            echo "ℹ️ Kernel Release Not Found"
+            echo "ℹ️ This is Expected When Debug Skip Build is Enabled"
           fi
 
+          # Export Verification Results
           echo "kernelrel=$REL" >> "$GITHUB_OUTPUT"
           echo "kernelver=$VER" >> "$GITHUB_OUTPUT"
 
-          echo "✔️ Kernel Build Verified"
-          ls -lh arch/arm64/boot/Image
+          # Display Kernel Image
+          echo
+          echo "📦 Kernel Image:"
+          ls -lh "$IMAGE"
+
+          echo "🎉 Kernel Build Verified"
    
      
       - name: 🧩 Patch Kernel with KPM
