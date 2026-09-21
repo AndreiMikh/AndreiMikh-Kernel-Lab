@@ -143,9 +143,12 @@ jobs:
       ak3name: ${{ steps.package.outputs.ak3name }}
     env:
       # CCache Configuration
+      CCACHE_BASEDIR: ${{ github.workspace }}
       CCACHE_DIR: ${{ github.workspace }}/.ccache
       CCACHE_MAXSIZE: 8G
       CCACHE_COMPILERCHECK: "content"
+      CCACHE_NOHASHDIR: "true"
+      CCACHE_NOHARDLINK: "true"
       CCACHE_IS_KERNEL_COMPILING: "true"
     steps:
       - name: 📥 Checkout Workflow Repository
@@ -224,21 +227,46 @@ jobs:
           echo "📌 Name  : $(git config --global user.name)"
           echo "📌 Email : $(git config --global user.email)"
           echo "🎉 Git Identity & Build Workspace Prepared Successfully"
+
+
+      - name: 🧹 Clean Unused Runner Components
+        shell: bash
+        run: |
+          echo "🧹 Cleaning Unused Runner Components..."
+          # Remove Unused .NET Runtime
+          sudo rm -rf /usr/share/dotnet
+          # Remove Unused Android SDK
+          sudo rm -rf /usr/local/lib/android
+          # Remove Unused GHC Toolchain
+          sudo rm -rf /opt/ghc
+          # Remove Unused CodeQL Tools
+          sudo rm -rf /opt/hostedtoolcache/CodeQL
+          echo "📊 Runner Storage After Cleanup:"
+          df -h
+          echo "🎉 Runner Cleanup Complete"
  
  
-      - name: ⚙️ Resolve Clang Revision
+      - name: 🔐 Resolve Clang Revision
         id: clang-meta
         shell: bash
         run: |
-          # Define Clang Cache Key
+          # Define Clang Revision
           CLANGVERSION="r563880c"
-          CLANGARCHIVE="clang-r563880c.tar.gz"
-          echo "📌 Clang Revision: ${CLANGVERSION}"
-          echo "📌 Clang Archive : ${CLANGARCHIVE}"
-          CLANGKEY="aosp-clang-${CLANGVERSION}-${{ runner.os }}-${{ runner.arch }}"
-          echo "📌 Clang Cache Key: ${CLANGKEY}"
-          echo "clangkey=${CLANGKEY}" >> "$GITHUB_OUTPUT"
+          CLANGARCHIVE="clang-${CLANGVERSION}.tar.gz"
 
+          # Export Clang Metadata
+          {
+            echo "CLANGVERSION=$CLANGVERSION"
+            echo "CLANGARCHIVE=$CLANGARCHIVE"
+          } >> "$GITHUB_ENV"
+
+          # Define Clang Cache Key
+          CLANGKEY="aosp-clang-21-${CLANGVERSION}-${{ runner.os }}-${{ runner.arch }}"
+          echo "📌 Clang Revision : $CLANGVERSION"
+          echo "📌 Clang Archive  : $CLANGARCHIVE"
+          echo "📌 Clang Cache Key: $CLANGKEY"
+
+          echo "clangkey=$CLANGKEY" >> "$GITHUB_OUTPUT"
    
       - name: 💾 Restore AOSP Clang Cache
         id: clang-cache
@@ -254,7 +282,7 @@ jobs:
         run: |
           # Display Clang Download Information
           echo "📥 Downloading AOSP Clang 21..."
-          echo "📌 Revision: ${CLANGVERSION}"
+          echo "📌 Revision: $CLANGVERSION"
 
           # Define AOSP Clang Archive URL
           CLANGURL="https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/b5f16aee7b8af4c339972027e91e7e793c2e55d9/${CLANGARCHIVE}"
@@ -388,25 +416,20 @@ jobs:
           echo "/tmp"
           echo "🎉 Clang Configuration & Toolchain Verification Complete"
     
-      - name: 🧹 Clean Unused Runner Components
-        shell: bash
-        run: |
-          echo "🧹 Cleaning Unused Runner Components..."
-          # Remove Unused .NET Runtime
-          sudo rm -rf /usr/share/dotnet
-          # Remove Unused Android SDK
-          sudo rm -rf /usr/local/lib/android
-          # Remove Unused GHC Toolchain
-          sudo rm -rf /opt/ghc
-          # Remove Unused CodeQL Tools
-          sudo rm -rf /opt/hostedtoolcache/CodeQL
-          echo "📊 Runner Storage After Cleanup:"
-          df -h
-          echo "🎉 Runner Cleanup Complete"
 
       - name: ⚙️ Configure CCache
         shell: bash
         run: |
+          # Configure and Initialize CCache for AOSP Kernel Build
+          # Configure CCache Environment
+          export CCACHE_DIR
+          export CCACHE_MAXSIZE
+          export CCACHE_COMPILERCHECK
+          export CCACHE_BASEDIR
+          export CCACHE_NOHASHDIR
+          export CCACHE_NOHARDLINK
+          export CCACHE_IS_KERNEL_COMPILING
+
           # Install Custom CCache Binary
           if [[ -f "$GITHUB_WORKSPACE/lib/ccache-ecs" ]]; then
             echo "📦 Installing Custom CCache Binary..."
@@ -420,35 +443,40 @@ jobs:
             echo "📌 Using System CCache"
           fi
 
-          # Configure CCache Environment
-          export CCACHE_DIR
-          export CCACHE_MAXSIZE
-          export CCACHE_COMPILERCHECK=content
-          export CCACHE_IS_KERNEL_COMPILING=true
-
           # Configure CCache
-          cat > "$CCACHE_DIR/ccache.conf" <<'EOF'
-          max_size = 8G
-          compression = true
-          compression_level = 5
-          compiler_check = content
-          sloppiness = file_stat_matches,include_file_ctime,include_file_mtime,pch_defines,file_macro,time_macros
-          EOF
+          ccache --set-config=cache_dir="$CCACHE_DIR"
+          ccache --set-config=max_size="$CCACHE_MAXSIZE"
+          ccache --set-config=compression=true
+          ccache --set-config=compression_level=5
+          ccache --set-config=compiler_check="$CCACHE_COMPILERCHECK"
+          ccache --set-config=base_dir="$CCACHE_BASEDIR"
+          ccache --set-config=hash_dir=false
+          ccache --set-config=hard_link=false
 
-          # Display CCache Configuration
+          # Reduce False Cache Misses
+          ccache --set-config=sloppiness=file_stat_matches,include_file_ctime,include_file_mtime,pch_defines,file_macro,time_macros
+
+          # Display Configuration
           echo
           echo "🔧 CCache Configuration"
-          echo "📂 Cache Directory : $CCACHE_DIR"
-          echo "📦 Maximum Size    : $CCACHE_MAXSIZE"
-          echo "🗜️ Compression     : Enabled"
-          echo "📊 Compression Lvl : 5"
-          echo "🔍 Compiler Check  : content"
+          echo "📂 Cache Directory  : $CCACHE_DIR"
+          echo "📦 Maximum Size     : $CCACHE_MAXSIZE"
+          echo "🗜️ Compression      : Enabled"
+          echo "📊 Compression Lvl  : 5"
+          echo "🔍 Compiler Check   : $CCACHE_COMPILERCHECK"
+          echo "📍 Base Directory   : $CCACHE_BASEDIR"
+          echo "📁 Hash Directory   : Disabled"
+          echo "🔗 Hard Links       : Disabled"
+          echo "⚙️ Kernel Compiling : $CCACHE_IS_KERNEL_COMPILING"
+
+          echo
           echo "🔎 CCache Version:"
           ccache --version
-
-          # Reset Statistics
+          echo
+          echo "🔎 CCache Configuration:"
+          ccache --show-config
+          # Reset Statistics Only
           ccache -z
-
           echo "🎉 CCache Configuration Complete"
 
 
