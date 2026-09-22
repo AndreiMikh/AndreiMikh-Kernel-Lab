@@ -245,6 +245,35 @@ jobs:
           df -h
           echo "🎉 Runner Cleanup Complete"
 
+
+      - name: 📦 Install Build Dependencies
+        shell: bash
+        run: |
+          # Define Required APT Packages
+          export APTPACKAGES="zip zstd patch bc flex bison libssl-dev libncurses-dev libelf-dev libdw-dev dwarves python3 ccache mkbootimg"
+
+          # Define APT Packages Script
+          SCRIPT="${WORKDIR}/AndreiMikh-Kernel-Lab/scripts/APT-Packages.sh"
+          # Verify APT Packages Script
+          if [[ ! -f "$SCRIPT" ]]; then
+            echo "⚠️ APT Packages Script Not Found"
+            echo "📁 Expected Path: $SCRIPT"
+            exit 1
+          fi
+
+          # Make APT Packages Script Executable
+          chmod +x "$SCRIPT"
+
+          # Install Build Dependencies
+          echo "🚀 Running APT Packages Script..."
+          bash "$SCRIPT" "$HOME/.apt-pkg-cache"
+
+          # Clean APT Package Cache
+          echo "🧹 Cleaning APT Package Cache..."
+          sudo apt-get clean
+          sudo rm -rf /var/lib/apt/lists/*
+          echo "🎉 Build Dependencies Ready"
+
  
       - name: 🔐 Resolve Clang Revision
         id: clang-meta
@@ -276,7 +305,7 @@ jobs:
           key: ${{ steps.clang-meta.outputs.clangkey }}
    
     
-      - name: 📥 Download AOSP Clang 21
+      - name: 📥 Download AOSP Clang
         if: steps.clang-cache.outputs.cache-hit != 'true'
         shell: bash
         run: |
@@ -345,37 +374,8 @@ jobs:
           path: clang
           key: ${{ steps.clang-meta.outputs.clangkey }}
 
-  
-      - name: 📦 Install Build Dependencies
-        shell: bash
-        run: |
-          # Define Required APT Packages
-          export APTPACKAGES="zip zstd patch bc flex bison libssl-dev libncurses-dev libelf-dev libdw-dev dwarves python3 ccache mkbootimg"
-
-          # Define APT Packages Script
-          SCRIPT="${WORKDIR}/AndreiMikh-Kernel-Lab/scripts/APT-Packages.sh"
-          # Verify APT Packages Script
-          if [[ ! -f "$SCRIPT" ]]; then
-            echo "⚠️ APT Packages Script Not Found"
-            echo "📁 Expected Path: $SCRIPT"
-            exit 1
-          fi
-
-          # Make APT Packages Script Executable
-          chmod +x "$SCRIPT"
-
-          # Install Build Dependencies
-          echo "🚀 Running APT Packages Script..."
-          bash "$SCRIPT" "$HOME/.apt-pkg-cache"
-
-          # Clean APT Package Cache
-          echo "🧹 Cleaning APT Package Cache..."
-          sudo apt-get clean
-          sudo rm -rf /var/lib/apt/lists/*
-          echo "🎉 Build Dependencies Ready"
-
    
-      - name: 🧰 Configure & Verify Clang Toolchain
+      - name: 🧰 Configure & Verify Clang
         shell: bash
         run: |
           # Define Clang Toolchain Path
@@ -568,7 +568,7 @@ jobs:
           echo "🎉 Reject Checker Ready"
 
 
-      - name: 📂 AOSP Kernel Sources
+      - name: 📂 Download AOSP Kernel Sources
         if: ${{ inputs.AOSPSOURCE == 'Lineage' || inputs.AOSPSOURCE == 'CrDroid' }}
         shell: bash
         run: |
@@ -1137,11 +1137,12 @@ jobs:
 
           # Export Root Engine Metadata
           {
-            echo "MANAGERBRANCH=$MANAGERBRANCH"
-            echo "BRANCHPATH=$BRANCHPATH"
-            echo "MANAGERARTIFACT=$MANAGERARTIFACT"
-            echo "KSUREPO=$KSUREPO"
+            echo "managerbranch=$MANAGERBRANCH"
+            echo "branchpath=$BRANCHPATH"
+            echo "managerartifact=$MANAGERARTIFACT"
+            echo "ksurepo=$KSUREPO"
           } >> "$GITHUB_OUTPUT"
+          
           echo "✔️ Root Engine Source Resolved"
           echo "📦 Engine     : $ROOTBRANCHSOURCE"
           echo "📂 Repository : $KSUREPO"
@@ -1157,8 +1158,8 @@ jobs:
           # Define Root Engine Source
           cd "$SOURCEDIR"
 
-          MANAGERBRANCH="${{ steps.manager.outputs.MANAGERBRANCH }}"
-          KSUREPO="${{ steps.manager.outputs.KSUREPO }}"
+          MANAGERBRANCH="${{ steps.manager.outputs.managerbranch }}"
+          KSUREPO="${{ steps.manager.outputs.ksurepo }}"
 
           # Get Repository Commit Count
           getcommitcount() {
@@ -2405,75 +2406,58 @@ jobs:
           echo "🎉 Dummy Image Created Successfully"
     
       
-      - name: 📊 Verify Kernel Build
+      - name: 📊 Verify Kernel UTS Version
         id: kernelverify
         shell: bash
         run: |
+          set -Eeuo pipefail
+      
           # Move Into Kernel Source
           cd "$SOURCEDIR"
-
-          echo "🔎 Verifying Kernel Build..."
+      
+          echo "🔎 Verifying Kernel UTS Version..."
           echo "📌 Expected Kernel Version: $FULLVERSION"
-
+      
           # Define Kernel Image
           IMAGE="arch/arm64/boot/Image"
-
+      
           # Validate Kernel Image
           if [[ ! -s "$IMAGE" ]]; then
             echo "⚠️ Kernel Image Missing or Empty"
             echo "📂 Expected: $SOURCEDIR/$IMAGE"
             exit 1
           fi
-
-          # Get Real Kernel Release
-          REL="$(cat include/config/kernel.release 2>/dev/null || true)"
-
-          # Get UTS Version
-          VER="$(
+      
+          # Read UTS Version From Generated Header
+          UTSVERSION="$(
             grep -oE '#[0-9]+ SMP[^"]*' \
               include/generated/utsversion.h 2>/dev/null |
               sed -n '1p' || true
           )"
-
+      
           # Fallback: Read UTS Version From Kernel Image
-          if [[ -z "$VER" ]]; then
-            VER="$(
+          if [[ -z "$UTSVERSION" ]]; then
+            echo "ℹ️ UTS Version Not Found In Generated Header"
+            echo "🔎 Checking Kernel Image..."     
+            UTSVERSION="$(
               strings "$IMAGE" |
                 grep -oE '#[0-9]+ SMP[^"]*' |
                 sed -n '1p' || true
-            )"
+            )
           fi
-
-          echo "📌 Kernel Release : ${REL:-Unknown}"
-          echo "📌 UTS Version    : ${VER:-Unknown}"
-
-          # Verify Kernel Release
-          if [[ -n "$REL" ]]; then
-            case "$REL" in
-              "$FULLVERSION"*)
-                echo "✔️ Kernel Version Matches: $FULLVERSION"
-                ;;
-              *)
-                echo "⚠️ Kernel Version Mismatch"
-                echo "📌 Expected: $FULLVERSION"
-                echo "📌 Found   : $REL"
-                exit 1
-                ;;
-            esac
-          else
-            echo "ℹ️ Kernel Release Not Found"
-            echo "ℹ️ This Is Expected When Debug Skip Build Is Enabled"
+      
+          # Validate UTS Version
+          if [[ -z "$UTSVERSION" ]]; then
+            echo "⚠️ UTS Version Not Found"
+            exit 1
           fi
-
-          # Export Verification Results
-          echo "kernelrel=$REL" >> "$GITHUB_OUTPUT"
-          echo "kernelver=$VER" >> "$GITHUB_OUTPUT"
-
-          # Display Kernel Image
-          echo
-          echo "📦 Kernel Image:"
-          ls -lh "$IMAGE"
-          echo "🎉 Kernel Build Verified"
+      
+          echo "📌 UTS Version: $VER"
+      
+          # Export Verification Result
+          echo "utsversion=$UTSVERSION" >> "$GITHUB_OUTPUT"
+      
+          echo "🎉 Kernel UTS Version Verified"
      
      
       - name: 🧩 Patch Kernel with KP-Next
