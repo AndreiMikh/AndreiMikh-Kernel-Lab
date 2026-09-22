@@ -134,11 +134,6 @@ on:
         description: "Custom Kernel Level Spoofing (Sublevel)"
         required: false
         default: ""        
-      FASTBUILD:
-        type: boolean
-        description: "Fast Kernel Build"
-        required: true
-        default: true        
       LSMBBG:
         type: boolean
         description: "Critical Partition Write Protection (Linux Security Module)"
@@ -222,9 +217,8 @@ jobs:
     name: >
       ${{
         format(
-          '{0}{1}{2}{3}{4}{5}{6}{7}{8}{9}{10}{11}{12}{13} {14}',
+          '{0}{1}{2}{3}{4}{5}{6}{7}{8}{9}{10}{11}{12} {13}',
 
-          (github.event.inputs.FASTBUILD == 'true' && 'Fast ' || ''),
           (github.event.inputs.NTSYNC == 'true' && 'NTSync ' || ''),
           
           (
@@ -803,7 +797,6 @@ jobs:
           echo "TCP                   : ${{ github.event.inputs.TCPALGORITHM }}"
           echo "SUSFS Repository      : ${{ github.event.inputs.SUSFSVARIANT }}"
           echo "SUSFS Branch          : ${{ github.event.inputs.SUSFSBRANCHDEV }}"
-          echo "Build                 : ${{ github.event.inputs.FASTBUILD }}"
           echo "Windspeed             : ${{ github.event.inputs.WINDSPEED }}"
           echo "Scheduler             : ${{ github.event.inputs.SCHEDULERS }}"
           echo "Unicode Bypass        : ${{ github.event.inputs.UNICODE }}"
@@ -1093,7 +1086,7 @@ jobs:
             CCache-
 
       - name: 🔧 Restore ThinLTO Cache
-        if: ${{ steps.buildprofile.outputs.BUILDCCACHE != 'Disabled' && github.event.inputs.FASTBUILD == 'true' && startsWith(env.KERNELVERSION, '5.') }}
+        if: ${{ steps.buildprofile.outputs.BUILDCCACHE != 'Disabled' && startsWith(env.KERNELVERSION, '5.') }}
         id: restore-thinlto
         uses: actions/cache/restore@v5
         with:
@@ -1567,52 +1560,85 @@ jobs:
         if: ${{ github.event.inputs.SUFFIX != '' }}
         id: inject
         continue-on-error: true
+        shell: bash
         run: |
+          set -Eeuo pipefail
+
+          # Navigate
           cd kernel_workspace
 
           # Inputs
           SUFFIX="${{ github.event.inputs.SUFFIX }}"
-          FASTBUILD="${{ github.event.inputs.FASTBUILD }}"
+          ANDROIDVERSION="${ANDROIDVERSION:-android15}"
+          echo "🚀 Injecting Custom Kernel Suffix: ${SUFFIX}"
+          echo "📌 Android Version: ${ANDROIDVERSION}"
 
-          echo "🚀 Injecting Custom Kernel Suffix: $SUFFIX"
+          # Process All Supported Set Local Version Scripts
           for path in \
             kernel_platform/common/scripts/setlocalversion \
             kernel_platform/msm-kernel/scripts/setlocalversion \
             kernel_platform/external/dtc/scripts/setlocalversion; do
-            [ -f "$path" ] || continue
-            echo "Processing: $path"
 
-            # Remove Dirty Tags
+            # Skip Missing Set Local Version Scripts
+            [[ -f "$path" ]] || continue
+            echo "📂 Processing: ${path}"
+
+            # Remove Existing Dirty Tags
             sed -i 's/ -dirty//g' "$path"
-            sed -i '$i res=$(echo "$res" | sed '\''s/-dirty//g'\'')' "$path"
-            if grep -q 'KERNELVERSION.*scm_version' "$path"; then
-              echo "📌 New Set Local Version Format Detected"
-              sed -i "s|echo \"\${KERNELVERSION}.*scm_version}\"|echo \"\${KERNELVERSION}-${ANDROIDVERSION}-${SUFFIX}\"|" "$path"
-            elif grep -q 'echo "\$res"' "$path"; then
-              echo "Old Set Local Version Format Detected"
-              if [ "$FASTBUILD" = "true" ]; then
-                echo "✔️ Fast Build Enabled: Setting Static Res Value"
-                sed -i "s/^res=.*/res=\"-${ANDROIDVERSION}-${SUFFIX}\"/" "$path"
-              else
-                echo "🛠️ Standard Build: Dynamically Injecting Suffix"
-                if [[ -f ./kernel_platform/build_with_bazel.py ]]; then
-                  echo "⚠️ Note: Using Bazel may Limit Special Characters, Adjust Script if Compilation Fails"
-                fi
-                tac "$path" | sed "0,/echo \"\\\$res\"/s//res=\\\$(echo \\\$res | cut -d- -f1-2)-${SUFFIX}; echo \"\\\$res\";/" | tac > "$path.tmp"
-                mv "$path.tmp" "$path"
-              fi
 
+            # Remove Dirty From Dynamically Generated Res Values
+            sed -i '$i res=$(echo "$res" | sed '\''s/-dirty//g'\'')' "$path"
+
+            # Detect Set Local Version Format
+            if grep -q 'KERNELVERSION.*scm_version' "$path"; then
+              # New Format: Replace SCM Version Output Directly
+              echo "📌 New Set Local Version Format Detected"
+              sed -i \
+                "s|echo \"\${KERNELVERSION}.*scm_version}\"|echo \"\${KERNELVERSION}-${ANDROIDVERSION}-${SUFFIX}-4k\"|" \
+                "$path"
+            elif grep -q 'echo "\$res"' "$path"; then
+              # Old Format: Set Static Res Value for Kernel Build
+              echo "📌 Old Set Local Version Format Detected"
+              echo "✔️ Fast Build Enabled: Setting Static Res Value"
+              sed -i \
+                "s/^res=.*/res=\"-${ANDROIDVERSION}-${SUFFIX}-4k\"/" \
+                "$path"
             else
-              echo "⚠️ Unknown Format: Appending Suffix Manually"
-              echo "echo \"\$res-${SUFFIX}\"" >> "$path"
+              # Standard Format: Dynamically Inject Suffix Into Res
+              echo "🛠️ Standard Build: Dynamically Injecting Suffix"
+              # Warn When Bazel May Restrict Special Characters
+              if [[ -f kernel_platform/build_with_bazel.py ]]; then
+                echo "⚠️ Note: Using Bazel May Limit Special Characters, Adjust Script if Compilation Fails"
+              fi
+              # Inject Custom Suffix Before First Echo "$res"
+              tac "$path" |
+                sed \
+                  "0,/echo \"\\\$res\"/s//res=\\\$(echo \\\$res | cut -d- -f1-2)-${SUFFIX}; echo \"\\\$res\";/" \
+                | tac > "${path}.tmp"
+              # Replace Original File
+              mv "${path}.tmp" "$path"
             fi
+
+            # Ensure Modified Script Remains Executable
             chmod +x "$path"
+            echo "🎉 Finished: ${path}"
+            echo
           done
 
           echo "⚙️ Committing Suffix Modifications..."
-          git add -A
-          git commit -m "🎉 Inject Custom Kernel Suffix and Remove Dirty Tags"
 
+          # Stage Modified Files
+          git add -A
+
+          # Commit Only When Changes Exist
+          if git diff --cached --quiet; then
+            echo "ℹ️ No Changes Detected, Nothing to Commit"
+          else
+            git commit \
+              -m "🎉 Inject Custom Kernel Suffix and Remove Dirty Tags"
+            echo "🎉 Suffix Modifications Committed Successfully"
+          fi
+  
       - name: 🔧 Fallback - Inject Local Kernel Version Suffix (Bazel Safe)
         if: ${{ steps.inject.conclusion == 'failure' && github.event.inputs.SUFFIX != '' }}
         run: |
@@ -1639,8 +1665,7 @@ jobs:
         run: |
           cd kernel_workspace
 
-          # Inputs and Variables
-          FASTBUILD="${{ github.event.inputs.FASTBUILD }}"
+          # Inputs
           echo "🚀 Generating Random Kernel Suffix..."
           
           # Random Generation
@@ -1670,7 +1695,7 @@ jobs:
                 case "\$res" in
                   *"-${AUTOSUFFIX}"*) ;;
                   *)
-                    res="\$res-${ANDROIDVERSION}-${AUTOSUFFIX}"
+                    res="\$res-${ANDROIDVERSION}-${AUTOSUFFIX}-4k"
                     ;;
                 esac
               fi
@@ -1678,11 +1703,11 @@ jobs:
             fi
       
           done      
-          echo "⚙️ Committing changes..."    
+          echo "⚙️ Committing Changes..."    
           git add -A
       
           if git diff --cached --quiet; then
-            echo "✔️ No changes to commit"
+            echo "✔️ No Changes to Commit"
           else
             git commit -m "🎉 Apply Auto-Generated Kernel Suffix"
           fi
@@ -1788,14 +1813,14 @@ jobs:
           echo "------------------------------"
 
       - name: 🔧 Setup Clang Toolchain
-        if: ${{ github.event.inputs.FASTBUILD == 'true' }}
         shell: bash
         run: |
           set -Eeuo pipefail
 
+          # Define Kernel Platform Directory
           KERNELPLATFORM="${GITHUB_WORKSPACE}/kernel_workspace/kernel_platform"
 
-          # Navigate Kernel Platform
+          # Navigate to Kernel Platform
           cd "$KERNELPLATFORM"
 
           # Detect LLVM Integrated Assembler
@@ -1805,7 +1830,7 @@ jobs:
             LLVMENABLED="true"
           fi
 
-          # Resolve Clang Prebuilt Root Dynamically
+          # Resolve Clang Prebuilt Root
           echo "------------------------------"
           echo "🚀 Resolving Clang Toolchain..."
           echo "------------------------------"
@@ -1817,23 +1842,25 @@ jobs:
               -name 'prebuilts*' \
               -exec test -d '{}/clang/host/linux-x86' \; \
               -print |
+            sort |
             head -n1
           )"
 
-          [[ -n "$CLANGROOT" ]] || {
+          if [[ -z "$CLANGROOT" ]]; then
             echo "⚠️ Clang Root Directory Missing"
-            echo "📂 Expected under: $KERNELPLATFORM/prebuilts*"
+            echo "📂 Expected under: ${KERNELPLATFORM}/prebuilts*"
             exit 1
-          }
+          fi
 
           CLANGROOT="$(realpath "$CLANGROOT")"
 
           # Find Newest Valid Clang Toolchain
           CLANGDIR="$(
             find "$CLANGROOT/clang/host/linux-x86" \
+              -mindepth 1 \
               -maxdepth 1 \
               -type d \
-              \( -name 'clang-r*' -o -name 'clang-*' \) \
+              -name 'clang-r*' \
               -exec test -x '{}/bin/clang' \; \
               -print 2>/dev/null |
             sort -V |
@@ -1844,98 +1871,95 @@ jobs:
             echo "⚠️ No Valid Clang Toolchain Found"
             echo "🔍 Available Toolchains:"
             find "$CLANGROOT/clang/host/linux-x86" \
-              -maxdepth 3 \
+              -mindepth 1 \
+              -maxdepth 2 \
               -type f \
               -name clang \
               -print 2>/dev/null || true
+
             exit 1
           fi
 
-          # Define Tool Paths
+          # Resolve Absolute Toolchain Paths
           CLANGDIR="$(realpath "$CLANGDIR")"
-          CLANGBIN="$CLANGDIR/bin"          
-          CLANGFULLPATH="$CLANGBIN/clang"
+          CLANGBIN="${CLANGDIR}/bin"
+          CLANGFULLPATH="${CLANGBIN}/clang"
 
-          # Validate Clang
-          [[ -x "$CLANGFULLPATH" ]] || {
+          # Validate Clang Binary
+          if [[ ! -x "$CLANGFULLPATH" ]]; then
             echo "⚠️ Clang Binary Missing"
-            echo "📂 Expected: $CLANGFULLPATH"
+            echo "📂 Expected: ${CLANGFULLPATH}"
             exit 1
-          }
+          fi
 
           # Detect Clang Version
           CLANGVERSION="$(
             "$CLANGFULLPATH" --version |
-              head -n1 |
-              sed -E 's/.*clang version ([0-9.]+).*/\1/' ||
-              true
+              sed -nE '1{s/.*clang version ([0-9.]+).*/\1/p}'
           )"
 
-          [[ -n "$CLANGVERSION" ]] || {
+          if [[ -z "$CLANGVERSION" ]]; then
             echo "⚠️ Failed to Detect Clang Version"
             exit 1
-          }
+          fi
 
-          # Resolve Clang Resource / Library Directory
-          CLANGLIBROOT="${CLANGDIR}"
-          if [[ -d "$CLANGLIBROOT/lib" ]]; then
-            LIBCLANGPATH="$CLANGLIBROOT/lib"
-          else
-            LIBCLANGROOT="$(
-              "$CLANGFULLPATH" --print-resource-dir 2>/dev/null |
-                sed 's|/lib/clang/.*||' ||
-                true
-            )"
+          # Resolve Clang Resource Directory
+          CLANGRESOURCEDIR="$(
+            "$CLANGFULLPATH" \
+              --print-resource-dir 2>/dev/null || true
+          )"
 
-            if [[ -n "$LIBCLANGROOT" ]] &&
-               [[ -d "$LIBCLANGROOT/lib" ]]; then
-              LIBCLANGPATH="$LIBCLANGROOT/lib"
-            else
-              LIBCLANGPATH=""
+          # Resolve Clang Library Directory
+          LIBCLANGPATH=""
+          if [[ -n "$CLANGRESOURCEDIR" ]]; then
+            CLANGLIBPATH="$(dirname "$CLANGRESOURCEDIR")"
+            if [[ -d "$CLANGLIBPATH" ]]; then
+              LIBCLANGPATH="$CLANGLIBPATH"
             fi
           fi
 
           # Persist Toolchain Environment
           {
-            echo "CLANGROOT=$CLANGROOT"
-            echo "CLANGDIR=$CLANGDIR"
-            echo "CLANGBIN=$CLANGBIN"
-            echo "CLANGFULLPATH=$CLANGFULLPATH"
-            echo "CLANGVERSION=$CLANGVERSION"
-            echo "LLVMENABLED=$LLVMENABLED"
-            echo "LIBCLANG_PATH=$LIBCLANGPATH"
-            echo "CCACHE_COMPILER=$CLANGFULLPATH"
+            echo "CLANGROOT=${CLANGROOT}"
+            echo "CLANGDIR=${CLANGDIR}"
+            echo "CLANGBIN=${CLANGBIN}"
+            echo "CLANGFULLPATH=${CLANGFULLPATH}"
+            echo "CLANGVERSION=${CLANGVERSION}"
+            echo "LLVMENABLED=${LLVMENABLED}"
+            echo "LIBCLANG_PATH=${LIBCLANGPATH}"
+            echo "CCACHE_COMPILER=${CLANGFULLPATH}"
           } >> "$GITHUB_ENV"
 
-          # Make the Complete LLVM Toolchain Available to Subsequent Actions Step
+          # Add Complete LLVM Toolchain to PATH
           echo "$CLANGBIN" >> "$GITHUB_PATH"
 
           # Load Android Kernel Build Environment
-          SETUPENVSH="$KERNELPLATFORM/build/kernel/_setup_env.sh"
+          SETUPENVSH="${KERNELPLATFORM}/build/kernel/_setup_env.sh"
 
           if [[ -f "$SETUPENVSH" ]]; then
-            set +u
-            source "$SETUPENVSH" 2>/dev/null || true
-            set -u
+            echo "🔧 Loading Android Kernel Build Environment..."
+            source "$SETUPENVSH" || true
           fi
 
+          # Display Toolchain Information
           echo ""
           echo "------------------------------"
-          echo "📂 Clang Root      : $CLANGROOT"
+          echo "📂 Clang Root      : ${CLANGROOT}"
           echo "📂 Clang Directory : $(basename "$CLANGDIR")"
-          echo "📂 Clang Bin       : $CLANGBIN"
-          echo "📂 Clang Version   : $CLANGVERSION"
-          echo "📂 LLVM IAS        : $LLVMENABLED"
+          echo "📂 Clang Bin       : ${CLANGBIN}"
+          echo "📂 Clang Version   : ${CLANGVERSION}"
+          echo "📂 LLVM IAS        : ${LLVMENABLED}"
           echo "📂 Lib Clang       : ${LIBCLANGPATH:-Unavailable}"
           echo "------------------------------"
 
+          # Verify Active Clang
           "$CLANGFULLPATH" --version | head -n1
 
           echo ""
           echo "🎉 Clang Toolchain Ready"
 
       - name: 🔧 Setup Rust and Bindgen
-        if: ${{ github.event.inputs.FASTBUILD == 'true' && env.ENABLERUSTC == 'true' }}
+        if: env.ENABLERUSTC == 'true'
         shell: bash
         run: |
           set -Eeuo pipefail
@@ -1943,7 +1967,7 @@ jobs:
           # Define Kernel Platform Directory
           KERNELPLATFORM="${GITHUB_WORKSPACE}/kernel_workspace/kernel_platform"
 
-          # Navigate Kernel Directory
+          # Navigate to Kernel Platform
           cd "$KERNELPLATFORM"
 
           echo "------------------------------"
@@ -1958,48 +1982,56 @@ jobs:
               -name 'prebuilts*' \
               -exec test -d '{}/rust/linux-x86' \; \
               -print |
+            sort |
             head -n1
           )"
 
           # Validate Rust Prebuilt Root
-          [[ -n "$RUSTPREBUILT" ]] || {
+          if [[ -z "$RUSTPREBUILT" ]]; then
             echo "⚠️ Rust Prebuilt Root Not Found"
+            echo "📂 Expected under: ${KERNELPLATFORM}/prebuilts*"
             exit 1
-          }
+          fi
 
-          # Resolve Rust Compiler Path
+          # Resolve Absolute Rust Prebuilt Path
           RUSTPREBUILT="$(realpath "$RUSTPREBUILT")"
-          RUSTCPATH="$RUSTPREBUILT/rust/linux-x86/${VERSIONRUSTC}/bin/rustc"
+          # Define Rust Compiler Path
+          RUSTCPATH="${RUSTPREBUILT}/rust/linux-x86/${VERSIONRUSTC}/bin/rustc"
           # Validate Rust Compiler
           if [[ ! -x "$RUSTCPATH" ]]; then
             echo "⚠️ Rust Compiler Not Found"
-            echo "📌 Expected: $RUSTCPATH"
+            echo "📌 Expected: ${RUSTCPATH}"
             echo "🔍 Available Rust Compilers:"
-            find "$RUSTPREBUILT" \
-              -maxdepth 5 \
+            find "$RUSTPREBUILT/rust/linux-x86" \
+              -maxdepth 4 \
               -type f \
               -name rustc \
               -print 2>/dev/null || true
             exit 1
           fi
 
-          # Add Rust Toolchain Binary Directory to Current PATH
+          # Resolve Rust Toolchain Binary Directory
           RUSTBIN="$(dirname "$RUSTCPATH")"
-          export PATH="$RUSTBIN:$PATH"
+          # Make Rust Available to Current Step
+          export PATH="${RUSTBIN}:$PATH"
+          # Persist Rust Toolchain Environment
+          {
+            echo "RUSTPREBUILT=${RUSTPREBUILT}"
+            echo "RUSTCPATH=${RUSTCPATH}"
+          } >> "$GITHUB_ENV"
 
-          # Persist Rust Toolchain Environment for Subsequent Steps
-          echo "RUSTPREBUILT=$RUSTPREBUILT" >> "$GITHUB_ENV"
-          echo "RUSTCPATH=$RUSTCPATH" >> "$GITHUB_ENV"
+          # Add Rust Toolchain to PATH for Subsequent Steps
           echo "$RUSTBIN" >> "$GITHUB_PATH"
 
-          # Preserve Libclang Path When Available
+          # Preserve Libclang Environment
           if [[ -n "${LIBCLANG_PATH:-}" ]] &&
              [[ -d "$LIBCLANG_PATH" ]]; then
-            echo "LIBCLANG_PATH=$LIBCLANG_PATH" >> "$GITHUB_ENV"
+            echo "LIBCLANG_PATH=${LIBCLANG_PATH}" >> "$GITHUB_ENV"
           fi
 
           # Display Rust Compiler Information
-          echo "📌 Rust Compiler : $RUSTCPATH"
+          echo "📂 Rust Root     : ${RUSTPREBUILT}"
+          echo "📂 Rust Compiler : ${RUSTCPATH}"
           echo "📦 Rust Version  : $("$RUSTCPATH" --version)"
 
           echo ""
@@ -2007,13 +2039,14 @@ jobs:
           echo "🔍 Resolving Bindgen"
           echo "------------------------------"
 
-          # Locate Prebuilt Bindgen Binary
+          # Locate Prebuilt Bindgen
           BINDGENBIN="$(
             find "$KERNELPLATFORM" \
               -type f \
               -path '*/clang-tools/linux-x86/bin/bindgen' \
               -executable \
               -print 2>/dev/null |
+            sort |
             head -n1
           )"
 
@@ -2021,40 +2054,47 @@ jobs:
           if [[ -x "$BINDGENBIN" ]]; then
             echo "📌 Prebuilt Bindgen Detected"
           else
-            # Fall Back to Installing Bindgen-Cli
             echo "⚠️ Prebuilt Bindgen Not Found"
             echo "📥 Installing Bindgen-Cli 0.69.5..."
-            # Ensure Cargo Is Available for Bindgen Installation
+            # Check for Cargo
             if ! command -v cargo >/dev/null 2>&1; then
               echo "📥 Installing Rustup Cargo Environment..."
-              curl --proto '=https' \
+              curl \
+                --proto '=https' \
                 --tlsv1.2 \
                 -sSf \
                 https://sh.rustup.rs |
                 sh -s -- -y --default-toolchain none
-              # Load Rustup Cargo Environment
+              # Load Cargo Environment
               source "$HOME/.cargo/env"
             fi
+
             # Install Required Bindgen Version
             cargo install bindgen-cli --version 0.69.5
-            # Resolve Installed Bindgen Binary
+            # Resolve Installed Bindgen
             BINDGENBIN="$(command -v bindgen || true)"
           fi
 
-          # Validate Bindgen Installation
-          [[ -x "$BINDGENBIN" ]] || {
+          # Validate Bindgen
+          if [[ -z "$BINDGENBIN" ]] || [[ ! -x "$BINDGENBIN" ]]; then
             echo "⚠️ Bindgen Installation Failed"
             exit 1
-          }
+          fi
 
-          # Persist Bindgen Environment for Subsequent Steps
-          echo "BINDGENBIN=$BINDGENBIN" >> "$GITHUB_ENV"
-          echo "BINDGEN=$BINDGENBIN" >> "$GITHUB_ENV"
+          # Resolve Absolute Bindgen Path
+          BINDGENBIN="$(realpath "$BINDGENBIN")"
+
+          # Persist Bindgen Environment
+          {
+            echo "BINDGENBIN=${BINDGENBIN}"
+            echo "BINDGEN=${BINDGENBIN}"
+          } >> "$GITHUB_ENV"
+
+          # Add Bindgen to PATH for Subsequent Steps
           echo "$(dirname "$BINDGENBIN")" >> "$GITHUB_PATH"
 
           # Display Bindgen Information
-          echo ""
-          echo "📌 Bindgen : $BINDGENBIN"
+          echo "📌 Bindgen : ${BINDGENBIN}"
           echo "📦 Version : $("$BINDGENBIN" --version | head -n1)"
 
           echo ""
@@ -4217,9 +4257,8 @@ jobs:
           echo ""
           echo "🎉 GPU Embedded Bridge / Engine Disable Stage Completed"
 
-      - name: 🔧 Build Kernel
-        if: ${{ github.event.inputs.FASTBUILD == 'true' }}
-        id: fastbuild
+      - name: 🔧 Kernel Build
+        id: kernelbuild
         run: |
           set -Eeuo pipefail
 
@@ -4608,8 +4647,8 @@ jobs:
           echo ""
           echo "🎉 Build Complete"
 
-      - name: 🔧 Build Kernel (Fallback)
-        if: ${{ steps.fastbuild.outputs.fallback == 'true' || github.event.inputs.FASTBUILD != 'true' }}
+      - name: 🔧 Fallback Kernel Build
+        if: ${{ steps.kernelbuild.outputs.fallback == 'true' }}
         shell: bash
         run: |
           set -Eeuo pipefail      
@@ -4634,8 +4673,8 @@ jobs:
           GKIV="${ANDROIDVER}-${KERNELVER}"
       
           # Retrieve Fast Build Metadata
-          FALLBACKREASON="${{ steps.fastbuild.outputs.fallbackreason }}"
-          FASTBUILDTIME="${{ steps.fastbuild.outputs.fastbuildtime }}"      
+          FALLBACKREASON="${{ steps.kernelbuild.outputs.fallbackreason }}"
+          FASTBUILDTIME="${{ steps.kernelbuild.outputs.fastbuildtime }}"      
           
           FALLBACKREASON="${FALLBACKREASON:-Unknown}"
           FASTBUILDTIME="${FASTBUILDTIME:-0}"
@@ -5587,10 +5626,7 @@ jobs:
           retention-days: 30
 
       - name: 🔧 Save Compiler Cache
-        if: ${{ success()
-              && steps.buildprofile.outputs.BUILDCCACHE != 'Disabled'
-              && steps.ccache-save.outputs.CCACHESAVE == 'true'
-              && steps.cache-restoration.outputs.cache-restored != 'true' }}
+        if: ${{ steps.buildprofile.outputs.BUILDCCACHE != 'Disabled' && steps.ccache-save.outputs.CCACHESAVE == 'true' && steps.cache-restoration.outputs.cache-restored != 'true' }}
         timeout-minutes: 10
         uses: actions/cache/save@v5
         with:
@@ -5598,7 +5634,7 @@ jobs:
           key: CCache-${{ runner.os }}-${MANIFESTBASEFILE}-${CPU}-${{ github.ref_name }}
 
       - name: 🔧 Save ThinLTO Cache
-        if: ${{ steps.buildprofile.outputs.BUILDCCACHE != 'Disabled' && github.event.inputs.FASTBUILD == 'true' && startsWith(env.KERNELVERSION, '5.') && steps.fastbuild.outputs.fallback != 'true' }}
+        if: ${{ steps.buildprofile.outputs.BUILDCCACHE != 'Disabled' && startsWith(env.KERNELVERSION, '5.') && steps.kernelbuild.outputs.fallback != 'true' }}
         uses: actions/cache/save@v5
         with:
           path: ${{ github.workspace }}/kernel_workspace/.thinlto-cache
@@ -6000,7 +6036,6 @@ jobs:
             echo "| 🧬 SUSFS Variant                 | \`${{ github.event.inputs.SUSFSVARIANT }}\`         |"
             echo "| 🧪 SUSFS Development Branch      | $(bool "${{ github.event.inputs.SUSFSBRANCHDEV }}") |"
             echo "| 🩹 Kernel Patch Variant          | \`${{ github.event.inputs.KERNELPATCH }}\`          |"
-            echo "| ⚡ Fast Kernel Build             | $(bool "${{ github.event.inputs.FASTBUILD }}")      |"
             echo "| 💾 Compiler Cache                | \`${{ steps.buildprofile.outputs.BUILDCCACHE }}\`   |"
             echo ""
 
