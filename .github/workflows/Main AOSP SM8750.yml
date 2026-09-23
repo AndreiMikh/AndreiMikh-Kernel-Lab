@@ -535,19 +535,30 @@ jobs:
     
 
       - name: ⚙️ Configure CCache
+        if: ${{ inputs.BUILDCCACHE }}
         shell: bash
         run: |
-          # Configure and Initialize CCache for AOSP Kernel Build
           # Configure CCache Environment
-          export CCACHE_DIR
-          export CCACHE_MAXSIZE
-          export CCACHE_COMPILERCHECK
-          export CCACHE_BASEDIR
-          export CCACHE_NOHASHDIR
-          export CCACHE_NOHARDLINK
-          export CCACHE_IS_KERNEL_COMPILING
+          export CCACHE_DIR="${CCACHE_DIR:-${GITHUB_WORKSPACE}/.ccache}"
+          export CCACHE_MAXSIZE="${CCACHE_MAXSIZE:-8G}"
+          export CCACHE_COMPILERCHECK="${CCACHE_COMPILERCHECK:-content}"
+          export CCACHE_BASEDIR="${CCACHE_BASEDIR:-${GITHUB_WORKSPACE}}"
+          export CCACHE_NOHASHDIR="${CCACHE_NOHASHDIR:-true}"
+          export CCACHE_NOHARDLINK="${CCACHE_NOHARDLINK:-true}"
+          export CCACHE_IS_KERNEL_COMPILING="${CCACHE_IS_KERNEL_COMPILING:-1}"
 
-          # Install Custom CCache Binary
+          # Export CCache Environment For Following Steps
+          {
+            echo "CCACHE_DIR=$CCACHE_DIR"
+            echo "CCACHE_MAXSIZE=$CCACHE_MAXSIZE"
+            echo "CCACHE_COMPILERCHECK=$CCACHE_COMPILERCHECK"
+            echo "CCACHE_BASEDIR=$CCACHE_BASEDIR"
+            echo "CCACHE_NOHASHDIR=$CCACHE_NOHASHDIR"
+            echo "CCACHE_NOHARDLINK=$CCACHE_NOHARDLINK"
+            echo "CCACHE_IS_KERNEL_COMPILING=$CCACHE_IS_KERNEL_COMPILING"
+          } >> "$GITHUB_ENV"
+
+          # Install Custom CCache Binary When Available
           if [[ -f "$GITHUB_WORKSPACE/lib/ccache-ecs" ]]; then
             echo "📦 Installing Custom CCache Binary..."
             sudo install \
@@ -564,22 +575,22 @@ jobs:
           ccache --set-config=cache_dir="$CCACHE_DIR"
           ccache --set-config=max_size="$CCACHE_MAXSIZE"
           ccache --set-config=compression=true
-          ccache --set-config=compression_level=5
+          ccache --set-config=compression_level=3
           ccache --set-config=compiler_check="$CCACHE_COMPILERCHECK"
           ccache --set-config=base_dir="$CCACHE_BASEDIR"
           ccache --set-config=hash_dir=false
           ccache --set-config=hard_link=false
 
-          # Reduce False Cache Misses
+          # Reduce Avoidable Cache Misses
           ccache --set-config=sloppiness=file_stat_matches,include_file_ctime,include_file_mtime,pch_defines,file_macro,time_macros
 
-          # Display Configuration
+          # Display CCache Configuration
           echo
           echo "🔧 CCache Configuration"
           echo "📂 Cache Directory  : $CCACHE_DIR"
           echo "📦 Maximum Size     : $CCACHE_MAXSIZE"
           echo "🗜️ Compression      : Enabled"
-          echo "📊 Compression Lvl  : 5"
+          echo "📊 Compression Lvl  : 3"
           echo "🔍 Compiler Check   : $CCACHE_COMPILERCHECK"
           echo "📍 Base Directory   : $CCACHE_BASEDIR"
           echo "📁 Hash Directory   : Disabled"
@@ -587,47 +598,62 @@ jobs:
           echo "⚙️ Kernel Compiling : $CCACHE_IS_KERNEL_COMPILING"
 
           echo
-          echo "🔎 CCache Version:"
+          echo "🔎 CCache Version"
           ccache --version
+
           echo
-          echo "🔎 CCache Configuration:"
+          echo "🔎 CCache Configuration"
           ccache --show-config
-          # Reset Statistics Only
-          ccache -z
+
           echo "🎉 CCache Configuration Complete"
 
 
       - name: 💾 Restore CCache
         id: ccache-restore
+        if: ${{ inputs.BUILDCCACHE }}
         uses: actions/cache/restore@v6
         with:
-          # CCache Directory
           path: .ccache
-          # Exact CCache Key
-          key: CCache-SM8750-${{ inputs.AOSPSOURCE }}-${{ runner.os }}-${{ runner.arch }}-${{ github.ref_name }}
-          # Fallback CCache Keys
+
+          # Rolling Exact Key
+          key: CCache-SM8750-v2-${{ inputs.AOSPSOURCE }}-${{ env.CLANGVERSION }}-${{ runner.os }}-${{ runner.arch }}-${{ github.ref_name }}-${{ github.run_id }}
+
+          # Restore Newest Compatible CCache
           restore-keys: |
-            CCache-SM8750-${{ inputs.AOSPSOURCE }}-${{ env.CLANGVERSION }}-${{ runner.os }}-${{ runner.arch }}-${{ github.ref_name }}
+            CCache-SM8750-${{ inputs.AOSPSOURCE }}-${{ env.CLANGVERSION }}-${{ runner.os }}-${{ runner.arch }}-${{ github.ref_name }}-
             CCache-SM8750-${{ inputs.AOSPSOURCE }}-${{ env.CLANGVERSION }}-${{ runner.os }}-${{ runner.arch }}-
             CCache-SM8750-${{ inputs.AOSPSOURCE }}-${{ env.CLANGVERSION }}-
+            CCache-SM8750-${{ inputs.AOSPSOURCE }}-
 
-     
+
       - name: 📦 Pull Public CCache
-        if: steps.ccache-restore.outputs.cache-hit != 'true'
+        if: ${{ inputs.BUILDCCACHE }}
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         shell: bash
         run: |
-          # Define Public CCache Archive
+          # Re-Export CCache Directory
+          CCACHE_DIR="${CCACHE_DIR:-${GITHUB_WORKSPACE}/.ccache}"
+
+          # Check Whether CCache Data Was Actually Restored
+          if [[ -n "$(find "$CCACHE_DIR" -type f -print -quit 2>/dev/null)" ]]; then
+            echo "✔️ Existing CCache Found"
+            echo "📌 Skipping Public CCache Download"
+            echo
+            echo "📊 Restored CCache Status"
+            ccache -s
+            exit 0
+          fi
+
+          # Define Public CCache Release
           ARCHIVE="CCache-SM8750-${{ inputs.AOSPSOURCE }}.tar.zst"
           RELEASE="CCache-SM8750-${{ inputs.AOSPSOURCE }}"
-
-          # Display CCache Download Information
+          echo "📦 No Local CCache Found"
           echo "📦 Looking For Public CCache Release..."
           echo "📌 Release : $RELEASE"
           echo "📌 Archive : $ARCHIVE"
 
-          # Download Public CCache Release
+          # Download Public CCache
           if gh release download "$RELEASE" \
             --repo "$GITHUB_REPOSITORY" \
             --pattern "$ARCHIVE" \
@@ -635,25 +661,129 @@ jobs:
             echo "✔️ Public CCache Found"
             echo "📦 Merging Public CCache..."
 
-            # Extract CCache Archive
+            # Extract Public CCache
             tar \
               -I zstd \
               -xf "$ARCHIVE" \
               -C "$CCACHE_DIR"
-            
-            # Remove CCache Archive
+
+            # Remove Downloaded Archive
             rm -f "$ARCHIVE"
 
-            # Apply CCache Size Limit
+            # Re-Apply CCache Size Limit
             ccache -M "$CCACHE_MAXSIZE"
-
-            # Display CCache Status
-            echo "📊 CCache Status"
+            echo
+            echo "📊 Public CCache Status"
             ccache -s
             echo "✔️ Public CCache Merged"
           else
             echo "ℹ️ No Public CCache Release Found"
+            echo "📌 Starting With Empty CCache"
           fi
+
+
+      - name: 📊 Initialize CCache Statistics
+        if: ${{ inputs.BUILDCCACHE }}
+        shell: bash
+        run: |
+          # Display Restored Cache Before Statistics Reset
+          echo "📊 CCache Before Build"
+          ccache -s
+
+          # Reset Statistics Only
+          # Does Not Delete Cached Compiler Objects
+          ccache -z
+
+          echo
+          echo "📊 CCache Statistics Reset"
+          ccache -s
+
+          echo "🎉 CCache Ready For Kernel Build"
+
+
+      - name: 💾 Save GitHub CCache
+        if: ${{ inputs.BUILDCCACHE && !inputs.DEBUGKERNELBUILD }}
+        uses: actions/cache/save@v6
+        with:
+          path: .ccache
+
+          # Unique Rolling Cache Snapshot
+          # A New Cache is Created for Every Successful Build
+          key: CCache-SM8750-${{ inputs.AOSPSOURCE }}-${{ env.CLANGVERSION }}-${{ runner.os }}-${{ runner.arch }}-${{ github.ref_name }}-${{ github.run_id }}
+
+
+      - name: 📦 Upload Public CCache
+        if: ${{ inputs.BUILDCCACHE && !inputs.DEBUGKERNELBUILD }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          # Define CCache Paths
+          CCACHE_DIR="${CCACHE_DIR:-${GITHUB_WORKSPACE}/.ccache}"
+          ARCHIVE="CCache-SM8750-${{ inputs.AOSPSOURCE }}.tar.zst"
+          RELEASE="CCache-SM8750-${{ inputs.AOSPSOURCE }}"
+
+          # Validate CCache Directory
+          if [[ ! -d "$CCACHE_DIR" ]]; then
+            echo "⚠️ CCache Directory Not Found"
+            echo "📂 Expected: $CCACHE_DIR"
+            exit 1
+          fi
+
+          if [[ -z "$(find "$CCACHE_DIR" -type f -print -quit 2>/dev/null)" ]]; then
+            echo "ℹ️ CCache Directory Is Empty"
+            echo "📌 Skipping Public CCache Upload"
+            exit 0
+          fi
+
+          echo "📦 Packaging Public CCache..."
+          echo "📂 CCache Directory: $CCACHE_DIR"
+
+          # Display Final CCache Statistics
+          echo
+          echo "📊 Final CCache Status"
+          ccache -s
+
+          # Create Compressed Public CCache Archive
+          echo
+          echo "🗜️ Creating Public CCache Archive..."
+          tar \
+            -I 'zstd -T0 -3' \
+            -cf "$ARCHIVE" \
+            -C "$CCACHE_DIR" .
+          echo "📦 Archive Size: $(du -sh "$ARCHIVE" | cut -f1)"
+
+          # Create Or Update Public CCache Release
+          echo "🚀 Uploading Public CCache..."
+          if gh release create \
+            "$RELEASE" \
+            "$ARCHIVE" \
+            --notes 'Category: CCache | SM8750-O2-FT — Public CCache for OPlus AOSP SM8750 Kernel Builds'; then
+            echo "✔️ Public CCache Release Created"
+          elif gh release upload \
+            "$RELEASE" \
+            "$ARCHIVE" \
+            --clobber; then
+            echo "✔️ Public CCache Release Updated"
+          else
+            echo "⚠️ Failed To Upload Public CCache"
+            rm -f "$ARCHIVE"
+            exit 1
+          fi
+
+          # Remove Temporary Archive
+          rm -f "$ARCHIVE"
+
+          echo "🎉 Public CCache Uploaded Successfully"
+
+
+      - name: 🐞 Upload CCache Debug Log
+        if: ${{ inputs.DEBUGBUILDCCACHE }}
+        uses: actions/upload-artifact@v6
+        with:
+          name: CCache-Debug-Log
+          path: ccache.log
+          if-no-files-found: ignore
 
 
       - name: 🗂️ Setup Reject Checker
