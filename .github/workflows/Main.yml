@@ -893,6 +893,12 @@ jobs:
           echo ""
           echo "🎉 Done!"
 
+      - name: 🔧 Setup Zig Toolchain
+        uses: jetsung/setup-zig@v0.0.4
+        with:
+          # Install Latest Zig Toolchain for NoMount MetaModule Userspace Compilation
+          version: master
+
       - name: 🔧 Setup Swap File
         shell: bash
         run: |
@@ -3734,6 +3740,7 @@ jobs:
           NOMOUNTBRANCH="${{ inputs.NOMOUNT }}"
           WS="${GITHUB_WORKSPACE}/kernel_workspace"
           KDIR="${WS}/kernel_platform/common"
+          NOMOUNTBIN="${WS}/nomount-bin"
 
           # Move Into Kernel Source Directory
           cd "$KDIR"
@@ -3768,6 +3775,12 @@ jobs:
             echo "⚠️ NoMount Symlink Missing"
             exit 1
           }
+
+          # Resolve NoMount Kernel Source
+          NOMOUNTKDIR="$(readlink -f "$KDIR/fs/nomount")"
+          NOMOUNTROOT="$(dirname "$NOMOUNTKDIR")"
+          echo "📂 NoMount Kernel : $NOMOUNTKDIR"
+          echo "📂 NoMount Root   : $NOMOUNTROOT"
           
           # Verify NoMount Source
           [[ -f "$KDIR/fs/nomount/Kconfig" ]] || {
@@ -3800,6 +3813,80 @@ jobs:
           echo "🚀 NoMount Symlink Verified"
           echo "🚀 NoMount Source Files Verified"
           echo "🚀 NoMount Kernel Integration Verified"
+
+          # Locate NoMount Userspace Source
+          NOMOUNTUSERDIR="${NOMOUNTROOT}/userspace"
+          NOMOUNTUSERSRC="${NOMOUNTUSERDIR}/src/nm.c"
+          [[ -f "$NOMOUNTUSERSRC" ]] || {
+            echo "⚠️ NoMount Userspace Source Missing:"
+            echo "   $NOMOUNTUSERSRC"
+            exit 1
+          }
+
+          echo ""
+          echo "------------------------------"
+          echo "NoMount Userspace Compilation"
+          echo "------------------------------"
+          echo "📂 Source : $NOMOUNTUSERSRC"
+          echo ""
+
+          # Prepare Output Directory
+          rm -rf "$NOMOUNTBIN"
+          mkdir -p "$NOMOUNTBIN"
+          cd "${NOMOUNTUSERDIR}/src"
+
+          # Compile ARM64 Userspace Binary
+          echo "🔨 Building NoMount-ARM64..."
+          zig cc \
+            -target aarch64-linux \
+            -Oz \
+            -mcmodel=tiny \
+            -static \
+            -nostdlib \
+            -ffreestanding \
+            -fno-unwind-tables \
+            -fno-ident \
+            -Wno-invalid-noreturn \
+            -Wl,--entry=_start \
+            nm.c \
+            -o "${NOMOUNTBIN}/nm-arm64"
+
+          # Compile ARM32 Userspace Binary
+          echo "🔨 Building NoMount-ARM..."
+          zig cc \
+            -target arm-linux \
+            -Oz \
+            -static \
+            -nostdlib \
+            -ffreestanding \
+            -fno-unwind-tables \
+            -fno-ident \
+            -Wno-invalid-noreturn \
+            -ffunction-sections \
+            -fdata-sections \
+            -Wl,--gc-sections \
+            -Wl,--entry=_start \
+            nm.c \
+            -o "${NOMOUNTBIN}/nm-arm"
+
+          # Verify Compiled Binaries
+          [[ -x "${NOMOUNTBIN}/nm-arm64" ]] || {
+            echo "⚠️ NoMount-ARM64 Compilation Failed"
+            exit 1
+          }
+
+          [[ -x "${NOMOUNTBIN}/nm-arm" ]] || {
+            echo "⚠️ NoMount-ARM Compilation Failed"
+            exit 1
+          }
+
+          echo ""
+          echo "🎉 NoMount-ARM64 Compiled Successfully"
+          echo "🎉 NoMount-ARM Compiled Successfully"
+          echo ""
+          echo "📦 NoMount Binaries:"
+          ls -lh "${NOMOUNTBIN}/nm-arm64"
+          ls -lh "${NOMOUNTBIN}/nm-arm"
 
           echo ""
           echo "🎉 NoMount Built-in Integration Completed Successfully"
@@ -5294,6 +5381,128 @@ jobs:
           echo ""
           echo "🎉 AnyKernel3 Packaging Completed Successfully"
 
+      - name: 📦 Package NoMount Metamodule
+        if: ${{ inputs.NOMOUNT != 'None' }}
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+
+          # Define Paths
+          WS="${GITHUB_WORKSPACE}/kernel_workspace"
+          KDIR="${WS}/kernel_platform/common"
+          NOMOUNTBIN="${WS}/nomount-bin"
+          NOMOUNTMODULEDIR="${WS}/nomount-metamodule"
+          NOMOUNTOUTDIR="${WS}/output"
+
+          # Resolve the NoMount Kernel Source
+          [[ -L "$KDIR/fs/nomount" ]] || {
+            echo "⚠️ NoMount SymLink Missing"
+            exit 1
+          }
+
+          NOMOUNTKDIR="$(readlink -f "$KDIR/fs/nomount")"
+          NOMOUNTROOT="$(dirname "$NOMOUNTKDIR")"
+          NOMOUNTMODULESRC="${NOMOUNTROOT}/module"
+
+          echo "------------------------------"
+          echo "NoMount Metamodule Packaging"
+          echo "------------------------------"
+          echo "📂 NoMount Root   : $NOMOUNTROOT"
+          echo "📂 Module Source  : $NOMOUNTMODULESRC"
+          echo "📂 Output         : $NOMOUNTOUTDIR"
+          echo ""
+
+          # Verify NoMount Module Source
+          [[ -d "$NOMOUNTMODULESRC" ]] || {
+            echo "⚠️ NoMount Module Directory Missing:"
+            echo "   $NOMOUNTMODULESRC"
+            exit 1
+          }
+
+          [[ -f "$NOMOUNTMODULESRC/module.prop" ]] || {
+            echo "⚠️ NoMount Module.prop Missing"
+            exit 1
+          }
+
+          # Verify Compiled Userspace Binaries
+          [[ -x "$NOMOUNTBIN/nm-arm64" ]] || {
+            echo "⚠️ NoMount-ARM64 Missing"
+            exit 1
+          }
+
+          [[ -x "$NOMOUNTBIN/nm-arm" ]] || {
+            echo "⚠️ NoMount-ARM Missing"
+            exit 1
+          }
+
+          # Prepare Packaging Directories
+          rm -rf "$NOMOUNTMODULEDIR"
+          mkdir -p "$NOMOUNTMODULEDIR/bin"
+          mkdir -p "$NOMOUNTOUTDIR"
+
+          # Copy Original NoMount MetaModule
+          cp -a "$NOMOUNTMODULESRC/." "$NOMOUNTMODULEDIR/"
+
+          # Install Newly Compiled Userspace Binaries
+          install -m 0755 \
+            "$NOMOUNTBIN/nm-arm64" \
+            "$NOMOUNTMODULEDIR/bin/nm-arm64"
+          install -m 0755 \
+            "$NOMOUNTBIN/nm-arm" \
+            "$NOMOUNTMODULEDIR/bin/nm-arm"
+
+          # Identify Exact NoMount Source Commit
+          if git -C "$NOMOUNTROOT" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+            NOMOUNTCOMMIT="$(git -C "$NOMOUNTROOT" rev-parse HEAD)"
+          else
+            NOMOUNTCOMMIT="Unknown"
+          fi
+
+          # Record NoMount Source Commit
+          printf '%s\n' "$NOMOUNTCOMMIT" \
+            > "$NOMOUNTMODULEDIR/nm-commit-src"
+
+          # Normalize Module Version Code
+          if grep -q '^versionCode=' "$NOMOUNTMODULEDIR/module.prop"; then
+            sed -i 's/^versionCode=.*/versionCode=1/' \
+              "$NOMOUNTMODULEDIR/module.prop"
+          fi
+
+          # Define Package Name
+          NOMOUNTMODULEZIP="${NOMOUNTOUTDIR}/NoMount-${NOMOUNTCOMMIT}.zip"
+          # Remove Existing Package
+          rm -f "$NOMOUNTMODULEZIP"
+
+          # Package Metamodule
+          echo "📦 Creating NoMount MetaModule..."
+          (
+            cd "$NOMOUNTMODULEZIP"
+            zip -qr "$NOMOUNTMODULEZIP" .
+          )
+
+          # Generate SHA-256 Checksum
+          sha256sum "$NOMOUNTMODULEZIP" \
+            > "${NOMOUNTMODULEZIP}.sha256"
+
+          # Verify Package
+          [[ -s "$NOMOUNTMODULEZIP" ]] || {
+            echo "⚠️ NoMount MetaModule ZIP Was Not Created"
+            exit 1
+          }
+
+          echo ""
+          echo "------------------------------"
+          echo "NoMount Metamodule Ready"
+          echo "------------------------------"
+          echo "📦 ZIP      : $NOMOUNTMODULEZIP"
+          echo "🔐 SHA-256  : ${NOMOUNTMODULEZIP}.sha256"
+          echo ""
+          echo "📁 Contents:"
+          unzip -l "$NOMOUNTMODULEZIP"
+         
+          echo ""
+          echo "🎉 NoMount MetaModule Packaged Successfully"
+
       - name: 🔧 Regional Variant Detection
         shell: bash
         run: |
@@ -6098,14 +6307,33 @@ jobs:
         if: ${{ steps.root-engine-apk.outputs.apkmanager == 'true' }}
         uses: actions/upload-artifact@v7
         with:
-          # Artifact Name
+          # Manager Artifact Name
           name: ManagerAPK-${{ inputs.ROOTENGINE }}-${{ steps.rootengine.outputs.ksuversion }}
 
           # Upload Manager APK Files
           path: FlatAPK/*.apk
 
-          # Warn When No APK Is Found        
+          # Warn When No APK is Found        
           if-no-files-found: warn
+          compression-level: 0
+          retention-days: 7
+
+      - name: 🔧 Upload NoMount Metamodule
+        if: ${{ inputs.NOMOUNT != 'None' }}
+        uses: actions/upload-artifact@v4
+        with:
+          # NoMount Artifact Name
+          name: NoMount-Metamodule
+
+          # Upload NoMount ZIP
+          path: |
+            ${{ github.workspace }}/kernel_workspace/output/NoMount-*.zip
+            ${{ github.workspace }}/kernel_workspace/output/NoMount-*.zip.sha256
+
+          # Warn When No NoMount ZIP is Found        
+          if-no-files-found: warn
+          compression-level: 0
+          retention-days: 7
 
       - name: 🔧 Create Zip Package
         if: ${{ steps.buildprofile.outputs.gitrelease == 'Enabled' }}
