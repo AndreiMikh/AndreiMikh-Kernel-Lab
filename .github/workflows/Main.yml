@@ -269,6 +269,10 @@ jobs:
     timeout-minutes: 60
     outputs:
       # Build Profile Outputs
+      manifestbasefile: ${{ steps.extract-info.outputs.manifestbasefile }}
+      cpu: ${{ steps.extract-info.outputs.cpu }}
+      androidversion: ${{ steps.kernel-version-setup.outputs.androidversion }}
+      kernelversion: ${{ steps.kernel-version-setup.outputs.kernelversion }}
       cleanspace: ${{ steps.buildprofile.outputs.cleanspace }}
       buildccache: ${{ steps.buildprofile.outputs.buildccache }}
       xus: ${{ steps.buildprofile.outputs.xus }}
@@ -285,6 +289,7 @@ jobs:
       branchpath: ${{ steps.manager.outputs.branchpath }}
       managerartifact: ${{ steps.manager.outputs.managerartifact }}
       ksurepo: ${{ steps.manager.outputs.ksurepo }}
+      apkmanager: ${{ steps.root-engine-apk.outputs.apkmanager }}
 
       # KernelSU Version
       ksuversion: ${{ steps.rootengine.outputs.ksuversion }}
@@ -300,8 +305,9 @@ jobs:
 
       # Build Profile Suffix
       suffix: ${{ steps.suffix.outputs.suffix }}
-
+      
       # Release Decision
+      tar: ${{ steps.manageccache.outputs.tar }}
       shouldrelease: ${{ steps.ksu-check.outputs.shouldrelease }}
 
       
@@ -530,6 +536,9 @@ jobs:
             echo "MANIFESTBASEFILE=$MANIFESTBASEFILE"
           } >> "$GITHUB_ENV"
 
+          # Export Step Output
+          echo "manifestbasefile=$MANIFESTBASEFILE" >> "$GITHUB_OUTPUT"
+
           # Define Repository Search Priority
           REPOS=(
             "AndreiMikh|Kernel-Manifest"
@@ -754,6 +763,9 @@ jobs:
             echo "VANDROID=$VANDROID"
             echo "ASHORTVERSION=$ASHORTVERSION"
           } >> "$GITHUB_ENV"
+
+          # Export CPU as a Step Output
+          echo "cpu=$CPU" >> "$GITHUB_OUTPUT"
 
           # Parse README Build Information
           CPUD=""
@@ -1113,23 +1125,15 @@ jobs:
         uses: actions/cache/restore@v5
         with:
           path: ${{ env.CCACHE_DIR }}          
-          key: CCache-${{ runner.os }}-${{ env.MANIFESTBASEFILE }}-${{ env.CPU }}-${{ github.ref_name }}
+          key: CCache-${{ runner.os }}-${{ steps.extract-info.outputs.manifestbasefile }}-${{ steps.extract-info.outputs.cpu }}-${{ github.ref_name }}
 
           # Restore Hierarchy for Partial Cache Reuse
           restore-keys: |
-            CCache-${{ runner.os }}-${{ env.MANIFESTBASEFILE }}-${{ env.CPU }}-${{ github.ref_name }}
-            CCache-${{ runner.os }}-${{ env.MANIFESTBASEFILE }}-${{ env.CPU }}-
-            CCache-${{ runner.os }}-${{ env.MANIFESTBASEFILE }}-
+            CCache-${{ runner.os }}-${{ steps.extract-info.outputs.manifestbasefile }}-${{ steps.extract-info.outputs.cpu }}-${{ github.ref_name }}
+            CCache-${{ runner.os }}-${{ steps.extract-info.outputs.manifestbasefile }}-${{ steps.extract-info.outputs.cpu }}-
+            CCache-${{ runner.os }}-${{ steps.extract-info.outputs.manifestbasefile }}-
             CCache-${{ runner.os }}-
             CCache-
-
-      - name: 🔧 Restore ThinLTO Cache
-        if: ${{ steps.buildprofile.outputs.buildccache != 'Disabled' && startsWith(env.KERNELVERSION, '5.') }}
-        id: restore-thinlto
-        uses: actions/cache/restore@v5
-        with:
-          path: ${{ github.workspace }}/kernel_workspace/.thinlto-cache
-          key: thinlto-${{ runner.os }}-${{ github.ref_name }}-${{ inputs.FILE }}-16.9
   
       - name: 🔧 Configure and Setup Compiler Cache
         if: ${{ steps.buildprofile.outputs.buildccache != 'Disabled' }}
@@ -1185,7 +1189,7 @@ jobs:
 
           # Build Display Cache Key
           # Represents Logical Cache Identity Used by Workflow
-          CACHEKEY="CCache-${{ runner.os }}-${{ env.MANIFESTBASEFILE }}-${{ env.CPU }}-${{ github.ref_name }}"
+          CACHEKEY="CCache-${{ runner.os }}-${{ steps.extract-info.outputs.manifestbasefile }}-${{ steps.extract-info.outputs.cpu }}-${{ github.ref_name }}"
           
           # Read Cache Restoration Results
           # Local Cache = GitHub Actions Cache Restoration
@@ -1478,6 +1482,7 @@ jobs:
           echo "🎉 Kernel Repository Pipeline Complete"
 
       - name: 🔧 Kernel Version Setup
+        id: kernel-version-setup
         shell: bash
         run: |
           set -Eeuo pipefail
@@ -1644,6 +1649,13 @@ jobs:
             echo "KSHORTVERSION=${NEWVERSION%.*}"
             echo "KSHORTPATCHVERSION=${NEWVERSION%.*}"
           } >> "$GITHUB_ENV"
+
+          # Export Values for GitHub Actions Expressions
+          {
+            echo "androidversion=$ANDROIDVERSION"
+            echo "kernelversion=$KERNELVERSION"
+            echo "fullversion=$FULLVERSION"
+          } >> "$GITHUB_OUTPUT"
 
           echo "🚀 Environment Variables Exported"
           
@@ -1848,6 +1860,7 @@ jobs:
           echo "------------------------------"
     
       - name: 🔧 Detect Rust Compiler Requirement
+        id: rust-compiler
         shell: bash
         run: |
           set -Eeuo pipefail
@@ -1935,6 +1948,11 @@ jobs:
           echo "ENABLERUSTC=$ENABLERUSTC" >> "$GITHUB_ENV"
           echo "VERSIONRUSTC=$VERSIONRUSTC" >> "$GITHUB_ENV"
           echo "RAWRUSTC=$RAWRUSTC" >> "$GITHUB_ENV"
+
+          # Export Step Outputs
+          echo "enablerustc=$ENABLERUSTC" >> "$GITHUB_OUTPUT"
+          echo "versionrustc=$VERSIONRUSTC" >> "$GITHUB_OUTPUT"
+          echo "rawrustc=$RAWRUSTC" >> "$GITHUB_OUTPUT"
 
           # Final Summary
           echo ""
@@ -3009,7 +3027,7 @@ jobs:
           echo "📦 Patch Type : $LZ4NEONPATCH"
     
       - name: 🔧 Scheduler Conversion
-        if: ${{ env.KERNELVERSION == '6.6' && inputs.WINDSPEED == 'false' && !endsWith(inputs.FILE, 'aosp') }}
+        if: ${{ steps.kernel-version-setup.outputs.kernelversion == '6.6' && !inputs.WINDSPEED && !endsWith(inputs.FILE, 'aosp') }}
         shell: bash
         run: |
           set -Eeuo pipefail
@@ -3095,7 +3113,7 @@ jobs:
           echo "🎉 Scheduler Conversion Stage Completed"
 
       - name: 🔧 DRM Atomic Clone Validation Flicker Fix
-        if: ${{ env.FULLVERSION == '6.6.118' && startsWith(env.CPU, 'sm8750') }}
+        if: ${{ steps.kernel-version-setup.outputs.kernelversion == '6.6' && startsWith(steps.extract-info.outputs.cpu, 'sm8750') }}
         shell: bash
         run: |
           set -Eeuo pipefail
@@ -3213,7 +3231,7 @@ jobs:
           fi
      
       - name: 🔧 Unicode Bypass
-        if: ${{ inputs.UNICODE == 'true' }}
+        if: ${{ inputs.UNICODE }}
         shell: bash
         run: |
           set -Eeuo pipefail
@@ -3280,7 +3298,7 @@ jobs:
           echo "🎉 Unicode Bypass Stage Completed"
                             
       - name: 🔧 Apply Fengchi / Windspeed Scheduler
-        if: ${{ env.KERNELVERSION == '6.6' && inputs.WINDSPEED == 'true' && !endsWith(inputs.FILE, 'aosp') }}
+        if: ${{ steps.kernel-version-setup.outputs.kernelversion == '6.6' && inputs.WINDSPEED && !endsWith(inputs.FILE, 'aosp') }}
         shell: bash
         env:
           FILE: ${{ inputs.FILE }}
@@ -3349,7 +3367,7 @@ jobs:
           echo "🚀 Fengchi Patch Applied Successfully"
 
       - name: 🔧 Linux Security Module Baseband Guard
-        if: ${{ inputs.LSMBBG == 'true' }}
+        if: ${{ inputs.LSMBBG }}
         shell: bash
         run: |
           set -euo pipefail
@@ -3786,7 +3804,7 @@ jobs:
           echo "🎉 NoMount Built-in Integration Completed Successfully"
           
       - name: 🔧 Re-Kernel
-        if: ${{ inputs.REKERNEL == 'true' }}
+        if: ${{ inputs.REKERNEL }}
         run: |
           set -Eeuo pipefail
 
@@ -3863,7 +3881,7 @@ jobs:
           echo "🎉 Re-Kernel Files and Directories Successfully Synced and Patched"
 
       - name: 🔧 Congestion Control BBR Version 3
-        if: ${{ (inputs.TCPALGORITHM == 'BBRV1+BBRV3+ECN' || inputs.TCPALGORITHM == 'BBRV1+BBRV3+ECN+Brutal') && env.ANDROIDVERSION != 'android16' && env.KERNELVERSION != '6.12' }}
+        if: ${{ (inputs.TCPALGORITHM == 'BBRV1+BBRV3+ECN' || inputs.TCPALGORITHM == 'BBRV1+BBRV3+ECN+Brutal') && steps.kernel-version-setup.outputs.androidversion != 'android16' && steps.kernel-version-setup.outputs.kernelversion != '6.12' }}
         shell: bash
         run: |
           set -Eeuo pipefail
@@ -4248,7 +4266,7 @@ jobs:
           fi             
 
       - name: 🔧 IPv6 NAT Fix Stage
-        if: ${{ inputs.NETFILTER == 'true' }}
+        if: ${{ inputs.NETFILTER }}
         shell: bash
         run: |
           set -euo pipefail
@@ -4366,7 +4384,7 @@ jobs:
           echo "🎉 Custom Build Time Setup Completed"
      
       - name: 🔧 Disable GPU Embedded Bridge / Engine
-        if: ${{ env.KERNELVERSION == '5.10' && startsWith(env.CPU, 'mt') }}
+        if: ${{ steps.kernel-version-setup.outputs.kernelversion == '5.10' && startsWith(steps.extract-info.outputs.cpu, 'mt') }}
         shell: bash
         run: |
           set -euo pipefail
@@ -5069,6 +5087,7 @@ jobs:
             TAR="CCache-${MANIFESTBASEFILE}-${{ runner.os }}.tar.zst"
             TMPTAR="${TAR}.tmp"
             echo "TAR=$TAR" >> "$GITHUB_ENV"
+            echo "tar=$TAR" >> "$GITHUB_OUTPUT"
 
             # Verify cache directory
             echo "📂 Cache Directory: $CCACHE_DIR"
@@ -5753,7 +5772,7 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           # Build Artifact Name
-          name: "${{ env.FULLVERSION }}-${{ env.KSUVERSION }}-${{ env.MANIFESTBASEFILE }}-${{ steps.suffix.outputs.suffix }}"
+          name: "${{ steps.kernel-version-setup.outputs.fullversion }}-${{ env.KSUVERSION }}-${{ steps.extract-info.outputs.manifestbasefile }}-${{ steps.suffix.outputs.suffix }}"
       
           # Upload Flashable Kernel Files
           path: ./AnyKernel3/*
@@ -5770,11 +5789,11 @@ jobs:
           key: CCache-${{ runner.os }}-${MANIFESTBASEFILE}-${CPU}-${{ github.ref_name }}
 
       - name: 🔧 Save ThinLTO Cache
-        if: ${{ steps.buildprofile.outputs.buildccache != 'Disabled' && startsWith(env.KERNELVERSION, '5.') && steps.kernelbuild.outputs.fallback != 'true' }}
+        if: ${{ steps.buildprofile.outputs.buildccache != 'Disabled' && startsWith(steps.kernel-version-setup.outputs.kernelversion, '5.') && steps.kernelbuild.outputs.fallback != 'true' }}
         uses: actions/cache/save@v5
         with:
           path: ${{ github.workspace }}/kernel_workspace/.thinlto-cache
-          key: thinlto-${{ runner.os }}-${{ github.ref_name }}-${{ inputs.FILE }}-${{ env.KERNELVERSION }}-16.9
+          key: thinlto-${{ runner.os }}-${{ github.ref_name }}-${{ inputs.FILE }}-${{ steps.kernel-version-setup.outputs.kernelversion }}-16.9
       
       - name: 🔧 Release Status Requirement
         if: ${{ steps.buildprofile.outputs.gitrelease == 'Enabled' }}
@@ -6035,7 +6054,7 @@ jobs:
           if-no-files-found: warn
 
       - name: 🔧 Create Zip Package
-        if: steps.buildprofile.outputs.gitrelease == 'Enabled'
+        if: ${{ steps.buildprofile.outputs.gitrelease == 'Enabled' }}
         run: |
           set -e
       
@@ -6067,10 +6086,10 @@ jobs:
         uses: softprops/action-gh-release@v3
         with:
           # Release Tag
-          tag_name: ${{ env.MANIFESTBASEFILE }}
+          tag_name: ${{ steps.extract-info.outputs.manifestbasefile }}
 
           # Release Name
-          name: ${{ env.MANIFESTBASEFILE }}-${{ env.FULLVERSION }}-${{ steps.suffix.outputs.suffix }}
+          name: ${{ steps.extract-info.outputs.manifestbasefile }}-${{ steps.kernel-version-setup.outputs.fullversion }}-${{ steps.suffix.outputs.suffix }}
           body: |
             ### 📋 **INSTALLATION GUIDE**:
          
@@ -6133,7 +6152,7 @@ jobs:
           tag_name: ${{ env.CPU }}
       
           # Cache Tarball
-          files: ${{ env.TAR }}
+          files: ${{ steps.manageccache.outputs.tar }}
       
           # Replace Existing Release Asset
           overwrite_files: true    
