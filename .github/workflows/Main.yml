@@ -1182,22 +1182,34 @@ jobs:
         if: ${{ steps.buildprofile.outputs.buildccache != 'Disabled' }}
         run: |
           set -euo pipefail
-          
+
+          # Build Display Cache Key
+          # Represents Logical Cache Identity Used by Workflow
           CACHEKEY="CCache-${{ runner.os }}-${{ env.MANIFESTBASEFILE }}-${{ env.CPU }}-${{ github.ref_name }}"
+          
+          # Read Cache Restoration Results
+          # Local Cache = GitHub Actions Cache Restoration
+          # Release Cache = Public Cache Release Restoration
           LOCAL="${{ steps.ccache-restore.outputs.cache-hit }}"
           RELEASE="${{ steps.cache-restoration.outputs.cache-restored }}"
-          
-          echo "🔑 Cache Key : $CACHEKEY"
-          echo ""
-      
+
+          # Display Cache Restoration Information
+          echo "🔑 Cache Key : $CACHEKEY"   
           echo "🎯 Local Cache Hit   : ${LOCAL:-false}"
           echo "🎯 Release Cache Hit : ${RELEASE:-false}"
 
+          # Write Cache Status to GitHub Actions Step Summary
           echo "### 🧠 Compiler Cache Status" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "| Status | Value |" >> $GITHUB_STEP_SUMMARY
           echo "|--------|--------|" >> $GITHUB_STEP_SUMMARY
 
+          # Determine Highest-Confidence Cache Result
+          # Priority:
+          #   1. Exact GitHub Actions Cache Hit
+          #   2. Exact public release Cache Hit
+          #   3. Existing Cache Data Restored Through Restore-Key Fallback
+          #   4. Completely Empty Cache (Cold Build)
           if [[ "$LOCAL" == 'true' ]]; then
             STATUS="✔️ Exact Cache Match Restored from Local (Fully Matched Cache Key with Identical Build Signature for Maximum Reuse Efficiency)"
             echo "🎉 Exact Cache Hit!"
@@ -1208,73 +1220,91 @@ jobs:
             STATUS="♻️ Partial Cache Restored (Fallback Cache Retrieved via Restore Keys — May Result in Lower but Still Effective Cache Hit Rate)"
             echo "♻️ Partial Cache Found via Restore Keys"
           else
+            # Usable Cached Compiler Objects Were Restored
+            # Kernel Build will Therefore Start as a Cold Cache Build
             STATUS="⚠️ No Cache Available (Cold Build — All Compilation Requests Will Be Processed Without Any Cached Objects)"
             echo "⚠️ No Cache Found — Cold Build"
           fi
-          
-          echo ""
+
+          # Add Final Cache Status to GitHub Actions Summary
           echo "| Cache | $STATUS |" >> $GITHUB_STEP_SUMMARY
 
-          echo ""
+          # Display Final Cache Status in Workflow Log
           echo "📦 Final Cache Status:"
           echo "$STATUS"
 
       - name: 🔧 Install Repository Tool
         shell: bash
         run: |
-          set -euo pipefail
+          set -Eeuo pipefail
 
-          # Already Installed
+          # Check Whether Repository Tool is Already Installed
           if command -v repo >/dev/null 2>&1; then
             echo "🎉 Repository Tool Already Installed"
+            echo ""
+            echo "📦 Repository Tool Path:"
+            command -v repo
+            echo ""
+            echo "📜 Repository Version:"
             repo --version
             exit 0
           fi
 
-          # Primary Method: Pip
-          echo "📦 Attempting Installation via Pip..."
-          if python3 -m pip install --upgrade pip && \
-             python3 -m pip install git-repo; then
-            echo "🎉 Pip Installation Successful"
+          # Define Repository Tool Installation Paths
+          BIN="/usr/local/bin/repo"
+          GOOGLE="https://storage.googleapis.com/git-repo-downloads/repo"
+          GITHUB="https://raw.githubusercontent.com/GerritCodeReview/git-repo/main/repo"
+
+          # Download Repository Tool
+          download() {
+            local URL="$1"
+
+            echo "🌐 Downloading Repository Tool:"
+            echo "$URL"
+
+            curl \
+              -fL \
+              --retry 5 \
+              --retry-delay 3 \
+              --retry-all-errors \
+              --connect-timeout 15 \
+              --max-time 300 \
+              "$URL" \
+              -o repo
+          }
+
+          # Primary Source: Official Google Download
+          echo "📥 Installing Repository Tool..."
+          if download "$GOOGLE"; then
+            echo "🎉 Repository Tool Downloaded from Google"
           else
-            echo "⚠️ Pip Installation Failed"
-            echo "🔄 Falling Back to Manual Download..."
+            # Fallback Source: Official GitHub Mirror
+            echo "⚠️ Google Download Failed"
+            echo "🔄 Trying Official GitHub Mirror..."
 
-            BIN="/usr/local/bin/repo"
-            GOOGLE="https://storage.googleapis.com/git-repo-downloads/repo"
-            GITHUB="https://raw.githubusercontent.com/GerritCodeReview/git-repo/main/repo"
-            download() {
-              local URL="$1"
-              echo "🌐 Downloading: $URL"
-              curl -fL \
-                --retry 5 \
-                --retry-delay 3 \
-                --connect-timeout 15 \
-                "$URL" -o repo
-            }
-
-            # Google Source
-            if download "$GOOGLE"; then
-              echo "🎉 Downloaded from Google"
+            if download "$GITHUB"; then
+              echo "🎉 Repository Tool Downloaded from GitHub"
             else
-              echo "⚠️ Google Download Failed"
-              echo "🔄 Trying GitHub Mirror..."
-              download "$GITHUB" || {
-                echo "⚠️ Failed to Download Repository Tool"
-                exit 1
-              }
+              echo "⚠️ Failed to Download Repository Tool"
+              exit 1
             fi
-
-            chmod +x repo
-            sudo mv repo "$BIN"
-            echo "🎉 Fallback Installation Complete"
           fi
 
-          echo ""
+          # Install Repository Tool
+          chmod +x repo
+          sudo install -m 0755 repo "$BIN"
+          rm -f repo
+
+          # Validate Installation
+          if [[ ! -x "$BIN" ]]; then
+            echo "⚠️ Repository Tool Installation Failed"
+            echo "📌 Expected Path: $BIN"
+            exit 1
+          fi
+
+          # Verify Repository Tool
           echo "📦 Repository Tool Path:"
           command -v repo
-
-          echo ""
           echo "📜 Repository Version:"
           repo --version
 
@@ -1293,17 +1323,24 @@ jobs:
           echo "🕒 Start Time: $(timezone)"
           echo ""
 
-          # Git Performance Tweaks
+          # Configure Git for Faster and More Reliable Repository Sync
           echo "⚙️ Applying Git Performance Tweaks..."
+
+          # Increase Parallel Fetch Operations
           git config --global fetch.parallel 16
-          git config --global http.postBuffer 524288000
+
+          # Disable Git Compression to Reduce CPU Overhead
           git config --global core.compression 0
+
+          # Use Git Protocol Version 2 for More Efficient Fetching
           git config --global protocol.version 2
 
+          # Disable Interactive Authentication Prompts
           export GIT_TERMINAL_PROMPT=0
+
+          # Prevent Git from Aborting Slow HTTP Transfers
           export GIT_HTTP_LOW_SPEED_LIMIT=0
           export GIT_HTTP_LOW_SPEED_TIME=999999
-          export GIT_RETRY_COUNT=5
 
           # Workspace Setup
           WORKDIR="kernel_workspace"
@@ -1470,13 +1507,11 @@ jobs:
           # Detect Kernel Module Branch
           echo "🔍 Detecting Kernel Module Branch..."
           KERNELMODULE=""
-
           for cfg in \
             "$KCDIR/build.config.constants" \
             "$KCDIR/build.config.common"; do
             if [[ -f "$cfg" ]]; then
               TMPBRANCH=$(grep -m1 '^BRANCH=' "$cfg" | cut -d= -f2 || true)
-
               if [[ -n "${TMPBRANCH:-}" ]]; then
                 KERNELMODULE="$TMPBRANCH"
                 break
@@ -1484,25 +1519,26 @@ jobs:
             fi
           done
 
-          # Fallback Using ACK SHA
-          if [[ -z "${KERNELMODULE:-}" && -n "${KERNELREPOSITORY:-}" \
-            && -f "./$KERNELREPOSITORY/android/ACK_SHA" ]]; then
-            KERNELMODULE=$(sed -n '2p' "./$KERNELREPOSITORY/android/ACK_SHA" \
-              | awk -F'-' '{print $1"-"$2}')
+          # Fallback: Detect Module Branch from ACK SHA
+          if [[ -z "$KERNELMODULE" \
+             && -n "${KERNELREPOSITORY:-}" \
+             && -f "./$KERNELREPOSITORY/android/ACK_SHA" ]]; then
+            KERNELMODULE="$(
+              sed -n '2p' "./$KERNELREPOSITORY/android/ACK_SHA" \
+                | awk -F'-' '{print $1 "-" $2}'
+            )"
           fi
 
           # Parse Kernel Module Information
           if [[ -n "${KERNELMODULE:-}" ]]; then
             ANDROIDVERSION="${KERNELMODULE%-*}"
             KERNELVERSION="${KERNELMODULE#*-}"
-
             echo "🚀 Kernel Module Detected"
             echo "📌 Kernel Module   : $KERNELMODULE"
             echo "📌 Android Version : $ANDROIDVERSION"
             echo "📌 Kernel Branch   : $KERNELVERSION"
           else
             echo "⚠️ Unable to Detect Kernel Module"
-
             KERNELMODULE="Unknown"
             ANDROIDVERSION="Unknown"
             KERNELVERSION="Unknown"
