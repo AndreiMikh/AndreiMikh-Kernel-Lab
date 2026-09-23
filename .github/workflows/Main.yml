@@ -1483,7 +1483,6 @@ jobs:
           set -Eeuo pipefail
 
           cd kernel_workspace/kernel_platform
-
           echo "📂 Working Directory: $(pwd)"
 
           # Resolve Kernel Common Directory
@@ -1493,7 +1492,7 @@ jobs:
           elif [[ -f "./kernel_platform/common/Makefile" ]]; then
             KCDIR="./kernel_platform/common"
           else
-            echo "⚠️ ERROR: Kernel Common Makefile Not Found"
+            echo "⚠️ Kernel Common Makefile Not Found"
             echo "📂 Nearby Makefiles:"
             find . -maxdepth 4 -name Makefile | head -20
             exit 1
@@ -1509,13 +1508,17 @@ jobs:
           KERNELMODULE=""
           for cfg in \
             "$KCDIR/build.config.constants" \
-            "$KCDIR/build.config.common"; do
-            if [[ -f "$cfg" ]]; then
-              TMPBRANCH=$(grep -m1 '^BRANCH=' "$cfg" | cut -d= -f2 || true)
-              if [[ -n "${TMPBRANCH:-}" ]]; then
-                KERNELMODULE="$TMPBRANCH"
-                break
-              fi
+            "$KCDIR/build.config.common"
+          do
+            [[ -f "$cfg" ]] || continue
+            TMPBRANCH="$(
+              grep -m1 '^BRANCH=' "$cfg" \
+                | cut -d= -f2 \
+                || true
+            )"
+            if [[ -n "$TMPBRANCH" ]]; then
+              KERNELMODULE="$TMPBRANCH"
+              break
             fi
           done
 
@@ -1545,24 +1548,38 @@ jobs:
           fi
 
           # Read Actual Kernel Version
-          echo ""
           echo "🧾 Reading Real Kernel Version..."
-          VERSION=$(grep '^VERSION[[:space:]]*=' "$COMMONMAKEFILE" \
-            | head -n1 | cut -d= -f2 | tr -d ' ')
-          PATCHLEVEL=$(grep '^PATCHLEVEL[[:space:]]*=' "$COMMONMAKEFILE" \
-            | head -n1 | cut -d= -f2 | tr -d ' ')
-          # Extract Sublevel
-          SUBLEVEL=$(grep '^SUBLEVEL[[:space:]]*=' "$COMMONMAKEFILE" \
-            | head -n1 | cut -d= -f2 | tr -d ' ')
+          VERSION="$(
+            awk -F'=' '/^VERSION[[:space:]]*=/ {
+              gsub(/[[:space:]]/, "", $2)
+              print $2
+              exit
+            }' "$COMMONMAKEFILE"
+          )"
+          PATCHLEVEL="$(
+            awk -F'=' '/^PATCHLEVEL[[:space:]]*=/ {
+              gsub(/[[:space:]]/, "", $2)
+              print $2
+              exit
+            }' "$COMMONMAKEFILE"
+          )"
+          SUBLEVEL="$(
+            awk -F'=' '/^SUBLEVEL[[:space:]]*=/ {
+              gsub(/[[:space:]]/, "", $2)
+              print $2
+              exit
+            }' "$COMMONMAKEFILE"
+          )"
 
           # Fallback if Empty
           VERSION="${VERSION:-0}"
           PATCHLEVEL="${PATCHLEVEL:-0}"
           SUBLEVEL="${SUBLEVEL:-0}"
-
-          # Validate Sublevel
+          
+          # Validate Original Sublevel
           if ! [[ "$SUBLEVEL" =~ ^[0-9]+$ ]]; then
-            echo "⚠️ Invalid Sublevel Detected: $SUBLEVEL — Forcing 0"
+            echo "⚠️ Invalid Sublevel Detected: $SUBLEVEL"
+            echo "🔧 Forcing Sublevel to 0"
             SUBLEVEL=0
           fi
 
@@ -1574,10 +1591,9 @@ jobs:
           # Optional Sublevel Override
           SUBLVLINPUT="${{ github.event.inputs.SUBLEVEL }}"
           if [[ -n "${SUBLVLINPUT:-}" ]]; then
-            echo ""
             echo "🛠️ Updating Kernel Sublevel..."
             echo "📌 New Sublevel: $SUBLVLINPUT"
-
+            
             if ! [[ "$SUBLVLINPUT" =~ ^[0-9]+$ ]]; then
               echo "⚠️ Invalid Custom Sublevel: $SUBLVLINPUT"
               exit 1
@@ -1586,17 +1602,22 @@ jobs:
             sed -i \
               "s/^\(SUBLEVEL[[:space:]]*=[[:space:]]*\).*/\1$SUBLVLINPUT/" \
               "$COMMONMAKEFILE"
+            # Re-read the Updated Sublevel
+            SUBLEVEL="$SUBLVLINPUT"
+            echo "✔️ Kernel Sublevel Updated: $SUBLEVEL"
           else
             echo "📌 No Custom Sublevel Provided"
           fi
 
-          # Read Updated Kernel Version
-          NEWVERSION=$(awk '
-            /^VERSION[[:space:]]*=/ {v=$3}
-            /^PATCHLEVEL[[:space:]]*=/ {p=$3}
-            /^SUBLEVEL[[:space:]]*=/ {s=$3}
-            END {print v "." p "." s}
-          ' "$COMMONMAKEFILE")
+          # Read Final Kernel Version
+          NEWVERSION="$(
+            awk '
+              /^VERSION[[:space:]]*=/    { v=$3 }
+              /^PATCHLEVEL[[:space:]]*=/ { p=$3 }
+              /^SUBLEVEL[[:space:]]*=/   { s=$3 }
+              END { print v "." p "." s }
+            ' "$COMMONMAKEFILE"
+          )"
 
           echo ""
           echo "📊 Final Kernel Version: $NEWVERSION"
@@ -1608,8 +1629,7 @@ jobs:
             echo "✔️ Kernel Version Unchanged"
           fi
 
-          # Export Environment Variables
-          echo ""
+          # Export Kernel Version Environment
           echo "📤 Exporting Environment Variables..."
 
           {
@@ -1618,152 +1638,178 @@ jobs:
             echo "ANDROIDVERSION=$ANDROIDVERSION"
             echo "KERNELVERSION=$KERNELVERSION"
             echo "FULLVERSION=$NEWVERSION"
-            echo "KV1=$(echo "$KERNELVERSION" | cut -d. -f1)"
-            echo "KV2=$(echo "$KERNELVERSION" | tr -d '.')"
-            echo "KV3=$(echo "$NEWVERSION" | tr -d '.')"
-            echo "KSHORTVERSION=$(echo "$NEWVERSION" | cut -d. -f1,2)"
-            echo "KSHORTPATCHVERSION=$(echo "$NEWVERSION" | cut -d. -f1,2 | tr '.' '_')"
+            echo "KV1=${KERNELVERSION%%.*}"
+            echo "KV2=${KERNELVERSION//./}"
+            echo "KV3=${NEWVERSION//./}"
+            echo "KSHORTVERSION=${NEWVERSION%.*}"
+            echo "KSHORTPATCHVERSION=${NEWVERSION%.*}"
           } >> "$GITHUB_ENV"
 
           echo "🚀 Environment Variables Exported"
-
+          
           echo ""
           echo "🎉 Kernel Version Setup Complete"
 
-      - name: 🔧 Inject Custom Kernel Version Suffix
-        if: ${{ github.event.inputs.SUFFIX != '' }}
-        id: inject
-        continue-on-error: true
+      - name: 🔧 Configure Kernel Version Suffix
         shell: bash
         run: |
           set -Eeuo pipefail
 
-          # Navigate
-          cd kernel_workspace
+          # Navigate to Kernel Workspace
+          cd "${GITHUB_WORKSPACE}/kernel_workspace"
 
-          # Inputs
-          SUFFIX="${{ github.event.inputs.SUFFIX }}"
-          ANDROIDVERSION="${ANDROIDVERSION:-android15}"
-          echo "🚀 Injecting Custom Kernel Suffix: ${SUFFIX}"
+          # Android Version Is Already Determined by Kernel Version Setup
+          echo "🔧 Configuring Kernel Version Suffix..."
           echo "📌 Android Version: ${ANDROIDVERSION}"
 
-          # Process All Supported Set Local Version Scripts
-          for path in \
-            kernel_platform/common/scripts/setlocalversion \
-            kernel_platform/msm-kernel/scripts/setlocalversion \
-            kernel_platform/external/dtc/scripts/setlocalversion; do
-
-            # Skip Missing Set Local Version Scripts
-            [[ -f "$path" ]] || continue
-            echo "📂 Processing: ${path}"
-
-            # Remove Existing Dirty Tags
-            sed -i 's/ -dirty//g' "$path"
-
-            # Remove Dirty From Dynamically Generated Res Values
-            sed -i '$i res=$(echo "$res" | sed '\''s/-dirty//g'\'')' "$path"
-
-            # Detect Set Local Version Format
-            if grep -q 'KERNELVERSION.*scm_version' "$path"; then
-              # New Format: Replace SCM Version Output Directly
-              echo "📌 New Set Local Version Format Detected"
-              sed -i \
-                "s|echo \"\${KERNELVERSION}.*scm_version}\"|echo \"\${KERNELVERSION}-${ANDROIDVERSION}-${SUFFIX}-4k\"|" \
-                "$path"
-            elif grep -q 'echo "\$res"' "$path"; then
-              # Old Format: Set Static Res Value for Kernel Build
-              echo "📌 Old Set Local Version Format Detected"
-              echo "✔️ Fast Build Enabled: Setting Static Res Value"
-              sed -i \
-                "s/^res=.*/res=\"-${ANDROIDVERSION}-${SUFFIX}-4k\"/" \
-                "$path"
-            else
-              # Standard Format: Dynamically Inject Suffix Into Res
-              echo "🛠️ Standard Build: Dynamically Injecting Suffix"
-              # Warn When Bazel May Restrict Special Characters
-              if [[ -f kernel_platform/build_with_bazel.py ]]; then
-                echo "⚠️ Note: Using Bazel May Limit Special Characters, Adjust Script if Compilation Fails"
-              fi
-              # Inject Custom Suffix Before First Echo "$res"
-              tac "$path" |
-                sed \
-                  "0,/echo \"\\\$res\"/s//res=\\\$(echo \\\$res | cut -d- -f1-2)-${SUFFIX}; echo \"\\\$res\";/" \
-                | tac > "${path}.tmp"
-              # Replace Original File
-              mv "${path}.tmp" "$path"
-            fi
-
-            # Ensure Modified Script Remains Executable
-            chmod +x "$path"
-            echo "🎉 Finished: ${path}"
-            echo
-          done
-
-          echo "⚙️ Committing Suffix Modifications..."
-
-          # Stage Modified Files
-          git add -A
-
-          # Commit Only When Changes Exist
-          if git diff --cached --quiet; then
-            echo "ℹ️ No Changes Detected, Nothing to Commit"
-          else
-            git commit \
-              -m "🎉 Inject Custom Kernel Suffix and Remove Dirty Tags"
-            echo "🎉 Suffix Modifications Committed Successfully"
-          fi
-  
-      - name: 🔧 Fallback - Inject Local Kernel Version Suffix (Bazel Safe)
-        if: ${{ steps.inject.conclusion == 'failure' && github.event.inputs.SUFFIX != '' }}
-        run: |
-          cd kernel_workspace
-
-          SUFFIX="${{ github.event.inputs.SUFFIX }}"
-          FINALSUFFIX="-${ANDROIDVERSION}-${SUFFIX}"
-          echo "⚠️ Fallback Triggered → Using Local Version: $FINALSUFFIX"
-          echo ""
-
-          # Persist to Next Steps
-          echo "LOCALVERSION=$FINALSUFFIX" >> $GITHUB_ENV
-          echo "KBUILDVERSION=$FINALSUFFIX" >> $GITHUB_ENV
-
-          # Also for Current Shell
-          export LOCALVERSION="$FINALSUFFIX"
-          export KBUILDVERSION="$FINALSUFFIX"
-
-          echo ""
-          echo "🎉 Local Version is Set to: $LOCALVERSION"
-
-      - name: 🔧 Auto-Generated Kernel Suffix
-        if: ${{ github.event.inputs.SUFFIX == '' }}
-        run: |
-          cd kernel_workspace
-
-          # Inputs
-          echo "🚀 Generating Random Kernel Suffix..."
-          
-          # Random Generation
-          RANDOMDIGIT=$((RANDOM % 10))
-          RANDOMHASH=$(head -c 7 /dev/urandom | xxd -p)
-      
-          AUTOSUFFIX="${RANDOMDIGIT}-g${RANDOMHASH}"      
-          echo "🧾 Suffix: $AUTOSUFFIX"      
+          # Define Supported setlocalversion Scripts
           FILES=(
-            kernel_platform/common/scripts/setlocalversion
-            kernel_platform/msm-kernel/scripts/setlocalversion
-            kernel_platform/external/dtc/scripts/setlocalversion
+            "kernel_platform/common/scripts/setlocalversion"
+            "kernel_platform/msm-kernel/scripts/setlocalversion"
+            "kernel_platform/external/dtc/scripts/setlocalversion"
           )
-      
-          for path in "${FILES[@]}"; do
-            [[ -f "$path" ]] || continue
-            echo "⚙️ Processing: $path"      
-            # Ensure Executable
-            chmod +x "$path"      
-            # Remove Dirty Markers
-            sed -i 's/ -dirty//g' "$path"      
-            # Append Suffix Logic in a Safe Way (No Rewriting Core Logic)
-            if ! grep -q "Kernel Auto Suffix Injection" "$path"; then
-              cat >> "$path" <<EOF              
+
+          # Resolve Custom or Automatic Suffix
+          SUFFIX="${{ github.event.inputs.SUFFIX }}"
+          if [[ -n "$SUFFIX" ]]; then
+            # Custom Suffix Mode
+            SUFFIXMODE="Custom"
+            echo "🚀 Custom Kernel Suffix Detected"
+            echo "📌 Suffix: ${SUFFIX}"
+
+            # Build Final Kernel Local Version
+            FINALSUFFIX="-${ANDROIDVERSION}-${SUFFIX}-4k"
+            echo "📌 Final Local Version: ${FINALSUFFIX}"
+
+            # Track Injection Status
+            INJECTIONSUCCESS=true
+
+            # Process All Supported SETLOCALVERSION Scripts
+            for path in "${FILES[@]}"; do
+              # Skip Missing Scripts
+              [[ -f "$path" ]] || continue
+              echo "📂 Processing: ${path}"
+
+              # Ensure Script Remains Executable
+              chmod +x "$path"
+
+              # Remove Existing Dirty Tags
+              sed -i 's/ -dirty//g' "$path"
+              # Remove Dirty Tags From Dynamically Generated Res Values
+              sed -i '$i res=$(echo "$res" | sed '\''s/-dirty//g'\'')' "$path"
+
+              # Detect SETLOCALVERSION Format
+              if grep -q 'KERNELVERSION.*scm_version' "$path"; then
+                # New Format: Replace SCM Version Output Directly
+                echo "📌 New SETLOCALVERSION Format Detected"
+                if ! sed -i \
+                  "s|echo \"\${KERNELVERSION}.*scm_version}\"|echo \"\${KERNELVERSION}-${ANDROIDVERSION}-${SUFFIX}-4k\"|" \
+                  "$path"; then
+                  echo "⚠️ Failed to Modify: ${path}"
+                  INJECTIONSUCCESS=false
+                  break
+                fi
+              elif grep -q 'echo "\$res"' "$path"; then
+                # Old Format: Use Static Res Value
+                echo "📌 Old SETLOCALVERSION Format Detected"
+                echo "✔️ Using Static Res Value"
+                if ! sed -i \
+                  "s/^res=.*/res=\"-${ANDROIDVERSION}-${SUFFIX}-4k\"/" \
+                  "$path"; then
+                  echo "⚠️ Failed to Modify: ${path}"
+                  INJECTIONSUCCESS=false
+                  break
+                fi
+              else
+                # Standard Format: Dynamically Inject Suffix
+                echo "🛠️ Standard SELOCALVERSION Format Detected"
+                # Warn About Bazel Version Handling
+                if [[ -f kernel_platform/build_with_bazel.py ]]; then
+                  echo "⚠️ Bazel Build Detected"
+                  echo "📌 Special Characters in the Suffix May Require Adjustment"
+                fi
+                
+                # Inject Custom Suffix Before First Echo "$res"
+                if ! tac "$path" |
+                  sed \
+                    "0,/echo \"\\\$res\"/s//res=\\\$(echo \\\$res | cut -d- -f1-2)-${SUFFIX}-4k; echo \"\\\$res\";/" \
+                  | tac > "${path}.tmp"; then
+                  echo "⚠️ Failed to Inject Suffix: ${path}"
+                  rm -f "${path}.tmp"
+                  INJECTIONSUCCESS=false
+                  break
+                fi
+                # Replace Original Script
+                mv "${path}.tmp" "$path"
+              fi
+
+              # Restore Executable Permission
+              chmod +x "$path"
+              
+              echo "🎉 Finished: ${path}"
+            done
+
+            # Handle Custom Suffix Injection Result
+            if [[ "$INJECTIONSUCCESS" == "true" ]]; then
+              echo "🎉 Custom Kernel Suffix Injection Successful"
+              echo "📌 Local Version: ${FINALSUFFIX}"
+              # Persist Local Version for Subsequent Build Steps
+              {
+                echo "LOCALVERSION=${FINALSUFFIX}"
+                echo "KBUILDVERSION=${FINALSUFFIX}"
+              } >> "$GITHUB_ENV"
+              
+              # Export for Current Shell
+              export LOCALVERSION="$FINALSUFFIX"
+              export KBUILDVERSION="$FINALSUFFIX"
+            else
+              # Custom Injection Failed — Use Environment Fallback
+              echo "⚠️ Custom Kernel Suffix Injection Failed"
+              echo "🔄 Activating Local Version Fallback"
+              {
+                echo "LOCALVERSION=${FINALSUFFIX}"
+                echo "KBUILDVERSION=${FINALSUFFIX}"
+              } >> "$GITHUB_ENV"
+              
+              # Export for Current Shell
+              export LOCALVERSION="$FINALSUFFIX"
+              export KBUILDVERSION="$FINALSUFFIX"
+              echo "🎉 Local Version Fallback Enabled"
+              echo "📌 LOCALVERSION=${LOCALVERSION}"
+              echo "📌 KBUILDVERSION=${KBUILDVERSION}"
+            fi
+          else
+            # Automatic Suffix Mode
+            SUFFIXMODE="Automatic"
+            echo "🎲 No Custom Kernel Suffix Provided"
+            echo "🚀 Generating Random Kernel Suffix...
+            # Generate Random Kernel Suffix
+            RANDOMDIGIT=$((RANDOM % 10))
+            RANDOMHASH="$(head -c 7 /dev/urandom | xxd -p)"
+            AUTOSUFFIX="${RANDOMDIGIT}-g${RANDOMHASH}"
+            SUFFIX="$AUTOSUFFIX"
+            FINALSUFFIX="-${ANDROIDVERSION}-${AUTOSUFFIX}-4k"
+            echo "🧾 Generated Suffix: ${AUTOSUFFIX}"
+            echo "📌 Final Local Version: ${FINALSUFFIX}"
+
+            # Process All Supported SETLOCALVERSION Scripts
+            for path in "${FILES[@]}"; do
+              # Skip Missing Scripts
+              [[ -f "$path" ]] || continue
+              echo "📂 Processing: ${path}"
+              # Ensure Script Remains Executable
+              chmod +x "$path"
+              # Remove Existing Dirty Markers
+              sed -i 's/ -dirty//g' "$path"
+              # Prevent Duplicate Automatic Injection
+              if grep -q "Kernel Auto Suffix Injection" "$path"; then
+                echo "ℹ️ Auto Suffix Injection Already Present"
+                echo "⏭️ Skipping: ${path}"
+                continue
+              fi
+
+              # Append Automatic Suffix Logic
+              cat >> "$path" <<EOF
               # Kernel Auto Suffix Injection
               if [ -n "\$res" ]; then
                 case "\$res" in
@@ -1774,17 +1820,49 @@ jobs:
                 esac
               fi
               EOF
-            fi
-      
-          done      
-          echo "⚙️ Committing Changes..."    
-          git add -A
-      
-          if git diff --cached --quiet; then
-            echo "✔️ No Changes to Commit"
-          else
-            git commit -m "🎉 Apply Auto-Generated Kernel Suffix"
+              
+              echo "🎉 Auto Suffix Injection Applied"
+            done
+
+            # Persist Automatic Local Version
+            {
+              echo "LOCALVERSION=${FINALSUFFIX}"
+              echo "KBUILDVERSION=${FINALSUFFIX}"
+            } >> "$GITHUB_ENV"
+
+            # Export for Current Shell
+            export LOCALVERSION="$FINALSUFFIX"
+            export KBUILDVERSION="$FINALSUFFIX"
+            echo "📌 LOCALVERSION=${LOCALVERSION}"
+            echo "📌 KBUILDVERSION=${KBUILDVERSION}"
           fi
+
+          echo "⚙️ Checking Kernel Version Changes..."
+          # Stage All Modified Files
+          git add -A
+          # Commit Only When Changes Exist
+          if git diff --cached --quiet; then
+            echo "ℹ️ No Kernel Version Changes Detected"
+          else
+            if [[ "$SUFFIXMODE" == "Custom" ]]; then
+              git commit \
+                -m "🎉 Inject Custom Kernel Version Suffix"
+            else
+              git commit \
+                -m "🎉 Apply Auto-Generated Kernel Suffix"
+            fi
+            echo ""           
+            echo "🎉 Kernel Version Changes Committed Successfully"
+          fi
+
+          echo ""
+          echo "------------------------------"
+          echo "🎉 Kernel Version Suffix Configuration Complete"
+          echo "📌 Mode          : ${SUFFIXMODE}"
+          echo "📌 Android       : ${ANDROIDVERSION}"
+          echo "📌 Suffix        : ${SUFFIX}"
+          echo "📌 Local Version : ${FINALSUFFIX}"
+          echo "------------------------------"
     
       - name: 🔧 Detect Rust Compiler Requirement
         shell: bash
@@ -1805,7 +1883,6 @@ jobs:
           # Paths Relative to Kernel Platform
           FCONFIG="./common/build.config.constants"
           RUSTBIN="./prebuilts/rust/linux-x86/bin/rustc"
-
           # Detect Rust from Build Configuration Constants
           if [[ -f "$FCONFIG" ]]; then
             echo "🔎 Checking Build Configuration Constants..."
