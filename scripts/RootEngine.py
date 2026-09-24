@@ -164,15 +164,15 @@ def setupengine(
 # ===== GitHub Actions Output Helpers =====
 
 def setupoutput(name, value):
-    # GITHUB_OUTPUT is provided by GitHub Actions.
-    # The environment variable name must remain unchanged.
+    # Github Output is Provided by GitHub Actions
+    # Environment Variable Name Must Remain Unchanged
     gitoutput = os.environ.get(
         "GITHUB_OUTPUT"
     )
 
     if not gitoutput:
         raise RuntimeError(
-            "GITHUB_OUTPUT is not set"
+            "Output Not Set"
         )
 
     with open(
@@ -186,15 +186,15 @@ def setupoutput(name, value):
 
 
 def setupenv(name, value):
-    # GITHUB_ENV is provided by GitHub Actions.
-    # The environment variable name must remain unchanged.
+    # Github Environment is Provided by GitHub Actions
+    # Environment Variable Name Must Remain Unchange
     gitenv = os.environ.get(
         "GITHUB_ENV"
     )
 
     if not gitenv:
         raise RuntimeError(
-            "GITHUB_ENV is not set"
+            "Environment Not Set"
         )
 
     with open(
@@ -396,23 +396,23 @@ def main():
     )
 
     print(
-        f"📦 Engine     : {ROOTENGINE}"
+        f"📦 Engine     : {ROOTENGINE or 'None'}"
     )
 
     print(
-        f"📂 Repository : {KSUREPO}"
+        f"📂 Repository : {KSUREPO or 'None'}"
     )
 
     print(
-        f"🌿 Branch     : {MANAGERBRANCH}"
+        f"🌿 Branch     : {MANAGERBRANCH or 'None'}"
     )
 
     print(
-        f"📁 Setup Repo : {BRANCHPATH}"
+        f"📁 Set SukiSU : {BRANCHPATH or 'None'}"
     )
 
     print(
-        f"📦 Artifact   : {MANAGERARTIFACT}"
+        f"📦 Artifact   : {MANAGERARTIFACT or 'None'}"
     )
 
     print(
