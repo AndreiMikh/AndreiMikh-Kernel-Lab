@@ -1277,15 +1277,9 @@ if (args.size < 3) {
         """
         usage:
           kotlinc -script ConditionalVendorBlacklist.kts -- \
-            <kernel_dir> \
+            <kerneldir> \
             <modules> \
             <kernelversion>
-
-        example:
-          kotlinc -script ConditionalVendorBlacklist.kts -- \
-            "/path/to/kernel_platform/common" \
-            "oplus_secure_guard_new,oplus_bsp_zsmalloc" \
-            "6.12"
         """.trimIndent()
     )
 }
@@ -1324,7 +1318,16 @@ try {
             "coresight",
             "rust_binder",
             "msm_kgsl",
-            "camera"
+            "camera",
+            "oplusboot",
+            "rmnet_wlan",
+            "rmnet_core",
+            "msm_drm",
+            "cnss2",
+            "oplus_chg_v2",
+            "reboot_mode",
+            "rfkill",
+            "bootloader_log"
         )
 
     val protectedRequested =
