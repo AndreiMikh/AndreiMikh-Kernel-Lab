@@ -6,7 +6,6 @@ import subprocess
 import sys
 from pathlib import Path
 
-
 def run_command(command, cwd=None, check=True, stdout=None, stdin=None):
     return subprocess.run(
         command,
@@ -16,7 +15,6 @@ def run_command(command, cwd=None, check=True, stdout=None, stdin=None):
         stdin=stdin,
         text=True,
     )
-
 
 def gitlatesttag(repo):
     try:
@@ -39,22 +37,16 @@ def gitlatesttag(repo):
             parts = line.split()
             if len(parts) < 2:
                 continue
-
             ref = parts[1]
             if not ref.startswith("refs/tags/"):
                 continue
-
             tag = ref[len("refs/tags/"):]
             if tag.endswith("^{}"):
                 continue
-
             tags.append(tag)
-
         return tags[-1] if tags else "v0.0.0"
-
     except Exception:
         return "v0.0.0"
-
 
 def getcommitcount(cwd):
     try:
@@ -71,14 +63,12 @@ def getcommitcount(cwd):
     except Exception:
         return "0"
 
-
 def setupengine(repo, branch, argument, cwd):
     print(f"🔗 Setup Repository : {repo}")
     print(f"🌿 Setup Branch     : {branch}")
     print(f"📌 Setup Argument   : {argument}")
 
     url = f"https://raw.githubusercontent.com/{repo}/{branch}/kernel/setup.sh"
-
     curl = subprocess.Popen(
         ["curl", "-fsSL", url],
         stdout=subprocess.PIPE,
@@ -95,39 +85,28 @@ def setupengine(repo, branch, argument, cwd):
     finally:
         if curl.stdout is not None:
             curl.stdout.close()
-
     curl_returncode = curl.wait()
-
     if curl_returncode != 0:
         raise subprocess.CalledProcessError(curl_returncode, ["curl", "-fsSL", url])
-
     return bash
-
 
 def write_github_output(name, value):
     github_output = os.environ.get("GITHUB_OUTPUT")
-
     if not github_output:
         raise RuntimeError("GITHUB_OUTPUT is not set")
-
     with open(github_output, "a", encoding="utf-8") as output:
         output.write(f"{name}={value}\n")
 
-
 def write_github_env(name, value):
     github_env = os.environ.get("GITHUB_ENV")
-
     if not github_env:
         raise RuntimeError("GITHUB_ENV is not set")
-
     with open(github_env, "a", encoding="utf-8") as env_file:
         env_file.write(f"{name}={value}\n")
-
 
 def main():
     ROOTBRANCHSOURCE = os.environ.get("ROOTBRANCHSOURCE", "")
     ROOTENGINE = os.environ.get("ROOTENGINE", "")
-
     MANAGERBRANCH = ""
     BRANCHPATH = ""
     MANAGERARTIFACT = ""
@@ -200,7 +179,6 @@ def main():
     )
 
     os.chdir(KERNEL_PLATFORM)
-
     SUSFS = os.environ.get("SUSFSREPOSITORY", "")
     KCDIR = KERNEL_PLATFORM / "common"
     DEFCONFIG = KCDIR / "arch" / "arm64" / "configs" / "gki_defconfig"
@@ -210,7 +188,6 @@ def main():
     # SukiSU-Ultra
     if ROOTENGINE == "SukiSU-Ultra":
         print("🚀 Setting Up SukiSU-Ultra...")
-
         # SukiSU-Ultra Builtin Setup
         setupengine(
             KSUREPO,
@@ -218,13 +195,10 @@ def main():
             BRANCHPATH,
             KERNEL_PLATFORM,
         )
-
         kernelsu_dir = KERNEL_PLATFORM / "KernelSU"
-
         if not kernelsu_dir.is_dir():
             print("⚠️ SukiSU-Ultra Directory Not Found")
             sys.exit(1)
-
         os.chdir(kernelsu_dir)
 
         # Get Current Git Commit Hash
@@ -246,7 +220,6 @@ def main():
             check=False,
         )
         COMMITCOUNT = result.stdout.strip() or "0"
-
         if re.fullmatch(r"[0-9]+", COMMITCOUNT):
             KSUVERSION = int(COMMITCOUNT) + 37185
         else:
@@ -263,7 +236,6 @@ def main():
         # Verify Native SukiSU-Ultra Version Logic
         print("🔍 Verifying SukiSU-Ultra Version Definitions...")
         makefile = Path("kernel") / "Makefile"
-
         if makefile.is_file():
             pattern = re.compile(
                 r"^VERSION_BASE|^VERSION_OFFSET|^KSU_VERSION_FULL|^VERSION_TAG"
@@ -275,13 +247,11 @@ def main():
             ):
                 if pattern.search(line):
                     print(f"{line_number}:{line}")
-
         print("🎉 SukiSU-Ultra Setup Complete")
 
     # ReSukiSU
     elif ROOTENGINE == "ReSukiSU":
         print("🚀 Setting Up ReSukiSU...")
-
         setupengine(
             KSUREPO,
             MANAGERBRANCH,
@@ -290,13 +260,10 @@ def main():
         )
 
         kernelsu_dir = KERNEL_PLATFORM / "KernelSU"
-
         if not kernelsu_dir.is_dir():
             print("⚠️ ReSukiSU Directory was Not Created")
             sys.exit(1)
-
         os.chdir(kernelsu_dir)
-
         CURRENTBRANCH = ""
         try:
             result = subprocess.run(
@@ -309,16 +276,12 @@ def main():
             CURRENTBRANCH = result.stdout.strip()
         except Exception:
             CURRENTBRANCH = ""
-
         CURRENTBRANCH = CURRENTBRANCH or "HEAD"
-
         COMMITCOUNT = getcommitcount(Path.cwd())
-
         if re.fullmatch(r"[0-9]+", COMMITCOUNT):
             KSUVERSION = int(COMMITCOUNT) + 30700
         else:
             KSUVERSION = 30700
-
         write_github_env("KSUVERSION", KSUVERSION)
 
         # Force Simple Tag-Based Full-Name Format
@@ -327,7 +290,6 @@ def main():
                 encoding="utf-8",
                 errors="replace",
             ).splitlines()
-
             lines = [
                 line
                 for line in lines
@@ -335,21 +297,17 @@ def main():
             ]
 
             lines.append('CONFIG_KSU_FULL_NAME_FORMAT="%%TAG_NAME%%"')
-
             DEFCONFIG.write_text(
                 "\n".join(lines) + "\n",
                 encoding="utf-8",
             )
-
         print(f"🌿 Branch           : {CURRENTBRANCH}")
         print(f"🔢 KSU Version      : {KSUVERSION}")
-
         print("🎉 ReSukiSU Setup Complete")
 
     # KernelSU-Next
     elif ROOTENGINE == "KernelSU-Next":
         print("🚀 Setting Up KernelSU-Next...")
-
         setupengine(
             KSUREPO,
             MANAGERBRANCH,
@@ -358,33 +316,25 @@ def main():
         )
 
         kernelsu_dir = KERNEL_PLATFORM / "KernelSU-Next"
-
         if not kernelsu_dir.is_dir():
             print("⚠️ KernelSU-Next Directory was Not Created")
             sys.exit(1)
-
         os.chdir(kernelsu_dir)
-
         COMMITCOUNT = getcommitcount(Path.cwd())
-
         if re.fullmatch(r"[0-9]+", COMMITCOUNT):
             KSUVERSION = int(COMMITCOUNT) + 30000
         else:
             KSUVERSION = 30000
-
         write_github_env("KSUVERSION", KSUVERSION)
 
         # Version Fallback
         kbuild = Path("kernel") / "Kbuild"
-
         if kbuild.is_file():
             lines = kbuild.read_text(
                 encoding="utf-8",
                 errors="replace",
             ).splitlines()
-
             changed = False
-
             for index, line in enumerate(lines):
                 if line.startswith("KSU_VERSION_FALLBACK := "):
                     lines[index] = f"KSU_VERSION_FALLBACK := {KSUVERSION}"
@@ -392,14 +342,12 @@ def main():
 
             # Tag fallback
             KSU_GIT_TAG = gitlatesttag(KSUREPO)
-
             for index, line in enumerate(lines):
                 if line.startswith("KSU_VERSION_TAG_FALLBACK := "):
                     lines[index] = (
                         f"KSU_VERSION_TAG_FALLBACK := {KSU_GIT_TAG}"
                     )
                     changed = True
-
             if changed:
                 kbuild.write_text(
                     "\n".join(lines) + "\n",
@@ -410,7 +358,6 @@ def main():
 
         # KernelSU-Next SELinux Fix
         STATICSELINUX = Path("kernel") / "feature" / "selinux_hide.c"
-
         if STATICSELINUX.is_file():
             selinux_text = STATICSELINUX.read_text(
                 encoding="utf-8",
@@ -441,37 +388,30 @@ def main():
                     selinux_text,
                     flags=re.MULTILINE,
                 )
-
                 STATICSELINUX.write_text(
                     selinux_text,
                     encoding="utf-8",
                 )
-
                 print("✔️ KernelSU-Next SELinux Fix Applied")
 
         # SUSFS Inline Hook Mode
         dispatch = Path("kernel") / "supercall" / "dispatch.c"
-
         if SUSFS != "-1" and dispatch.is_file():
             dispatch_text = dispatch.read_text(
                 encoding="utf-8",
                 errors="replace",
             )
-
             dispatch_text = re.sub(
                 r"#ifdef CONFIG_HAVE_SYSCALL_TRACEPOINTS.*?#endif",
                 'strscpy(cmd.mode, "Inline", sizeof(cmd.mode));',
                 dispatch_text,
                 flags=re.DOTALL,
             )
-
             dispatch.write_text(
                 dispatch_text,
                 encoding="utf-8",
             )
-
             print("✔️ SUSFS Hook Mode Set to Inline")
-
         print(f"🌿 Branch           : {MANAGERBRANCH}")
         print(f"🏷️ Latest Tag       : {KSU_GIT_TAG}")
         print(f"🔢 KSU Version      : {KSUVERSION}")
@@ -480,7 +420,6 @@ def main():
     # KernelSU
     elif ROOTENGINE == "KernelSU":
         print("🚀 Setting Up KernelSU...")
-
         setupengine(
             KSUREPO,
             MANAGERBRANCH,
@@ -489,44 +428,34 @@ def main():
         )
 
         kernelsu_dir = KERNEL_PLATFORM / "KernelSU"
-
         if not kernelsu_dir.is_dir():
             print("⚠️ KernelSU Directory was Not Created")
             sys.exit(1)
-
         os.chdir(kernelsu_dir)
-
         COMMITCOUNT = getcommitcount(Path.cwd())
-
         if re.fullmatch(r"[0-9]+", COMMITCOUNT):
             KSUVERSION = int(COMMITCOUNT) + 30000
         else:
             KSUVERSION = 30000
-
         write_github_env("KSUVERSION", KSUVERSION)
 
         # KernelSU Version Fallback
         kbuild = Path("kernel") / "Kbuild"
-
         if kbuild.is_file():
             lines = kbuild.read_text(
                 encoding="utf-8",
                 errors="replace",
             ).splitlines()
-
             changed = False
-
             for index, line in enumerate(lines):
                 if line.startswith("KSU_VERSION_FALLBACK := "):
                     lines[index] = f"KSU_VERSION_FALLBACK := {KSUVERSION}"
                     changed = True
-
             # DKSU Version
             for index, line in enumerate(lines):
                 if re.match(r"^DKSU_VERSION\s*=", line):
                     lines[index] = f"DKSU_VERSION={KSUVERSION}"
                     changed = True
-
             if changed:
                 kbuild.write_text(
                     "\n".join(lines) + "\n",
@@ -536,7 +465,6 @@ def main():
         print(f"🌿 Branch           : {MANAGERBRANCH}")
         print(f"🔢 KSU Version      : {KSUVERSION}")
         print("🎉 KernelSU Setup Complete")
-
     else:
         print("⚠️ No Supported KSU Root Engine Selected")
         sys.exit(1)
@@ -552,7 +480,6 @@ def main():
     print(f"📂 Repository : {KSUREPO}")
     print(f"🌿 Branch     : {MANAGERBRANCH}")
     print(f"📁 Setup Repo : {BRANCHPATH}")
-
 
 if __name__ == "__main__":
     main()
