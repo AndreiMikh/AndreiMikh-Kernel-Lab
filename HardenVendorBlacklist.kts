@@ -7,31 +7,19 @@ import java.nio.file.attribute.PosixFilePermission
 import kotlin.system.exitProcess
 
 /*
- * Conditional Vendor Module Blacklist
+ * conditional vendor module blacklist
+ * unsupported:
+ *   linux 5.16 - 5.19
+ *   linux 6.0
  *
- * Linux 5.15 and below:
- *   kernel/module.c
- *
- * Linux 6.1 and above:
- *   kernel/module/main.c
- *
- * Unsupported:
- *   Linux 5.16 - 5.19
- *   Linux 6.0
- *
- * Configuration:
- *   arch/arm64/Kconfig
- *
- * gki_defconfig is never modified.
- *
- * Transaction safety:
- *   - Preflight validation
- *   - Complete/partial patch detection
- *   - Full snapshots before modification
- *   - Atomic writes
- *   - Single rollback path
- *   - Rollback verification
- *   - Snapshot cleanup
+ * transaction:
+ *   - preflight validation
+ *   - complete/partial patch detection
+ *   - full snapshots before modification
+ *   - atomic writes
+ *   - single rollback path
+ *   - rollback verification
+ *   - snapshot cleanup
  */
 
 private const val KCONFIG_SYMBOL =
@@ -127,7 +115,7 @@ fun atomicWrite(
     val parent =
         file.parentFile
             ?: configurationError(
-                "Unable to determine parent directory for " +
+                "unable to determine parent directory for " +
                     file.absolutePath
             )
 
@@ -182,7 +170,7 @@ fun parseKernelVersion(
         Regex("""^(\d+)\.(\d+)""")
             .find(version)
             ?: configurationError(
-                "Invalid KERNELVERSION: $version"
+                "invalid kernel version: $version"
             )
 
     return KernelVersion(
@@ -226,7 +214,7 @@ fun normalizeModules(
 ): List<String> {
     if (input.isBlank()) {
         configurationError(
-            "Module Blacklist Cannot Be Empty"
+            "module blacklist cannot be empty"
         )
     }
 
@@ -238,7 +226,7 @@ fun normalizeModules(
 
     if (modules.isEmpty()) {
         configurationError(
-            "No Valid Modules Were Supplied"
+            "no valid modules were supplied"
         )
     }
 
@@ -251,9 +239,9 @@ fun normalizeModules(
 
     if (invalid.isNotEmpty()) {
         configurationError(
-            "Invalid Kernel Module Name(s): " +
+            "invalid kernel module name(s): " +
                 invalid.joinToString(", ") +
-                ". Only letters, numbers and underscores are allowed."
+                ". only letters, numbers and underscores are allowed"
         )
     }
 
@@ -267,7 +255,7 @@ fun buildKconfigBlock(
 
     return """
 config DEBLOAT_VENDOR_MODULES
-	string "Debloat specific custom modules"
+	string "debloat specific custom modules"
 	default "$joined"
 	help
 	  Pass a comma-separated list of module names to block.
@@ -341,13 +329,13 @@ static int __init init_vendor_debloat_boot_check(void)
 {
 	if (is_normal_boot()) {
 		pr_info(
-			"Boot Mode: Standard state. "
-			"Debloater remains ACTIVE.\n"
+			"boot mode: standard state "
+			"debloater remains active\n"
 		);
 	} else {
 		pr_info(
-			"Boot Mode: Non-standard boot detected. "
-			"Disabling module debloater.\n"
+			"boot mode: non-standard boot detected "
+			"disabling module debloater\n"
 		);
 
 		static_branch_disable(&vendor_debloat_key);
@@ -584,7 +572,7 @@ fun assertNotPartial(
         configurationError(
             "$description is partially applied in " +
                 "${file.absolutePath}. " +
-                "Refusing to modify the kernel automatically."
+                "refusing to modify the kernel automatically"
         )
     }
 }
@@ -628,7 +616,7 @@ fun preflight(
         !kconfigText.contains(KCONFIG_ANCHOR)
     ) {
         configurationError(
-            "Unable to locate Kconfig insertion anchor: " +
+            "unable to locate kconfig insertion anchor: " +
                 KCONFIG_ANCHOR
         )
     }
@@ -644,7 +632,7 @@ fun preflight(
 
         if (!moduleText.contains(anchor)) {
             configurationError(
-                "Unable to locate boot-mode insertion anchor in " +
+                "unable to locate boot-mode insertion anchor in " +
                     moduleSource.absolutePath
             )
         }
@@ -656,7 +644,7 @@ fun preflight(
             )
         ) {
             configurationError(
-                "Unable to locate module_blacklist declaration in " +
+                "unable to locate module blacklist declaration in " +
                     moduleSource.absolutePath
             )
         }
@@ -668,7 +656,7 @@ fun preflight(
 
         if (functionStart < 0) {
             configurationError(
-                "Unable to locate blacklisted() function in " +
+                "unable to locate blacklisted() function in " +
                     moduleSource.absolutePath
             )
         }
@@ -681,7 +669,7 @@ fun preflight(
 
         if (functionEnd < 0) {
             configurationError(
-                "Unable to locate module_blacklist core_param() " +
+                "unable to locate module blacklist core param() " +
                     "after blacklisted() in " +
                     moduleSource.absolutePath
             )
@@ -705,14 +693,14 @@ fun preflight(
             )
         ) {
             configurationError(
-                "Unexpected blacklisted() implementation detected in " +
+                "unexpected blacklisted() implementation detected in " +
                     moduleSource.absolutePath +
-                    ". Refusing to replace it."
+                    ". refusing to replace it"
             )
         }
     }
 
-    info("✔️ Preflight validation passed")
+    info("✔️ preflight validation passed")
 }
 
 fun configureKconfig(
@@ -742,7 +730,7 @@ fun configureKconfig(
 
             if (existingBlock.contains(expectedDefault)) {
                 info(
-                    "ℹ️ DEBLOAT_VENDOR_MODULES Kconfig " +
+                    "ℹ️ debloat vendor modules kconfig " +
                         "is already configured"
                 )
                 return
@@ -758,8 +746,8 @@ fun configureKconfig(
 
             if (updatedBlock == existingBlock) {
                 configurationError(
-                    "Unable to locate existing " +
-                        "DEBLOAT_VENDOR_MODULES default."
+                    "unable to locate existing " +
+                        "debloat vendor modules default"
                 )
             }
 
@@ -777,8 +765,8 @@ fun configureKconfig(
             atomicWrite(kconfig, updated)
 
             info(
-                "✔️ Updated CONFIG_DEBLOAT_VENDOR_MODULES " +
-                    "default in arch/arm64/Kconfig"
+                "✔️ updated config debloat vendor modules " +
+                    "default in arch/arm64/kconfig"
             )
 
             return
@@ -792,7 +780,7 @@ fun configureKconfig(
 
     if (anchorIndex < 0) {
         configurationError(
-            "Unable to locate Kconfig insertion anchor: " +
+            "unable to locate kconfig insertion anchor: " +
                 KCONFIG_ANCHOR
         )
     }
@@ -809,8 +797,8 @@ fun configureKconfig(
     atomicWrite(kconfig, updated)
 
     info(
-        "✔️ Added CONFIG_DEBLOAT_VENDOR_MODULES " +
-            "to arch/arm64/Kconfig"
+        "✔️ added config debloat vendor modules " +
+            "to arch/arm64/kconfig"
     )
 }
 
@@ -823,7 +811,7 @@ fun configureBootMode(
     when (detectBootModeState(source)) {
         PatchState.COMPLETE -> {
             info(
-                "ℹ️ Conditional vendor boot-mode " +
+                "ℹ️ conditional vendor boot-mode " +
                     "logic already exists"
             )
             return
@@ -831,7 +819,7 @@ fun configureBootMode(
 
         PatchState.PARTIAL ->
             configurationError(
-                "Refusing to modify a partially applied " +
+                "refusing to modify a partially applied " +
                     "boot-mode patch in " +
                     moduleSource.path
             )
@@ -849,7 +837,7 @@ fun configureBootMode(
 
     if (!source.contains(anchor)) {
         configurationError(
-            "Unable to locate boot-mode insertion anchor in " +
+            "unable to locate boot-mode insertion anchor in " +
                 moduleSource.absolutePath
         )
     }
@@ -865,7 +853,7 @@ fun configureBootMode(
     atomicWrite(moduleSource, updated)
 
     info(
-        "✔️ Added patch-compatible OPlus boot-mode handling"
+        "✔️ added patch-compatible oplus boot-mode handling"
     )
 }
 
@@ -877,7 +865,7 @@ fun configureBlacklistLogic(
     when (detectBlacklistState(source)) {
         PatchState.COMPLETE -> {
             info(
-                "ℹ️ Conditional vendor blacklist " +
+                "ℹ️ conditional vendor blacklist " +
                     "logic already exists"
             )
             return
@@ -885,7 +873,7 @@ fun configureBlacklistLogic(
 
         PatchState.PARTIAL ->
             configurationError(
-                "Refusing to modify a partially applied " +
+                "refusing to modify a partially applied " +
                     "vendor blacklist patch in " +
                     moduleSource.path
             )
@@ -895,7 +883,7 @@ fun configureBlacklistLogic(
 
     if (!source.contains(MODULE_BLACKLIST_DECLARATION)) {
         configurationError(
-            "Unable to locate module_blacklist declaration in " +
+            "unable to locate module blacklist declaration in " +
                 moduleSource.absolutePath
         )
     }
@@ -913,7 +901,7 @@ fun configureBlacklistLogic(
 
     if (functionStart < 0) {
         configurationError(
-            "Unable to locate blacklisted() function in " +
+            "unable to locate blacklisted() function in " +
                 moduleSource.absolutePath
         )
     }
@@ -926,7 +914,7 @@ fun configureBlacklistLogic(
 
     if (functionEnd < 0) {
         configurationError(
-            "Unable to locate module_blacklist core_param() " +
+            "unable to locate module_blacklist core_param() " +
                 "after blacklisted() in " +
                 moduleSource.absolutePath
         )
@@ -946,9 +934,9 @@ fun configureBlacklistLogic(
         !existingFunction.contains("memcmp")
     ) {
         configurationError(
-            "Unexpected blacklisted() implementation detected in " +
+            "unexpected blacklisted() implementation detected in " +
                 moduleSource.absolutePath +
-                ". Refusing to replace it."
+                ". refusing to replace it"
         )
     }
 
@@ -960,7 +948,7 @@ fun configureBlacklistLogic(
     atomicWrite(moduleSource, source)
 
     info(
-        "✔️ Added patch-compatible vendor module " +
+        "✔️ added patch-compatible vendor module " +
             "blacklist logic"
     )
 }
@@ -978,7 +966,7 @@ fun verify(
         PatchState.COMPLETE
     ) {
         configurationError(
-            "Verification failed: Kconfig patch is incomplete."
+            "verification failed: kconfig patch is incomplete"
         )
     }
 
@@ -996,7 +984,7 @@ fun verify(
 
     if (!kconfigBlock.contains(expectedDefault)) {
         configurationError(
-            "Verification failed: expected Kconfig default " +
+            "verification failed: expected kconfig default " +
                 "is missing: $expectedDefault"
         )
     }
@@ -1006,8 +994,8 @@ fun verify(
         PatchState.COMPLETE
     ) {
         configurationError(
-            "Verification failed: boot-mode implementation " +
-                "is incomplete."
+            "verification failed: boot-mode implementation " +
+                "is incomplete"
         )
     }
 
@@ -1016,8 +1004,8 @@ fun verify(
         PatchState.COMPLETE
     ) {
         configurationError(
-            "Verification failed: blacklist implementation " +
-                "is incomplete."
+            "verification failed: blacklist implementation " +
+                "is incomplete"
         )
     }
 
@@ -1042,7 +1030,7 @@ fun verify(
     for (required in requiredStrings) {
         if (!moduleText.contains(required)) {
             configurationError(
-                "Verification failed: missing required component: " +
+                "verification failed: missing required component: " +
                     required
             )
         }
@@ -1054,8 +1042,8 @@ fun verify(
             .size - 1 != 1
     ) {
         configurationError(
-            "Verification failed: expected exactly one " +
-                "DEBLOAT_VENDOR_MODULES symbol."
+            "verification failed: expected exactly one " +
+                "debloat vendor modules symbol"
         )
     }
 
@@ -1065,8 +1053,8 @@ fun verify(
             .size - 1 != 1
     ) {
         configurationError(
-            "Verification failed: expected exactly one " +
-                "vendor_debloat_key declaration."
+            "verification failed: expected exactly one " +
+                "vendor debloat key declaration"
         )
     }
 
@@ -1076,12 +1064,12 @@ fun verify(
             .size - 1 != 1
     ) {
         configurationError(
-            "Verification failed: expected exactly one " +
-                "custom_module_blacklist declaration."
+            "verification failed: expected exactly one " +
+                "custom module blacklist declaration"
         )
     }
 
-    info("✔️ Source verification passed")
+    info("✔️ source verification passed")
 }
 
 fun createSnapshot(
@@ -1146,7 +1134,7 @@ fun createSnapshots(
         }
 
         throw ConfigurationException(
-            "Unable to create complete rollback snapshot: " +
+            "unable to create complete rollback snapshot: " +
                 (
                     exception.message
                         ?: exception::class.simpleName
@@ -1180,7 +1168,7 @@ fun rollback(
         mutableListOf<Throwable>()
 
     info(
-        "⚠️ Modification failed — starting rollback"
+        "⚠️ modification failed — starting rollback"
     )
 
     for (snapshot in snapshots.asReversed()) {
@@ -1188,13 +1176,13 @@ fun rollback(
             restoreSnapshot(snapshot)
 
             info(
-                "↩️ Restored ${snapshot.original.absolutePath}"
+                "↩️ restored ${snapshot.original.absolutePath}"
             )
         } catch (exception: Throwable) {
             failures += exception
 
             System.err.println(
-                "::error::Rollback failed for " +
+                "::error::rollback failed for " +
                     "${snapshot.original.absolutePath}: " +
                     (
                         exception.message
@@ -1206,7 +1194,7 @@ fun rollback(
     }
 
     /*
-     * Verify every snapshot after attempting all restores.
+     * verify every snapshot after attempting all restores
      */
     for (snapshot in snapshots) {
         try {
@@ -1223,7 +1211,7 @@ fun rollback(
             if (!current.contentEquals(backup)) {
                 failures +=
                     ConfigurationException(
-                        "Rollback verification failed for " +
+                        "rollback verification failed for " +
                             snapshot.original.absolutePath
                     )
 
@@ -1236,7 +1224,7 @@ fun rollback(
             failures += exception
 
             System.err.println(
-                "::error::Unable to verify rollback for " +
+                "::error::unable to verify rollback for " +
                     snapshot.original.absolutePath + ": " +
                     (
                         exception.message
@@ -1259,13 +1247,13 @@ fun cleanupSnapshots(
                 !snapshot.backup.delete()
             ) {
                 System.err.println(
-                    "::warning::Unable to delete rollback snapshot: " +
+                    "::warning::unable to delete rollback snapshot: " +
                         snapshot.backup.absolutePath
                 )
             }
         } catch (exception: Exception) {
             System.err.println(
-                "::warning::Unable to delete rollback snapshot: " +
+                "::warning::unable to delete rollback snapshot: " +
                     snapshot.backup.absolutePath +
                     ": " +
                     (
@@ -1316,17 +1304,17 @@ val kernelVersion =
 try {
     if (!kernelDir.isDirectory) {
         configurationError(
-            "Kernel source directory not found: " +
+            "kernel source directory not found: " +
                 kernelDir.absolutePath
         )
     }
 
     if (!isSupportedKernelVersion(kernelVersion)) {
         configurationError(
-            "Unsupported KERNELVERSION: $kernelVersion. " +
-                "Supported layouts are 5.15 and below, " +
-                "or 6.1 and above. " +
-                "5.16-5.19 and 6.0 are intentionally rejected."
+            "unsupported kernel version: $kernelVersion " +
+                "supported layouts are 5.15 and below " +
+                "or 6.1 and above " +
+                "5.16-5.19 and 6.0 are intentionally rejected"
         )
     }
 
@@ -1348,7 +1336,7 @@ try {
 
     if (protectedRequested.isNotEmpty()) {
         configurationError(
-            "Protected module(s) cannot be blacklisted: " +
+            "protected module(s) cannot be blacklisted: " +
                 protectedRequested.joinToString(", ")
         )
     }
@@ -1376,17 +1364,17 @@ try {
         }
 
     info("")
-    info("🛡️ Conditional Vendor Module Blacklist")
+    info("🛡️ conditional vendor module blacklist")
     info(
-        "📂 Kernel Source : " +
+        "📂 kernel source : " +
             kernelDir.absolutePath
     )
     info(
-        "📦 Kernel        : " +
+        "📦 kernel        : " +
             kernelVersion
     )
     info(
-        "🧩 Implementation: " +
+        "🧩 implementation: " +
             if (legacy) {
                 "kernel/module.c"
             } else {
@@ -1394,14 +1382,14 @@ try {
             }
     )
     info(
-        "📦 Modules       : " +
+        "📦 modules       : " +
             modules.joinToString(", ")
     )
     info(
-        "📋 Configuration : arch/arm64/Kconfig"
+        "📋 configuration : arch/arm64/kconfig"
     )
     info(
-        "🚫 Defconfig     : Not modified"
+        "🚫 defconfig     : not modified"
     )
     info("")
 
@@ -1415,7 +1403,7 @@ try {
         "Kernel module source"
     )
 
-    info("🔎 Validating kernel source...")
+    info("🔎 validating kernel source...")
 
     preflight(
         kconfig,
@@ -1424,12 +1412,12 @@ try {
     )
 
     /*
-     * Important:
+     * important:
      *
-     * Both snapshots are created before ANY modification.
+     * both snapshots are created before any modification
      *
-     * If the second snapshot fails, the first snapshot is
-     * immediately cleaned up and the kernel remains untouched.
+     * if the second snapshot fails, the first snapshot is
+     * immediately cleaned up and the kernel remains untouched
      */
     val snapshots =
         createSnapshots(
@@ -1467,7 +1455,7 @@ try {
             true
 
         info(
-            "✔️ Transaction committed successfully"
+            "✔️ transaction committed successfully"
         )
 
     } catch (exception: Throwable) {
@@ -1477,48 +1465,48 @@ try {
 
         if (rollbackFailures.isNotEmpty()) {
             System.err.println(
-                "::error::Rollback completed with " +
-                    "${rollbackFailures.size} failure(s)."
+                "::error::rollback completed with " +
+                    "${rollbackFailures.size} failure(s)"
             )
 
             System.err.println(
-                "::error::The kernel source may require " +
-                    "manual restoration."
+                "::error::the kernel source may require " +
+                    "manual restoration"
             )
 
             System.err.println(
-                "::error::Original failure: " +
+                "::error::original failure: " +
                     formatFailure(exception)
             )
 
             throw ConfigurationException(
-                "Configuration failed and rollback was not " +
-                    "fully successful."
+                "configuration failed and rollback was not " +
+                    "fully successful"
             )
         }
 
         /*
-         * Rollback succeeded completely.
+         * rollback succeeded completely
          *
-         * Re-throw the original failure rather than replacing
-         * it with a generic rollback message.
+         * re-throw the original failure rather than replacing
+         * it with a generic rollback message
          */
         throw exception
 
     } finally {
         /*
-         * Backups are temporary transaction resources.
+         * backups are temporary transaction resources
          *
-         * They are deleted whether the transaction commits,
-         * rolls back successfully, or rollback itself fails.
+         * they are deleted whether the transaction commits
+         * rolls back successfully, or rollback itself fails
          */
         if (transactionCommitted) {
             info(
-                "🧹 Cleaning committed transaction snapshots"
+                "🧹 cleaning committed transaction snapshots"
             )
         } else {
             info(
-                "🧹 Cleaning rollback transaction snapshots"
+                "🧹 cleaning rollback transaction snapshots"
             )
         }
 
@@ -1527,32 +1515,32 @@ try {
 
     info("")
     info(
-        "🎉 Conditional Vendor Module Blacklist Configured"
+        "🎉 conditional vendor module blacklist configured"
     )
     info(
-        "📦 Kernel Version : " +
+        "📦 kernel kersion : " +
             kernelVersion
     )
     info(
-        "📦 Module Source  : " +
+        "📦 module source  : " +
             moduleSource.relativeTo(kernelDir)
     )
     info(
-        "📋 Kconfig        : " +
+        "📋 kconfig        : " +
             kconfig.relativeTo(kernelDir)
     )
     info(
-        "📦 Blacklisted    : " +
+        "📦 blacklisted    : " +
             modules.joinToString(", ")
     )
     info(
-        "🚫 gki_defconfig  : Not modified"
+        "🚫 gki defconfig  : not modified"
     )
     info("")
 
 } catch (exception: Throwable) {
     fail(
-        "Conditional vendor blacklist configuration failed: " +
+        "conditional vendor blacklist configuration failed: " +
             formatFailure(exception)
     )
 }
