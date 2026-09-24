@@ -484,31 +484,25 @@ fun detectKconfigState(
     if (!source.contains(KCONFIG_SYMBOL)) {
         return PatchState.ABSENT
     }
-
     val block =
         extractKconfigBlock(source)
             ?: return PatchState.PARTIAL
-
     val hasPrompt =
         block.contains(
             "string \"debloat specific custom modules\""
         )
-
     val hasDefault =
         Regex(
             """(?m)^\s*default\s+"[^"]*"\s*$"""
         ).containsMatchIn(block)
-
     val hasHelp =
         block.contains(
             "pass a comma-separated list of module names to block"
         )
-
     val hasExample =
         block.contains(
             "oplus_network_tuning,oplus_bsp_zsmalloc"
         )
-
     return if (
         hasPrompt &&
         hasDefault &&
@@ -564,19 +558,15 @@ fun detectBootModeState(
 
     val count =
         checks.count { it }
-
     return when {
         count == 0 ->
             PatchState.ABSENT
-
         count == checks.size ->
             PatchState.COMPLETE
-
         else ->
             PatchState.PARTIAL
     }
 }
-
 
 fun detectBlacklistState(
     source: String
@@ -587,40 +577,27 @@ fun detectBlacklistState(
                 CUSTOM_BLACKLIST_DECLARATION
             ),
             source.contains(
-                BLACKLIST_FUNCTION
-            ),
-            source.contains(
                 "goto custom_blacklist;"
             ),
             source.contains(
                 "custom_blacklist:"
             ),
             source.contains(
-                "custom_module_blacklist"
-            ),
-            source.contains(
                 "static_branch_likely(&vendor_debloat_key)"
-            ),
-            source.contains(
-                MODULE_BLACKLIST_PARAM
             )
         )
 
     val count =
         checks.count { it }
-
     return when {
         count == 0 ->
             PatchState.ABSENT
-
         count == checks.size ->
             PatchState.COMPLETE
-
         else ->
             PatchState.PARTIAL
     }
-}
-
+}    
 
 fun assertNotPartial(
     description: String,
@@ -643,31 +620,24 @@ fun preflight(
 ) {
     val kconfigText =
         kconfig.readText()
-
     val moduleText =
         moduleSource.readText()
-
     val kconfigState =
         detectKconfigState(kconfigText)
-
     val bootState =
         detectBootModeState(moduleText)
-
     val blacklistState =
-        detectBlacklistState(moduleText)
-
+        detectBlacklistState(moduleText)    
     assertNotPartial(
-        "debloat_vendor_modules kconfig patch",
+        "debloat vendor modules kconfig patch",
         kconfigState,
         kconfig
     )
-
     assertNotPartial(
         "vendor boot-mode patch",
         bootState,
         moduleSource
     )
-
     assertNotPartial(
         "vendor blacklist patch",
         blacklistState,
@@ -774,13 +744,11 @@ fun configureKconfig(
 ) {
     val source =
         kconfig.readText()
-
     when (detectKconfigState(source)) {
         PatchState.PARTIAL ->
             configurationError(
                 "refusing to modify a partially applied kconfig patch"
             )
-
         PatchState.COMPLETE -> {
             val existingBlock =
                 extractKconfigBlock(source)
@@ -788,12 +756,10 @@ fun configureKconfig(
                         "unable to read existing " +
                             "debloat_vendor_modules block"
                     )
-
             val expectedDefault =
                 "default \"" +
                     modules.joinToString(",") +
                     "\""
-
             if (existingBlock.contains(expectedDefault)) {
                 info(
                     "ℹ️ debloat vendor modules kconfig " +
@@ -801,7 +767,6 @@ fun configureKconfig(
                 )
                 return
             }
-
             val updatedBlock =
                 existingBlock.replace(
                     Regex(
@@ -809,71 +774,56 @@ fun configureKconfig(
                     ),
                     "$1$expectedDefault"
                 )
-
             if (updatedBlock == existingBlock) {
                 configurationError(
                     "unable to locate existing " +
                         "debloat vendor modules default"
                 )
             }
-
             val start =
                 source.indexOf(KCONFIG_SYMBOL)
-
             val end =
                 start + existingBlock.length
-
             val updated =
                 source.substring(0, start) +
                     updatedBlock +
                     source.substring(end)
-
             atomicWrite(
                 kconfig,
                 updated
             )
-
             info(
                 "✔️ updated config debloat vendor modules " +
                     "default in arch/arm64/kconfig"
             )
-
             return
         }
-
         PatchState.ABSENT -> Unit
     }
-
     val anchorIndex =
         source.indexOf(KCONFIG_ANCHOR)
-
     if (anchorIndex < 0) {
         configurationError(
             "unable to locate kconfig insertion anchor: " +
                 KCONFIG_ANCHOR
         )
     }
-
     val insertPosition =
         anchorIndex + KCONFIG_ANCHOR.length
-
     val updated =
         source.substring(0, insertPosition) +
             "\n\n" +
             buildKconfigBlock(modules) +
             source.substring(insertPosition)
-
     atomicWrite(
         kconfig,
         updated
     )
-
     info(
         "✔️ added config debloat vendor modules " +
             "to arch/arm64/kconfig"
     )
 }
-
 
 fun configureBootMode(
     moduleSource: File,
@@ -881,7 +831,6 @@ fun configureBootMode(
 ) {
     val source =
         moduleSource.readText()
-
     when (detectBootModeState(source)) {
         PatchState.COMPLETE -> {
             info(
@@ -890,17 +839,14 @@ fun configureBootMode(
             )
             return
         }
-
         PatchState.PARTIAL ->
             configurationError(
                 "refusing to modify a partially applied " +
                     "boot-mode patch in " +
                     moduleSource.path
             )
-
         PatchState.ABSENT -> Unit
     }
-
     val anchor =
         if (legacy) {
             "#define ARCH_SHF_SMALL 0\n#endif"
@@ -908,14 +854,12 @@ fun configureBootMode(
             "#undef CREATE_TRACE_POINTS\n" +
                 "#include <trace/hooks/module.h>"
         }
-
     if (!source.contains(anchor)) {
         configurationError(
             "unable to locate boot-mode insertion anchor in " +
                 moduleSource.absolutePath
         )
     }
-
     val updated =
         source.replace(
             anchor,
@@ -923,24 +867,20 @@ fun configureBootMode(
                 "\n\n" +
                 buildBootModeBlock()
         )
-
     atomicWrite(
         moduleSource,
         updated
     )
-
     info(
         "✔️ added patch-compatible oplus boot-mode handling"
     )
 }
-
 
 fun configureBlacklistLogic(
     moduleSource: File
 ) {
     var source =
         moduleSource.readText()
-
     when (detectBlacklistState(source)) {
         PatchState.COMPLETE -> {
             info(
@@ -949,17 +889,14 @@ fun configureBlacklistLogic(
             )
             return
         }
-
         PatchState.PARTIAL ->
             configurationError(
                 "refusing to modify a partially applied " +
                     "vendor blacklist patch in " +
                     moduleSource.path
             )
-
         PatchState.ABSENT -> Unit
     }
-
     if (
         !source.contains(
             MODULE_BLACKLIST_DECLARATION
@@ -970,7 +907,6 @@ fun configureBlacklistLogic(
                 moduleSource.absolutePath
         )
     }
-
     source =
         source.replace(
             MODULE_BLACKLIST_DECLARATION,
@@ -978,25 +914,21 @@ fun configureBlacklistLogic(
                 "\n" +
                 CUSTOM_BLACKLIST_DECLARATION
         )
-
     val functionStart =
         source.indexOf(
             BLACKLIST_FUNCTION
         )
-
     if (functionStart < 0) {
         configurationError(
             "unable to locate blacklisted() function in " +
                 moduleSource.absolutePath
         )
     }
-
     val functionEnd =
         source.indexOf(
             MODULE_BLACKLIST_PARAM,
             functionStart
         )
-
     if (functionEnd < 0) {
         configurationError(
             "unable to locate module_blacklist core param() " +
@@ -1004,13 +936,11 @@ fun configureBlacklistLogic(
                 moduleSource.absolutePath
         )
     }
-
     val existingFunction =
         source.substring(
             functionStart,
             functionEnd
         )
-
     if (
         !existingFunction.contains(
             "if (!module_blacklist)"
@@ -1028,23 +958,19 @@ fun configureBlacklistLogic(
                 " refusing to replace it"
         )
     }
-
     source =
         source.substring(0, functionStart) +
             buildBlacklistFunction() +
             source.substring(functionEnd)
-
     atomicWrite(
         moduleSource,
         source
     )
-
     info(
         "✔️ added patch-compatible vendor module " +
             "blacklist logic"
     )
 }
-
 
 fun verify(
     kconfig: File,
@@ -1053,10 +979,8 @@ fun verify(
 ) {
     val kconfigText =
         kconfig.readText()
-
     val moduleText =
         moduleSource.readText()
-
     if (
         detectKconfigState(kconfigText) !=
         PatchState.COMPLETE
@@ -1065,26 +989,22 @@ fun verify(
             "verification failed: kconfig patch is incomplete"
         )
     }
-
     val kconfigBlock =
         extractKconfigBlock(kconfigText)
             ?: configurationError(
                 "verification failed: " +
                     "debloat_vendor_modules block is missing"
             )
-
     val expectedDefault =
         "default \"" +
             modules.joinToString(",") +
             "\""
-
     if (!kconfigBlock.contains(expectedDefault)) {
         configurationError(
             "verification failed: expected kconfig default " +
                 "is missing: $expectedDefault"
         )
     }
-
     if (
         detectBootModeState(moduleText) !=
         PatchState.COMPLETE
@@ -1094,7 +1014,6 @@ fun verify(
                 "is incomplete"
         )
     }
-
     if (
         detectBlacklistState(moduleText) !=
         PatchState.COMPLETE
@@ -1104,7 +1023,6 @@ fun verify(
                 "is incomplete"
         )
     }
-
     val requiredStrings =
         listOf(
             "#include <linux/bootconfig.h>",
@@ -1122,7 +1040,6 @@ fun verify(
             "static_branch_likely(&vendor_debloat_key)",
             "custom_blacklist:"
         )
-
     for (required in requiredStrings) {
         if (!moduleText.contains(required)) {
             configurationError(
@@ -1131,7 +1048,6 @@ fun verify(
             )
         }
     }
-
     if (
         kconfigText
             .split(KCONFIG_SYMBOL)
@@ -1142,7 +1058,6 @@ fun verify(
                 "debloat vendor modules symbol"
         )
     }
-
     if (
         moduleText
             .split(STATIC_KEY_DECLARATION)
@@ -1153,7 +1068,6 @@ fun verify(
                 "vendor debloat key declaration"
         )
     }
-
     if (
         moduleText
             .split(CUSTOM_BLACKLIST_DECLARATION)
@@ -1164,7 +1078,6 @@ fun verify(
                 "custom module blacklist declaration"
         )
     }
-
     info("✔️ source verification passed")
 }
 
@@ -1178,14 +1091,12 @@ fun createSnapshot(
             ".${file.name}.rollback.",
             ".bak"
         ).toFile()
-
     try {
         Files.copy(
             file.toPath(),
             backup.toPath(),
             StandardCopyOption.REPLACE_EXISTING
         )
-
         val permissions =
             try {
                 Files.getPosixFilePermissions(
@@ -1194,7 +1105,6 @@ fun createSnapshot(
             } catch (_: UnsupportedOperationException) {
                 null
             }
-
         return FileSnapshot(
             original = file,
             backup = backup,
@@ -1205,23 +1115,19 @@ fun createSnapshot(
             backup.delete()
         } catch (_: Exception) {
         }
-
         throw exception
     }
 }
-
 
 fun createSnapshots(
     files: List<File>
 ): List<FileSnapshot> {
     val snapshots =
         mutableListOf<FileSnapshot>()
-
     try {
         for (file in files) {
             snapshots += createSnapshot(file)
         }
-
         return snapshots
     } catch (exception: Exception) {
         snapshots.asReversed().forEach { snapshot ->
@@ -1230,7 +1136,6 @@ fun createSnapshots(
             } catch (_: Exception) {
             }
         }
-
         throw ConfigurationException(
             "unable to create complete rollback snapshot: " +
                 (
@@ -1242,7 +1147,6 @@ fun createSnapshots(
     }
 }
 
-
 fun restoreSnapshot(
     snapshot: FileSnapshot
 ) {
@@ -1251,7 +1155,6 @@ fun restoreSnapshot(
         snapshot.original.toPath(),
         StandardCopyOption.REPLACE_EXISTING
     )
-
     snapshot.permissions?.let {
         Files.setPosixFilePermissions(
             snapshot.original.toPath(),
@@ -1260,13 +1163,11 @@ fun restoreSnapshot(
     }
 }
 
-
 fun rollback(
     snapshots: List<FileSnapshot>
 ): List<Throwable> {
     val failures =
         mutableListOf<Throwable>()
-
     info(
         "⚠️ modification failed — starting rollback"
     )
@@ -1274,13 +1175,11 @@ fun rollback(
     for (snapshot in snapshots.asReversed()) {
         try {
             restoreSnapshot(snapshot)
-
             info(
                 "↩️ restored ${snapshot.original.absolutePath}"
             )
         } catch (exception: Throwable) {
             failures += exception
-
             System.err.println(
                 "::error::rollback failed for " +
                     "${snapshot.original.absolutePath}: " +
@@ -1302,19 +1201,16 @@ fun rollback(
                 Files.readAllBytes(
                     snapshot.original.toPath()
                 )
-
             val backup =
                 Files.readAllBytes(
                     snapshot.backup.toPath()
                 )
-
             if (!current.contentEquals(backup)) {
                 failures +=
                     ConfigurationException(
                         "rollback verification failed for " +
                             snapshot.original.absolutePath
                     )
-
                 System.err.println(
                     "::error::rollback verification failed for " +
                         snapshot.original.absolutePath
@@ -1322,7 +1218,6 @@ fun rollback(
             }
         } catch (exception: Throwable) {
             failures += exception
-
             System.err.println(
                 "::error::unable to verify rollback for " +
                     snapshot.original.absolutePath + ": " +
@@ -1334,10 +1229,8 @@ fun rollback(
             )
         }
     }
-
     return failures
 }
-
 
 fun cleanupSnapshots(
     snapshots: List<FileSnapshot>
