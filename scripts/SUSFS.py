@@ -163,7 +163,7 @@ def resolvesusfsbranch(
     return branch
 
 
-def clone_susfs(
+def clonesusfs(
     repository,
     branch,
     destination,
@@ -206,7 +206,7 @@ def checkoutsusfsrevised(
 
     os.chdir(susfsdir)
 
-    # Numeric rollback mode
+    # Numeric Rollback Mode
     if re.fullmatch(
         r"[0-9]+",
         susfsrepository,
@@ -253,8 +253,7 @@ def checkoutsusfsrevised(
             sys.exit(1)
 
     else:
-        # SUSFS commit hash / tag /
-        # branch mode
+        # SUSFS Commit Hash / Tag / Branch Mode
         if re.fullmatch(
             r"[0-9a-fA-F]{7,40}",
             susfsrepository,
@@ -331,7 +330,7 @@ def detectsusfsversion(susfsdir):
     return "Unknown"
 
 
-def find_susfs_patch(
+def findsusfspatch(
     susfsdir,
     androidversion,
     kernelversion,
@@ -467,7 +466,7 @@ def applypatch(
     return result.returncode == 0
 
 
-def apply_kernelsu_susfs_patch(
+def applykernelsususfspatch(
     rootengine,
     susfsvariant,
     androidversion,
@@ -550,7 +549,7 @@ def apply_kernelsu_susfs_patch(
         TimeoutError,
     ):
         print(
-            "⚠️ ERROR: Patch does "
+            "⚠️ ERROR: Patch Does "
             "Not Exist:"
         )
         print(susfs10url)
@@ -648,7 +647,7 @@ def apply_kernelsu_susfs_patch(
     else:
         print(
             "⚠️ SUSFS Enable Patch "
-            "Is Not Compatible with "
+            "Is Not Compatible With "
             "This KernelSU Source Tree"
         )
 
@@ -708,8 +707,8 @@ def applylegacyfixpatch(
         "(Kernel 5.15.0–5.15.123)"
     )
 
-    # Check whether the patch is
-    # already applied.
+    # Check Whether the Patch is
+    # Already Applied
     dryrun = runcommand(
         [
             "patch",
@@ -821,8 +820,8 @@ def checkrejects(
     # checkrejects .
     #
     # Checker is Therefore
-    # Executed Inside Bash so that
-    # Functions Defined by the
+    # Executed Inside Bash so That
+    # Functions Defined By The
     # Sourced Script Remain Available
     command = [
         "bash",
@@ -1042,7 +1041,7 @@ def main():
 
     # ===== Find SUSFS Patch =====
 
-    susfspatch = find_susfs_patch(
+    susfspatch = findsusfspatch(
         susfsdir,
         androidversion,
         kernelversion,
@@ -1092,7 +1091,7 @@ def main():
 
     # ===== Apply KernelSU SUSFS Patch =====
 
-    apply_kernelsu_susfs_patch(
+    applykernelsususfspatch(
         rootengine,
         susfsvariant,
         androidversion,
