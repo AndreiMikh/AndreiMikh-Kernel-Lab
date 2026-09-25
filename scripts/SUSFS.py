@@ -983,7 +983,7 @@ def main():
 
     # ===== Clone SUSFS =====
 
-    clone_susfs(
+    clonesusfs(
         susfsurl,
         susfsbranch,
         susfsdir,
