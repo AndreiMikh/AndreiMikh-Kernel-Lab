@@ -314,9 +314,7 @@ jobs:
       
       # Release Decision
       tar: ${{ steps.manageccache.outputs.tar }}
-      shouldrelease: ${{ steps.ksu-check.outputs.shouldrelease }}
-
-      
+      shouldrelease: ${{ steps.ksu-check.outputs.shouldrelease }}     
     env:
       # Cache Directories
       CCACHE_DIR: ${{ github.workspace }}/.ccache
@@ -6317,7 +6315,9 @@ jobs:
           fi
             
       - name: 🤖 AI APK Workflow Resolver
+        id: root-engine-apk
         continue-on-error: true
+        shell: bash
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -6341,8 +6341,7 @@ jobs:
           echo "------------------------------"
           echo ""
       
-          echo "🔎 [Check] Fetching Latest Successful Workflow Runs..."
-      
+          echo "🔎 [Check] Fetching Latest Successful Workflow Runs..."     
           # Safe Array of Runs
           mapfile -t runs < <(
             gh api \
@@ -6351,10 +6350,14 @@ jobs:
                 | sort_by(.created_at)
                 | reverse
                 | .[].id'
-          )
-      
+          )      
           if [[ ${#runs[@]} -eq 0 ]]; then
             echo "⚠️ [Error] No Successful Runs Found"
+            {
+              echo "managerapk=false"
+              echo "apkcount=0"
+              echo "managerapkdir=$MANAGERAPKDIR"
+            } >> "$GITHUB_OUTPUT"
             exit 0
           fi
       
@@ -6398,6 +6401,11 @@ jobs:
       
           if [[ -z "$selectedrun" ]]; then
             echo "⚠️ [Error] No Valid APK Workflow Found"
+            {
+              echo "managerapk=false"
+              echo "apkcount=0"
+              echo "managerapkdir=$MANAGERAPKDIR"
+            } >> "$GITHUB_OUTPUT"
             exit 0
           fi
 
@@ -6412,8 +6420,7 @@ jobs:
           gh api repos/$KSUREPOSITORY/actions/runs/$selectedrun/artifacts \
             --jq '.artifacts[].name' || true
           
-          echo "------------------------------"
-      
+          echo "------------------------------"      
           echo "📩 [Step 3] Fetching Only Manager APK Artifacts..."
           set +e    # Disable Strict Mode          
           artifacturls=$(gh api \
@@ -6425,12 +6432,16 @@ jobs:
           echo "------------------------------"
           echo "🔍 Manager Artifact URLs:"
           echo "$artifacturls"
-          echo "------------------------------"
-          
+          echo "------------------------------"          
           artifactcount=$(echo "$artifacturls" | grep -c "api.github.com" || true)          
           echo "📦 Manager Artifact Count: $artifactcount"          
           if [[ "$artifactcount" -eq 0 ]]; then
             echo "⚠️ No Manager APK Artifacts Found"
+            {
+              echo "managerapk=false"
+              echo "apkcount=0"
+              echo "managerapkdir=$MANAGERAPKDIR"
+            } >> "$GITHUB_OUTPUT"
             exit 0
           fi
           
@@ -6441,8 +6452,7 @@ jobs:
             [[ -z "$url" ]] && continue          
             ((i++))
             echo "⬇️ Downloading Artifact #$i"          
-            zipfile="$MANAGERAPKDIR/artifact_$i.zip"
-          
+            zipfile="$MANAGERAPKDIR/artifact_$i.zip"         
             # Curl (Never Fail Pipeline)
             curl -L \
               -H "Authorization: Bearer $GITHUB_TOKEN" \
@@ -6462,15 +6472,13 @@ jobs:
               echo "⚠️ Corrupted Artifact, Skipping..."
               rm -f "$zipfile"
               continue
-            }
-          
+            }         
             unzip -o "$zipfile" -d "$MANAGERAPKDIR" >/dev/null 2>&1 || true
             rm -f "$zipfile"        
           done <<< "$artifacturls"
           set -e    # Re-Enable Strict Mode      
           echo "🧹 [Step 4] Cleaning Non-APK Files..."          
           find "$MANAGERAPKDIR" -type f ! -name "*.apk" -delete || true    
-
           # Apply Strict ARM64-V8A Filter if the Repository is ReSukiSU/ReSukiSU
           if [[ "$KSUREPOSITORY" == "ReSukiSU/ReSukiSU" ]]; then
             echo "ℹ️ [Info] ReSukiSU Repository Detected. Filtering for Standard ARM64-V88 Release APK..."
@@ -6480,8 +6488,7 @@ jobs:
           
           echo "🔍 [Step 5] Verifying Output..."         
           APKCOUNT=$(find "$MANAGERAPKDIR" -type f -name "*.apk" | wc -l || true)          
-          echo "📦 APK Count: $APKCOUNT"
-          
+          echo "📦 APK Count: $APKCOUNT"          
           if [[ "$APKCOUNT" -gt 0 ]]; then
             echo "------------------------------"
             echo "📦 [Success] APKs Found: $APKCOUNT"
@@ -6491,90 +6498,15 @@ jobs:
             echo "⚠️ [Warning] No APK Files Found (Manager Build Likely Missing)"
           fi
 
+          {
+            echo "managerapk=$APKMANAGER"
+            echo "apkcount=$APKCOUNT"
+            echo "managerapkdir=$MANAGERAPKDIR"
+            echo "selectedrun=$selectedrun"
+          } >> "$GITHUB_OUTPUT"
+
           echo ""
           echo "🎉 AI APK Resolver Completed Successfully"
-
-      - name: 📦 Validate and Collect Manager APK
-        id: root-engine-apk
-        shell: bash
-        run: |
-          set -Eeuo pipefail
-
-          # Define APK Source and Flattened Output Directories
-          echo "🔍 Checking Manager APK Directory..."
-          APKSOURCE="ManagerAPK-ReSukiSU-35172"
-          FLATDIR="FlatAPK"
-
-          # Count Available Manager APKs
-          APKCOUNT="$(find "$APKSOURCE" -type f -name "*.apk" 2>/dev/null | wc -l || true)"
-          APKCOUNT="${APKCOUNT//[[:space:]]/}"
-
-          echo "------------------------------"
-          echo "📦 APK Count: $APKCOUNT"
-          echo "------------------------------"
-
-          if [[ "$APKCOUNT" -gt 0 ]]; then
-            APKMANAGER="true"
-
-            echo "📦 Manager APK Found"
-            echo "📌 APK Manager : $APKMANAGER"
-            echo "📌 APK Count   : $APKCOUNT"
-
-            # Export to subsequent GitHub Actions Steps
-            {
-              echo "APKMANAGER=$APKMANAGER"
-              echo "APKCOUNT=$APKCOUNT"
-            } >> "$GITHUB_ENV"
-
-            # Export APK Status and Count as Step Outputs
-            {
-              echo "apkmanager=$APKMANAGER"
-              echo "apkcount=$APKCOUNT"
-            } >> "$GITHUB_OUTPUT"
-
-            # Flatten APKs into a Single Directory for Artifact Upload
-            echo "📦 Flattening APKs..."
-            mkdir -p "$FLATDIR"
-            find "$APKSOURCE" \
-              -type f \
-              -name "*.apk" \
-              -exec cp -f {} "$FLATDIR/" \;
-            # Count Flattened APKs for Verification
-            FLATCOUNT="$(find "$FLATDIR" -type f -name "*.apk" | wc -l || true)"
-            FLATCOUNT="${FLATCOUNT//[[:space:]]/}"
-
-            echo "------------------------------"
-            echo "📦 Flat APK Count: $FLATCOUNT"
-            echo "------------------------------"
-
-            # Verify All APKs Were Successfully Flattened
-            if [[ "$FLATCOUNT" -ne "$APKCOUNT" ]]; then
-              echo "⚠️ APK Flattening Verification Failed"
-              echo "📌 Expected: $APKCOUNT"
-              echo "📌 Found   : $FLATCOUNT"
-              exit 1
-            fi
-
-            echo "✔️ APK Ready for Upload"
-          else
-            # No Manager APKs Found
-            APKMANAGER="false"
-            APKCOUNT="0"
-
-            # Export Empty APK Status and Count to Subsequent Steps
-            {
-              echo "APKMANAGER=$APKMANAGER"
-              echo "APKCOUNT=$APKCOUNT"
-            } >> "$GITHUB_ENV"
-
-            # Export Empty APK Status and Count as Step Outputs
-            {
-              echo "apkmanager=$APKMANAGER"
-              echo "apkcount=$APKCOUNT"
-            } >> "$GITHUB_OUTPUT"
-
-            echo "⚠️ No APK Found"
-          fi
 
       - name: 📤 Upload Flashable Kernel Artifact
         uses: actions/upload-artifact@v7
@@ -6593,9 +6525,10 @@ jobs:
           # Build Manager Artifact
           name: ManagerAPK-${{ inputs.ROOTENGINE }}-${{ steps.rootengine.outputs.ksuversion }}
           # Upload Manager APK Files
-          path: FlatAPK/*.apk
+          path: ${{ steps.root-engine-apk.outputs.managerapkdir }}/*.apk
           # Warn When No APK is Found        
           if-no-files-found: warn
+          retention-days: 7
 
       - name: 📤 Upload NoMount Userspace
         if: ${{ inputs.NOMOUNT != 'None' }}
@@ -6607,6 +6540,7 @@ jobs:
           path: ${{ github.workspace }}/kernel_workspace/nomount-userspace/
           # Warn When No ZIP is Found
           if-no-files-found: warn
+          retention-days: 7
 
       - name: 📤 Upload CCache Tarball
         if: ${{ steps.buildprofile.outputs.builccache != 'Disabled' }}
@@ -6679,7 +6613,6 @@ jobs:
         with:
           # Release Tag
           tag_name: ${{ steps.extract-info.outputs.manifestbasefile }}
-
           # Release Name
           name: ${{ steps.extract-info.outputs.manifestbasefile }}-${{ steps.kernel-version-setup.outputs.fullversion }}-${{ steps.suffix.outputs.suffix }}
           body: |
@@ -6732,7 +6665,7 @@ jobs:
             
           files: |
             ${ANYKERNEL3ZIP}
-            FlatAPK/*.apk
+            ${{ steps.root-engine-apk.outputs.managerapkdir }}/*.apk
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
