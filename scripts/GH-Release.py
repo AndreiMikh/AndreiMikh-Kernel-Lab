@@ -62,15 +62,22 @@ def collectassets():
                 anykernelpath
             )
 
-    # Search FlatAPK Directory for APK Files
-    flatapk = Path("FlatAPK")
+    # Read Manager APK Directory From AI APK Resolver
+    managerapkdir = os.environ.get(
+        "MANAGERAPKDIR",
+        "",
+    )
 
-    if isdir(flatapk):
-        for apk in sorted(
-            flatapk.rglob("*.apk")
-        ):
-            if isfile(apk):
-                assets.append(apk)
+    # Search AI APK Resolver Directory for APK Files
+    if managerapkdir:
+        managerapkpath = Path(managerapkdir)
+
+        if isdir(managerapkpath):
+            for apk in sorted(
+                managerapkpath.rglob("*.apk")
+            ):
+                if isfile(apk):
+                    assets.append(apk)
 
     return assets
 
