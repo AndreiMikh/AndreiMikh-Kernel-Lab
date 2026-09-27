@@ -2128,29 +2128,34 @@ jobs:
             LLVMENABLED="true"
           fi
 
-          # Resolve Clang Prebuilt Root
           echo "------------------------------"
           echo "🚀 Resolving Clang Toolchain..."
           echo "------------------------------"
 
-          CLANGROOT="$(
-            find "$KERNELPLATFORM" \
-              -maxdepth 1 \
-              -type d \
-              -name 'prebuilts*' \
-              -exec test -d '{}/clang/host/linux-x86' \; \
-              -print |
-            sort |
-            head -n1
-          )"
+          # Resolve AOSP Clang Prebuilt Root
+          # Prefer Standard Prebuilts Directory
+          # Fallback to Prebuilts-Master When Required
+          CLANGROOT=""
+          for PREBUILT in \
+            "$KERNELPLATFORM/prebuilts" \
+            "$KERNELPLATFORM/prebuilts-master"
+          do
+            if [[ -d "$PREBUILT/clang/host/linux-x86" ]]; then
+              CLANGROOT="$PREBUILT"
+              break
+            fi
+          done
 
           if [[ -z "$CLANGROOT" ]]; then
-            echo "⚠️ Clang Root Directory Missing"
-            echo "📂 Expected under: ${KERNELPLATFORM}/prebuilts*"
+            echo "⚠️ No AOSP Clang Prebuilt Root Found"
+            echo "📂 Checked:"
+            echo "   $KERNELPLATFORM/prebuilts"
+            echo "   $KERNELPLATFORM/prebuilts-master"
             exit 1
           fi
 
           CLANGROOT="$(realpath "$CLANGROOT")"
+          echo "📂 Clang Root: $CLANGROOT"
 
           # Find Newest Valid Clang Toolchain
           CLANGDIR="$(
@@ -2166,15 +2171,14 @@ jobs:
           )"
 
           if [[ -z "$CLANGDIR" ]]; then
-            echo "⚠️ No Valid Clang Toolchain Found"
-            echo "🔍 Available Toolchains:"
+            echo "⚠️ No Valid Clang-r* Toolchain Found"
+            echo "🔍 Available Clang Binaries:"
             find "$CLANGROOT/clang/host/linux-x86" \
               -mindepth 1 \
-              -maxdepth 2 \
+              -maxdepth 3 \
               -type f \
               -name clang \
               -print 2>/dev/null || true
-
             exit 1
           fi
 
@@ -2185,8 +2189,8 @@ jobs:
 
           # Validate Clang Binary
           if [[ ! -x "$CLANGFULLPATH" ]]; then
-            echo "⚠️ Clang Binary Missing"
-            echo "📂 Expected: ${CLANGFULLPATH}"
+            echo "::error::Clang binary is missing"
+            echo "📂 Expected: $CLANGFULLPATH"
             exit 1
           fi
 
@@ -2201,7 +2205,7 @@ jobs:
             exit 1
           fi
 
-          # Resolve Clang Resource Directory
+          # Detect Clang Resource Directory
           CLANGRESOURCEDIR="$(
             "$CLANGFULLPATH" \
               --print-resource-dir 2>/dev/null || true
@@ -2216,6 +2220,20 @@ jobs:
             fi
           fi
 
+          # Derive Stable Clang Fingerprint
+          # Used to Distinguish Different Compiler Builds
+          # Even When the Reported Version is Identical
+          CLANGFINGERPRINT="$(
+            "$CLANGFULLPATH" --version |
+              sha256sum |
+              cut -c1-12
+          )"
+
+          if [[ -z "$CLANGFINGERPRINT" ]]; then
+            echo "⚠️ Failed to Generate Clang Fingerprint"
+            exit 1
+          fi
+
           # Persist Toolchain Environment
           {
             echo "CLANGROOT=${CLANGROOT}"
@@ -2223,8 +2241,10 @@ jobs:
             echo "CLANGBIN=${CLANGBIN}"
             echo "CLANGFULLPATH=${CLANGFULLPATH}"
             echo "CLANGVERSION=${CLANGVERSION}"
+            echo "CLANGRESOURCEDIR=${CLANGRESOURCEDIR}"
             echo "LLVMENABLED=${LLVMENABLED}"
             echo "LIBCLANG_PATH=${LIBCLANGPATH}"
+            echo "CLANGFINGERPRINT=${CLANGFINGERPRINT}"
             echo "CCACHE_COMPILER=${CLANGFULLPATH}"
           } >> "$GITHUB_ENV"
 
@@ -2234,12 +2254,14 @@ jobs:
           # Display Toolchain Information
           echo ""
           echo "------------------------------"
-          echo "📂 Clang Root      : ${CLANGROOT}"
-          echo "📂 Clang Directory : $(basename "$CLANGDIR")"
-          echo "📂 Clang Bin       : ${CLANGBIN}"
-          echo "📂 Clang Version   : ${CLANGVERSION}"
-          echo "📂 LLVM IAS        : ${LLVMENABLED}"
-          echo "📂 Lib Clang       : ${LIBCLANGPATH:-Unavailable}"
+          echo "📂 Clang Root        : ${CLANGROOT}"
+          echo "📂 Clang Directory   : $(basename "$CLANGDIR")"
+          echo "📂 Clang Bin         : ${CLANGBIN}"
+          echo "📂 Clang Version     : ${CLANGVERSION}"
+          echo "📂 Clang Resource    : ${CLANGRESOURCEDIR:-Unavailable}"
+          echo "📂 Lib Clang         : ${LIBCLANGPATH:-Unavailable}"
+          echo "🔐 Clang Fingerprint : ${CLANGFINGERPRINT}"
+          echo "📂 LLVM IAS          : ${LLVMENABLED}"
           echo "------------------------------"
 
           # Verify Active Clang
@@ -2265,21 +2287,22 @@ jobs:
           echo "------------------------------"
 
           # Locate Rust Prebuilt Toolchain Root
-          RUSTPREBUILT="$(
-            find "$KERNELPLATFORM" \
-              -maxdepth 1 \
-              -type d \
-              -name 'prebuilts*' \
-              -exec test -d '{}/rust/linux-x86' \; \
-              -print |
-            sort |
-            head -n1
-          )"
+          RUSTPREBUILT=""
+          for PREBUILT in \
+            "$KERNELPLATFORM/prebuilts" \
+            "$KERNELPLATFORM/prebuilts-master"
+          do
+            if [[ -d "$PREBUILT/rust/linux-x86" ]]; then
+              RUSTPREBUILT="$PREBUILT"
+              break
+            fi
+          done
 
           # Validate Rust Prebuilt Root
           if [[ -z "$RUSTPREBUILT" ]]; then
-            echo "⚠️ Rust Prebuilt Root Not Found"
-            echo "📂 Expected under: ${KERNELPLATFORM}/prebuilts*"
+            echo "📂 Checked:"
+            echo "   $KERNELPLATFORM/prebuilts"
+            echo "   $KERNELPLATFORM/prebuilts-master"
             exit 1
           fi
 
@@ -2389,6 +2412,33 @@ jobs:
 
           echo ""
           echo "🎉 Rust + Bindgen Ready"
+
+      - name: 🧪 Validate Rust and Bindgen
+        if: ${{ steps.rust-compiler.outputs.enablerustc == 'true' }}
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+
+          KDIR="${GITHUB_WORKSPACE}/kernel_workspace/kernel_platform/common"
+
+          cd "$KDIR"
+
+          export RUSTTARGET="aarch64-linux-android"
+
+          echo "🦀 Rustc:"
+          "$RUSTCPATH" --version
+
+          echo ""
+          echo "🔧 Bindgen:"
+          "$BINDGEN" --version
+
+          echo ""
+          echo "🧪 Testing Kernel Rust Availability..."
+
+          make V=1 rustavailable
+
+          echo ""
+          echo "🎉 Rust + Bindgen validation passed"
 
       - name: 🛡️ Setup Reject Checker
         shell: bash
