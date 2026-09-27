@@ -2120,7 +2120,7 @@ jobs:
           # Navigate to Kernel Platform
           cd "$KERNELPLATFORM"
 
-          # Detect LLVM Integrated Assembler
+          # Check Whether the Kernel Build Configuration Enables LLVM's Integrated Assembler
           LLVMENABLED="false"
           if [[ -f "./common/build.config.arm" ]] &&
              grep -q '^LLVM_IAS=1' "./common/build.config.arm"; then
@@ -2132,7 +2132,7 @@ jobs:
           echo "🚀 Resolving Clang Toolchain..."
           echo "------------------------------"
 
-          # Locate Clang Prebuilt Root
+          # Find the Prebuilt Toolchain Directory Containing the Linux-Hosted Clang Binaries
           CLANGROOT="$(
             find "$KERNELPLATFORM" \
               -maxdepth 1 \
@@ -2151,7 +2151,7 @@ jobs:
 
           CLANGROOT="$(realpath "$CLANGROOT")"
 
-          # Locate Newest Valid Clang Toolchain
+          # Select the Newest Available clang-r* Directory that Contains an Executable Clang Binary
           CLANGDIR="$(
             find "$CLANGROOT/clang/host/linux-x86" \
               -mindepth 1 \
@@ -2174,14 +2174,14 @@ jobs:
           CLANGBIN="${CLANGDIR}/bin"
           CLANGFULLPATH="${CLANGBIN}/clang"
 
-          # Validate Clang Binary
-          if [[ ! -x "$CLANGFULLPATH" ]]; then
-            echo "⚠️ Clang Binary Missing"
-            echo "📂 Expected: ${CLANGFULLPATH}"
+          # Make Sure the Selected Clang Binary is Executable Before Exporting its Paths
+          [[ -x "$CLANGFULLPATH" ]] || {
+            echo "⚠️ Clang Binary Not Found"
+            echo "📌 Expected: $CLANGFULLPATH"
             exit 1
-          fi
+          }
 
-          # Detect Clang Version
+          # Read the Compiler Version Directly From the Selected Clang Binary
           CLANGVERSION="$(
             "$CLANGFULLPATH" --version |
               sed -nE '1{s/.*clang version ([0-9.]+).*/\1/p}'
@@ -2192,7 +2192,7 @@ jobs:
             exit 1
           }
 
-          # Resolve Clang Library Directory
+          # Locate Lib Clang for Tools Such as Bindgen that Require the Clang Shared Library
           LIBCLANGPATH="$(
             find "$CLANGDIR" \
               -type f \
@@ -2202,7 +2202,7 @@ jobs:
             xargs -r dirname
           )"
 
-          # Persist Clang Environment
+          # Export the Resolved Clang Environment for Subsequent GitHub Actions Steps
           {
             echo "CLANGROOT=$CLANGROOT"
             echo "CLANGDIR=$CLANGDIR"
@@ -2214,9 +2214,8 @@ jobs:
             echo "CCACHE_COMPILER=$CLANGFULLPATH"
           } >> "$GITHUB_ENV"
 
+          # Add the Selected Clang Binaries to Path for Tools Invoked by Later Steps
           echo "$CLANGBIN" >> "$GITHUB_PATH"
-
-          echo ""
           echo "📂 Clang Root      : $CLANGROOT"
           echo "📂 Clang Directory : $(basename "$CLANGDIR")"
           echo "📂 Clang Bin       : $CLANGBIN"
@@ -2224,11 +2223,12 @@ jobs:
           echo "📂 LLVM IAS        : $LLVMENABLED"
           echo "📂 Lib Clang       : ${LIBCLANGPATH:-Unavailable}"
 
-          echo ""
+          # Verify that the Selected Compiler can Execute and Report its Resource Directory
           echo "🔎 Verifying Clang..."
           "$CLANGFULLPATH" --version | head -n1
           "$CLANGFULLPATH" -print-resource-dir
 
+          # Report Whether Lib Clang was Found for Rust Bindgen Integration
           if [[ -n "$LIBCLANGPATH" ]]; then
             echo "✔️ libclang Found"
           else
@@ -2253,7 +2253,7 @@ jobs:
           echo "🦀 Setting Up Rust Toolchain"
           echo "------------------------------"
 
-          # Locate Rust Prebuilt Toolchain Root
+          # Find the Prebuilt Rust Toolchain Root Supplied by the Kernel Source
           RUSTPREBUILT="$(
             find "$KERNELPLATFORM" \
               -maxdepth 1 \
@@ -2265,7 +2265,6 @@ jobs:
             head -n1
           )"
 
-          # Validate Rust Prebuilt Root
           [[ -n "$RUSTPREBUILT" ]] || {
             echo "⚠️ Rust Prebuilt Root Not Found"
             exit 1
@@ -2274,10 +2273,10 @@ jobs:
           # Resolve Absolute Rust Prebuilt Path
           RUSTPREBUILT="$(realpath "$RUSTPREBUILT")"
          
-          # Define Rust Compiler Path
+          # First Try the Rust Compiler Version Detected From the Kernel Build Configuration
           RUSTCPATH="${RUSTPREBUILT}/rust/linux-x86/${VERSIONRUSTC}/bin/rustc"
        
-          # Validate Rust Compiler
+          # If the Configured Version is Unavailable, Search the Prebuilt Tree for Another Usable Rustc
           if [[ ! -x "$RUSTCPATH" ]]; then
             echo "⚠️ Rust Compiler Not Found"
             echo "📌 Expected: ${RUSTCPATH}"
@@ -2293,16 +2292,16 @@ jobs:
             )"
           fi
 
+          # Stop the Build if Neither the Configured nor Fallback Rust Compiler Exists
           [[ -x "$RUSTCPATH" ]] || {
             echo "⚠️ No Usable Rust Compiler Found"
             exit 1
           }
 
-          # Resolve Rust Toolchain Binary Directory
           RUSTCPATH="$(realpath "$RUSTCPATH")"
           RUSTBIN="$(dirname "$RUSTCPATH")"
           
-          # Make Rust Available to Current Step
+          # Make Rust Available to Commands Executed Within the Step
           export PATH="${RUSTBIN}:$PATH"
           
           # Persist Rust Toolchain Environment
@@ -2345,7 +2344,6 @@ jobs:
           if [[ -z "$BINDGENBIN" ]]; then
             echo "⚠️ Prebuilt Bindgen Not Found"
             echo "📥 Installing Bindgen-Cli 0.69.5..."
-
             if ! command -v cargo >/dev/null 2>&1; then
               echo "📥 Installing Cargo..."
               curl \
@@ -2354,17 +2352,16 @@ jobs:
                 -sSf \
                 https://sh.rustup.rs |
                 sh -s -- -y --default-toolchain none
-
+              # Load the Cargo Environment Installed by Rustup Into the Current Shell
               source "$HOME/.cargo/env"
             fi
 
-            # Install Required Bindgen Version
+            # Install Required Bindgen CLI Version Used as the Fallback Tool
             cargo install bindgen-cli --version 0.69.5
-            # Resolve Installed Bindgen
             BINDGENBIN="$(command -v bindgen || true)"
           fi
 
-          # Validate Bindgen
+          # Ensure a Usable Bindgen Executable was Resolved From Either Source
           [[ -x "$BINDGENBIN" ]] || {
             echo "⚠️ Bindgen Not Found"
             exit 1
@@ -2373,25 +2370,25 @@ jobs:
           # Resolve Absolute Bindgen Path
           BINDGENBIN="$(realpath "$BINDGENBIN")"
 
-          # Persist Bindgen Environment
+          # Persist Bindgen Under Both its Explicit Binary Name and the Conventional Bindgen Variable
           {
             echo "BINDGENBIN=${BINDGENBIN}"
             echo "BINDGEN=${BINDGENBIN}"
           } >> "$GITHUB_ENV"
 
-          # Add Bindgen to PATH for Subsequent Steps
+          # Add Bindgen Directory to Path for Subsequent Kernel Build Commands
           echo "$(dirname "$BINDGENBIN")" >> "$GITHUB_PATH"
-
           # Display Bindgen Information
           echo "📌 Bindgen : ${BINDGENBIN}"
           echo "📦 Version : $("$BINDGENBIN" --version | head -n1)"
 
-          # Verify Bindgen + Lib Clang
+          # Expose the Clang Shared-Library Location to Bindgen When Lib Clang was Discovered
           if [[ -n "${LIBCLANG_PATH:-}" ]]; then
             export LIBCLANG_PATH
             echo "📂 LIBCLANG_PATH: $LIBCLANG_PATH"
           fi
 
+          # Confirm that the Resolved Bindgen Binary can Actually Execute
           if ! "$BINDGENBIN" --version >/dev/null 2>&1; then
             echo "⚠️ Bindgen Execution Failed"
             exit 1
