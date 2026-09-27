@@ -5731,21 +5731,51 @@ jobs:
               du -sh "$CCACHE_DIR" || true
               ccache -s || true
 
-              # Compress Compiler Cache
-              echo "📦 Compressing Compiler Cache..."
-              tar \
-                --sort=name \
-                --mtime='UTC 2025-01-01' \
-                --owner=0 \
-                --group=0 \
-                --numeric-owner \
-                -cf - \
-                -C "$CCACHE_DIR" . \
-                | zstd \
-                    -T0 \
-                    -15 \
-                    --force \
-                    -o "$TMPTAR"
+              # Select ZSTD Compression Level
+              echo "📦 Selecting ZSTD Compression Level..."
+              TWOGIB=$((2 * 1024 * 1024 * 1024))
+              CACHESIZE="$(du -sb "$CCACHE_DIR" | awk '{print $1}')"
+              echo "📦 Cache Size: $(numfmt --to=iec "$CACHESIZE")"
+              echo "🎯 Maximum Archive Size: 2 GiB"
+              ZSTDLEVEL=""
+              SELECTEDSIZE=""
+              for LEVEL in 3 5 10 15 20; do
+                echo ""
+                echo "🗜️ Testing ZSTD Compression Level: $LEVEL"
+                TESTTAR="${TMPTAR}.level${LEVEL}"
+                rm -f "$TESTTAR"
+                tar \
+                  --sort=name \
+                  --mtime='UTC 2025-01-01' \
+                  --owner=0 \
+                 --group=0 \
+                 --numeric-owner \
+                  -cf - \
+                  -C "$CCACHE_DIR" . \
+                  | zstd \
+                      -T0 \
+                      "-${LEVEL}" \
+                      --force \
+                      -o "$TESTTAR"
+                TESTSIZE="$(stat -c '%s' "$TESTTAR")"
+                echo "📦 Level $LEVEL Archive: $(numfmt --to=iec "$TESTSIZE")"
+                if [[ "$TESTSIZE" -le "$TWOGIB" ]]; then
+                  ZSTDLEVEL="$LEVEL"
+                  SELECTEDSIZE="$TESTSIZE"
+                  mv -f "$TESTTAR" "$TMPTAR"
+                  echo "✔️ Selected ZSTD Compression Level: $ZSTDLEVEL"
+                  echo "📦 Final Archive Size: $(numfmt --to=iec "$SELECTEDSIZE")"
+                  break
+                fi
+
+                echo "⚠️ Level $LEVEL Exceeds 2 Gb"
+                rm -f "$TESTTAR"
+              done
+
+              if [[ -z "$ZSTDLEVEL" ]]; then
+                echo "⚠️ No Tested ZSTD Compression Level Produced an Archive <= 2 Gb"
+                exit 1
+              fi
               sync
 
               # Finalize Compiler Cache Archive
