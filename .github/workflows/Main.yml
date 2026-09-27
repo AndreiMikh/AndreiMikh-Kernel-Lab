@@ -2117,7 +2117,6 @@ jobs:
 
           # Define Kernel Platform Directory
           KERNELPLATFORM="${GITHUB_WORKSPACE}/kernel_workspace/kernel_platform"
-
           # Navigate to Kernel Platform
           cd "$KERNELPLATFORM"
 
@@ -2133,6 +2132,7 @@ jobs:
           echo "🚀 Resolving Clang Toolchain..."
           echo "------------------------------"
 
+          # Locate Clang Prebuilt Root
           CLANGROOT="$(
             find "$KERNELPLATFORM" \
               -maxdepth 1 \
@@ -2144,15 +2144,14 @@ jobs:
             head -n1
           )"
 
-          if [[ -z "$CLANGROOT" ]]; then
-            echo "⚠️ Clang Root Directory Missing"
-            echo "📂 Expected under: ${KERNELPLATFORM}/prebuilts*"
+          [[ -n "$CLANGROOT" ]] || {
+            echo "⚠️ Clang Prebuilt Root Not Found"
             exit 1
-          fi
+          }
 
           CLANGROOT="$(realpath "$CLANGROOT")"
 
-          # Find Newest Valid Clang Toolchain
+          # Locate Newest Valid Clang Toolchain
           CLANGDIR="$(
             find "$CLANGROOT/clang/host/linux-x86" \
               -mindepth 1 \
@@ -2165,18 +2164,10 @@ jobs:
             tail -n1
           )"
 
-          if [[ -z "$CLANGDIR" ]]; then
+          [[ -n "$CLANGDIR" ]] || {
             echo "⚠️ No Valid Clang Toolchain Found"
-            echo "🔍 Available Toolchains:"
-            find "$CLANGROOT/clang/host/linux-x86" \
-              -mindepth 1 \
-              -maxdepth 2 \
-              -type f \
-              -name clang \
-              -print 2>/dev/null || true
-
             exit 1
-          fi
+          }
 
           # Resolve Absolute Toolchain Paths
           CLANGDIR="$(realpath "$CLANGDIR")"
@@ -2196,54 +2187,53 @@ jobs:
               sed -nE '1{s/.*clang version ([0-9.]+).*/\1/p}'
           )"
 
-          if [[ -z "$CLANGVERSION" ]]; then
-            echo "⚠️ Failed to Detect Clang Version"
+          [[ -n "$CLANGVERSION" ]] || {
+            echo "⚠️ Unable to Detect Clang Version"
             exit 1
-          fi
-
-          # Resolve Clang Resource Directory
-          CLANGRESOURCEDIR="$(
-            "$CLANGFULLPATH" \
-              --print-resource-dir 2>/dev/null || true
-          )"
+          }
 
           # Resolve Clang Library Directory
-          LIBCLANGPATH=""
-          if [[ -n "$CLANGRESOURCEDIR" ]]; then
-            CLANGLIBPATH="$(dirname "$CLANGRESOURCEDIR")"
-            if [[ -d "$CLANGLIBPATH" ]]; then
-              LIBCLANGPATH="$CLANGLIBPATH"
-            fi
-          fi
+          LIBCLANGPATH="$(
+            find "$CLANGDIR" \
+              -type f \
+              \( -name 'libclang.so' -o -name 'libclang.so.*' \) \
+              -print 2>/dev/null |
+            head -n1 |
+            xargs -r dirname
+          )"
 
-          # Persist Toolchain Environment
+          # Persist Clang Environment
           {
-            echo "CLANGROOT=${CLANGROOT}"
-            echo "CLANGDIR=${CLANGDIR}"
-            echo "CLANGBIN=${CLANGBIN}"
-            echo "CLANGFULLPATH=${CLANGFULLPATH}"
-            echo "CLANGVERSION=${CLANGVERSION}"
-            echo "LLVMENABLED=${LLVMENABLED}"
-            echo "LIBCLANG_PATH=${LIBCLANGPATH}"
-            echo "CCACHE_COMPILER=${CLANGFULLPATH}"
+            echo "CLANGROOT=$CLANGROOT"
+            echo "CLANGDIR=$CLANGDIR"
+            echo "CLANGBIN=$CLANGBIN"
+            echo "CLANGFULLPATH=$CLANGFULLPATH"
+            echo "CLANGVERSION=$CLANGVERSION"
+            echo "LLVMENABLED=$LLVMENABLED"
+            echo "LIBCLANG_PATH=$LIBCLANGPATH"
+            echo "CCACHE_COMPILER=$CLANGFULLPATH"
           } >> "$GITHUB_ENV"
 
-          # Add Complete LLVM Toolchain to PATH
           echo "$CLANGBIN" >> "$GITHUB_PATH"
 
-          # Display Toolchain Information
           echo ""
-          echo "------------------------------"
-          echo "📂 Clang Root      : ${CLANGROOT}"
+          echo "📂 Clang Root      : $CLANGROOT"
           echo "📂 Clang Directory : $(basename "$CLANGDIR")"
-          echo "📂 Clang Bin       : ${CLANGBIN}"
-          echo "📂 Clang Version   : ${CLANGVERSION}"
-          echo "📂 LLVM IAS        : ${LLVMENABLED}"
+          echo "📂 Clang Bin       : $CLANGBIN"
+          echo "📂 Clang Version   : $CLANGVERSION"
+          echo "📂 LLVM IAS        : $LLVMENABLED"
           echo "📂 Lib Clang       : ${LIBCLANGPATH:-Unavailable}"
-          echo "------------------------------"
 
-          # Verify Active Clang
+          echo ""
+          echo "🔎 Verifying Clang..."
           "$CLANGFULLPATH" --version | head -n1
+          "$CLANGFULLPATH" -print-resource-dir
+
+          if [[ -n "$LIBCLANGPATH" ]]; then
+            echo "✔️ libclang Found"
+          else
+            echo "⚠️ libclang Not Found"
+          fi
 
           echo ""
           echo "🎉 Clang Toolchain Ready"
@@ -2256,7 +2246,6 @@ jobs:
 
           # Define Kernel Platform Directory
           KERNELPLATFORM="${GITHUB_WORKSPACE}/kernel_workspace/kernel_platform"
-
           # Navigate to Kernel Platform
           cd "$KERNELPLATFORM"
 
@@ -2277,33 +2266,45 @@ jobs:
           )"
 
           # Validate Rust Prebuilt Root
-          if [[ -z "$RUSTPREBUILT" ]]; then
+          [[ -n "$RUSTPREBUILT" ]] || {
             echo "⚠️ Rust Prebuilt Root Not Found"
-            echo "📂 Expected under: ${KERNELPLATFORM}/prebuilts*"
             exit 1
-          fi
+          }
 
           # Resolve Absolute Rust Prebuilt Path
           RUSTPREBUILT="$(realpath "$RUSTPREBUILT")"
+         
           # Define Rust Compiler Path
           RUSTCPATH="${RUSTPREBUILT}/rust/linux-x86/${VERSIONRUSTC}/bin/rustc"
+       
           # Validate Rust Compiler
           if [[ ! -x "$RUSTCPATH" ]]; then
             echo "⚠️ Rust Compiler Not Found"
             echo "📌 Expected: ${RUSTCPATH}"
             echo "🔍 Available Rust Compilers:"
-            find "$RUSTPREBUILT/rust/linux-x86" \
-              -maxdepth 4 \
-              -type f \
-              -name rustc \
-              -print 2>/dev/null || true
-            exit 1
+            RUSTCPATH="$(
+              find "$RUSTPREBUILT/rust/linux-x86" \
+                -type f \
+                -path '*/bin/rustc' \
+                -executable \
+                -print 2>/dev/null |
+              sort -V |
+              tail -n1
+            )"
           fi
 
+          [[ -x "$RUSTCPATH" ]] || {
+            echo "⚠️ No Usable Rust Compiler Found"
+            exit 1
+          }
+
           # Resolve Rust Toolchain Binary Directory
+          RUSTCPATH="$(realpath "$RUSTCPATH")"
           RUSTBIN="$(dirname "$RUSTCPATH")"
+          
           # Make Rust Available to Current Step
           export PATH="${RUSTBIN}:$PATH"
+          
           # Persist Rust Toolchain Environment
           {
             echo "RUSTPREBUILT=${RUSTPREBUILT}"
@@ -2328,7 +2329,6 @@ jobs:
           echo "------------------------------"
           echo "🔍 Resolving Bindgen"
           echo "------------------------------"
-
           # Locate Prebuilt Bindgen
           BINDGENBIN="$(
             find "$KERNELPLATFORM" \
@@ -2341,21 +2341,20 @@ jobs:
           )"
 
           # Use Prebuilt Bindgen When Available
-          if [[ -x "$BINDGENBIN" ]]; then
-            echo "📌 Prebuilt Bindgen Detected"
-          else
+          # Cargo Bindgen Fallback
+          if [[ -z "$BINDGENBIN" ]]; then
             echo "⚠️ Prebuilt Bindgen Not Found"
             echo "📥 Installing Bindgen-Cli 0.69.5..."
-            # Check for Cargo
+
             if ! command -v cargo >/dev/null 2>&1; then
-              echo "📥 Installing Rustup Cargo Environment..."
+              echo "📥 Installing Cargo..."
               curl \
                 --proto '=https' \
                 --tlsv1.2 \
                 -sSf \
                 https://sh.rustup.rs |
                 sh -s -- -y --default-toolchain none
-              # Load Cargo Environment
+
               source "$HOME/.cargo/env"
             fi
 
@@ -2366,10 +2365,10 @@ jobs:
           fi
 
           # Validate Bindgen
-          if [[ -z "$BINDGENBIN" ]] || [[ ! -x "$BINDGENBIN" ]]; then
-            echo "⚠️ Bindgen Installation Failed"
+          [[ -x "$BINDGENBIN" ]] || {
+            echo "⚠️ Bindgen Not Found"
             exit 1
-          fi
+          }
 
           # Resolve Absolute Bindgen Path
           BINDGENBIN="$(realpath "$BINDGENBIN")"
@@ -2386,6 +2385,17 @@ jobs:
           # Display Bindgen Information
           echo "📌 Bindgen : ${BINDGENBIN}"
           echo "📦 Version : $("$BINDGENBIN" --version | head -n1)"
+
+          # Verify Bindgen + Lib Clang
+          if [[ -n "${LIBCLANG_PATH:-}" ]]; then
+            export LIBCLANG_PATH
+            echo "📂 LIBCLANG_PATH: $LIBCLANG_PATH"
+          fi
+
+          if ! "$BINDGENBIN" --version >/dev/null 2>&1; then
+            echo "⚠️ Bindgen Execution Failed"
+            exit 1
+          fi
 
           echo ""
           echo "🎉 Rust + Bindgen Ready"
@@ -5098,17 +5108,22 @@ jobs:
       
           # Pass Rust Compiler to Kernel Build
           if [[ "${ENABLERUSTC:-false}" == "true" ]]; then
-            MAKE_ARGS+=(RUSTC="$RUSTCPATH")
-            echo "🦀 Rust Compiler  : Enabled"
-            echo "📦 Rustc          : $RUSTCPATH"
+            MAKE_ARGS+=(
+              RUSTC="$RUSTCPATH"
+              BINDGEN="$BINDGEN"
+            )
+            echo "🦀 Rust Compiler : Enabled"
+            echo "📦 Rustc         : $RUSTCPATH"
+            echo "📦 Bindgen       : $BINDGEN"
           fi
       
-          # Use ThinLTO Wrapper as Kernel Linker When Available
+          # Configure ThinLTO Linker
           if [[ -n "$LDLLDWRAPPER" ]]; then
             MAKE_ARGS+=(LD="$LDLLDWRAPPER")
-            echo "🔗 Kernel Linker  : ThinLTO Wrapper"
+            echo "🔗 Kernel Linker : ThinLTO Wrapper"
           else
-            echo "🔗 Kernel Linker  : Default LLVM LLD"
+            MAKE_ARGS+=(LD=ld.lld)
+            echo "🔗 Kernel Linker : LLVM LLD"
           fi
       
           # Pass Optional Fake Configuration Setting
