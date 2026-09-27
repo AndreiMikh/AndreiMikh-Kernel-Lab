@@ -2012,35 +2012,50 @@ jobs:
           set -Eeuo pipefail
 
           # Kernel Platform Directory
-          KDIR="kernel_workspace/kernel_platform"
-
+          KERNELPLATFORM="${GITHUB_WORKSPACE}/kernel_workspace/kernel_platform"
           # State
           ENABLERUSTC="false"
           VERSIONRUSTC=""
           RAWRUSTC=""
 
-          # Navigate Kernel Directory
-          cd "$KDIR"
-
           # Paths Relative to Kernel Platform
-          FCONFIG="./common/build.config.constants"
-          RUSTBIN="./prebuilts/rust/linux-x86/bin/rustc"
+          FCONFIG="${KERNELPLATFORM}/common/build.config.constants"
+          RUSTBIN="${KERNELPLATFORM}/prebuilts/rust/linux-x86/bin/rustc"
+
+          echo "------------------------------"
+          echo "🦀 Detecting Rust Requirement"
+          echo "------------------------------"
+          
           # Detect Rust from Build Configuration Constants
           if [[ -f "$FCONFIG" ]]; then
             echo "🔎 Checking Build Configuration Constants..."
             # Prefer Modern AOSP Key
             RAWRUSTC="$(
-              awk -F= '/^RUSTC_VERSION=/{print $2}' "$FCONFIG" \
-                | tr -d '"' \
-                | head -n1
+              awk -F= '
+                /^RUSTC_VERSION=/ {
+                  value=$2
+                  sub(/^[[:space:]]*/, "", value)
+                  sub(/[[:space:]]*$/, "", value)
+                  gsub(/"/, "", value)
+                  print value
+                  exit
+                }
+              ' "$FCONFIG"
             )"
 
             # Fallback to Legacy / Custom Key: VERSIONRUSTC
             if [[ -z "$RAWRUSTC" ]]; then
               RAWRUSTC="$(
-                awk -F= '/^VERSIONRUSTC=/{print $2}' "$FCONFIG" \
-                  | tr -d '"' \
-                  | head -n1
+                awk -F= '
+                  /^VERSIONRUSTC=/ {
+                    value=$2
+                    sub(/^[[:space:]]*/, "", value)
+                    sub(/[[:space:]]*$/, "", value)
+                    gsub(/"/, "", value)
+                    print value
+                    exit
+                  }
+                ' "$FCONFIG"
               )"
             fi
 
@@ -2049,67 +2064,79 @@ jobs:
               # Extract Path-Safe Version
               # Example: 1.81.0 from 1.81.0-Google
               VERSIONRUSTC="$(
-                echo "$RAWRUSTC" \
-                  | grep -oE '^[0-9]+\.[0-9]+\.[0-9]+' || true
+                printf '%s\n' "$RAWRUSTC" |
+                  grep -oE '^[0-9]+\.[0-9]+\.[0-9]+' ||
+                  true
               )"
 
-              # Fallback if version extraction fails
-              [[ -z "$VERSIONRUSTC" ]] && VERSIONRUSTC="$RAWRUSTC"
-              echo "📁 RUST Version for Paths: $VERSIONRUSTC"
+              # Preserve Raw Value If Extraction Fails
+              if [[ -z "$VERSIONRUSTC" ]]; then
+                VERSIONRUSTC="$RAWRUSTC"
+              fi
+
               ENABLERUSTC="true"
+
+              echo "📁 Rust Path Version: $VERSIONRUSTC"
             else
-              echo "⚠️ No RUST Compiler Version Found in Configuration"
+              echo "⚠️ No Rust Compiler Version Declared"
             fi
           else
             echo "⚠️ Missing Build Configuration Constants"
           fi
 
-          # Fallback: Detect Rust Toolchain Directly
-          if [[ "$ENABLERUSTC" == "false" ]]; then
-            if [[ -x "$RUSTBIN" ]]; then
-              echo "📦 Rust Toolchain Detected (Fallback)"
-              RAWRUSTC="$("$RUSTBIN" --version | awk '{print $2}')"
-              VERSIONRUSTC="$(
-                echo "$RAWRUSTC" \
-                  | grep -oE '^[0-9]+\.[0-9]+\.[0-9]+' || true
-              )"
+          # Fallback: Detect Generic AOSP Rust Prebuilt
+          if [[ "$ENABLERUSTC" != "true" && -x "$RUSTBIN" ]]; then
+            echo "📦 AOSP Rust Compiler Detected"
+            RAWRUSTC="$(
+              "$RUSTBIN" --version |
+                awk '{print $2}'
+            )"
 
-              # Fallback if Version Extraction Fails
-              [[ -z "$VERSIONRUSTC" ]] && VERSIONRUSTC="$RAWRUSTC"
-              echo "🔍 Detected Rustc Version: $RAWRUSTC"
-              echo "📁 RUST Version for Paths: $VERSIONRUSTC"
-              ENABLERUSTC="true"
-            else
-              echo "⛔ RUST Toolchain Not Found: $RUSTBIN"
-            fi
+            VERSIONRUSTC="$(
+              printf '%s\n' "$RAWRUSTC" |
+                grep -oE '^[0-9]+\.[0-9]+\.[0-9]+' ||
+                true
+            )"
+
+            [[ -z "$VERSIONRUSTC" ]] && VERSIONRUSTC="$RAWRUSTC"
+            ENABLERUSTC="true"
+            echo "🔍 Detected Rustc Version: $RAWRUSTC"
+            echo "📁 Rust Path Version: $VERSIONRUSTC"
           fi
 
           # Final Defaults
           if [[ "$ENABLERUSTC" != "true" ]]; then
+            ENABLERUSTC="false"
             VERSIONRUSTC="None"
             RAWRUSTC="None"
+
+            echo "ℹ️ Rust Kernel Support is Not Enabled"
+            echo "ℹ️ Rust and Bindgen Setup Will be Skipped"
           fi
 
-          # Export to GitHub Environment
-          echo "ENABLERUSTC=$ENABLERUSTC" >> "$GITHUB_ENV"
-          echo "VERSIONRUSTC=$VERSIONRUSTC" >> "$GITHUB_ENV"
-          echo "RAWRUSTC=$RAWRUSTC" >> "$GITHUB_ENV"
+          # Export GitHub Environment
+          {
+            echo "ENABLERUSTC=${ENABLERUSTC}"
+            echo "VERSIONRUSTC=${VERSIONRUSTC}"
+            echo "RAWRUSTC=${RAWRUSTC}"
+          } >> "$GITHUB_ENV"
 
           # Export Step Outputs
-          echo "enablerustc=$ENABLERUSTC" >> "$GITHUB_OUTPUT"
-          echo "versionrustc=$VERSIONRUSTC" >> "$GITHUB_OUTPUT"
-          echo "rawrustc=$RAWRUSTC" >> "$GITHUB_OUTPUT"
+          {
+            echo "enablerustc=${ENABLERUSTC}"
+            echo "versionrustc=${VERSIONRUSTC}"
+            echo "rawrustc=${RAWRUSTC}"
+          } >> "$GITHUB_OUTPUT"
 
-          # Final Summary
           echo ""
           echo "------------------------------"
-          echo "🦀 RUST Detection Result"
+          echo "🦀 Rust Detection Result"
           echo "------------------------------"
-          echo "Enabled      : $ENABLERUSTC"
-          echo "Raw Version  : $RAWRUSTC"
-          echo "Path Version : $VERSIONRUSTC"
+          echo "Enabled      : ${ENABLERUSTC}"
+          echo "Raw Version  : ${RAWRUSTC}"
+          echo "Path Version : ${VERSIONRUSTC}"
           echo "------------------------------"
-
+          
       - name: 🧰 Setup Clang Toolchain
         shell: bash
         run: |
@@ -2173,9 +2200,7 @@ jobs:
           if [[ -z "$CLANGDIR" ]]; then
             echo "⚠️ No Valid Clang-r* Toolchain Found"
             echo "🔍 Available Clang Binaries:"
-            find "$CLANGROOT/clang/host/linux-x86" \
-              -mindepth 1 \
-              -maxdepth 3 \
+            find "${CLANGROOT}/clang/host/linux-x86" \
               -type f \
               -name clang \
               -print 2>/dev/null || true
@@ -2189,8 +2214,8 @@ jobs:
 
           # Validate Clang Binary
           if [[ ! -x "$CLANGFULLPATH" ]]; then
-            echo "::error::Clang binary is missing"
-            echo "📂 Expected: $CLANGFULLPATH"
+            echo "⚠️ Clang Binary is Missing"
+            echo "📂 Expected: ${CLANGFULLPATH}"
             exit 1
           fi
 
@@ -2201,7 +2226,7 @@ jobs:
           )"
 
           if [[ -z "$CLANGVERSION" ]]; then
-            echo "⚠️ Failed to Detect Clang Version"
+            echo "⚠️ Unable to Determine Clang Version"
             exit 1
           fi
 
@@ -2211,13 +2236,22 @@ jobs:
               --print-resource-dir 2>/dev/null || true
           )"
 
-          # Resolve Clang Library Directory
-          LIBCLANGPATH=""
-          if [[ -n "$CLANGRESOURCEDIR" ]]; then
-            CLANGLIBPATH="$(dirname "$CLANGRESOURCEDIR")"
-            if [[ -d "$CLANGLIBPATH" ]]; then
-              LIBCLANGPATH="$CLANGLIBPATH"
-            fi
+          # Resolve Actual Clang Library Directory
+          LIBCLANG_PATH=""
+          LIBCLANG_FILE="$(
+            find "$CLANGDIR" \
+              -type f \
+              \( \
+                -name 'libclang.so' \
+                -o \
+                -name 'libclang.so.*' \
+              \) \
+              -print 2>/dev/null |
+            head -n1
+          )"
+
+          if [[ -n "$LIBCLANG_FILE" ]]; then
+            LIBCLANG_PATH="$(dirname "$LIBCLANG_FILE")"
           fi
 
           # Derive Stable Clang Fingerprint
@@ -2243,7 +2277,7 @@ jobs:
             echo "CLANGVERSION=${CLANGVERSION}"
             echo "CLANGRESOURCEDIR=${CLANGRESOURCEDIR}"
             echo "LLVMENABLED=${LLVMENABLED}"
-            echo "LIBCLANG_PATH=${LIBCLANGPATH}"
+            echo "LIBCLANG_PATH=${LIBCLANG_PATH}"
             echo "CLANGFINGERPRINT=${CLANGFINGERPRINT}"
             echo "CCACHE_COMPILER=${CLANGFULLPATH}"
           } >> "$GITHUB_ENV"
@@ -2315,10 +2349,10 @@ jobs:
             echo "⚠️ Rust Compiler Not Found"
             echo "📌 Expected: ${RUSTCPATH}"
             echo "🔍 Available Rust Compilers:"
-            find "$RUSTPREBUILT/rust/linux-x86" \
-              -maxdepth 4 \
+            find "${RUSTPREBUILT}/rust/linux-x86" \
               -type f \
               -name rustc \
+              -executable \
               -print 2>/dev/null || true
             exit 1
           fi
@@ -2327,70 +2361,49 @@ jobs:
           RUSTBIN="$(dirname "$RUSTCPATH")"
           # Make Rust Available to Current Step
           export PATH="${RUSTBIN}:$PATH"
+      
           # Persist Rust Toolchain Environment
           {
             echo "RUSTPREBUILT=${RUSTPREBUILT}"
             echo "RUSTCPATH=${RUSTCPATH}"
           } >> "$GITHUB_ENV"
 
-          # Add Rust Toolchain to PATH for Subsequent Steps
+          # Add Rust To Future Steps
           echo "$RUSTBIN" >> "$GITHUB_PATH"
 
-          # Preserve Libclang Environment
+          # Preserve Libclang For Bindgen
           if [[ -n "${LIBCLANG_PATH:-}" ]] &&
              [[ -d "$LIBCLANG_PATH" ]]; then
             echo "LIBCLANG_PATH=${LIBCLANG_PATH}" >> "$GITHUB_ENV"
           fi
 
-          # Display Rust Compiler Information
           echo "📂 Rust Root     : ${RUSTPREBUILT}"
           echo "📂 Rust Compiler : ${RUSTCPATH}"
           echo "📦 Rust Version  : $("$RUSTCPATH" --version)"
 
           echo ""
           echo "------------------------------"
-          echo "🔍 Resolving Bindgen"
+          echo "🔍 Resolving AOSP Bindgen"
           echo "------------------------------"
 
           # Locate Prebuilt Bindgen
           BINDGENBIN="$(
-            find "$KERNELPLATFORM" \
+            find \
+              "${KERNELPLATFORM}/prebuilts" \
+              "${KERNELPLATFORM}/prebuilts-master" \
               -type f \
               -path '*/clang-tools/linux-x86/bin/bindgen' \
               -executable \
               -print 2>/dev/null |
-            sort |
+            sort -V |
             head -n1
           )"
 
-          # Use Prebuilt Bindgen When Available
-          if [[ -x "$BINDGENBIN" ]]; then
-            echo "📌 Prebuilt Bindgen Detected"
-          else
-            echo "⚠️ Prebuilt Bindgen Not Found"
-            echo "📥 Installing Bindgen-Cli 0.69.5..."
-            # Check for Cargo
-            if ! command -v cargo >/dev/null 2>&1; then
-              echo "📥 Installing Rustup Cargo Environment..."
-              curl \
-                --proto '=https' \
-                --tlsv1.2 \
-                -sSf \
-                https://sh.rustup.rs |
-                sh -s -- -y --default-toolchain none
-              # Load Cargo Environment
-              source "$HOME/.cargo/env"
-            fi
-
-            # Install Required Bindgen Version
-            cargo install bindgen-cli --version 0.69.5
-            # Resolve Installed Bindgen
-            BINDGENBIN="$(command -v bindgen || true)"
-          fi
-
-          # Validate Bindgen
-          if [[ -z "$BINDGENBIN" ]] || [[ ! -x "$BINDGENBIN" ]]; then
-            echo "⚠️ Bindgen Installation Failed"
+          # Bindgen Is Required Only When Rust is Enabled
+          if [[ -z "$BINDGENBIN" ]]; then
+            echo "⚠️ AOSP Bindgen Was Not Found"
+            echo "🔍 Expected Path Pattern:"
+            echo "   */clang-tools/linux-x86/bin/bindgen"
             exit 1
           fi
 
@@ -2403,12 +2416,22 @@ jobs:
             echo "BINDGEN=${BINDGENBIN}"
           } >> "$GITHUB_ENV"
 
-          # Add Bindgen to PATH for Subsequent Steps
+          # Add Bindgen To Future Steps
           echo "$(dirname "$BINDGENBIN")" >> "$GITHUB_PATH"
 
           # Display Bindgen Information
           echo "📌 Bindgen : ${BINDGENBIN}"
           echo "📦 Version : $("$BINDGENBIN" --version | head -n1)"
+
+          echo ""
+          echo "------------------------------"
+          echo "🔗 Toolchain Association"
+          echo "------------------------------"
+          echo "📂 Clang : ${CLANGFULLPATH}"
+          echo "📂 Rustc : ${RUSTCPATH}"
+          echo "📂 Bindgen: ${BINDGENBIN}"
+          echo "📂 Libclang: ${LIBCLANG_PATH:-Unavailable}"
+          echo "------------------------------"
 
           echo ""
           echo "🎉 Rust + Bindgen Ready"
@@ -2423,23 +2446,37 @@ jobs:
 
           cd "$KDIR"
 
-          export RUSTTARGET="aarch64-linux-android"
+          echo "------------------------------"
+          echo "🧪 Validating Rust Toolchain"
+          echo "------------------------------"
 
+          # Rust Compiler
           echo "🦀 Rustc:"
           "$RUSTCPATH" --version
 
+          # Bindgen
           echo ""
           echo "🔧 Bindgen:"
           "$BINDGEN" --version
 
+          # Clang
+          echo ""
+          echo "🔨 Clang:"
+          "$CLANGFULLPATH" --version | head -n1
+
+          # Libclang
+          echo ""
+          echo "📂 LIBCLANG_PATH:"
+          echo "${LIBCLANG_PATH:-Unavailable}"
+
+          # Kernel Rust Availability
           echo ""
           echo "🧪 Testing Kernel Rust Availability..."
-
           make V=1 rustavailable
 
           echo ""
-          echo "🎉 Rust + Bindgen validation passed"
-
+          echo "🎉 Rust + Bindgen Validation Passed"
+     
       - name: 🛡️ Setup Reject Checker
         shell: bash
         run: |
