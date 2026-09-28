@@ -2033,8 +2033,10 @@ jobs:
 
           # Define Kernel Platform Directory
           KERNELPLATFORM="${GITHUB_WORKSPACE}/kernel_workspace/kernel_platform"
+
           # Define Android Kernel Build Configuration Constants
-          FCONFIG="${KERNELPLATFORM}/common/build.config.constants"          
+          FCONFIG="${KERNELPLATFORM}/common/build.config.constants"
+
           # Initialize Rust Detection State
           ENABLERUSTC="false"
           VERSIONRUSTC=""
@@ -2042,47 +2044,62 @@ jobs:
           RUSTPREBUILT=""
           RUSTBIN=""
           RUSTCPATH=""
+
           echo "🦀 Detecting Rust Compiler Requirement..."
+
           # Read Rust Compiler Version from Kernel Build Configuration
           if [[ -f "$FCONFIG" ]]; then
             echo "🔎 Checking Build Configuration Constants..."
-            # Prefer Modern AOSP RUSTCVERSION Variable
+
+            # Prefer Modern AOSP RUSTC_VERSION Variable
             RAWRUSTC="$(
               awk -F= '
-                /^RUSTC_VERSION=/ {
-                  sub(/^[[:space:]]+/, "", $2)
-                  gsub(/"/, "", $2)
-                  print $2
+                /^[[:space:]]*RUSTC_VERSION[[:space:]]*=/ {
+                  value=$2
+                  sub(/^[[:space:]]+/, "", value)
+                  sub(/[[:space:]]+$/, "", value)
+                  gsub(/"/, "", value)
+                  print value
                   exit
                 }
               ' "$FCONFIG"
             )"
+
             # Fallback to Legacy VERSIONRUSTC Variable
             if [[ -z "$RAWRUSTC" ]]; then
               RAWRUSTC="$(
                 awk -F= '
-                  /^VERSIONRUSTC=/ {
-                    sub(/^[[:space:]]+/, "", $2)
-                    gsub(/"/, "", $2)
-                    print $2
+                  /^[[:space:]]*VERSIONRUSTC[[:space:]]*=/ {
+                    value=$2
+                    sub(/^[[:space:]]+/, "", value)
+                    sub(/[[:space:]]+$/, "", value)
+                    gsub(/"/, "", value)
+                    print value
                     exit
                   }
                 ' "$FCONFIG"
               )"
             fi
 
-            # Process Configured Rust Version When One was Found
+            # Process Configured Rust Version
             if [[ -n "$RAWRUSTC" ]]; then
               echo "📌 Rust Version from Configuration: $RAWRUSTC"
-              # Extract Numeric Rust Version Used by the Prebuilt Directory
+
+              # Extract Numeric Rust Version
               VERSIONRUSTC="$(
                 printf '%s\n' "$RAWRUSTC" |
                   grep -oE '^[0-9]+\.[0-9]+\.[0-9]+' ||
                   true
-              )
-              # Preserve Complete Value When Numeric Extraction is Unavailable
-              [[ -n "$VERSIONRUSTC" ]] || VERSIONRUSTC="$RAWRUSTC"
+              )"
+
+              # Preserve Complete Version When Numeric Extraction Fails
+              if [[ -z "$VERSIONRUSTC" ]]; then
+                VERSIONRUSTC="$RAWRUSTC"
+              fi
+
               echo "📁 Rust Path Version: $VERSIONRUSTC"
+
+              # Configuration Explicitly Requires Rust
               ENABLERUSTC="true"
             else
               echo "⚠️ No Rust Compiler Version Found in Configuration"
@@ -2091,10 +2108,10 @@ jobs:
             echo "⚠️ Build Configuration Constants Not Found"
           fi
 
-          # Search Kernel Source for a Rust Prebuilt When Configuration Detection Failed
-          if [[ "$ENABLERUSTC" != "true" ]]; then
+          # Only Search for a Rust Prebuilt When Configuration Did Not Enable Rust
+          if [[ "$ENABLERUSTC" == "false" ]]; then
             echo "🔎 Searching Rust Prebuilt Toolchains..."
-          
+
             RUSTPREBUILT="$(
               find "$KERNELPLATFORM" \
                 -maxdepth 1 \
@@ -2105,11 +2122,13 @@ jobs:
               sort -V |
               head -n1
             )"
-          
-            # Resolve Actual Rust Compiler When a Prebuilt Root Was Found
+
+            # A Rust Prebuilt Root Was Found
             if [[ -n "$RUSTPREBUILT" ]]; then
+              echo "📂 Rust Prebuilt Root: $RUSTPREBUILT"
+              # Resolve Absolute Path Only After Validation
               RUSTPREBUILT="$(realpath "$RUSTPREBUILT")"
-          
+              # Locate Rust Compiler
               RUSTBIN="$(
                 find "$RUSTPREBUILT/rust/linux-x86" \
                   -type f \
@@ -2119,39 +2138,48 @@ jobs:
                 sort -V |
                 tail -n1
               )"
-          
-              # Enable Rust Only When an Executable Compiler Was Discovered
+
+              # Validate Discovered Rust Compiler
               if [[ -n "$RUSTBIN" && -x "$RUSTBIN" ]]; then
                 RAWRUSTC="$(
                   "$RUSTBIN" --version |
                     awk '{print $2}'
                 )"
-          
                 VERSIONRUSTC="$(
                   printf '%s\n' "$RAWRUSTC" |
                     grep -oE '^[0-9]+\.[0-9]+\.[0-9]+' ||
                     true
                 )"
-          
-                [[ -n "$VERSIONRUSTC" ]] || VERSIONRUSTC="$RAWRUSTC"          
+                if [[ -z "$VERSIONRUSTC" ]]; then
+                  VERSIONRUSTC="$RAWRUSTC"
+                fi
+                
+                RUSTCPATH="$RUSTBIN"
+                ENABLERUSTC="true"
                 echo "📦 Rust Toolchain Detected"
                 echo "📌 Rustc        : $RUSTBIN"
                 echo "📦 Raw Version  : $RAWRUSTC"
-                echo "📁 Path Version : $VERSIONRUSTC"        
-                ENABLERUSTC="true"
+                echo "📁 Path Version : $VERSIONRUSTC"
               else
-                echo "⚠️ Rust Prebuilt Directory Found, But Rust Compiler was Not Found"
+                echo "⚠️ Rust Prebuilt Directory Found, But Rust Compiler Was Not Found"
               fi
             else
               echo "⚠️ No Rust Prebuilt Toolchain Found"
             fi
+          else
+            echo "✔️ Rust Requirement Found in Build Configuration"
+            echo "📌 Required Version: $VERSIONRUSTC"
+            echo "ℹ️ Prebuilt Discovery Fallback: Skipped"
           fi
 
-          # Disable Rust Cleanly When No Compiler Requirement or Toolchain was Detected
+          # Disable Rust Cleanly When Nothing Requires Rust
           if [[ "$ENABLERUSTC" != "true" ]]; then
             ENABLERUSTC="false"
             VERSIONRUSTC="None"
             RAWRUSTC="None"
+            RUSTPREBUILT=""
+            RUSTBIN=""
+            RUSTCPATH=""
             echo "ℹ️ Rust Compiler Requirement: Disabled"
           else
             echo "✔️ Rust Compiler Requirement: Enabled"
@@ -2162,7 +2190,11 @@ jobs:
             echo "ENABLERUSTC=$ENABLERUSTC"
             echo "VERSIONRUSTC=$VERSIONRUSTC"
             echo "RAWRUSTC=$RAWRUSTC"
+            echo "RUSTPREBUILT=$RUSTPREBUILT"
+            echo "RUSTBIN=$RUSTBIN"
+            echo "RUSTCPATH=$RUSTCPATH"
           } >> "$GITHUB_ENV"
+
           # Export Rust Detection State as Step Outputs
           {
             echo "enablerustc=$ENABLERUSTC"
@@ -2175,6 +2207,7 @@ jobs:
           echo "Enabled      : $ENABLERUSTC"
           echo "Raw Version  : $RAWRUSTC"
           echo "Path Version : $VERSIONRUSTC"
+          echo "Rust Compiler: ${RUSTCPATH:-Not Resolved}"
 
       - name: 🧰 Setup Clang Toolchain
         shell: bash
@@ -2311,91 +2344,88 @@ jobs:
 
           # Define Kernel Platform Directory
           KERNELPLATFORM="${GITHUB_WORKSPACE}/kernel_workspace/kernel_platform"
+
           # Enter Kernel Platform Directory
           cd "$KERNELPLATFORM"
+
           echo "🦀 Setting Up Rust Toolchain..."
-          # Locate Prebuilt Root Containing Rust Toolchain
-          RUSTPREBUILT="$(
-            find "$KERNELPLATFORM" \
-              -maxdepth 1 \
-              -type d \
-              -name 'prebuilts*' \
-              -exec test -d '{}/rust/linux-x86' \; \
-              -print |
-            sort |
-            head -n1
-          )"
-          # Stop Build When Rust Prebuilt Root Cannot be Located
+
+          # Reuse Rust Prebuilt Root Detected Earlier When Available
+          RUSTPREBUILT="${RUSTPREBUILT:-}"
+
+          # Locate Rust Prebuilt Root When Detector Did Not Resolve It
+          if [[ -z "$RUSTPREBUILT" ]]; then
+            RUSTPREBUILT="$(
+              find "$KERNELPLATFORM" \
+                -maxdepth 1 \
+                -type d \
+                -name 'prebuilts*' \
+                -exec test -d '{}/rust/linux-x86' \; \
+                -print 2>/dev/null |
+              sort -V |
+              head -n1
+            )"
+          fi
+
+          # Stop Build When Rust Prebuilt Root Cannot Be Located
           [[ -n "$RUSTPREBUILT" ]] || {
             echo "⚠️ Rust Prebuilt Root Not Found"
             exit 1
           }
 
-          # Resolve Absolute Rust Paths
+          # Resolve Absolute Rust Prebuilt Root
           RUSTPREBUILT="$(realpath "$RUSTPREBUILT")"
           RUSTROOT="${RUSTPREBUILT}/rust/linux-x86"
-          # Initialize Resolved Rust Compiler Path
-          RUSTCPATH=""
-          # Try Exact Rust Compiler Version Detected from Build Configuration
-          if [[ -n "${VERSIONRUSTC:-}" ]] &&
-             [[ "$VERSIONRUSTC" != "None" ]]; then
-            CANDIDATE="${RUSTROOT}/${VERSIONRUSTC}/bin/rustc"
-            if [[ -x "$CANDIDATE" ]]; then
-              RUSTCPATH="$CANDIDATE"
-              echo "✔️ Configured Rust Compiler Found"
-            else
-              echo "⚠️ Configured Rust Compiler Not Found"
-              echo "📌 Expected: $CANDIDATE"
-            fi
-          fi
 
-          # Fallback to Searching Complete Rust Prebuilt Tree
-          if [[ -z "$RUSTCPATH" ]]; then
-            echo "🔎 Searching Rust Prebuilt Tree..."          
-            RUSTCPATH="$(
-              find "$RUSTROOT" \
-                -type f \
-                -path '*/bin/rustc' \
-                -executable \
-                -print 2>/dev/null |
-              sort -V |
-              tail -n1
-            )"
-          
-            if [[ -n "$RUSTCPATH" ]]; then
-              echo "⚠️ Exact Configured Rust Version Not Found"
-              echo "📌 Falling Back to: $RUSTCPATH"
-            fi
-          fi
-
-          # Stop Build When No Usable Rust Compiler Exists
-          [[ -x "$RUSTCPATH" ]] || {
-            echo "⚠️ No Usable Rust Compiler Found"
+          # Require a Valid Configured Rust Version
+          [[ -n "${VERSIONRUSTC:-}" ]] &&
+          [[ "$VERSIONRUSTC" != "None" ]] || {
+            echo "⚠️ Rust Version Requirement Is Not Defined"
             exit 1
           }
 
-          # Resolve Absolute Compiler Paths
+          echo "📌 Required Rust Version: $VERSIONRUSTC"
+
+          # Resolve Exact Rust Compiler Required by Kernel Configuration
+          CANDIDATE="${RUSTROOT}/${VERSIONRUSTC}/bin/rustc"
+
+          if [[ -x "$CANDIDATE" ]]; then
+            RUSTCPATH="$CANDIDATE"
+            echo "✔️ Configured Rust Compiler Found"
+          else
+            echo "❌ Configured Rust Compiler Not Found"
+            echo "📌 Expected: $CANDIDATE"
+            exit 1
+          fi
+
+          # Resolve Absolute Rust Compiler Path
           RUSTCPATH="$(realpath "$RUSTCPATH")"
           RUSTBIN="$(dirname "$RUSTCPATH")"
-          # Make Rust Available Immediately Within this Step
+
+          # Make Rust Available Immediately Within This Step
           export PATH="${RUSTBIN}:$PATH"
+
           # Force Cargo to Use the Resolved AOSP Rust Compiler
           export RUSTC="$RUSTCPATH"
-          
+
           # Export Resolved Rust Environment to Later Steps
           {
             echo "RUSTPREBUILT=$RUSTPREBUILT"
             echo "RUSTROOT=$RUSTROOT"
             echo "RUSTCPATH=$RUSTCPATH"
+            echo "RUSTBIN=$RUSTBIN"
             echo "RUSTC=$RUSTCPATH"
           } >> "$GITHUB_ENV"
 
-          # Add Rust to the persistent GitHub Actions PATH
+          # Add Rust to Persistent GitHub Actions PATH
           echo "$RUSTBIN" >> "$GITHUB_PATH"
+
           echo "📂 Rust Root     : $RUSTPREBUILT"
           echo "📂 Rust Compiler : $RUSTCPATH"
           echo "📦 Rust Version  : $("$RUSTCPATH" --version)"
+
           echo "🔍 Resolving Bindgen..."
+
           # Search Kernel Source for an Android-Provided Bindgen Binary
           BINDGENBIN="$(
             find "$KERNELPLATFORM" \
@@ -2403,7 +2433,7 @@ jobs:
               -path '*/clang-tools/linux-x86/bin/bindgen' \
               -executable \
               -print 2>/dev/null |
-            sort |
+            sort -V |
             head -n1
           )"
 
@@ -2412,20 +2442,36 @@ jobs:
             echo "✔️ Prebuilt Bindgen Found"
           else
             echo "⚠️ Prebuilt Bindgen Not Found"
-            # Install Cargo Only When a Prebuilt Bindgen is Unavailable
+
+            # Install Cargo Only When a Prebuilt Bindgen Is Unavailable
             if ! command -v cargo >/dev/null 2>&1; then
               echo "📥 Installing Cargo..."
+
               curl \
                 --proto '=https' \
                 --tlsv1.2 \
                 -sSf \
                 https://sh.rustup.rs |
                 sh -s -- -y --default-toolchain none
+
               # Load Cargo Environment Installed by Rustup
               source "$HOME/.cargo/env"
+
+              # Restore the Explicit AOSP Rust Compiler After Rustup Setup
+              export PATH="${RUSTBIN}:$PATH"
+              export RUSTC="$RUSTCPATH"
             fi
 
-            # Install the Fallback Bindgen CLI Version
+            # Verify Cargo Is Available
+            command -v cargo >/dev/null 2>&1 || {
+              echo "⚠️ Cargo Not Found"
+              exit 1
+            }
+
+            # Force Cargo to Use Resolved AOSP Rust Compiler
+            export RUSTC="$RUSTCPATH"
+
+            # Install Fallback Bindgen CLI
             echo "📥 Installing Bindgen-CLI 0.69.5..."
             cargo install \
               bindgen-cli \
@@ -2435,15 +2481,16 @@ jobs:
             BINDGENBIN="$(command -v bindgen || true)"
           fi
 
-          # Stop Build When Bindgen Cannot be Resolved
-          [[ -x "$BINDGENBIN" ]] || {
+          # Stop Build When Bindgen Cannot Be Resolved
+          [[ -n "$BINDGENBIN" && -x "$BINDGENBIN" ]] || {
             echo "⚠️ Bindgen Not Found"
             exit 1
           }
 
           # Resolve Absolute Bindgen Path
           BINDGENBIN="$(realpath "$BINDGENBIN")"
-          # Export both Bindgen Variable Names for Compatibility with Kernel Builds
+
+          # Export Bindgen Environment
           {
             echo "BINDGENBIN=$BINDGENBIN"
             echo "BINDGEN=$BINDGENBIN"
@@ -2454,7 +2501,7 @@ jobs:
           echo "📌 Bindgen : $BINDGENBIN"
           echo "📦 Version : $("$BINDGENBIN" --version | head -n1)"
 
-          # Preserve Discovered Lib Clang Path for Bindgen
+          # Preserve Lib Clang Path for Bindgen
           if [[ -n "${LIBCLANG_PATH:-}" ]] &&
              [[ -d "$LIBCLANG_PATH" ]]; then
             export LIBCLANG_PATH
@@ -2463,7 +2510,7 @@ jobs:
             echo "⚠️ Lib Clang Path is Unavailable"
           fi
 
-          # Verify that Bindgen can Execute
+          # Verify Bindgen Can Execute
           "$BINDGENBIN" --version >/dev/null
 
           echo ""
@@ -2475,13 +2522,15 @@ jobs:
           set -Eeuo pipefail
 
           echo "🧪 Testing Kernel Toolchain Integration..."
-          # Create a Clean Temporary Directory for Compiler Tests
+
+          # Create Clean Temporary Directory for Compiler Tests
           TESTDIR="${RUNNER_TEMP}/kernel-toolchain-test"
           rm -rf "$TESTDIR"
           mkdir -p "$TESTDIR"
+
           echo "🧪 Testing Clang AArch64 Compilation"
 
-          # Create a Minimal C Source for an Actual AArch64 Compilation Test
+          # Create Minimal C Source
           cat > "$TESTDIR/test.c" <<'EOF'
           int test_function(int value)
           {
@@ -2489,13 +2538,13 @@ jobs:
           }
           EOF
 
-          # Verify that the Selected Clang can Produce an AArch64 Object File
+          # Verify Selected Clang Can Produce an AArch64 Object
           "$CLANGFULLPATH" \
             -target aarch64-linux-gnu \
             -c "$TESTDIR/test.c" \
             -o "$TESTDIR/test.o"
 
-          # Verify that the compiler generated a non-empty object file
+          # Verify Object File
           [[ -s "$TESTDIR/test.o" ]] || {
             echo "⚠️ Clang Produced an Empty Object File"
             exit 1
@@ -2503,28 +2552,33 @@ jobs:
 
           echo "✔️ Clang AArch64 Compilation Passed"
 
-          # Run Rust and Bindgen tests only when Rust support is required
+          # Run Rust and Bindgen Tests Only When Rust Is Required
           if [[ "${ENABLERUSTC:-false}" == "true" ]]; then
             echo "🧪 Testing Bindgen + Lib Clang"
-            # Create a Minimal C header for Bindgen
+
+            # Create Minimal C Header
             cat > "$TESTDIR/test.h" <<'EOF'
           #define TEST_VALUE 42
           struct test_struct {
               int value;
           };
           EOF
-            # Verify that Bindgen is Available
+
+            # Verify Bindgen
             [[ -x "${BINDGEN:-}" ]] || {
               echo "⚠️ Bindgen Is Not Available"
               exit 1
             }
-            # Verify that Rust Compiler is Available
+
+            # Verify Rust Compiler
             [[ -x "${RUSTCPATH:-}" ]] || {
               echo "⚠️ Rust Compiler Is Not Available"
               exit 1
             }
-            # Run Bindgen with Lib Clang When the Shared Library Path is Available
-            if [[ -n "${LIBCLANG_PATH:-}" ]]; then
+
+            # Run Bindgen
+            if [[ -n "${LIBCLANG_PATH:-}" ]] &&
+               [[ -d "$LIBCLANG_PATH" ]]; then
               LIBCLANG_PATH="$LIBCLANG_PATH" \
                 "$BINDGEN" \
                 "$TESTDIR/test.h" \
@@ -2534,38 +2588,53 @@ jobs:
                 "$TESTDIR/test.h" \
                 --output "$TESTDIR/bindings.rs"
             fi
-            # Verify that Bindgen generated valid output
+
+            # Verify Generated Bindings
             [[ -s "$TESTDIR/bindings.rs" ]] || {
               echo "⚠️ Bindgen Produced an Empty Bindings File"
               exit 1
             }
-            echo "✔️ Bindgen Passed"
-            echo "🧪 Testing Rust Compiler"
 
-            # Compile Generated Bindings with the Resolved Rust Compiler
+            echo "✔️ Bindgen Passed"
+
+            # Verify Rust Compiler Version
+            echo "🧪 Testing Rust Compiler"
+            "$RUSTCPATH" --version
+
+            # Compile Generated Bindings
             "$RUSTCPATH" \
               --crate-type lib \
               "$TESTDIR/bindings.rs" \
               -o "$TESTDIR/libbindings.rlib"
-            # Verify that Rust Produced a Valid Output File
+
+            # Verify Rust Output
             [[ -s "$TESTDIR/libbindings.rlib" ]] || {
               echo "⚠️ Rust Compiler Produced an Empty Library"
               exit 1
             }
+
             echo "✔️ Rust Binding Compilation Passed"
           else
             echo "ℹ️ Rust / Bindgen Integration: Disabled"
           fi
 
+          echo ""
           echo "📋 Integration Test Summary"
           echo "Clang AArch64 : Passed"
+
           if [[ "${ENABLERUSTC:-false}" == "true" ]]; then
             echo "Bindgen       : Passed"
-            echo "Lib Clang     : Passed"
+            if [[ -n "${LIBCLANG_PATH:-}" ]] &&
+               [[ -d "$LIBCLANG_PATH" ]]; then
+              echo "Lib Clang     : Passed"
+            else
+              echo "Lib Clang     : Not Explicitly Configured"
+            fi
+
             echo "Rust          : Passed"
           else
             echo "Bindgen       : Disabled"
-            echo "Lib Clang     : Not Explicitly Configured"
+            echo "Lib Clang     : Not Required"
             echo "Rust          : Disabled"
           fi
 
