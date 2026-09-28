@@ -2011,104 +2011,137 @@ jobs:
         run: |
           set -Eeuo pipefail
 
-          # Kernel Platform Directory
-          KDIR="kernel_workspace/kernel_platform"
-
-          # State
+          # Define Kernel Platform Directory
+          KERNELPLATFORM="${GITHUB_WORKSPACE}/kernel_workspace/kernel_platform"
+          # Initialize Rust Detection State
           ENABLERUSTC="false"
           VERSIONRUSTC=""
           RAWRUSTC=""
-
-          # Navigate Kernel Directory
-          cd "$KDIR"
-
-          # Paths Relative to Kernel Platform
-          FCONFIG="./common/build.config.constants"
-          RUSTBIN="./prebuilts/rust/linux-x86/bin/rustc"
-          # Detect Rust from Build Configuration Constants
+          # Define Android Kernel Build Configuration Constants
+          FCONFIG="${KERNELPLATFORM}/common/build.config.constants"
+          echo "🦀 Detecting Rust Compiler Requirement..."
+          # Read Rust Compiler Version from Kernel Build Configuration
           if [[ -f "$FCONFIG" ]]; then
             echo "🔎 Checking Build Configuration Constants..."
-            # Prefer Modern AOSP Key
+            # Prefer Modern AOSP RUSTCVERSION Variable
             RAWRUSTC="$(
-              awk -F= '/^RUSTC_VERSION=/{print $2}' "$FCONFIG" \
-                | tr -d '"' \
-                | head -n1
+              awk -F= '
+                /^RUSTC_VERSION=/ {
+                  sub(/^[[:space:]]+/, "", $2)
+                  gsub(/"/, "", $2)
+                  print $2
+                  exit
+                }
+              ' "$FCONFIG"
             )"
-
-            # Fallback to Legacy / Custom Key: VERSIONRUSTC
+            # Fallback to Legacy VERSIONRUSTC Variable
             if [[ -z "$RAWRUSTC" ]]; then
               RAWRUSTC="$(
-                awk -F= '/^VERSIONRUSTC=/{print $2}' "$FCONFIG" \
-                  | tr -d '"' \
-                  | head -n1
+                awk -F= '
+                  /^VERSIONRUSTC=/ {
+                    sub(/^[[:space:]]+/, "", $2)
+                    gsub(/"/, "", $2)
+                    print $2
+                    exit
+                  }
+                ' "$FCONFIG"
               )"
             fi
 
+            # Process Configured Rust Version When One was Found
             if [[ -n "$RAWRUSTC" ]]; then
-              echo "📌 RUST Version from Configuration (Raw): $RAWRUSTC"
-              # Extract Path-Safe Version
-              # Example: 1.81.0 from 1.81.0-Google
+              echo "📌 Rust Version from Configuration: $RAWRUSTC"
+              # Extract Numeric Rust Version Used by the Prebuilt Directory
               VERSIONRUSTC="$(
-                echo "$RAWRUSTC" \
-                  | grep -oE '^[0-9]+\.[0-9]+\.[0-9]+' || true
-              )"
-
-              # Fallback if version extraction fails
-              [[ -z "$VERSIONRUSTC" ]] && VERSIONRUSTC="$RAWRUSTC"
-              echo "📁 RUST Version for Paths: $VERSIONRUSTC"
+                printf '%s\n' "$RAWRUSTC" |
+                  grep -oE '^[0-9]+\.[0-9]+\.[0-9]+' ||
+                  true
+              )
+              # Preserve Complete Value When Numeric Extraction is Unavailable
+              [[ -n "$VERSIONRUSTC" ]] || VERSIONRUSTC="$RAWRUSTC"
+              echo "📁 Rust Path Version: $VERSIONRUSTC"
               ENABLERUSTC="true"
             else
-              echo "⚠️ No RUST Compiler Version Found in Configuration"
+              echo "⚠️ No Rust Compiler Version Found in Configuration"
             fi
           else
-            echo "⚠️ Missing Build Configuration Constants"
+            echo "⚠️ Build Configuration Constants Not Found"
           fi
 
-          # Fallback: Detect Rust Toolchain Directly
-          if [[ "$ENABLERUSTC" == "false" ]]; then
-            if [[ -x "$RUSTBIN" ]]; then
-              echo "📦 Rust Toolchain Detected (Fallback)"
-              RAWRUSTC="$("$RUSTBIN" --version | awk '{print $2}')"
-              VERSIONRUSTC="$(
-                echo "$RAWRUSTC" \
-                  | grep -oE '^[0-9]+\.[0-9]+\.[0-9]+' || true
+          # Search Kernel Source for a Rust Prebuilt When Configuration Detection Failed
+          if [[ "$ENABLERUSTC" != "true" ]]; then
+            echo "🔎 Searching Rust Prebuilt Toolchains..."
+            RUSTPREBUILT="$(
+              find "$KERNELPLATFORM" \
+                -maxdepth 1 \
+                -type d \
+                -name 'prebuilts*' \
+                -exec test -d '{}/rust/linux-x86' \; \
+                -print |
+              sort |
+              head -n1
+            )"
+            # Resolve Actual Rust Compiler When a Prebuilt Root was Found
+            if [[ -n "$RUSTPREBUILT" ]]; then
+              RUSTPREBUILT="$(realpath "$RUSTPREBUILT")"
+              RUSTBIN="$(
+                find "$RUSTPREBUILT/rust/linux-x86" \
+                  -type f \
+                  -path '*/bin/rustc' \
+                  -executable \
+                  -print 2>/dev/null |
+                sort -V |
+                tail -n1
               )"
-
-              # Fallback if Version Extraction Fails
-              [[ -z "$VERSIONRUSTC" ]] && VERSIONRUSTC="$RAWRUSTC"
-              echo "🔍 Detected Rustc Version: $RAWRUSTC"
-              echo "📁 RUST Version for Paths: $VERSIONRUSTC"
-              ENABLERUSTC="true"
-            else
-              echo "⛔ RUST Toolchain Not Found: $RUSTBIN"
+              # Enable Rust When an Executable Compiler was Discovered
+              if [[ -x "$RUSTBIN" ]]; then
+                RAWRUSTC="$(
+                  "$RUSTBIN" --version |
+                    awk '{print $2}'
+                )"
+                VERSIONRUSTC="$(
+                  printf '%s\n' "$RAWRUSTC" |
+                    grep -oE '^[0-9]+\.[0-9]+\.[0-9]+' ||
+                    true
+                )
+                [[ -n "$VERSIONRUSTC" ]] || VERSIONRUSTC="$RAWRUSTC"
+                echo "📦 Rust Toolchain Detected"
+                echo "📌 Rustc        : $RUSTBIN"
+                echo "📦 Raw Version  : $RAWRUSTC"
+                echo "📁 Path Version : $VERSIONRUSTC"
+                ENABLERUSTC="true"
+              fi
             fi
           fi
 
-          # Final Defaults
+          # Disable Rust Cleanly When No Compiler Requirement or Toolchain was Detected
           if [[ "$ENABLERUSTC" != "true" ]]; then
+            ENABLERUSTC="false"
             VERSIONRUSTC="None"
             RAWRUSTC="None"
+            echo "ℹ️ Rust Compiler Requirement: Disabled"
+          else
+            echo "✔️ Rust Compiler Requirement: Enabled"
           fi
 
-          # Export to GitHub Environment
-          echo "ENABLERUSTC=$ENABLERUSTC" >> "$GITHUB_ENV"
-          echo "VERSIONRUSTC=$VERSIONRUSTC" >> "$GITHUB_ENV"
-          echo "RAWRUSTC=$RAWRUSTC" >> "$GITHUB_ENV"
+          # Export Rust Detection State to Subsequent GitHub Actions Steps
+          {
+            echo "ENABLERUSTC=$ENABLERUSTC"
+            echo "VERSIONRUSTC=$VERSIONRUSTC"
+            echo "RAWRUSTC=$RAWRUSTC"
+          } >> "$GITHUB_ENV"
+          # Export Rust Detection State as Step Outputs
+          {
+            echo "enablerustc=$ENABLERUSTC"
+            echo "versionrustc=$VERSIONRUSTC"
+            echo "rawrustc=$RAWRUSTC"
+          } >> "$GITHUB_OUTPUT"
 
-          # Export Step Outputs
-          echo "enablerustc=$ENABLERUSTC" >> "$GITHUB_OUTPUT"
-          echo "versionrustc=$VERSIONRUSTC" >> "$GITHUB_OUTPUT"
-          echo "rawrustc=$RAWRUSTC" >> "$GITHUB_OUTPUT"
-
-          # Final Summary
           echo ""
-          echo "------------------------------"
-          echo "🦀 RUST Detection Result"
-          echo "------------------------------"
+          echo "🦀 Rust Detection Result"
           echo "Enabled      : $ENABLERUSTC"
           echo "Raw Version  : $RAWRUSTC"
           echo "Path Version : $VERSIONRUSTC"
-          echo "------------------------------"
 
       - name: 🧰 Setup Clang Toolchain
         shell: bash
@@ -2117,22 +2150,17 @@ jobs:
 
           # Define Kernel Platform Directory
           KERNELPLATFORM="${GITHUB_WORKSPACE}/kernel_workspace/kernel_platform"
-          # Navigate to Kernel Platform
+          # Enter Kernel Platform Directory
           cd "$KERNELPLATFORM"
-
-          # Check Whether the Kernel Build Configuration Enables LLVM's Integrated Assembler
+          echo "🚀 Resolving Clang Toolchain..."
+          # Detect Whether Kernel Build Configuration Enables LLVM's Integrated Assembler
           LLVMENABLED="false"
-          if [[ -f "./common/build.config.arm" ]] &&
-             grep -q '^LLVM_IAS=1' "./common/build.config.arm"; then
+          if [[ -f "${KERNELPLATFORM}/common/build.config.arm" ]] &&
+             grep -q '^LLVM_IAS=1' "${KERNELPLATFORM}/common/build.config.arm"; then
             LLVMENABLED="true"
           fi
 
-          # Resolve Clang Prebuilt Root
-          echo "------------------------------"
-          echo "🚀 Resolving Clang Toolchain..."
-          echo "------------------------------"
-
-          # Find the Prebuilt Toolchain Directory Containing the Linux-Hosted Clang Binaries
+          # Locate Prebuilt Root Containing Clang Toolchain
           CLANGROOT="$(
             find "$KERNELPLATFORM" \
               -maxdepth 1 \
@@ -2144,14 +2172,15 @@ jobs:
             head -n1
           )"
 
+          # Stop Build When Clang Prebuilt Root Cannot be Located
           [[ -n "$CLANGROOT" ]] || {
             echo "⚠️ Clang Prebuilt Root Not Found"
             exit 1
           }
 
+          # Convert Clang Root to an Absolute Path
           CLANGROOT="$(realpath "$CLANGROOT")"
-
-          # Select the Newest Available clang-r* Directory that Contains an Executable Clang Binary
+          # Locate Newest Available Clang-r* Directory with an Executable Compiler
           CLANGDIR="$(
             find "$CLANGROOT/clang/host/linux-x86" \
               -mindepth 1 \
@@ -2164,45 +2193,47 @@ jobs:
             tail -n1
           )"
 
+          # Stop Build When No Usable Clang Compiler Exists
           [[ -n "$CLANGDIR" ]] || {
             echo "⚠️ No Valid Clang Toolchain Found"
             exit 1
           }
-
-          # Resolve Absolute Toolchain Paths
+          # Resolve Absolute Paths for Selected Clang Toolchain
           CLANGDIR="$(realpath "$CLANGDIR")"
           CLANGBIN="${CLANGDIR}/bin"
           CLANGFULLPATH="${CLANGBIN}/clang"
-
-          # Make Sure the Selected Clang Binary is Executable Before Exporting its Paths
+          # Verify that Selected Clang Compiler is Executable
           [[ -x "$CLANGFULLPATH" ]] || {
             echo "⚠️ Clang Binary Not Found"
             echo "📌 Expected: $CLANGFULLPATH"
             exit 1
           }
-
-          # Read the Compiler Version Directly From the Selected Clang Binary
+          # Detect Clang Version Directly from Selected Compiler
           CLANGVERSION="$(
             "$CLANGFULLPATH" --version |
-              sed -nE '1{s/.*clang version ([0-9.]+).*/\1/p}'
+              sed -nE '1s/.*clang version ([0-9.]+).*/\1/p'
           )"
-
+          # Stop Build When Clang Version Cannot be Determined
           [[ -n "$CLANGVERSION" ]] || {
             echo "⚠️ Unable to Detect Clang Version"
             exit 1
           }
-
-          # Locate Lib Clang for Tools Such as Bindgen that Require the Clang Shared Library
-          LIBCLANGPATH="$(
+          # Locate Lib Clang for Tools Such as Bindgen
+          LIBCLANGFILE="$(
             find "$CLANGDIR" \
               -type f \
               \( -name 'libclang.so' -o -name 'libclang.so.*' \) \
               -print 2>/dev/null |
-            head -n1 |
-            xargs -r dirname
+            head -n1
           )"
+          # Convert Lib Clang File Location Into Directory Expected by Bindgen
+          if [[ -n "$LIBCLANGFILE" ]]; then
+            LIBCLANG_PATH="$(dirname "$(realpath "$LIBCLANGFILE")")"
+          else
+            LIBCLANG_PATH=""
+          fi
 
-          # Export the Resolved Clang Environment for Subsequent GitHub Actions Steps
+          # Export Resolved Clang Environment
           {
             echo "CLANGROOT=$CLANGROOT"
             echo "CLANGDIR=$CLANGDIR"
@@ -2210,29 +2241,30 @@ jobs:
             echo "CLANGFULLPATH=$CLANGFULLPATH"
             echo "CLANGVERSION=$CLANGVERSION"
             echo "LLVMENABLED=$LLVMENABLED"
-            echo "LIBCLANG_PATH=$LIBCLANGPATH"
             echo "CCACHE_COMPILER=$CLANGFULLPATH"
+            # Export Lib Clang Path Only when Lib Clang was Found
+            if [[ -n "$LIBCLANG_PATH" ]]; then
+              echo "LIBCLANG_PATH=$LIBCLANG_PATH"
+            fi
           } >> "$GITHUB_ENV"
-
-          # Add the Selected Clang Binaries to Path for Tools Invoked by Later Steps
+          # Add Selected Clang Binary Directory to GitHub Actions Path
           echo "$CLANGBIN" >> "$GITHUB_PATH"
           echo "📂 Clang Root      : $CLANGROOT"
           echo "📂 Clang Directory : $(basename "$CLANGDIR")"
           echo "📂 Clang Bin       : $CLANGBIN"
           echo "📂 Clang Version   : $CLANGVERSION"
           echo "📂 LLVM IAS        : $LLVMENABLED"
-          echo "📂 Lib Clang       : ${LIBCLANGPATH:-Unavailable}"
+          echo "📂 Lib Clang       : ${LIBCLANG_PATH:-Unavailable}"
 
-          # Verify that the Selected Compiler can Execute and Report its Resource Directory
+          # Verify Selected Clang Compiler
           echo "🔎 Verifying Clang..."
           "$CLANGFULLPATH" --version | head -n1
           "$CLANGFULLPATH" -print-resource-dir
-
-          # Report Whether Lib Clang was Found for Rust Bindgen Integration
-          if [[ -n "$LIBCLANGPATH" ]]; then
-            echo "✔️ libclang Found"
+          # Report Lib Clang Status
+          if [[ -n "$LIBCLANG_PATH" ]]; then
+            echo "✔️ Lib Clang Found"
           else
-            echo "⚠️ libclang Not Found"
+            echo "⚠️ Lib Clang Not Found"
           fi
 
           echo ""
@@ -2246,14 +2278,10 @@ jobs:
 
           # Define Kernel Platform Directory
           KERNELPLATFORM="${GITHUB_WORKSPACE}/kernel_workspace/kernel_platform"
-          # Navigate to Kernel Platform
+          # Enter Kernel Platform Directory
           cd "$KERNELPLATFORM"
-
-          echo "------------------------------"
-          echo "🦀 Setting Up Rust Toolchain"
-          echo "------------------------------"
-
-          # Find the Prebuilt Rust Toolchain Root Supplied by the Kernel Source
+          echo "🦀 Setting Up Rust Toolchain..."
+          # Locate Prebuilt Root Containing Rust Toolchain
           RUSTPREBUILT="$(
             find "$KERNELPLATFORM" \
               -maxdepth 1 \
@@ -2264,25 +2292,35 @@ jobs:
             sort |
             head -n1
           )"
-
+          # Stop Build When Rust Prebuilt Root Cannot be Located
           [[ -n "$RUSTPREBUILT" ]] || {
             echo "⚠️ Rust Prebuilt Root Not Found"
             exit 1
           }
 
-          # Resolve Absolute Rust Prebuilt Path
+          # Resolve Absolute Rust Paths
           RUSTPREBUILT="$(realpath "$RUSTPREBUILT")"
-         
-          # First Try the Rust Compiler Version Detected From the Kernel Build Configuration
-          RUSTCPATH="${RUSTPREBUILT}/rust/linux-x86/${VERSIONRUSTC}/bin/rustc"
-       
-          # If the Configured Version is Unavailable, Search the Prebuilt Tree for Another Usable Rustc
-          if [[ ! -x "$RUSTCPATH" ]]; then
-            echo "⚠️ Rust Compiler Not Found"
-            echo "📌 Expected: ${RUSTCPATH}"
-            echo "🔍 Available Rust Compilers:"
+          RUSTROOT="${RUSTPREBUILT}/rust/linux-x86"
+          # Initialize Resolved Rust Compiler Path
+          RUSTCPATH=""
+          # Try Exact Rust Compiler Version Detected from Build Configuration
+          if [[ -n "${VERSIONRUSTC:-}" ]] &&
+             [[ "$VERSIONRUSTC" != "None" ]]; then
+            CANDIDATE="${RUSTROOT}/${VERSIONRUSTC}/bin/rustc"
+            if [[ -x "$CANDIDATE" ]]; then
+              RUSTCPATH="$CANDIDATE"
+              echo "✔️ Configured Rust Compiler Found"
+            else
+              echo "⚠️ Configured Rust Compiler Not Found"
+              echo "📌 Expected: $CANDIDATE"
+            fi
+          fi
+
+          # Fallback to Searching the Complete Rust Prebuilt Tree
+          if [[ -z "$RUSTCPATH" ]]; then
+            echo "🔎 Searching Rust Prebuilt Tree..."
             RUSTCPATH="$(
-              find "$RUSTPREBUILT/rust/linux-x86" \
+              find "$RUSTROOT" \
                 -type f \
                 -path '*/bin/rustc' \
                 -executable \
@@ -2292,43 +2330,31 @@ jobs:
             )"
           fi
 
-          # Stop the Build if Neither the Configured nor Fallback Rust Compiler Exists
+          # Stop Build When No Usable Rust Compiler Exists
           [[ -x "$RUSTCPATH" ]] || {
             echo "⚠️ No Usable Rust Compiler Found"
             exit 1
           }
 
+          # Resolve Absolute Compiler Paths
           RUSTCPATH="$(realpath "$RUSTCPATH")"
           RUSTBIN="$(dirname "$RUSTCPATH")"
-          
-          # Make Rust Available to Commands Executed Within the Step
+          # Make Rust Available Immediately Within this Step
           export PATH="${RUSTBIN}:$PATH"
-          
-          # Persist Rust Toolchain Environment
+          # Export Resolved Rust Environment to Later Steps
           {
-            echo "RUSTPREBUILT=${RUSTPREBUILT}"
-            echo "RUSTCPATH=${RUSTCPATH}"
+            echo "RUSTPREBUILT=$RUSTPREBUILT"
+            echo "RUSTROOT=$RUSTROOT"
+            echo "RUSTCPATH=$RUSTCPATH"
           } >> "$GITHUB_ENV"
 
-          # Add Rust Toolchain to PATH for Subsequent Steps
+          # Add Rust to the persistent GitHub Actions PATH
           echo "$RUSTBIN" >> "$GITHUB_PATH"
-
-          # Preserve Libclang Environment
-          if [[ -n "${LIBCLANG_PATH:-}" ]] &&
-             [[ -d "$LIBCLANG_PATH" ]]; then
-            echo "LIBCLANG_PATH=${LIBCLANG_PATH}" >> "$GITHUB_ENV"
-          fi
-
-          # Display Rust Compiler Information
-          echo "📂 Rust Root     : ${RUSTPREBUILT}"
-          echo "📂 Rust Compiler : ${RUSTCPATH}"
+          echo "📂 Rust Root     : $RUSTPREBUILT"
+          echo "📂 Rust Compiler : $RUSTCPATH"
           echo "📦 Rust Version  : $("$RUSTCPATH" --version)"
-
-          echo ""
-          echo "------------------------------"
-          echo "🔍 Resolving Bindgen"
-          echo "------------------------------"
-          # Locate Prebuilt Bindgen
+          echo "🔍 Resolving Bindgen..."
+          # Search Kernel Source for an Android-Provided Bindgen Binary
           BINDGENBIN="$(
             find "$KERNELPLATFORM" \
               -type f \
@@ -2339,11 +2365,12 @@ jobs:
             head -n1
           )"
 
-          # Use Prebuilt Bindgen When Available
-          # Cargo Bindgen Fallback
-          if [[ -z "$BINDGENBIN" ]]; then
+          # Use Kernel-Provided Bindgen When Available
+          if [[ -n "$BINDGENBIN" ]]; then
+            echo "✔️ Prebuilt Bindgen Found"
+          else
             echo "⚠️ Prebuilt Bindgen Not Found"
-            echo "📥 Installing Bindgen-Cli 0.69.5..."
+            # Install Cargo Only When a Prebuilt Bindgen is Unavailable
             if ! command -v cargo >/dev/null 2>&1; then
               echo "📥 Installing Cargo..."
               curl \
@@ -2352,16 +2379,21 @@ jobs:
                 -sSf \
                 https://sh.rustup.rs |
                 sh -s -- -y --default-toolchain none
-              # Load the Cargo Environment Installed by Rustup Into the Current Shell
+              # Load Cargo Environment Installed by Rustup
               source "$HOME/.cargo/env"
             fi
 
-            # Install Required Bindgen CLI Version Used as the Fallback Tool
-            cargo install bindgen-cli --version 0.69.5
+            # Install the Fallback Bindgen CLI Version
+            echo "📥 Installing Bindgen-CLI 0.69.5..."
+            cargo install \
+              bindgen-cli \
+              --version 0.69.5 \
+              --locked
+            # Resolve Installed Bindgen Binary
             BINDGENBIN="$(command -v bindgen || true)"
           fi
 
-          # Ensure a Usable Bindgen Executable was Resolved From Either Source
+          # Stop Build When Bindgen Cannot be Resolved
           [[ -x "$BINDGENBIN" ]] || {
             echo "⚠️ Bindgen Not Found"
             exit 1
@@ -2369,30 +2401,28 @@ jobs:
 
           # Resolve Absolute Bindgen Path
           BINDGENBIN="$(realpath "$BINDGENBIN")"
-
-          # Persist Bindgen Under Both its Explicit Binary Name and the Conventional Bindgen Variable
+          # Export both Bindgen Variable Names for Compatibility with Kernel Builds
           {
-            echo "BINDGENBIN=${BINDGENBIN}"
-            echo "BINDGEN=${BINDGENBIN}"
+            echo "BINDGENBIN=$BINDGENBIN"
+            echo "BINDGEN=$BINDGENBIN"
           } >> "$GITHUB_ENV"
 
-          # Add Bindgen Directory to Path for Subsequent Kernel Build Commands
+          # Add Bindgen to Persistent GitHub Actions Path
           echo "$(dirname "$BINDGENBIN")" >> "$GITHUB_PATH"
-          # Display Bindgen Information
-          echo "📌 Bindgen : ${BINDGENBIN}"
+          echo "📌 Bindgen : $BINDGENBIN"
           echo "📦 Version : $("$BINDGENBIN" --version | head -n1)"
 
-          # Expose the Clang Shared-Library Location to Bindgen When Lib Clang was Discovered
-          if [[ -n "${LIBCLANG_PATH:-}" ]]; then
+          # Preserve Discovered Lib Clang Path for Bindgen
+          if [[ -n "${LIBCLANG_PATH:-}" ]] &&
+             [[ -d "$LIBCLANG_PATH" ]]; then
             export LIBCLANG_PATH
-            echo "📂 LIBCLANG_PATH: $LIBCLANG_PATH"
+            echo "📂 Lib Clang Path: $LIBCLANG_PATH"
+          else
+            echo "⚠️ Lib Clang Path is Unavailable"
           fi
 
-          # Confirm that the Resolved Bindgen Binary can Actually Execute
-          if ! "$BINDGENBIN" --version >/dev/null 2>&1; then
-            echo "⚠️ Bindgen Execution Failed"
-            exit 1
-          fi
+          # Verify that Bindgen can Execute
+          "$BINDGENBIN" --version >/dev/null
 
           echo ""
           echo "🎉 Rust + Bindgen Ready"
@@ -2403,91 +2433,98 @@ jobs:
           set -Eeuo pipefail
 
           echo "🧪 Testing Kernel Toolchain Integration..."
+          # Create a Clean Temporary Directory for Compiler Tests
           TESTDIR="${RUNNER_TEMP}/kernel-toolchain-test"
+          rm -rf "$TESTDIR"
           mkdir -p "$TESTDIR"
           echo "🧪 Testing Clang AArch64 Compilation"
 
-          # Create a Minimal Source for an Actual Clang Compilation Test
-          printf '%s\n' \
-            'int test_function(int value)' \
-            '{' \
-            '  return value + 1;' \
-            '}' \
-            > "$TESTDIR/test.c"
+          # Create a Minimal C Source for an Actual AArch64 Compilation Test
+          cat > "$TESTDIR/test.c" <<'EOF'
+          int test_function(int value)
+          {
+              return value + 1;
+          }
+          EOF
 
           # Verify that the Selected Clang can Produce an AArch64 Object File
-          if "$CLANGFULLPATH" \
+          "$CLANGFULLPATH" \
             -target aarch64-linux-gnu \
             -c "$TESTDIR/test.c" \
-            -o "$TESTDIR/test.o"; then
-            echo "✔️ Clang AArch64 Compilation Passed"
-          else
-            echo "⚠️ Clang AArch64 Compilation Failed"
-            exit 1
-          fi
+            -o "$TESTDIR/test.o"
 
+          # Verify that the compiler generated a non-empty object file
           [[ -s "$TESTDIR/test.o" ]] || {
             echo "⚠️ Clang Produced an Empty Object File"
             exit 1
           }
 
-          echo ""
-          echo "🧪 Testing Bindgen + Lib Clang"
+          echo "✔️ Clang AArch64 Compilation Passed"
 
+          # Run Rust and Bindgen tests only when Rust support is required
           if [[ "${ENABLERUSTC:-false}" == "true" ]]; then
-            # Create a Minimal Source Header for the Bindgen Integration Test
-            printf '%s\n' \
-              '#define TEST_VALUE 42' \
-              '' \
-              'struct test_struct {' \
-              '  int value;' \
-              '};' \
-              > "$TESTDIR/test.h"
-
-            # Generate Rust Bindings to Verify that Bindgen can Communicate with Lib Clang
-            if LIBCLANG_PATH="${LIBCLANG_PATH:-}" \
-              "$BINDGEN" "$TESTDIR/test.h" \
-              --output "$TESTDIR/bindings.rs"; then
-              echo "✔️ Bindgen + Lib Clang Passed"
-            else
-              echo "⚠️ Bindgen + Lib Clang Failed"
+            echo "🧪 Testing Bindgen + Lib Clang"
+            # Create a Minimal C header for Bindgen
+            cat > "$TESTDIR/test.h" <<'EOF'
+          #define TEST_VALUE 42
+          struct test_struct {
+              int value;
+          };
+          EOF
+            # Verify that Bindgen is Available
+            [[ -x "${BINDGEN:-}" ]] || {
+              echo "⚠️ Bindgen Is Not Available"
               exit 1
+            }
+            # Verify that Rust Compiler is Available
+            [[ -x "${RUSTCPATH:-}" ]] || {
+              echo "⚠️ Rust Compiler Is Not Available"
+              exit 1
+            }
+            # Run Bindgen with Lib Clang When the Shared Library Path is Available
+            if [[ -n "${LIBCLANG_PATH:-}" ]]; then
+              LIBCLANG_PATH="$LIBCLANG_PATH" \
+                "$BINDGEN" \
+                "$TESTDIR/test.h" \
+                --output "$TESTDIR/bindings.rs"
+            else
+              "$BINDGEN" \
+                "$TESTDIR/test.h" \
+                --output "$TESTDIR/bindings.rs"
             fi
-
+            # Verify that Bindgen generated valid output
             [[ -s "$TESTDIR/bindings.rs" ]] || {
               echo "⚠️ Bindgen Produced an Empty Bindings File"
               exit 1
             }
-
-            echo ""
+            echo "✔️ Bindgen + Lib Clang Passed"
             echo "🧪 Testing Rust Compiler"
 
-            # Compile the Generated Bindings to Verify that the Selected Rust Compiler can Consume them
-            if "$RUSTCPATH" \
+            # Compile Generated Bindings with the Resolved Rust Compiler
+            "$RUSTCPATH" \
               --crate-type lib \
               "$TESTDIR/bindings.rs" \
-              -o "$TESTDIR/libbindings.rlib"; then
-              echo "✔️ Rust Binding Compilation Passed"
-            else
-              echo "⚠️ Rust Binding Compilation Failed"
-              exit 1
-            fi
-
+              -o "$TESTDIR/libbindings.rlib"
+            # Verify that Rust Produced a Valid Output File
             [[ -s "$TESTDIR/libbindings.rlib" ]] || {
               echo "⚠️ Rust Compiler Produced an Empty Library"
               exit 1
             }
+            echo "✔️ Rust Binding Compilation Passed"
           else
-            echo "ℹ️ Rust/Bindgen Integration: Disabled"
+            echo "ℹ️ Rust / Bindgen Integration: Disabled"
           fi
 
-          echo ""
           echo "📋 Integration Test Summary"
           echo "Clang AArch64 : Passed"
           if [[ "${ENABLERUSTC:-false}" == "true" ]]; then
             echo "Bindgen       : Passed"
             echo "Lib Clang     : Passed"
             echo "Rust          : Passed"
+          else
+            echo "Bindgen       : Disabled"
+            echo "Lib Clang     : Not Required"
+            echo "Rust          : Disabled"
           fi
 
           echo ""
@@ -4976,19 +5013,18 @@ jobs:
 
       - name: 🏗️ Kernel Build
         id: kernelbuild
+        shell: bash
         run: |
           set -Eeuo pipefail
 
-          # Define kernel source paths
-          KERNELPLATFORM="$GITHUB_WORKSPACE/kernel_workspace/kernel_platform"
-          KERNELCOMMON="$KERNELPLATFORM/common"
-
-          # Handle Expected Fast Build Fallback
+          # Define Kernel Source Directories
+          KERNELPLATFORM="${GITHUB_WORKSPACE}/kernel_workspace/kernel_platform"
+          KERNELCOMMON="${KERNELPLATFORM}/common"
+          # Handle an Expected Fast-Build Fallback
           fallback() {
             local reason="$1"
             echo "⚠️ Fast Build Fallback"
             echo "📌 Reason : $reason"
-
             if [[ -z "${FALLBACKSET:-}" ]]; then
               echo "fallbackreason=$reason" >> "$GITHUB_OUTPUT"
               echo "fallback=true" >> "$GITHUB_OUTPUT"
@@ -4997,7 +5033,7 @@ jobs:
             exit 0
           }
 
-          # Handle Unexpected Fast Build Errors
+          # Convert Unexpected Bash Errors Into Normal Fallback Path
           error() {
             local line="$1"
             local code="$2"
@@ -5006,50 +5042,40 @@ jobs:
             echo "📤 Exit Code : $code"
             fallback "unexpectederror"
           }
-
-          # Route Unexpected Errors Through Fallback Handler
+          # Catch Unexpected Command Failures
           trap 'error "$LINENO" "$?"' ERR
 
-          # Load Build Environment Information
-          echo "------------------------------"
-          echo "🚀 Fast Kernel Build"
-          echo "------------------------------"
+          # Load Build Metadata from the Workflow Environment
+          echo "🚀 Kernel Build Details"
           echo "📂 File     : ${MANIFESTBASEFILE:-Unknown}"
           echo "🌿 Branch   : ${MANIFESTBRANCH:-Unknown}"
           echo "📱 CPUD     : ${CPUD:-Unknown}"
           echo "⚙️ Method   : ${BUILDMETHOD:-Perf}"
-          echo "📦 Version  : ${FULLVERSION:-Unknown}"
-          echo "------------------------------"
+          echo "📦 Version  : ${ANDROIDVERSION:-Unknown}-${KERNELVERSION:-Unknown}"
           echo ""
 
-          # Record Fast Build Start Time for Final Summary
-          FASTBUILDSTART=$(date +%s)
+          # Record Fast-Build Start Time
+          FASTBUILDSTART="$(date +%s)"
 
-          # Validate Clang Toolchain
-          # Clang is Prepared by the Dedicated Clang Setup Step
-          # CLANGFULLPATH is Persisted
+          # Verify that Resolved Clang Compiler is Available
           [[ -x "${CLANGFULLPATH:-}" ]] || {
-            echo "⚠️ Clang Toolchain Is Not Available"
+            echo "⚠️ Clang Toolchain is Not Available"
             fallback "missingclang"
           }
 
-          # Validate Rust Compiler And Bindgen
-          # Rust and Bindgen are Only Fequired When Kernel Source Requires Rust Support
+          # Verify Rust and Bindgen When Kernel Requires Rust
           if [[ "${ENABLERUSTC:-false}" == "true" ]]; then
-            # Rustc Must be Available Before Attempting to Use Bindgen
             [[ -x "${RUSTCPATH:-}" ]] || {
-              echo "⚠️ Rust Compiler Is Not Available"
+              echo "⚠️ Rust Compiler is Not Available"
               fallback "missingrustc"
             }
-
-            # Bindgen is Required Together with Rust Toolchain
             [[ -x "${BINDGEN:-}" ]] || {
-              echo "⚠️ Bindgen Is Not Available"
+              echo "⚠️ Bindgen is Not Available"
               fallback "missingbindgen"
             }
           fi
 
-          # Detect the Prebuilt Pahole Binary Dynamically
+          # Locate Prebuilt Pahole Binary
           PAHOLEBIN="$(
             find "$KERNELPLATFORM" \
               -type f \
@@ -5059,7 +5085,7 @@ jobs:
             head -n1
           )"
 
-          # Fall Back to the System Pahole When Necessary
+          # Fallback to System Pahole Installation
           if [[ -z "$PAHOLEBIN" ]]; then
             PAHOLEBIN="$(command -v pahole 2>/dev/null || true)"
             if [[ -x "$PAHOLEBIN" ]]; then
@@ -5067,7 +5093,7 @@ jobs:
             fi
           fi
 
-          # Validate Pahole and LLVM Tools
+          # Verify Pahole Before Enabling BTF Generation
           if [[ -x "$PAHOLEBIN" ]]; then
             export PAHOLE="$PAHOLEBIN"
             echo "📌 Pahole Detected"
@@ -5083,33 +5109,38 @@ jobs:
           if [[ -f "$KERNELCOMMON/Makefile" ]]; then
             cd "$KERNELCOMMON"
           else
-            echo "⚠️ Common Directory Not Found!"
+            echo "⚠️ Common Directory Not Found"
             echo "📂 Expected: $KERNELCOMMON"
             fallback "missingcommon"
           fi
 
-          # Load Android Kernel Build Environment
+          # Load Android Kernel Build Environment When Available
           SETUPENVSH="${KERNELPLATFORM}/build/kernel/_setup_env.sh"
           if [[ -f "$SETUPENVSH" ]]; then
             echo "🔧 Loading Android Kernel Build Environment..."
-            # Temporarily Disable Unset Variable Checking
+            # _setup_env.sh may reference variables that are not defined
             set +u
-            source "$SETUPENVSH" 2>/dev/null || true
+            source "$SETUPENVSH" || true
             set -u
+            # Restore Explicitly Selected Clang Environment
+            export PATH="${CLANGBIN}:${PATH}"
+            # Restore Rust and Bindgen After Loading Android Environment
+            if [[ "${ENABLERUSTC:-false}" == "true" ]]; then
+              export PATH="$(dirname "$RUSTCPATH"):${PATH}"
+              export RUSTC="$RUSTCPATH"
+              export BINDGEN="$BINDGEN"
+            fi
           fi
 
-          # Physical Kernel Source Root
-          # Resolve for Reproducible Compiler Prefix Mapping
+          # Resolve Physical Kernel Source Root
           ROOTREALPATH="$(realpath ../..)" ||
             fallback "realpathfailed"
           ROOTREALPATH="${ROOTREALPATH%/}"
-
-          # Configure Compiler Path Mapping and Warning Flags
+          # Define Reproducible Compiler Path Mappings
           MAP="-fdebug-prefix-map=${ROOTREALPATH}=."
           MPMAP="-fmacro-prefix-map=${ROOTREALPATH}=."
           FPMAP="-ffile-prefix-map=${ROOTREALPATH}=."
-          
-          # Common Optimization and Reproducibility Flags 
+          # Define Common Compiler Flags
           KCFLAGS=(
             "$MAP"
             "$FPMAP"
@@ -5120,56 +5151,51 @@ jobs:
             -fno-stack-protector
             -D__ANDROID_COMMON_KERNEL__
           )
-          # Apply Macro Prefix Mapping
+          # Define Source Pre-Processor Flags
           KCPPFLAGS="$MPMAP"
 
-          # Create CCache Clang Wrapper
+          # Create a Compiler Cache Wrapper Around Selected Clang Compiler
           REALCLANGBIN="$CLANGFULLPATH"
-          CCACHEWRAPPER="$GITHUB_WORKSPACE/kernel_workspace/cc-wrapper"
+          CCACHEWRAPPER="${GITHUB_WORKSPACE}/kernel_workspace/cc-wrapper"
           printf '#!/bin/bash\nexec ccache "%s" "$@"\n' \
             "$REALCLANGBIN" > "$CCACHEWRAPPER"
           chmod +x "$CCACHEWRAPPER"
           echo "🎉 CCache Wrapper Created"
           echo "📦 Wrapper : $CCACHEWRAPPER"
           echo "📦 Clang   : $REALCLANGBIN"
-
-          # Configure ThinLTO Linker Cache for Supported 5.x Kernels
+          # Initialize the optional ThinLTO linker wrapper
           LDLLDWRAPPER=""
-          if [[ "${BUILDCCACHE:-Disabled}" != "Disabled" ]] && \
+          if [[ "${BUILDCCACHE:-Disabled}" != "Disabled" ]] &&
              [[ "$KERNELVERSION" == 5.* ]]; then
-            LDCACHEDIR="$GITHUB_WORKSPACE/kernel_workspace/.thinlto-cache"
-            LDLLDWRAPPER="$GITHUB_WORKSPACE/kernel_workspace/ld-wrapper"
-
-            # Create ThinLTO Cache Directory
+            # Store the ThinLTO cache outside the kernel output directory
+            LDCACHEDIR="${GITHUB_WORKSPACE}/kernel_workspace/.thinlto-cache"
+            LDLLDWRAPPER="${GITHUB_WORKSPACE}/kernel_workspace/ld-wrapper"
             mkdir -p "$LDCACHEDIR"
-
             # Locate LLVM LLD
             LLDBIN="$(command -v ld.lld 2>/dev/null || true)"
             if [[ -z "$LLDBIN" ]]; then
               echo "⚠️ LD.LLD Not Found"
               echo "📊 ThinLTO Linker Cache: Disabled"
-
               LDLLDWRAPPER=""
             else
-              # Create ThinLTO LLD Wrapper
+              # Create an LLD Wrapper with ThinLTO Caching Enabled
               printf '#!/bin/bash\nexec "%s" "$@" --thinlto-cache-dir="%s" --thinlto-cache-policy=cache_size_bytes=2g --thinlto-jobs=%s\n' \
                 "$LLDBIN" \
                 "$LDCACHEDIR" \
                 "$(nproc --all)" > "$LDLLDWRAPPER"
               chmod +x "$LDLLDWRAPPER"
-
               echo "🎉 ThinLTO Linker Wrapper Created"
               echo "📦 Wrapper : $LDLLDWRAPPER"
               echo "📦 LLD     : $LLDBIN"
               echo "📂 Cache   : $LDCACHEDIR"
-              echo "💾 Cache   : 2Gb"
+              echo "💾 Cache   : 2 GB"
               echo "⚙️ Jobs    : $(nproc --all)"
             fi
           else
             echo "📊 ThinLTO Linker Cache: Disabled"
           fi
 
-          # Prepare Kernel Based Arguments Shared by Build Configurations
+          # Prepare Common Kernel Make Arguments
           MAKE_ARGS=(
             LLVM=1
             ARCH=arm64
@@ -5182,15 +5208,15 @@ jobs:
             KCPPFLAGS="$KCPPFLAGS"
           )
 
-          # Enable LLVM Integrated Assembler When Requested
+          # Enable LLVM's Integrated Assembler When Requested by Source Tree
           if [[ "${LLVMENABLED:-false}" == "true" ]]; then
             MAKE_ARGS+=(LLVM_IAS=1)
             echo "🛠️ LLVM Integrated Assembler: Enabled"
           else
             echo "🛠️ LLVM Integrated Assembler: Disabled"
           fi
-      
-          # Pass Rust Compiler to Kernel Build
+
+          # Pass Resolved Rust Compiler and Bindgen to Kernel Build
           if [[ "${ENABLERUSTC:-false}" == "true" ]]; then
             MAKE_ARGS+=(
               RUSTC="$RUSTCPATH"
@@ -5199,25 +5225,27 @@ jobs:
             echo "🦀 Rust Compiler : Enabled"
             echo "📦 Rustc         : $RUSTCPATH"
             echo "📦 Bindgen       : $BINDGEN"
+          else
+            echo "🦀 Rust Compiler : Disabled"
           fi
-      
-          # Configure ThinLTO Linker
-          if [[ -n "$LDLLDWRAPPER" ]]; then
+
+          # Configure Kernel Linker
+          if [[ -n "${LDLLDWRAPPER:-}" ]]; then
             MAKE_ARGS+=(LD="$LDLLDWRAPPER")
             echo "🔗 Kernel Linker : ThinLTO Wrapper"
           else
             MAKE_ARGS+=(LD=ld.lld)
             echo "🔗 Kernel Linker : LLVM LLD"
           fi
-      
-          # Pass Optional Fake Configuration Setting
+
+          # Pass Optional Fake Configuration Override
           if [[ -n "${DISABLEFAKECONFIG:-}" ]]; then
             MAKE_ARGS+=(DISABLEFAKECONFIG="$DISABLEFAKECONFIG")
             echo "🧩 Fake Configuration Override: Enabled"
           fi
 
-          # Generate Initial GKI Configuration
-          echo ">> 🚀 Running GKI Default Configuration"
+          # Generate Initial GKI Kernel Configuration
+          echo "🚀 Running GKI Default Configuration"
           if ! make O=out \
             "${MAKE_ARGS[@]}" \
             gki_defconfig; then
@@ -5225,14 +5253,14 @@ jobs:
             fallback "gkidefconfigfailed"
           fi
 
-          # Configure ThinLTO for Supported 5.x Kernels
-          echo "🧾 Configuring Link Time Optimization (LTO) for Kernel $KERNELVERSION"
+          # Configure ThinLTO Only for Supported 5.x Kernel Versions
+          echo "🧾 Configuring LTO for Kernel $KERNELVERSION"
           if [[ ! -s out/.config ]]; then
-            echo "⚠️ Configuration Not Found"
-            echo "📊 LTO Status: Skipped (Missing Configuration)"
+            echo "⚠️ Kernel Configuration Not Found"
+            echo "📊 LTO Status: Skipped"
           else
             CONFIGTOOL=""
-            # Check Common Scripts / Configurations Locations
+            # Check Common Locations for Scripts / Config
             for path in \
               ../scripts/config \
               ./scripts/config \
@@ -5244,31 +5272,31 @@ jobs:
               fi
             done
 
-            # Search Source Tree When No Standard Path Exists
+            # Search Source Tree When Standard Locations are Unavailable
             if [[ -z "$CONFIGTOOL" ]]; then
               CONFIGTOOL="$(
                 find .. \
                   -type f \
                   -path '*/scripts/config' \
                   -executable \
-                  2>/dev/null |
+                  -print 2>/dev/null |
                 head -n1
               )"
             fi
 
-            # Validate Configuration Tool
+            # Validate Discovered Configuration Utility
             if [[ -n "$CONFIGTOOL" ]] &&
                [[ ! -x "$CONFIGTOOL" ]]; then
               CONFIGTOOL=""
             fi
-            
+
             if [[ -z "$CONFIGTOOL" ]]; then
-              echo "⚠️ Scripts / Configuration Not Found"
-              echo "📊 LTO Status: Skipped (Missing scripts/config)"
+              echo "⚠️ scripts/config Not Found"
+              echo "📊 LTO Status: Skipped"
             else
               case "$KERNELVERSION" in
                 5.*)
-                  echo ">> 🚀 LTO: Thin"
+                  echo "🚀 LTO: Thin"
                   "$CONFIGTOOL" \
                     --file out/.config \
                     -e LTO_CLANG \
@@ -5286,8 +5314,8 @@ jobs:
             fi
           fi
 
-          # Generate Final Kernel Configuration
-          echo ">> 🚀 Running Old Default Configuration"
+          # Regenerate Configuration After All Configuration Changes
+          echo "🚀 Running Old Default Configuration"
           if ! make O=out \
             "${MAKE_ARGS[@]}" \
             olddefconfig; then
@@ -5295,35 +5323,40 @@ jobs:
             fallback "olddefconfigfailed"
           fi
 
-          # Save Important Build Outputs for Fast Build Cache
+          # Define Fast-Build Cache Directory
           CACHE_DIR="../cache"
+          # Save Important Generated Kernel Files for Fast-Build Path
           savefastccache() {
             echo "📦 Saving Fast Build Cache..."
             mkdir -p "$CACHE_DIR" || {
               echo "⚠️ Unable to Create Fast Build Cache"
               return 0
             }
+
+            # Save Generated Kernel Configuration
             [[ -f out/.config ]] &&
-              cp -f out/.config "$CACHE_DIR/.config" || true
+              cp -f out/.config "$CACHE_DIR/.config" ||
+              true
+            # Save Generated Kernel Headers
             if [[ -d out/include ]]; then
               rm -rf "$CACHE_DIR/include" || true
               cp -rf out/include "$CACHE_DIR/" || true
             fi
+            # Save Module.SymVers When Generated
             [[ -f out/Module.symvers ]] &&
-              cp -f out/Module.symvers "$CACHE_DIR/Module.symvers" || true
+              cp -f out/Module.symvers "$CACHE_DIR/Module.symvers" ||
+              true
             echo "✔️ Fast Build Cache Saved"
           }
 
-          # Save Configuration Before Compilation
+          # Save Configuration and Generated Headers Before Compilation
           savefastccache
-
-          # Display Available System Resources
+          # Display Available Runner Resources
           echo "💻 CPU Threads : $(nproc)"
           free -h || true
-          echo ""
+          
           echo "🚀 Compiling Kernel with $(nproc) Threads"
-
-          # Compile Kernel
+          # Compile the kernel
           if ! make -j"$(nproc)" \
             O=out \
             "${MAKE_ARGS[@]}"; then
@@ -5331,39 +5364,36 @@ jobs:
             fallback "compilefailed"
           fi
 
-          # Save Generated Build Outputs After Compilation
+          # Save Generated Outputs After Successful Compilation
           savefastccache
-
-          # Display Final CCache Statistics
+          # Display Compiler Cache Statistics
           echo "📊 Compiler Cache Statistics"
           ccache -s || true
 
-          # Calculate Fast Build Duration
-          FASTBUILDEND=$(date +%s)
+          # Calculate Total Fast-Build Duration
+          FASTBUILDEND="$(date +%s)"
           FASTBUILDTIME=$((FASTBUILDEND - FASTBUILDSTART))
           echo "fastbuildtime=$FASTBUILDTIME" >> "$GITHUB_OUTPUT"
           echo "fastbuildstatus=success" >> "$GITHUB_OUTPUT"
           echo "⏱️ Fast Build Time: ${FASTBUILDTIME}s"
 
-          # Generate GitHub Actions Build Summary
+          # Collect Compiler Cache Statistics for GitHub Actions Summary
           CCACHESUMMARY="$(ccache -s 2>&1)"
+          # Generate GitHub Actions Build Summary
           {
             echo "## 🧠 Compiler Cache Performance Summary"
-            echo ""
             echo "| Metric | Result |"
             echo "|---|---:|"
             echo "| Build Status | 🚀 Success |"
             echo "| Fast Build Time | **${FASTBUILDTIME}s** |"
             echo "| Cacheable Calls | $(echo "$CCACHESUMMARY" | grep "Cacheable calls:" | sed 's/.*Cacheable calls:[[:space:]]*//') |"
-            echo "| Cache Hits | $(echo "$CCACHESUMMARY" | grep -E "^[[:space:]]*Hits:" | head -n1 | sed 's/.*Hits:[[:space:]]*//') |"
+            echo "| Cache Hits | $(echo "$CCACHESUMMARY" | grep -E '^[[:space:]]*Hits:' | head -n1 | sed 's/.*Hits:[[:space:]]*//') |"
             echo "| Direct Hits | $(echo "$CCACHESUMMARY" | grep "Direct:" | sed 's/.*Direct:[[:space:]]*//') |"
             echo "| Preprocessed Hits | $(echo "$CCACHESUMMARY" | grep "Preprocessed:" | sed 's/.*Preprocessed:[[:space:]]*//') |"
-            echo "| Cache Misses | $(echo "$CCACHESUMMARY" | grep -E "^[[:space:]]*Misses:" | head -n1 | sed 's/.*Misses:[[:space:]]*//') |"
+            echo "| Cache Misses | $(echo "$CCACHESUMMARY" | grep -E '^[[:space:]]*Misses:' | head -n1 | sed 's/.*Misses:[[:space:]]*//') |"
             echo "| Uncacheable Calls | $(echo "$CCACHESUMMARY" | grep "Uncacheable calls:" | sed 's/.*Uncacheable calls:[[:space:]]*//') |"
             echo "| Cache Size | $(echo "$CCACHESUMMARY" | grep "Cache size" | sed 's/.*Cache size (GB):[[:space:]]*//') |"
-            echo ""
             echo "### ⚡ Build Result"
-            echo ""
             echo "**🎉 Fast Build Completed Successfully**"
           } >> "$GITHUB_STEP_SUMMARY"
 
