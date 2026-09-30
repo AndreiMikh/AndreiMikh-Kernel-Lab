@@ -4253,29 +4253,23 @@ jobs:
           echo "🎉 NoMount Built-in Integration and Packaging Completed Successfully"
 
       - name: 🛠️ Re-Kernel Integration
-        if: ${{ inputs.REKERNEL == 'Built-in' }}
+        if: ${{ inputs.REKERNEL == 'Built-in' || inputs.REKERNEL == 'Module' }}
         shell: bash
         run: |
           set -Eeuo pipefail
 
-          # Kernel Workspace Paths
+          # Define Re-Kernel and Kernel Source Paths
           WS="${GITHUB_WORKSPACE}/kernel_workspace"
-          KDIR="${WS}/kernel_platform/common"
           RKREPODIR="${WS}/Re-Kernel"
-          INTEGRATEDIR="${RKREPODIR}/Integrate"
-          echo "📂 Kernel Source : ${KDIR}"
-          echo "📂 Re-Kernel     : ${RKREPODIR}"
-          # Validate Kernel Source
-          [[ -d "$KDIR" ]] || {
-            echo "⚠️ Kernel Source Directory Not Found: $KDIR"
-            exit 1
-          }
-          [[ -f "$KDIR/Makefile" ]] || {
-            echo "⚠️ Kernel Makefile Not Found: $KDIR/Makefile"
-            exit 1
-          }
+          KDIR="${WS}/kernel_platform/common"
+          KCDDIR="${KDIR}/drivers"
+          RKTARGETDIR="${KCDDIR}/rekernel"
+          KCONFIGFILE="${KCDIR}/Kconfig"
+          MAKEFILE="${KCDIR}/Makefile"
+          DEFCONFIG="${KDIR}/arch/arm64/configs/gki_defconfig"
+          BUILDBAZEL="${KDIR}/BUILD.bazel"
 
-          # Clone Re-Kernel
+          # Clone Re-Kernel when it is Not Already Available
           if [[ ! -d "$RKREPODIR/.git" ]]; then
             echo "📩 Cloning Re-Kernel..."
             git clone --depth=1 \
@@ -4283,70 +4277,79 @@ jobs:
               "$RKREPODIR"
             echo "✔️ Re-Kernel Cloned"
           else
-            echo "ℹ️ Re-Kernel Repository Already Exists"
+            echo "⚠️ Re-Kernel Repository Already Exists"
           fi
 
-          # Validate Upstream Integration Files
-          echo "🔎 Validating Re-Kernel Upstream Integration Files..."
-          [[ -f "$INTEGRATEDIR/patches.sh" ]] || {
-            echo "⚠️ Re-Kernel Integration Script Not Found: $INTEGRATEDIR/patches.sh"
+          # Re-Kernel Kernel Sources are Provided by LKM-Source
+          RKSRCDIR="${RKREPODIR}/LKM-Source"
+          echo "📂 Re-Kernel Source: $RKSRCDIR"
+          # Verify Re-Kernel Source Tree Before Modifying Kernel
+          if [[ ! -d "$RKSRCDIR" ]]; then
+            echo "⚠️ Re-Kernel LKM-Source Directory Not Found"
             exit 1
-          }
-          [[ -d "$INTEGRATEDIR/rekernel" ]] || {
-            echo "⚠️ Re-Kernel Integration Source Directory Not Found: $INTEGRATEDIR/rekernel"
-            exit 1
-          }
-
-          echo "🔎 Validating Re-Kernel Source..."
-          [[ -f "$INTEGRATEDIR/rekernel/Kconfig" ]] || {
-            echo "⚠️ Missing Re-Kernel Kconfig"
-            exit 1
-          }
-          [[ -f "$INTEGRATEDIR/rekernel/Makefile" ]] || {
-            echo "⚠️ Missing Re-Kernel Makefile"
-            exit 1
-          }
-          [[ -f "$INTEGRATEDIR/rekernel/rekernel.c" ]] || {
-            echo "⚠️ Missing Re-Kernel Source"
-            exit 1
-          }
-          [[ -f "$INTEGRATEDIR/rekernel/rekernel.h" ]] || {
-            echo "⚠️ Missing Re-Kernel Header"
-            exit 1
-          }
-          echo "✔️ Re-Kernel Source Validated"
-
-          # Prevent Duplicate Integration
-          if grep -qE \
-              'CONFIG_REKERNEL|rekernel_binder_transaction|rekernel_report' \
-              "$KDIR/arch/arm64/configs/gki_defconfig" \
-              "$KDIR/drivers/Kconfig" \
-              "$KDIR/drivers/Makefile" \
-              "$KDIR/drivers/android/binder.c" \
-              "$KDIR/kernel/signal.c" 2>/dev/null; then
-            echo "⚠️ Re-Kernel Integration Markers Already Exist"
-            echo "⚠️ Refusing to Apply Re-Kernel Integration Twice"
+          fi
+          
+          if [[ ! -f "$RKSRCDIR/Kconfig" ]]; then
+            echo "⚠️ Re-Kernel Kconfig Not Found"
             exit 1
           fi
 
-          # Apply Upstream Re-Kernel Integration
-          echo "🧩 Applying Re-Kernel Integration..."
-          (
-            cd "$KDIR"
-            bash "$INTEGRATEDIR/patches.sh"
-          )
-          echo "✔️ Re-Kernel Integration Applied"
+          if [[ ! -f "$RKSRCDIR/Makefile" ]]; then
+            echo "⚠️ Re-Kernel Makefile Not Found"
+            exit 1
+          fi
 
-          # Enable Re-Kernel Integration
-          echo "⚙️ Enabling CONFIG REKERNEL..."
-          DEFCONFIG="$KDIR/arch/arm64/configs/gki_defconfig"
-          if grep -qE '^CONFIG_REKERNEL=y$' "$DEFCONFIG"; then
-            echo "✔️ CONFIG REKERNEL Already Enabled"
+          # Add Re-Kernel Kconfig to Kernel Drivers Menu
+          echo "⚙️ Checking Re-Kernel Kconfig Entry..."
+          if grep -qF 'source "drivers/rekernel/Kconfig"' "$KCONFIGFILE"; then
+            echo "⚠️ Re-Kernel Kconfig Entry Already Exists"
           else
-            printf '\nCONFIG_REKERNEL=y\n' >> "$DEFCONFIG"
-            echo "✔️ CONFIG REKERNEL Enabled"
+            sed -i \
+              '/endmenu/i source "drivers/rekernel/Kconfig"' \
+              "$KCONFIGFILE"
+            echo "✔️ Re-Kernel Kconfig Entry Added"
           fi
 
+          # Add Re-Kernel to Kernel Drivers Build System
+          echo "⚙️ Checking Re-Kernel Makefile Entry..."
+          if grep -qF 'obj-$(CONFIG_REKERNEL) += rekernel/' "$MAKEFILE"; then
+            echo "⚠️ Re-Kernel Makefile Entry Already Exists"
+          else
+            printf '\n# Re-Kernel Support\nobj-$(CONFIG_REKERNEL) += rekernel/\n' \
+              >> "$MAKEFILE"
+            echo "✔️ Re-Kernel Makefile Entry Added"
+          fi
+
+          # Replace any Existing Re-Kernel Source with Current Upstream Source
+          echo "♻️ Syncing Re-Kernel Source..."
+          rm -rf "$RKTARGETDIR"
+          mkdir -p "$RKTARGETDIR"
+          cp -af "$RKSRCDIR"/. "$RKTARGETDIR"/
+          echo "✔️ Re-Kernel Source Synced"
+
+          # Enable Re-Kernel Directly in the GKI DefConfig
+          echo "⚙️ Configuring CONFIG_REKERNEL..."
+          
+          if [[ "${{ inputs.REKERNEL }}" == "Built-in" ]]; then
+            REKERNELCONFIG="y"
+          elif [[ "${{ inputs.REKERNEL }}" == "Module" ]]; then
+            REKERNELCONFIG="m"
+          else
+            echo "⚠️ Unsupported Re-Kernel Mode: ${{ inputs.REKERNEL }}"
+            exit 1
+          fi
+          
+          if grep -qE '^CONFIG_REKERNEL=(y|m)$' "$DEFCONFIG"; then
+            sed -i \
+              "s/^CONFIG_REKERNEL=.*/CONFIG_REKERNEL=${REKERNELCONFIG}/" \
+              "$DEFCONFIG"
+            echo "✔️ CONFIG REKERNEL=${REKERNELCONFIG}"
+          else
+            printf '\nCONFIG_REKERNEL=%s\n' "$REKERNELCONFIG" >> "$DEFCONFIG"
+            echo "✔️ CONFIG REKERNEL=${REKERNELCONFIG} Added"
+          fi
+
+          # Enable Re-Kernel Network Support in the GKI DefConfig
           if grep -qE '^CONFIG_REKERNEL_NETWORK=y$' "$DEFCONFIG"; then
             echo "✔️ CONFIG REKERNEL NETWORK Already Enabled"
           else
@@ -4354,95 +4357,34 @@ jobs:
             echo "✔️ CONFIG REKERNEL NETWORK Enabled"
           fi
 
-          # Validate Kconfig Integration
-          echo "🔎 Validating Kconfig Integration..."
-          grep -qF \
-            'source "drivers/rekernel/Kconfig"' \
-            "$KDIR/drivers/Kconfig" || {
-            echo "⚠️ Re-Kernel Kconfig Entry Missing"
-            exit 1
-          }
-          grep -qF \
-            'obj-$(CONFIG_REKERNEL) += rekernel/' \
-            "$KDIR/drivers/Makefile" || {
-            echo "⚠️ Re-Kernel Makefile Entry Missing"
-            exit 1
-          }
-          grep -qE \
-            '^CONFIG_REKERNEL=y$' \
-            "$DEFCONFIG" || {
-            echo "⚠️ CONFIG REKERNEL is Not Enabled"
-            exit 1
-          }
-          echo "✔️ Kconfig Integration Validated"
-
-          # Validate Binder Integration
-          echo "🔎 Validating Binder Integration..."
-          BINDER="$KDIR/drivers/android/binder.c"
-          grep -qF \
-            '#include <../rekernel/rekernel.h>' \
-            "$BINDER" || {
-            echo "⚠️ Re-Kernel Binder Header Integration Missing"
-            exit 1
-          }
-          grep -qF \
-            'rekernel_binder_transaction(reply, t, target_node, tr);' \
-            "$BINDER" || {
-            echo "⚠️ Re-Kernel Binder Transaction Hook Missing"
-            exit 1
-          }
-          echo "✔️ Binder Integration Validated"
-
-          # Validate Signal Integration
-          echo "🔎 Validating Signal Integration..."
-          SIGNAL="$KDIR/kernel/signal.c"
-          grep -qF \
-            '#include <../drivers/rekernel/rekernel.h>' \
-            "$SIGNAL" || {
-            echo "⚠️ Re-Kernel Signal Header Integration Missing"
-            exit 1
-          }
-          grep -qF \
-            'rekernel_report(SIGNAL,' \
-            "$SIGNAL" || {
-            echo "⚠️ Re-Kernel Signal Reporting Hook Missing"
-            exit 1
-          }
-          echo "✔️ Signal Integration Validated"
-
-          # Validate Installed Re-Kernel Source
-          RKTARGETDIR="${KDIR}/drivers/rekernel"
-          [[ -d "$RKTARGETDIR" ]] || {
-            echo "⚠️ Re-Kernel Source Directory was Not Installed"
-            exit 1
-          }
-          [[ -f "$RKTARGETDIR/Kconfig" ]] || {
-            echo "⚠️ Re-Kernel Kconfig Missing"
-            exit 1
-          }
-          [[ -f "$RKTARGETDIR/Makefile" ]] || {
-            echo "⚠️ Re-Kernel Makefile Missing"
-            exit 1
-          }
-          [[ -f "$RKTARGETDIR/rekernel.c" ]] || {
-            echo "⚠️ Re-Kernel Source Missing"
-            exit 1
-          }
-          [[ -f "$RKTARGETDIR/rekernel.h" ]] || {
-            echo "⚠️ Re-Kernel Header Missing"
-            exit 1
-          }
-          echo "✔️ Re-Kernel Source Validated"
+          # Add Re-Kernel Module to the Bazel Kernel Module Outputs When Supported
+          if [[ -f "$BUILDBAZEL" ]]; then
+            echo "⚙️ Checking BUILD Bazel..."
+            if grep -qF '"drivers/rekernel/rekernel.ko"' "$BUILDBAZEL"; then
+              echo "⚠️ Re-Kernel Module Already Present In BUILD Bazel"
+            else
+              sed -i \
+                '0,/name = "kernel_aarch64",/{/module_implicit_outs/s|,$| + ["drivers/rekernel/rekernel.ko"],|}' \
+                "$BUILDBAZEL"
+              if grep -qF '"drivers/rekernel/rekernel.ko"' "$BUILDBAZEL"; then
+                echo "✔️ BUILD Bazel Patched"
+              else
+                echo "⚠️ Failed To Patch BUILD Bazel"
+                exit 1
+              fi
+            fi
+          else
+            echo "ℹ️ BUILD.bazel Not Found, Skipping"
+          fi
 
           echo ""
-          echo "🎉 Re-Kernel Integration Complete"
-          echo "📂 Source       : Drivers / ReKernel"
-          echo "⚙️ Config       : CONFIG REKERNEL Enabled"
-          echo "🔗 Kconfig      : Integrated"
-          echo "🔗 Kbuild       : Integrated"
-          echo "🔗 Binder       : Integrated"
-          echo "🔗 Signal       : Integrated"
-          echo "🧩 Proc Ops     : Handled by Upstream Script"
+          echo "🎉 Re-Kernel Integration Completed Successfully"
+          echo "   ├─ Source      : Synced"
+          echo "   ├─ Kconfig     : Integrated"
+          echo "   ├─ Makefile    : Integrated"
+          echo "   ├─ ReKernel    : ${REKERNELCONFIG}"
+          echo "   ├─ Network     : y"
+          echo "   └─ BUILD Bazel : Checked"
 
       - name: 🌐 Congestion Control BBR Version 3
         if: ${{ (inputs.TCPALGORITHM == 'BBRV1+BBRV3+ECN' || inputs.TCPALGORITHM == 'BBRV1+BBRV3+ECN+Brutal') && steps.kernel-version-setup.outputs.androidversion != 'android16' && steps.kernel-version-setup.outputs.kernelversion != '6.12' }}
