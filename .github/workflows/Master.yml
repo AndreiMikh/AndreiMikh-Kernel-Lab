@@ -6933,3 +6933,239 @@ jobs:
             echo "| 🔤 Built-in NoMount                             | $(bool "${{ inputs.NOMOUNT }}")                  |"
             echo "| 🆔 Workflow Run ID                              | \`${GITHUB_RUN_ID}\`                             |"
           } >> $GITHUB_STEP_SUMMARY
+
+  upload-rekernel:
+    name: Upload Re-Kernel Module
+    if: ${{ inputs.REKERNEL == true }}
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: 🔎 Find Re-Kernel Module ZIP
+        id: download-rekernel
+        uses: actions/github-script@v8
+        env:
+          # Kernel version exported by the build job.
+          # Example: android15-6.6 → 6.6
+          KERNELMAJOR: ${{ needs.build.outputs.kernelversion }}
+        with:
+          script: |
+            const owner = 'Sakion-Team';
+            const repo = 'Re-Kernel';
+
+            // Read the detected kernel major version from the build job.
+            const kernelMajor = process.env.KERNELMAJOR;
+
+            // Validate detected kernel version
+            if (!kernelMajor || !/^\d+\.\d+$/.test(kernelMajor)) {
+              core.setFailed(
+                `Invalid or Missing Kernel Major Version: ${kernelMajor || 'empty'}`
+              );
+              return;
+            }
+
+            core.info(`📌 Detected Kernel Major: ${kernelMajor}`);
+            core.info(`🔎 Fetching Latest ${owner}/${repo} Release...`);
+
+            // Get the latest Re-Kernel GitHub release
+            const release = await github.rest.repos.getLatestRelease({
+              owner,
+              repo,
+            });
+
+            const releaseTag = release.data.tag_name;
+            const assets = release.data.assets || [];
+
+            core.info(`📦 Latest Release: ${releaseTag}`);
+            core.info(`📦 Release Assets: ${assets.length}`);
+
+            // Escape Dots in the Kernel Version for the Regular Expression
+            // Example: 6.6 → 6\.6
+            const escapedKernel =
+              kernelMajor.replace(/\./g, '\\.');
+
+            // Exact Kernel-Version Asset Pattern
+            // Example:
+            // Re-Kernel-v11.6-6.6.zip
+            // Re-Kernel-v11.6-6.12.zip
+            const exactPattern = new RegExp(
+              `^Re-Kernel-v([\\d.]+)-${escapedKernel}\\.zip$`,
+              'i'
+            );
+
+            // Fallback Pattern
+            const fallbackPattern =
+              /^Re-Kernel.*\.zip$/i;
+
+            let targetAsset = null;
+            let versionNumber = '';
+            let isExactMatch = false;
+
+            // First: Find an Exact Kernel-Version Match
+            core.info(
+              `🔎 Searching for exact Re-Kernel ${kernelMajor} module...`
+            );
+
+            for (const asset of assets) {
+              const match = asset.name.match(exactPattern);
+
+              if (!match) {
+                continue;
+              }
+
+              targetAsset = asset;
+              versionNumber = match[1];
+              isExactMatch = true;
+
+              core.info(
+                ` Exact ${kernelMajor} Module Found: ${asset.name}`
+              );
+
+              break;
+            }
+
+            // Second: Fallback to any Re-Kernel ZIP
+            if (!targetAsset) {
+              core.warning(
+                `⚠️ No Re-Kernel Module Found for Kernel ${kernelMajor}`
+              );
+
+              core.info(
+                `🔎 Searching for Fallback Re-Kernel Module...`
+              );
+
+              for (const asset of assets) {
+                if (!fallbackPattern.test(asset.name)) {
+                  continue;
+                }
+
+                targetAsset = asset;
+
+                // Extract the Re-Kernel Version From the Asset Name
+                // Example:
+                // Re-Kernel-v11.6-6.6.zip → 11.6
+                const versionMatch =
+                  asset.name.match(/^Re-Kernel-v?([\d.]+)/i);
+
+                if (versionMatch) {
+                  versionNumber = versionMatch[1];
+                } else {
+                  // If the asset name does not contain a version,
+                  // use the GitHub release tag instead.
+                  versionNumber =
+                    releaseTag.replace(/^v/i, '') || 'latest';
+                }
+
+                core.warning(
+                  `⚠️ Using Fallback Module: ${asset.name}`
+                );
+
+                break;
+              }
+            }
+
+            // No Re-Kernel Asset Found
+            if (!targetAsset) {
+              core.setFailed(
+                `❌ No Re-Kernel ZIP Found in ${releaseTag}`
+              );
+              return;
+            }
+
+            // 📋 Display Selected Asset Information
+            core.info('');
+            core.info('------------------------------------');
+            core.info(`📦 Asset   : ${targetAsset.name}`);
+            core.info(`🏷️ Version : ${versionNumber}`);
+            core.info(`🧩 Kernel  : ${kernelMajor}`);
+            core.info(
+              `🎯 Match   : ${isExactMatch ? 'Exact' : 'Fallback'}`
+            );
+            core.info(
+              `📏 Size    : ${(targetAsset.size / 1024).toFixed(1)} KB`
+            );
+            core.info('------------------------------------');
+
+            // 📤 Export Selected Asset Information to the Next Step
+            core.setOutput(
+              'asset-name',
+              targetAsset.name
+            );
+
+            core.setOutput(
+              'download-url',
+              targetAsset.browser_download_url
+            );
+
+            core.setOutput(
+              'version-number',
+              versionNumber
+            );
+
+            core.setOutput(
+              'exact-match',
+              isExactMatch ? 'true' : 'false'
+            );
+
+      - name: 📥 Download Re-Kernel Module
+        env:
+          ASSETNAME: ${{ steps.download-rekernel.outputs.asset-name }}
+          DLURL: ${{ steps.download-rekernel.outputs.download-url }}
+          VERSIONNUMBER: ${{ steps.download-rekernel.outputs.version-number }}
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+
+          # Artifact directory name.
+          ARTIFACTNAME="Re-Kernel-v${VERSIONNUMBER}"
+
+          echo "📦 Re-Kernel Asset : ${ASSETNAME}"
+          echo "🏷️ Version         : ${VERSIONNUMBER}"
+          echo "📁 Artifact        : ${ARTIFACTNAME}"
+          echo "🔗 Download URL    : ${DLURL}"
+          echo ""
+
+          # Download
+          echo "📥 Downloading Re-Kernel..."
+          curl \
+            --fail \
+            --location \
+            --retry 3 \
+            --retry-delay 2 \
+            --output "${ASSETNAME}" \
+            "${DLURL}"
+          echo "✔️ Re-Kernel Download Complete"
+
+          # Display Downloaded Archive Information
+          echo "📊 Downloaded File:"
+          ls -lh "${ASSETNAME}"
+
+          # Validate the Downloaded ZIP Before Extraction
+          echo "🔎 Validating ZIP Archive..."
+          unzip -tq "${ASSETNAME}"
+          echo "✔️ ZIP Validation Passed"
+
+          # Extract the Re-Kernel Module
+          echo "📂 Extracting Re-Kernel..."
+          mkdir -p "${ARTIFACTNAME}"
+          unzip -q \
+            "${ASSETNAME}" \
+            -d "${ARTIFACTNAME}"
+          echo "✔️ Re-Kernel Extraction Complete"
+
+          # Display Extracted Files for Build-Log Verification
+          echo "📋 Extracted Re-Kernel Files:"
+
+          find "${ARTIFACTNAME}" \
+            -maxdepth 4 \
+            -type f \
+            -print \
+            | sort
+
+      # 📤 Upload extracted Re-Kernel as a GitHub Actions Artifact
+      - name: 📤 Upload Re-Kernel Artifact
+        uses: actions/upload-artifact@v6
+        with:
+          name: Re-Kernel-v${{ steps.download-rekernel.outputs.version-number }}
+          path: Re-Kernel-v${{ steps.download-rekernel.outputs.version-number }}
+          if-no-files-found: error
+          compression-level: 0
