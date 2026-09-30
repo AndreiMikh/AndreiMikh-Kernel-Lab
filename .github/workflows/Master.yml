@@ -5149,16 +5149,14 @@ jobs:
             if [[ -z "$LLDBIN" ]]; then
               echo "⚠️ LD.LLD Not Found"
               echo "📊 ThinLTO Linker Cache: Disabled"
-
               LDLLDWRAPPER=""
             else
               # Create ThinLTO LLD Wrapper
-              printf '#!/bin/bash\nexec "%s" "$@" --thinlto-cache-dir="%s" --thinlto-cache-policy=cache_size_bytes=2g --thinlto-jobs=%s\n' \
+              printf '#!/bin/bash\nexec "%s" "$@" --thinlto-cache-dir="%s" --thinlto-cache-policy=cache_size_bytes=3g --thinlto-jobs=%s\n' \
                 "$LLDBIN" \
                 "$LDCACHEDIR" \
                 "$(nproc --all)" > "$LDLLDWRAPPER"
               chmod +x "$LDLLDWRAPPER"
-
               echo "🎉 ThinLTO Linker Wrapper Created"
               echo "📦 Wrapper : $LDLLDWRAPPER"
               echo "📦 LLD     : $LLDBIN"
@@ -5200,6 +5198,8 @@ jobs:
             echo "🦀 Rust Compiler : Enabled"
             echo "📦 Rustc         : $RUSTCPATH"
             echo "📦 Bindgen       : $BINDGEN"
+          else
+            echo "🦀 Rust Compiler : Disabled"
           fi
       
           # Configure ThinLTO Linker
@@ -5226,66 +5226,96 @@ jobs:
             fallback "gkidefconfigfailed"
           fi
 
+          # Locate scripts/config
+          CONFIGTOOL=""
+          for path in \
+            ../scripts/config \
+            ./scripts/config \
+            ../../scripts/config
+          do
+            if [[ -x "$path" ]]; then
+              CONFIGTOOL="$path"
+              break
+            fi
+          done
+
+          # Search Source Tree When No Standard Path Exists
+          if [[ -z "$CONFIGTOOL" ]]; then
+            CONFIGTOOL="$(
+              find .. \
+                -type f \
+                -path '*/scripts/config' \
+                -executable \
+                -print 2>/dev/null |
+              head -n1
+            )"
+          fi
+
+          # Validate Configuration Tool
+          if [[ -n "$CONFIGTOOL" ]] &&
+             [[ ! -x "$CONFIGTOOL" ]]; then
+            CONFIGTOOL=""
+          fi
+
+          if [[ -z "$CONFIGTOOL" ]]; then
+            echo "⚠️ Scripts / Configuration Tool Not Found"
+            fallback "missingconfigtool"
+          fi
+
+          echo "🧰 Config Tool : $CONFIGTOOL"
           # Configure ThinLTO for Supported 5.x Kernels
-          echo "🧾 Configuring Link Time Optimization (LTO) for Kernel $KERNELVERSION"
+          echo "🧾 Configuring Link Time Optimization (LTO) for Kernel ${KERNELVERSION}"
           if [[ ! -s out/.config ]]; then
             echo "⚠️ Configuration Not Found"
             echo "📊 LTO Status: Skipped (Missing Configuration)"
           else
-            CONFIGTOOL=""
-            # Check Common Scripts / Configurations Locations
-            for path in \
-              ../scripts/config \
-              ./scripts/config \
-              ../../scripts/config
-            do
-              if [[ -x "$path" ]]; then
-                CONFIGTOOL="$path"
-                break
-              fi
-            done
-
-            # Search Source Tree When No Standard Path Exists
-            if [[ -z "$CONFIGTOOL" ]]; then
-              CONFIGTOOL="$(
-                find .. \
-                  -type f \
-                  -path '*/scripts/config' \
-                  -executable \
-                  2>/dev/null |
-                head -n1
-              )"
-            fi
-
-            # Validate Configuration Tool
-            if [[ -n "$CONFIGTOOL" ]] &&
-               [[ ! -x "$CONFIGTOOL" ]]; then
-              CONFIGTOOL=""
-            fi
-            
-            if [[ -z "$CONFIGTOOL" ]]; then
-              echo "⚠️ Scripts / Configuration Not Found"
-              echo "📊 LTO Status: Skipped (Missing scripts/config)"
-            else
-              case "$KERNELVERSION" in
-                5.*)
-                  echo ">> 🚀 LTO: Thin"
-                  "$CONFIGTOOL" \
-                    --file out/.config \
-                    -e LTO_CLANG \
-                    -e LTO_CLANG_THIN \
-                    -d LTO_CLANG_NONE \
-                    -d LTO_CLANG_FULL ||
-                    echo "⚠️ LTO Configuration Apply Failed"
+            case "${KERNELVERSION}" in
+              5.*)
+                echo ">> 🚀 LTO: Thin"
+                if "$CONFIGTOOL" \
+                  --file out/.config \
+                  -e LTO_CLANG \
+                  -e LTO_CLANG_THIN \
+                  -d LTO_CLANG_NONE \
+                  -d LTO_CLANG_FULL; then
                   echo "📊 LTO Status: Applied (Thin)"
-                  ;;
-                *)
-                  echo "🚀 LTO Skipped for Kernel $KERNELVERSION"
-                  echo "📊 LTO Status: Skipped (Unsupported Kernel)"
-                  ;;
-              esac
-            fi
+                else
+                  echo "⚠️ LTO Configuration Apply Failed"
+                  fallback "ltoconfigfailed"
+                fi
+                ;;
+              *)
+                echo "🚀 LTO Skipped for Kernel ${KERNELVERSION}"
+                echo "📊 LTO Status: Skipped (Unsupported Kernel)"
+                ;;
+            esac
           fi
+
+          # Disable Unneeded KUnit Test Configurations
+          echo "🧪 Disabling Unneeded KUnit Test Configurations"
+          disablelists=(
+            CONFIG_REGMAP_KUNIT
+            CONFIG_INPUT_KUNIT_TEST
+            CONFIG_SND_SOC_TOPOLOGY_KUNIT_TEST
+            CONFIG_SND_SOC_UTILS_KUNIT_TEST
+            CONFIG_HID_KUNIT_TEST
+            CONFIG_RTC_LIB_KUNIT_TEST
+            CONFIG_CLK_KUNIT_TEST
+            CONFIG_CLK_GATE_KUNIT_TEST
+            CONFIG_IIO_FORMAT_KUNIT_TEST
+            CONFIG_EXT4_KUNIT_TESTS
+            CONFIG_FAT_KUNIT_TEST
+          )
+
+          for sym in "${disablelists[@]}"; do
+            if "$CONFIGTOOL" \
+              --file out/.config \
+              -d "$sym" 2>/dev/null; then
+              echo "  └─ Disabled      : $sym"
+            else
+              echo "  └─ Not Available : $sym"
+            fi
+          done
 
           # Generate Final Kernel Configuration
           echo ">> 🚀 Running Old Default Configuration"
@@ -5295,6 +5325,21 @@ jobs:
             echo "⚠️ Old Default Configuration Failed"
             fallback "olddefconfigfailed"
           fi
+
+          # Verify Required KSU Configuration
+          echo "🔐 Verifying Required KSU Configuration"
+          for sym in \
+            CONFIG_KSU \
+            CONFIG_KSU_MULTI_MANAGER_SUPPORT \
+            CONFIG_KSU_TOOLKIT_SUPPORT
+          do
+            if grep -q "^${sym}=y$" out/.config; then
+              echo "  └─ Enabled : $sym"
+            else
+              echo "⚠️ Required KSU Option Missing After OldDefConfig: $sym"
+              fallback "ksuconfigmissing"
+            fi
+          done
 
           # Save Important Build Outputs for Fast Build Cache
           CACHE_DIR="../cache"
