@@ -189,10 +189,14 @@ on:
           - ADIOS
           - None
       REKERNEL:
-        type: boolean
+        type: choice
         description: "Re-Kernel Support"
         required: true
-        default: true
+        default: Built-in
+        options:
+          - Built-in
+          - Module
+          - None
       NTSYNC:
         type: boolean
         description: "NTSync (Custom Synchronization Feature)"
@@ -4229,7 +4233,7 @@ jobs:
           echo "🎉 NoMount Built-in Integration Completed Successfully"
 
       - name: 🛠️ Re-Kernel Integration
-        if: ${{ inputs.REKERNEL }}
+        if: ${{ inputs.REKERNEL == 'Built-in' }}
         shell: bash
         run: |
           set -Eeuo pipefail
@@ -6677,139 +6681,6 @@ jobs:
           
           echo ""
           echo "🎉 AI APK Resolver Completed Successfully"
-
-      - name: 📦 Prepare Release Build Files
-        if: ${{ steps.buildprofile.outputs.gitrelease == 'Enabled' }}
-        shell: bash
-        run: |
-          set -Eeuo pipefail
-
-          # Define Workspace and Artifact Staging Directories
-          WS="${GITHUB_WORKSPACE}"
-          RELEASEINPUT="${WS}/Release-Output"
-          NOMOUNTSOURCE="${WS}/kernel_workspace/nomount"
-          NOMOUNTBIN="${NOMOUNTSOURCE}/nomount-bin"
-          NOMOUNTPACKAGE="${WS}/NoMount-Build-Files"
-
-          echo "📦 Preparing Release Build Files..."
-          echo ""
-
-          # Reset and Create the Release Artifact Structure
-          rm -rf "$RELEASEINPUT"
-          mkdir -p \
-            "${RELEASEINPUT}/AnyKernel3" \
-            "${RELEASEINPUT}/manager"
-
-          # Copy the Prepared AnyKernel3 Directory
-          [[ -d "${WS}/AnyKernel3" ]] || {
-            echo "⛔ AnyKernel3 Directory Missing"
-            exit 1
-          }
-
-          cp -a \
-            "${WS}/AnyKernel3/." \
-            "${RELEASEINPUT}/AnyKernel3/"
-
-          # Locate and Copy the Root Manager APK
-          MANAGERAPKDIR="${{ steps.root-engine-apk.outputs.managerapkdir }}"
-          compgen -G "${MANAGERAPKDIR}/*.apk" > /dev/null || {
-            echo "⛔ Root Manager APK Missing"
-            echo "   Directory: ${MANAGERAPKDIR}"
-            exit 1
-          }
-
-          cp -a \
-            "${MANAGERAPKDIR}/"*.apk \
-            "${RELEASEINPUT}/manager/"
-
-          # Prepare the NoMount Artifact When NoMount is Enabled
-          if [[ "${{ inputs.NOMOUNT }}" != "None" ]]; then
-            echo "📦 Preparing NoMount Build Files..."
-            echo ""
-
-            # Define the Expected NoMount Source Directories
-            [[ -d "$NOMOUNTSOURCE" ]] || {
-              echo "⛔ NoMount Source Directory Missing"
-              echo "   ${NOMOUNTSOURCE}"
-              exit 1
-            }
-
-            [[ -d "$NOMOUNTBIN" ]] || {
-              echo "⛔ NoMount Binary Directory Missing"
-              echo "   ${NOMOUNTBIN}"
-              exit 1
-            }
-
-            # Verify the NoMount Module Metadata Exists
-            [[ -f "${NOMOUNTSOURCE}/module/module.prop" ]] || {
-              echo "⛔ NoMount module.prop Missing"
-              exit 1
-            }
-
-            # Verify Both Compiled Userspace Binaries Exist
-            [[ -f "${NOMOUNTBIN}/nm-arm64" ]] || {
-              echo "⛔ NoMount NoMount-ARM64 Missing"
-              exit 1
-            }
-
-            [[ -f "${NOMOUNTBIN}/nm-arm" ]] || {
-              echo "⛔ NoMount NoMount-ARM Missing"
-              exit 1
-            }
-
-            # Verify the NoMount source commit metadata exists
-            [[ -f "${NOMOUNTBIN}/nm-commit-src" ]] || {
-              echo "⛔ NoMount Source Commit Missing"
-              exit 1
-            }
-
-            # Reset and Create a Deterministic NoMount Artifact Layout
-            rm -rf "$NOMOUNTPACKAGE"
-            mkdir -p \
-              "${NOMOUNTPACKAGE}/module" \
-              "${NOMOUNTPACKAGE}/bin"
-
-            # Copy NoMount Module Files
-            cp -a \
-              "${NOMOUNTSOURCE}/module/." \
-              "${NOMOUNTPACKAGE}/module/"
-
-            # Copy Compiled NoMount Userspace Binaries
-            install -m 0755 \
-              "${NOMOUNTBIN}/nm-arm64" \
-              "${NOMOUNTPACKAGE}/bin/nm-arm64"
-            install -m 0755 \
-              "${NOMOUNTBIN}/nm-arm" \
-              "${NOMOUNTPACKAGE}/bin/nm-arm"
-            # Copy the NoMount Source Commit Metadata
-            install -m 0644 \
-              "${NOMOUNTBIN}/nm-commit-src" \
-              "${NOMOUNTPACKAGE}/nm-commit-src"
-
-            # Display the Final NoMount Artifact Contents
-            echo "📂 NoMount Build Files:"
-            find "$NOMOUNTPACKAGE" \
-              -type f \
-              -printf '  %P\n'
-            echo "✔️ NoMount Build Files Prepared"
-          fi
-
-          # Display the Final Kernel Release Artifact Contents
-          echo "📁 Release Files:"
-          find "$RELEASEINPUT" \
-            -type f \
-            -printf '  %P\n'
-
-          # Display the Final NoMount Artifact Contents When Enabled
-          if [[ "${{ inputs.NOMOUNT }}" != "None" ]]; then
-            echo "📁 NoMount Files:"
-            find "$NOMOUNTPACKAGE" \
-              -type f \
-              -printf '  %P\n'
-          fi
-
-          echo ""
-          echo "🎉 Release Build Files Prepared"
    
       - name: 📤 Upload Flashable Kernel Artifact
         uses: actions/upload-artifact@v7
@@ -6819,7 +6690,7 @@ jobs:
           # Upload Flashable Kernel Files
           path: ./AnyKernel3/*      
           # Retain Artifact for 30 Days
-          retention-days: 7
+          retention-days: 30
           
       - name: 📤 Upload Manager APK
         if: ${{ steps.root-engine-apk.outputs.managerapk == 'true' }}
@@ -6830,6 +6701,18 @@ jobs:
           # Upload Manager APK Files
           path: ${{ steps.root-engine-apk.outputs.managerapkdir }}/*.apk
           # Warn When No APK is Found        
+          if-no-files-found: warn
+          retention-days: 7
+
+      - name: 📤 Upload NoMount Userspace
+        if: ${{ inputs.NOMOUNT != 'None' }}
+        uses: actions/upload-artifact@v4
+        with:
+          # Build NoMount Userspace Artifact
+          name: NoMount-Userspace-${{ steps.extract-info.outputs.manifestbasefile }}-${{ inputs.ROOTENGINE }}-${{ steps.rootengine.outputs.ksuversion }}
+          # Upload NoMount Userspace Files
+          path: ${{ github.workspace }}/kernel_workspace/nomount-userspace/
+          # Warn When No ZIP is Found
           if-no-files-found: warn
           retention-days: 7
 
@@ -6868,25 +6751,97 @@ jobs:
 
           # Confirm Successful Upload
           echo ""
-          echo "🎉 CCache Tarball Uploaded Successfully"
-
-      - name: 📤 Upload Release Build Files
+          echo "🎉 CCache tarball uploaded successfully."
+      
+      - name: 📦 Create ZIP Package
         if: ${{ steps.buildprofile.outputs.gitrelease == 'Enabled' }}
-        uses: actions/upload-artifact@v7
-        with:
-          name: Kernel-Release-Files
-          path: ${{ github.workspace }}/Release-Output
-          if-no-files-found: error
-          compression-level: 0
+        run: |
+          set -e
+      
+          echo "---- 📋 Build Information ----"
+          echo "🧠 Kernel Packaging Stage"
+          echo "Base       : ${{ steps.extract-info.outputs.manifestbasefile }}"
+          echo "Kernel     : ${{ steps.kernel-version-setup.outputs.fullversion }}"
+          echo "Root       : ${KSUVERSION}"
+          echo "------------------------------"
+          echo ""
+      
+          # 📦 AnyKernel3 (Required)
+          ANYKERNEL3ZIP="${{ steps.kernel-version-setup.outputs.fullversion }}-${KSUVERSION}-${{ steps.extract-info.outputs.manifestbasefile }}-${{ steps.suffix.outputs.suffix }}.zip"    
+          if [ -d "AnyKernel3" ] && [ "$(ls -A AnyKernel3 2>/dev/null)" ]; then
+            echo "📦 Creating AnyKernel3 Zip..."       
+            ANYKERNEL3ZIP="${{ steps.kernel-version-setup.outputs.fullversion }}-${KSUVERSION}-${{ steps.extract-info.outputs.manifestbasefile }}-${{ steps.suffix.outputs.suffix }}.zip"     
+            cd AnyKernel3
+            zip -r "../$ANYKERNEL3ZIP" .
+            cd ..     
+            echo "ANYKERNEL3ZIP=$ANYKERNEL3ZIP" >> $GITHUB_ENV
+          else
+            echo "⚠️ AnyKernel3 Missing — Build Cannot Continue"
+            exit 1
+          fi
 
-      - name: 📤 Upload NoMount Build Files
-        if: ${{ steps.buildprofile.outputs.gitrelease == 'Enabled' && inputs.NOMOUNT != 'None' }}
-        uses: actions/upload-artifact@v7
+      - name: 📤 Upload Artifacts to Git Release
+        if: ${{ steps.ksu-check.outputs.shouldrelease == 'true' }}
+        continue-on-error: true
+        uses: softprops/action-gh-release@v3
         with:
-          name: NoMount-Build-Files
-          path: ${{ github.workspace }}/NoMount-Build-Files
-          if-no-files-found: error
-          compression-level: 0
+          # Release Tag
+          tag_name: ${{ steps.extract-info.outputs.manifestbasefile }}
+          # Release Name
+          name: ${{ steps.extract-info.outputs.manifestbasefile }}-${{ steps.kernel-version-setup.outputs.fullversion }}-${{ steps.suffix.outputs.suffix }}
+          body: |
+            ### 📋 **INSTALLATION GUIDE**:
+         
+            ### 📩 **DOWNLOAD THE KERNEL ZIP FILE**:            
+            ---            
+            - Navigate to the Release Page & Download & Correct Kernel Zip File for Your Device & Kernel Version
+            - Ensure that You Select the File that Matches Your Device's Model & the Kernel Version You're Installing
+            ### 📲 **PREPARE YOUR DEVICE**:            
+            ---            
+            - Make Sure Your Device has an **Unlocked Bootloader** & a Compatible Custom Recovery (TWRP/OrangeFox/Etc)
+            - It's Recommended to **Backup Your Data** Before Proceeding with the Installation to Avoid Any Loss
+            ### 📤 **INSTALL THROUGH RECOVERY TOOL**:            
+            ---            
+            - Reboot Your Device Into **Recovery Mode** (TWRP/OrangeFox/Etc)
+            - In the Recovery Menu, Select **Install** & Navigate to the Downloaded Kernel Zip File
+            - Select the Kernel Zip File & Swipe to Confirm Installation
+            - After the Installation Completes, Reboot Your Device Into the System
+            ### 📥 **INSTALLATION VIA KERNELFLASHER APP**:            
+            ---            
+            - **Download KernelFlasher**: Get the **KernelFlasher** App from [KernelFlasher GitHub](https://github.com/fatalcoder524/KernelFlasher)
+            - **Launch KernelFlasher**: Open the App & Make Sure Your **Device is Rooted**
+            - **Select Kernel**: Choose the Downloaded **Kernel Zip File** Within the App
+            - **Flash the Kernel**: Follow the Prompts to Flash the Kernel Directly Onto your Device
+            - **Reboot**: After Flashing, the App will Prompt to Reboot the Device Into the System
+            ### 📥 **INSTALLATION VIA HORIZON FLASHER APP**:            
+            ---            
+            - **Download Horizon Flasher**: Download the **Horizon Flasher App** from [HorizonKernelFlasher GitHub](https://github.com/libxzr/HorizonKernelFlasher/releases) 
+            - **Install the App**: Once the App is Installed, Launch & Select the **Downloaded Kernel Zip File**
+            - **Flash**: App will Automatically Flash the Kernel for You... It may Take Some Time, Depending on the Size of the Kernel File
+            - **Reboot the System**: After Flashing, App will Prompt You to Reboot... Follow the On-Screen Instructions to Reboot Into the System   
+            ### 🛠️ **TROUBLESHOOTING**:            
+            ---            
+            - If You Encounter Any Issues with the Installation or Booting, Here are some Common Fixes:
+            - **Bootloops**: If Your Device is Stuck in a Bootloop After Installation, Try Clearing the Cache & Dalvik Cache from the Recovery Menu
+            - **Kernel Panic**: This may Occur if Your Device is Incompatible with the Kernel, Try Reverting to a Different Kernel Version or Check for Device-Specific Patches
+            - **Stuck on Recovery**: If You Can’t Boot Into the System After Installation, Reflash the Recovery & Reattempt the Installation        
+            ### 🧩 **TIPS**:            
+            ---            
+            - **Root Access**: If You Need Root Access, Ensure that the Corresponding Root Manager (`ReSukiSU`, Etc) is Installed After Flashing the Kernel, Follow the Specific Instructions Provided by the Root Manager's Documentation          
+            ### 🔧 **COMMON ISSUES & FIXES**:            
+            ---            
+            - **Issue - Kernel Does Not Boot**:
+            - Fix: Make Sure You are Using a Kernel Compatible with Your Device, Review the Device-Specific Kernel Settings or Check if There are Any Custom Patches Required for Your Device Model  
+            ### 📊 **AFTER INSTALLATION**:            
+            ---            
+            - Once Installed, You Can Verify the Kernel Version & Root Access by Using a Kernel Checker App or a Root Checker App from the Play Store
+            - Enjoy the New Kernel Features & Enhancements Designed to Improve Your Device's Performance       
+            
+          files: |
+            ${ANYKERNEL3ZIP}
+            ${{ steps.root-engine-apk.outputs.managerapkdir }}/*.apk
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: 💾 Post Build Disk Usage Check
         run: |
@@ -6959,445 +6914,223 @@ jobs:
             echo "| 🔤 Unicode Bypass Patch                         | $(bool "${{ inputs.UNICODE }}")                  |"
             echo "| 🧹 Disk Space Clean                             | \`${{ steps.buildprofile.outputs.cleanspace }}\` |"
             echo "| 📂 XUS Patch                                    | \`${{ steps.buildprofile.outputs.xus }}\`        |"
-            echo "| 🔁 Re-Kernel (Use with Freezer, NoActive, Etc.) | $(bool "${{ inputs.REKERNEL }}")                 |"
+            echo "| 🔁 Re-Kernel (Use with Freezer, NoActive, Etc.) | \`${{ inputs.REKERNEL }}\`                       |"
             echo "| 🔤 NTSync Patch                                 | $(bool "${{ inputs.NTSYNC }}")                   |"
             echo "| 🔤 Built-in NoMount                             | $(bool "${{ inputs.NOMOUNT }}")                  |"
             echo "| 🆔 Workflow Run ID                              | \`${GITHUB_RUN_ID}\`                             |"
           } >> $GITHUB_STEP_SUMMARY
 
-  nomount-userspace:
-    name: Upload NoMount Userspace
-    if: ${{ inputs.NOMOUNT != 'None' }}
+  upload-rekernel:
+    name: Upload Re-Kernel Module
+    if: ${{ inputs.REKERNEL == 'Module' }}
     needs: kernel-build
     runs-on: ubuntu-latest
     steps:
-      - name: 📥 Download NoMount Build Files
-        uses: actions/download-artifact@v7
+      - name: 🔎 Find Re-Kernel Module ZIP
+        id: download-rekernel
+        uses: actions/github-script@v8
+        env:
+          KERNELMAJOR: ${{ needs.kernel-build.outputs.kernelversion }}
         with:
-          name: NoMount-Build-Files
-          path: nomount-build
-          merge-multiple: false
+          script: |
+            const owner = 'Sakion-Team';
+            const repo = 'Re-Kernel';
 
-      - name: 📦 Package NoMount Userspace
+            // Read the detected kernel major version from the build job.
+            const kernelMajor = process.env.KERNELMAJOR;
+            // Validate detected kernel version
+            if (!kernelMajor || !/^\d+\.\d+$/.test(kernelMajor)) {
+              core.setFailed(
+                `Invalid or Missing Kernel Major Version: ${kernelMajor || 'empty'}`
+              );
+              return;
+            }
+            core.info(`📌 Detected Kernel Major: ${kernelMajor}`);
+            core.info(`🔎 Fetching Latest ${owner}/${repo} Release...`);
+            // Get the latest Re-Kernel GitHub release
+            const release = await github.rest.repos.getLatestRelease({
+              owner,
+              repo,
+            });
+
+            const releaseTag = release.data.tag_name;
+            const assets = release.data.assets || [];
+            core.info(`📦 Latest Release: ${releaseTag}`);
+            core.info(`📦 Release Assets: ${assets.length}`);
+
+            // Escape Dots in the Kernel Version for the Regular Expression
+            // Example: 6.6 → 6\.6
+            const escapedKernel =
+              kernelMajor.replace(/\./g, '\\.');
+            // Exact Kernel-Version Asset Pattern
+            // Example:
+            // Re-Kernel-v11.6-6.6.zip
+            // Re-Kernel-v11.6-6.12.zip
+            const exactPattern = new RegExp(
+              `^Re-Kernel-v([\\d.]+)-${escapedKernel}\\.zip$`,
+              'i'
+            );
+
+            // Fallback Pattern
+            const fallbackPattern =
+              /^Re-Kernel.*\.zip$/i;
+            let targetAsset = null;
+            let versionNumber = '';
+            let isExactMatch = false;
+
+            // First: Find an Exact Kernel-Version Match
+            core.info(
+              `🔎 Searching for exact Re-Kernel ${kernelMajor} module...`
+            );
+            for (const asset of assets) {
+              const match = asset.name.match(exactPattern);
+              if (!match) {
+                continue;
+              }
+              targetAsset = asset;
+              versionNumber = match[1];
+              isExactMatch = true;
+              core.info(
+                ` Exact ${kernelMajor} Module Found: ${asset.name}`
+              );
+              break;
+            }
+
+            // Second: Fallback to any Re-Kernel ZIP
+            if (!targetAsset) {
+              core.warning(
+                `⚠️ No Re-Kernel Module Found for Kernel ${kernelMajor}`
+              );
+              core.info(
+                `🔎 Searching for Fallback Re-Kernel Module...`
+              );
+              for (const asset of assets) {
+                if (!fallbackPattern.test(asset.name)) {
+                  continue;
+                }
+                targetAsset = asset;
+                
+                // Extract the Re-Kernel Version From the Asset Name
+                // Example:
+                // Re-Kernel-v11.6-6.6.zip → 11.6
+                const versionMatch =
+                  asset.name.match(/^Re-Kernel-v?([\d.]+)/i);
+
+                if (versionMatch) {
+                  versionNumber = versionMatch[1];
+                } else {
+                  // If the asset name does not contain a version,
+                  // use the GitHub release tag instead.
+                  versionNumber =
+                    releaseTag.replace(/^v/i, '') || 'latest';
+                }
+
+                core.warning(
+                  `⚠️ Using Fallback Module: ${asset.name}`
+                );
+
+                break;
+              }
+            }
+
+            // No Re-Kernel Asset Found
+            if (!targetAsset) {
+              core.setFailed(
+                `No Re-Kernel ZIP Found in ${releaseTag}`
+              );
+              return;
+            }
+
+            // 📋 Display Selected Asset Information
+            core.info('');
+            core.info('------------------------------------');
+            core.info(`📦 Asset   : ${targetAsset.name}`);
+            core.info(`🏷️ Version : ${versionNumber}`);
+            core.info(`🧩 Kernel  : ${kernelMajor}`);
+            core.info(
+              `🎯 Match   : ${isExactMatch ? 'Exact' : 'Fallback'}`
+            );
+            core.info(
+              `📏 Size    : ${(targetAsset.size / 1024).toFixed(1)} KB`
+            );
+            core.info('------------------------------------');
+            // 📤 Export Selected Asset Information to the Next Step
+            core.setOutput(
+              'asset-name',
+              targetAsset.name
+            );
+            core.setOutput(
+              'download-url',
+              targetAsset.browser_download_url
+            );
+            core.setOutput(
+              'version-number',
+              versionNumber
+            );
+            core.setOutput(
+              'exact-match',
+              isExactMatch ? 'true' : 'false'
+            );
+
+      - name: 📥 Download Re-Kernel Module
+        env:
+          ASSETNAME: ${{ steps.download-rekernel.outputs.asset-name }}
+          DLURL: ${{ steps.download-rekernel.outputs.download-url }}
+          VERSIONNUMBER: ${{ steps.download-rekernel.outputs.version-number }}
         shell: bash
         run: |
           set -Eeuo pipefail
 
-          # Define NoMount source and output paths
-          NOMOUNTBUILD="${GITHUB_WORKSPACE}/nomount-build"
-          NOMOUNTMODULESRC="${NOMOUNTBUILD}/module"
-          NOMOUNTBINDIR="${NOMOUNTBUILD}/bin"
-          NOMOUNTMODULEDIR="${GITHUB_WORKSPACE}/nomount-userspace"
-          NOMOUNTOUTDIR="${GITHUB_WORKSPACE}/output"
-          echo "📂 NoMount Build    : $NOMOUNTBUILD"
-          echo "📂 Module Source    : $NOMOUNTMODULESRC"
-          echo "📂 Binary Directory : $NOMOUNTBINDIR"
-          echo "📂 Output           : $NOMOUNTOUTDIR"
+          # Artifact Directory Name
+          ARTIFACTNAME="Re-Kernel-v${VERSIONNUMBER}"
+          echo "📦 Re-Kernel Asset : ${ASSETNAME}"
+          echo "🏷️ Version         : ${VERSIONNUMBER}"
+          echo "📁 Artifact        : ${ARTIFACTNAME}"
+          echo "🔗 Download URL    : ${DLURL}"
           echo ""
 
-          # Verify the NoMount Module Directory
-          [[ -d "$NOMOUNTMODULESRC" ]] || {
-            echo "⛔ NoMount Module Directory Missing"
-            echo "   ${NOMOUNTMODULESRC}"
-            exit 1
-          }
+          # Download
+          echo "📥 Downloading Re-Kernel..."
+          curl \
+            --fail \
+            --location \
+            --retry 3 \
+            --retry-delay 2 \
+            --output "${ASSETNAME}" \
+            "${DLURL}"
+          echo "✔️ Re-Kernel Download Complete"
 
-          # Verify the NoMount Module Metadata
-          [[ -f "${NOMOUNTMODULESRC}/module.prop" ]] || {
-            echo "⛔ NoMount module.prop Missing"
-            exit 1
-          }
+          # Display Downloaded Archive Information
+          echo "📊 Downloaded File:"
+          ls -lh "${ASSETNAME}"
 
-          # Verify the Compiled ARM64 Userspace Binary
-          [[ -x "${NOMOUNTBINDIR}/nm-arm64" ]] || {
-            echo "⛔ NoMount ARM64 Binary Missing"
-            echo "   ${NOMOUNTBINDIR}/nm-arm64"
-            exit 1
-          }
+          # Validate Downloaded ZIP Before Extraction
+          echo "🔎 Validating ZIP Archive..."
+          unzip -tq "${ASSETNAME}"
+          echo "✔️ ZIP Validation Passed"
 
-          # Verify the Compiled ARM Userspace Binary
-          [[ -x "${NOMOUNTBINDIR}/nm-arm" ]] || {
-            echo "⛔ NoMount ARM Binary Missing"
-            echo "   ${NOMOUNTBINDIR}/nm-arm"
-            exit 1
-          }
+          # Extract Re-Kernel Module
+          echo "📂 Extracting Re-Kernel..."
+          mkdir -p "${ARTIFACTNAME}"
+          unzip -q \
+            "${ASSETNAME}" \
+            -d "${ARTIFACTNAME}"
+          echo "✔️ Re-Kernel Extraction Complete"
 
-          # Verify the Source Commit Metadata
-          [[ -f "${NOMOUNTBUILD}/nm-commit-src" ]] || {
-            echo "⛔ NoMount Source Commit Missing"
-            exit 1
-          }
+          # Display Extracted Files for Build-Log Verification
+          echo "📋 Extracted Re-Kernel Files:"
 
-          # Read and Validate the Exact NoMount Source Commit
-          NOMOUNTCOMMIT="$(
-            tr -d '[:space:]' \
-              < "${NOMOUNTBUILD}/nm-commit-src"
-          )"
-          [[ "$NOMOUNTCOMMIT" =~ ^[0-9a-fA-F]{40}$ ]] || {
-            echo "⛔ Invalid NoMount Commit: ${NOMOUNTCOMMIT}"
-            exit 1
-          }
-          echo "📌 NoMount Commit : ${NOMOUNTCOMMIT}"
-          echo ""
+          find "${ARTIFACTNAME}" \
+            -maxdepth 4 \
+            -type f \
+            -print \
+            | sort
 
-          # Prepare Clean Packaging Directories
-          rm -rf "$NOMOUNTMODULEDIR"
-          mkdir -p \
-            "${NOMOUNTMODULEDIR}/bin" \
-            "$NOMOUNTOUTDIR"
-
-          # Copy the Original NoMount Module Contents
-          cp -a \
-            "${NOMOUNTMODULESRC}/." \
-            "$NOMOUNTMODULEDIR/"
-
-          # Install the Compiled ARM64 Userspace Binary
-          install -m 0755 \
-            "${NOMOUNTBINDIR}/nm-arm64" \
-            "${NOMOUNTMODULEDIR}/bin/nm-arm64"
-
-          # Install the compiled ARM userspace binary
-          install -m 0755 \
-            "${NOMOUNTBINDIR}/nm-arm" \
-            "${NOMOUNTMODULEDIR}/bin/nm-arm"
-
-          # Record the Exact NoMount Source Commit in the Package
-          printf '%s\n' "$NOMOUNTCOMMIT" \
-            > "${NOMOUNTMODULEDIR}/nm-commit-src"
-
-          # Normalize the Module Version Code
-          if grep -q '^versionCode=' \
-              "${NOMOUNTMODULEDIR}/module.prop"; then
-            sed -i \
-              's/^versionCode=.*/versionCode=1/' \
-              "${NOMOUNTMODULEDIR}/module.prop"
-          fi
-
-          # Define the Final NoMount Package Name
-          NOMOUNTMODULEZIP="${NOMOUNTOUTDIR}/NoMount-${NOMOUNTCOMMIT}.zip"
-
-          # Remove any Previous Package and Checksum
-          rm -f "$NOMOUNTMODULEZIP"
-          rm -f "${NOMOUNTMODULEZIP}.sha256"
-
-          # Create the NoMount Userspace Zip
-          echo "📦 Creating NoMount Userspace..."
-          (
-            cd "$NOMOUNTMODULEDIR"
-            zip -qr \
-              "$NOMOUNTMODULEZIP" \
-              .
-          )
-
-          # Generate SHA-256 Checksum
-          sha256sum "$NOMOUNTMODULEZIP" \
-            > "${NOMOUNTMODULEZIP}.sha256"
-
-          # Verify Package Files Were Created
-          [[ -s "$NOMOUNTMODULEZIP" ]] || {
-            echo "⛔ NoMount Userspace Zip Was Not Created"
-            exit 1
-          }
-
-          [[ -s "${NOMOUNTMODULEZIP}.sha256" ]] || {
-            echo "⛔ NoMount Userspace SHA-256 Was Not Created"
-            exit 1
-          }
-
-          echo ""
-          echo "📦 ZIP     : ${NOMOUNTMODULEZIP}"
-          echo "🔐 SHA-256 : ${NOMOUNTMODULEZIP}.sha256"
-          echo ""
-
-          # Validate the Zip Archive
-          echo "🔎 Validating Zip..."
-          unzip -tq \
-            "$NOMOUNTMODULEZIP"
-          echo "✔️ Zip Validation Passed"
-
-          # Validate the Generated SHA-256 Checksum
-          echo "🔐 Verifying SHA-256..."
-          (
-            cd "$NOMOUNTOUTDIR"
-            sha256sum -c \
-              "$(basename "${NOMOUNTMODULEZIP}.sha256")"
-          )
-          echo "✔️ SHA-256 Verification Passed"
-
-          # Display Final Package Contents
-          echo "📁 Package Contents:"
-          unzip -l "$NOMOUNTMODULEZIP"
-
-          echo ""
-          echo "🎉 NoMount Userspace Packaged Successfully"
-
-      - name: 📤 Upload NoMount Userspace Artifact
-        uses: actions/upload-artifact@v7
+      # 📤 Upload extracted Re-Kernel as a GitHub Actions Artifact
+      - name: 📤 Upload Re-Kernel Artifact
+        uses: actions/upload-artifact@v6
         with:
-          name: NoMount-Userspace-${{ needs.kernel-build.outputs.manifestbasefile }}
-          path: |
-            output/NoMount-*.zip
-            output/NoMount-*.zip.sha256
+          name: Re-Kernel-v${{ steps.download-rekernel.outputs.version-number }}
+          path: Re-Kernel-v${{ steps.download-rekernel.outputs.version-number }}
           if-no-files-found: error
           compression-level: 0
-  
-  release:
-    name: Create GitHub Release
-    needs:
-      - kernel-build
-      - nomount-userspace
-    if: >-
-      ${{ needs.kernel-build.result == 'success' &&
-          needs.nomount-userspace.result == 'success' &&
-          needs.kernel-build.outputs.gitrelease == 'Enabled' }}
-    runs-on: ubuntu-latest
-    steps:
-      - name: 📥 Download Kernel Release Files
-        uses: actions/download-artifact@v7
-        with:
-          name: Kernel-Release-Files
-          path: Release-Output
-          merge-multiple: false
-
-      - name: 📥 Download NoMount Userspace
-        if: ${{ inputs.NOMOUNT != 'None' }}
-        uses: actions/download-artifact@v7
-        with:
-          name: NoMount-Userspace-${{ needs.kernel-build.outputs.manifestbasefile }}
-          path: nomount-userspace
-          merge-multiple: false
-
-      - name: 📦 Create Zip Package
-        shell: bash
-        env:
-          FULLVERSION: ${{ needs.kernel-build.outputs.kernelversion }}
-          KSUVERSION: ${{ needs.kernel-build.outputs.ksuversion }}
-          MANIFESTBASEFILE: ${{ needs.kernel-build.outputs.manifestbasefile }}
-          SUFFIX: ${{ needs.kernel-build.outputs.suffix }}
-        run: |
-          set -Eeuo pipefail
-
-          echo "📋 Build Information"
-          echo "🧠 Kernel Packaging Stage"
-          echo "Base       : ${MANIFESTBASEFILE}"
-          echo "Kernel     : ${FULLVERSION}"
-          echo "Root       : ${KSUVERSION}"
-          echo ""
-
-          ANYKERNEL3DIR="${GITHUB_WORKSPACE}/Release-Output/AnyKernel3"
-          ANYKERNEL3ZIP="${FULLVERSION}-${KSUVERSION}-${MANIFESTBASEFILE}-${SUFFIX}.zip"
-
-          # Verify AnyKernel3 Source Directory
-          [[ -d "$ANYKERNEL3DIR" ]] || {
-            echo "⛔ AnyKernel3 Directory Missing"
-            exit 1
-          }
-
-          # Verify AnyKernel3 Contains Files
-          [[ -n "$(find "$ANYKERNEL3DIR" -mindepth 1 -print -quit)" ]] || {
-            echo "⛔ AnyKernel3 Directory is Empty"
-            exit 1
-          }
-
-          # Create the Final AnyKernel3 Package
-          echo "📦 Creating AnyKernel3 Zip..."
-          (
-            cd "$ANYKERNEL3DIR"
-            zip -qr \
-              "${GITHUB_WORKSPACE}/${ANYKERNEL3ZIP}" \
-              .
-          )
-
-          # Verify the Zip was Created
-          [[ -s "${GITHUB_WORKSPACE}/${ANYKERNEL3ZIP}" ]] || {
-            echo "⛔ AnyKernel3 Zip Was Not Created"
-            exit 1
-          }
-
-          echo "📦 Package : ${ANYKERNEL3ZIP}"
-          echo "📏 Size    : $(du -h "${GITHUB_WORKSPACE}/${ANYKERNEL3ZIP}" | awk '{print $1}')"
-          echo ""
-
-          # Validate the AnyKernel3 ZIP Archive
-          echo "🔎 Validating AnyKernel3 ZIP..."
-          unzip -tq \
-            "${GITHUB_WORKSPACE}/${ANYKERNEL3ZIP}"
-          echo "✔️ AnyKernel3 ZIP Validation Passed"
-
-          # Make the Zip Path Available to Later Release Steps
-          echo "ANYKERNEL3ZIP=${GITHUB_WORKSPACE}/${ANYKERNEL3ZIP}" >> "$GITHUB_ENV"
-
-      - name: 🔎 Verify Release Files
-        shell: bash
-        run: |
-          set -Eeuo pipefail
-
-          echo "📂 Release Output:"
-          find Release-Output \
-            -type f \
-            -printf '  %P\n'
-          if [[ -d "nomount-userspace" ]]; then
-            echo ""
-            echo "📂 NoMount Userspace:"
-            find nomount-userspace \
-              -type f \
-              -printf '  %P\n'
-          fi
-
-          # Verify the Root Manager APK Exists
-          [[ -n "$(find Release-Output/manager \
-            -type f \
-            -name '*.apk' \
-            -print -quit 2>/dev/null)" ]] || {
-            echo "⛔ Root Manager APK Missing"
-            exit 1
-          }
-
-          # Verify NoMount Userspace Package and Checksum
-          if [[ "${{ inputs.NOMOUNT }}" != "None" ]]; then
-            [[ -n "$(find nomount-userspace \
-              -type f \
-              -name 'NoMount-*.zip' \
-              -print -quit 2>/dev/null)" ]] || {
-              echo "⛔ NoMount Userspace Zip Missing"
-              exit 1
-            }
-            [[ -n "$(find nomount-userspace \
-              -type f \
-              -name 'NoMount-*.zip.sha256' \
-              -print -quit 2>/dev/null)" ]] || {
-              echo "⛔ NoMount Userspace SHA-256 Missing"
-              exit 1
-            }
-          fi
-
-          echo "✔️ Release Files Verified"
-
-      - name: 📤 Create GitHub Release
-        shell: bash
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          RELEASETAG: ${{ needs.kernel-build.outputs.manifestbasefile }}
-          RELEASENAME: ${{ needs.kernel-build.outputs.manifestbasefile }}-${{ needs.kernel-build.outputs.kernelversion }}-${{ needs.kernel-build.outputs.suffix }}
-        run: |
-          set -Eeuo pipefail
-
-          RELEASEBODY="${GITHUB_WORKSPACE}/release-body.md"
-
-          # Create the GitHub Release notes
-          cat > "$RELEASEBODY" <<'EOF'
-          ### 📋 **INSTALLATION GUIDE**
-
-          ### 📩 **DOWNLOAD THE KERNEL ZIP FILE**
-          ---
-          - Navigate to the Release Page and Download the Correct Kernel ZIP File for Your Device and Kernel Version
-          - Ensure that the Selected File Matches Your Device Model and Kernel Version
-
-          ### 📲 **PREPARE YOUR DEVICE**
-          ---
-          - Make Sure Your Device Has an **Unlocked Bootloader** and a Compatible Custom Recovery
-          - It is Recommended to Backup Your Data Before Installation
-
-          ### 📤 **INSTALL THROUGH RECOVERY**
-          ---
-          - Reboot Your Device Into Recovery Mode
-          - Select **Install** and Navigate to the Downloaded Kernel Zip
-          - Select the Kernel Zip and Flash it
-          - Reboot the Device After Flashing
-
-          ### 📥 **INSTALLATION VIA KERNELFLASHER**
-          ---
-          - Install KernelFlasher
-          - Launch KernelFlasher and Ensure Your Device is Rooted
-          - Select the Downloaded Kernel Zip
-          - Follow the Flashing Instructions
-          - Reboot After Flashing
-
-          ### 📥 **INSTALLATION VIA HORIZON FLASHER**
-          ---
-          - Install Horizon Flasher
-          - Select the Downloaded Kernel Zip
-          - Start the Flashing Process
-          - Reboot the System After Flashing
-
-          ### 🛠️ **TROUBLESHOOTING**
-          ---
-          - **Bootloops:** Revert to a Known-Good Kernel or Restore Your Backup
-          - **Kernel Panic:** Verify that the Kernel Matches Your Device and Firmware
-          - **Recovery Issues:** Reflash the Appropriate Recovery and Retry Installation
-
-          ### 🧩 **ROOT ACCESS**
-          ---
-          - If Root Access Is Required, Ensure the Corresponding Root Manager Is Installed After Flashing
-
-          ### 📊 **AFTER INSTALLATION**
-          ---
-          - Verify the Installed Kernel Version Using a Kernel Information or Kernel Checker Application
-          - Verify Root Access if Applicable
-          EOF
-
-          # Start with the AnyKernel3 Kernel Package
-          RELEASEFILES=(
-            "${ANYKERNEL3ZIP}"
-          )
-
-          # Add All Root Manager APKs
-          while IFS= read -r APK; do
-            RELEASEFILES+=("$APK")
-          done < <(
-            find "${GITHUB_WORKSPACE}/Release-Output/manager" \
-              -type f \
-              -name '*.apk' \
-              -print
-          )
-
-          # Add NoMount Userspace Files When Enabled
-          if [[ "${{ inputs.NOMOUNT }}" != "None" ]]; then
-            while IFS= read -r NOMOUNTFILE; do
-              RELEASEFILES+=("$NOMOUNTFILE")
-            done < <(
-              find "${GITHUB_WORKSPACE}/nomount-userspace" \
-                -type f \
-                \( \
-                  -name 'NoMount-*.zip' \
-                  -o \
-                  -name 'NoMount-*.zip.sha256' \
-                \) \
-                -print
-            )
-          fi
-
-          echo "📦 Release Files:"
-          printf '  %s\n' "${RELEASEFILES[@]}"
-          echo ""
-
-          # Final Verification Before Creating the Release
-          for FILE in "${RELEASEFILES[@]}"; do
-            [[ -f "$FILE" ]] || {
-              echo "⛔ Release File Missing:"
-              echo "   ${FILE}"
-              exit 1
-            }
-
-            [[ -s "$FILE" ]] || {
-              echo "⛔ Release File Is Empty:"
-              echo "   ${FILE}"
-              exit 1
-            }
-          done
-
-          echo "✔️ Release Files Verified"
-          echo ""
-
-          # Create the GitHub Release and Upload All Assets
-          gh release create \
-            "$RELEASETAG" \
-            "${RELEASEFILES[@]}" \
-            --repo "$GITHUB_REPOSITORY" \
-            --title "$RELEASENAME" \
-            --notes-file "$RELEASEBODY"
-
-          echo ""
-          echo "🎉 GitHub Release Created Successfully"
-          echo "🏷️ Tag  : ${RELEASETAG}"
-          echo "📋 Name : ${RELEASENAME}"
