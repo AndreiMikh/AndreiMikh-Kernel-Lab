@@ -4228,22 +4228,30 @@ jobs:
           echo ""
           echo "🎉 NoMount Built-in Integration Completed Successfully"
 
-      - name: 🛠️ Re-Kernel
+      - name: 🛠️ Re-Kernel Integration
         if: ${{ inputs.REKERNEL }}
+        shell: bash
         run: |
           set -Eeuo pipefail
 
-          # Paths
+          # Kernel Workspace Paths
           WS="${GITHUB_WORKSPACE}/kernel_workspace"
-          RKREPODIR="${WS}/Re-Kernel"
           KDIR="${WS}/kernel_platform/common"
-          KCDDIR="${KDIR}/drivers"
-          RKTARGETDIR="${KCDDIR}/rekernel"
-          KCONFIGFILE="${KCDDIR}/Kconfig"
-          MAKEFILE="${KCDDIR}/Makefile"
-          BUILDBAZEL="${KDIR}/BUILD.bazel"
+          RKREPODIR="${WS}/Re-Kernel"
+          INTEGRATEDIR="${RKREPODIR}/Integrate"
+          echo "📂 Kernel Source : ${KDIR}"
+          echo "📂 Re-Kernel     : ${RKREPODIR}"
+          # Validate Kernel Source
+          [[ -d "$KDIR" ]] || {
+            echo "⚠️ Kernel Source Directory Not Found: $KDIR"
+            exit 1
+          }
+          [[ -f "$KDIR/Makefile" ]] || {
+            echo "⚠️ Kernel Makefile Not Found: $KDIR/Makefile"
+            exit 1
+          }
 
-          # Clone Re-Kernel if Needed
+          # Clone Re-Kernel
           if [[ ! -d "$RKREPODIR/.git" ]]; then
             echo "📩 Cloning Re-Kernel..."
             git clone --depth=1 \
@@ -4251,59 +4259,166 @@ jobs:
               "$RKREPODIR"
             echo "✔️ Re-Kernel Cloned"
           else
-            echo "⚠️ Re-Kernel Repository Already Exists"
+            echo "ℹ️ Re-Kernel Repository Already Exists"
           fi
 
-          # Resolve Source Directory
-          if [[ -d "$RKREPODIR/LKM-Source" ]]; then
-            RKSRCDIR="$RKREPODIR/LKM-Source"
-          else
-            RKSRCDIR="$RKREPODIR"
-          fi
-
-          echo "📂 Re-Kernel Source: $RKSRCDIR"
-
-          [[ -d "$RKSRCDIR" ]] || {
-            echo "⚠️ Re-Kernel Source Directory Not Found"
+          # Validate Upstream Integration Files
+          echo "🔎 Validating Re-Kernel Upstream Integration Files..."
+          [[ -f "$INTEGRATEDIR/patches.sh" ]] || {
+            echo "⚠️ Re-Kernel Integration Script Not Found: $INTEGRATEDIR/patches.sh"
+            exit 1
+          }
+          [[ -d "$INTEGRATEDIR/rekernel" ]] || {
+            echo "⚠️ Re-Kernel Integration Source Directory Not Found: $INTEGRATEDIR/rekernel"
             exit 1
           }
 
-          # Add Kernel Configuration Entry Only if Missing
-          if grep -qF 'source "drivers/rekernel/Kconfig"' "$KCONFIGFILE"; then
-            echo "⚠️ Re-Kernel Kernel Configuration Entry Already Exists"
-          else
-            sed -i '/endmenu/i source "drivers/rekernel/Kconfig"' "$KCONFIGFILE"
-            echo "⚙️ Re-Kernel Kconfig Entry Added"
+          echo "🔎 Validating Re-Kernel Source..."
+          [[ -f "$INTEGRATEDIR/rekernel/Kconfig" ]] || {
+            echo "⚠️ Missing Re-Kernel Kconfig"
+            exit 1
+          }
+          [[ -f "$INTEGRATEDIR/rekernel/Makefile" ]] || {
+            echo "⚠️ Missing Re-Kernel Makefile"
+            exit 1
+          }
+          [[ -f "$INTEGRATEDIR/rekernel/rekernel.c" ]] || {
+            echo "⚠️ Missing Re-Kernel Source: ReKernel Source"
+            exit 1
+          }
+          [[ -f "$INTEGRATEDIR/rekernel/rekernel.h" ]] || {
+            echo "⚠️ Missing Re-Kernel Header: ReKernel Header"
+            exit 1
+          }
+          echo "✔️ Re-Kernel Source Validated"
+
+          # Prevent Duplicate Integration
+          if grep -qE \
+              'CONFIG_REKERNEL|rekernel_binder_transaction|rekernel_report' \
+              "$KDIR/arch/arm64/configs/gki_defconfig" \
+              "$KDIR/drivers/Kconfig" \
+              "$KDIR/drivers/Makefile" \
+              "$KDIR/drivers/android/binder.c" \
+              "$KDIR/kernel/signal.c" 2>/dev/null; then
+            echo "⚠️ Re-Kernel Integration Markers Already Exist"
+            echo "⚠️ Refusing to Apply Re-Kernel Integration Twice"
+            exit 1
           fi
 
-          # Add Makefile Entry Only if Missing
-          if grep -qF 'obj-$(CONFIG_REKERNEL) += rekernel/' "$MAKEFILE"; then
-            echo "⚠️ Re-Kernel Makefile Entry Already Exists"
+          # Apply Upstream Re-Kernel Integration
+          echo "🧩 Applying Re-Kernel Integration..."
+          (
+            cd "$KDIR"
+            bash "$INTEGRATEDIR/patches.sh"
+          )
+          echo "✔️ Re-Kernel Integration Applied"
+
+          # Enable Re-Kernel Integration
+          echo "⚙️ Enabling CONFIG REKERNEL..."
+          DEFCONFIG="$KDIR/arch/arm64/configs/gki_defconfig"
+          if grep -qE '^CONFIG_REKERNEL=y$' "$DEFCONFIG"; then
+            echo "✔️ CONFIG REKERNEL Already Enabled"
           else
-            printf '\n# Re-Kernel Support\nobj-$(CONFIG_REKERNEL) += rekernel/\n' >> "$MAKEFILE"
-            echo "⚙️ Re-Kernel Makefile Entry Added"
+            printf '\nCONFIG_REKERNEL=y\n' >> "$DEFCONFIG"
+            echo "✔️ CONFIG REKERNEL Enabled"
           fi
 
-          # Replace Existing Re-Kernel Source
-          echo "♻️ Syncing Re-Kernel Source..."
-          rm -rf "$RKTARGETDIR"
-          mkdir -p "$RKTARGETDIR"
-          cp -af "$RKSRCDIR"/. "$RKTARGETDIR"/
-          echo "✔️ Re-Kernel Source Synced"
-
-          # Patch BUILD Bazel if Present
-          if [[ -f "$BUILDBAZEL" ]]; then
-            echo "⚙️ Patching BUILD Bazel..."
-            sed -i \
-              '0,/name = "kernel_aarch64",/{/module_implicit_outs/s|,$| + ["drivers/rekernel/rekernel.ko"],|}' \
-              "$BUILDBAZEL"
-            echo "🚀 BUILD Bazel Patch Applied"
+          if grep -qE '^CONFIG_REKERNEL_NETWORK=y$' "$DEFCONFIG"; then
+            echo "✔️ CONFIG REKERNEL NETWORK Already Enabled"
           else
-            echo "ℹ️ BUILD Bazel Not Found, Skipping"
+            printf 'CONFIG_REKERNEL_NETWORK=y\n' >> "$DEFCONFIG"
+            echo "✔️ CONFIG REKERNEL NETWORK Enabled"
           fi
+
+          # Validate Kconfig Integration
+          echo "🔎 Validating Kconfig Integration..."
+          grep -qF \
+            'source "drivers/rekernel/Kconfig"' \
+            "$KDIR/drivers/Kconfig" || {
+            echo "⚠️ Re-Kernel Kconfig Entry Missing"
+            exit 1
+          }
+          grep -qF \
+            'obj-$(CONFIG_REKERNEL) += rekernel/' \
+            "$KDIR/drivers/Makefile" || {
+            echo "⚠️ Re-Kernel Makefile Entry Missing"
+            exit 1
+          }
+          grep -qE \
+            '^CONFIG_REKERNEL=y$' \
+            "$DEFCONFIG" || {
+            echo "⚠️ CONFIG REKERNEL is Not Enabled"
+            exit 1
+          }
+          echo "✔️ Kconfig Integration Validated"
+
+          # Validate Binder Integration
+          echo "🔎 Validating Binder Integration..."
+          BINDER="$KDIR/drivers/android/binder.c"
+          grep -qF \
+            '#include <../rekernel/rekernel.h>' \
+            "$BINDER" || {
+            echo "⚠️ Re-Kernel Binder Header Integration Missing"
+            exit 1
+          }
+          grep -qF \
+            'rekernel_binder_transaction(reply, t, target_node, tr);' \
+            "$BINDER" || {
+            echo "⚠️ Re-Kernel Binder Transaction Hook Missing"
+            exit 1
+          }
+          echo "✔️ Binder Integration Validated"
+
+          # Validate Signal Integration
+          echo "🔎 Validating Signal Integration..."
+          SIGNAL="$KDIR/kernel/signal.c"
+          grep -qF \
+            '#include <../drivers/rekernel/rekernel.h>' \
+            "$SIGNAL" || {
+            echo "⚠️ Re-Kernel Signal Header Integration Missing"
+            exit 1
+          }
+          grep -qF \
+            'rekernel_report(SIGNAL,' \
+            "$SIGNAL" || {
+            echo "⚠️ Re-Kernel Signal Reporting Hook Missing"
+            exit 1
+          }
+          echo "✔️ Signal Integration Validated"
+
+          # Validate Installed Re-Kernel Source
+          RKTARGETDIR="${KDIR}/drivers/rekernel"
+          [[ -d "$RKTARGETDIR" ]] || {
+            echo "⚠️ Re-Kernel Source Directory was Not Installed"
+            exit 1
+          }
+          [[ -f "$RKTARGETDIR/Kconfig" ]] || {
+            echo "⚠️ Re-Kernel Kconfig Missing"
+            exit 1
+          }
+          [[ -f "$RKTARGETDIR/Makefile" ]] || {
+            echo "⚠️ Re-Kernel Makefile Missing"
+            exit 1
+          }
+          [[ -f "$RKTARGETDIR/rekernel.c" ]] || {
+            echo "⚠️ Re-Kernel Source Missing"
+            exit 1
+          }
+          [[ -f "$RKTARGETDIR/rekernel.h" ]] || {
+            echo "⚠️ Re-Kernel Header Missing"
+            exit 1
+          }
+          echo "✔️ Re-Kernel Source Validated"
 
           echo ""
-          echo "🎉 Re-Kernel Files and Directories Successfully Synced and Patched"
+          echo "🎉 Re-Kernel Integration Complete"
+          echo "📂 Source       : Drivers / ReKernel"
+          echo "⚙️ Config       : CONFIG REKERNEL Enabled"
+          echo "🔗 Kconfig      : Integrated"
+          echo "🔗 Kbuild       : Integrated"
+          echo "🔗 Binder       : Integrated"
+          echo "🔗 Signal       : Integrated"
+          echo "🧩 Proc Ops     : Handled by Upstream Script"
 
       - name: 🌐 Congestion Control BBR Version 3
         if: ${{ (inputs.TCPALGORITHM == 'BBRV1+BBRV3+ECN' || inputs.TCPALGORITHM == 'BBRV1+BBRV3+ECN+Brutal') && steps.kernel-version-setup.outputs.androidversion != 'android16' && steps.kernel-version-setup.outputs.kernelversion != '6.12' }}
@@ -4378,7 +4493,6 @@ jobs:
           SUSFS="${{ inputs.SUSFSREPOSITORY }}"
           SCHEDULERS="${{ inputs.SCHEDULERS }}" 
           FILE="${{ inputs.FILE }}" 
-          REKERNEL="${{ inputs.REKERNEL }}" 
           GKI="${ANDROIDVERSION}-${KERNELVERSION}"
           KERNELPATCH="${{ inputs.KERNELPATCH }}"
           TCP="${{ inputs.TCPALGORITHM }}"
@@ -4463,19 +4577,6 @@ jobs:
                 ;;
             esac
           done
-
-          # Re-Kernel Configuration
-          echo "🚀 Enabling Re-Kernel Support (for Use with Freezer, NoActive and Etc to Improve Background App Freezing)..."
-          # Use Underscore for Variable Name
-          REKERNEL="${REKERNEL:-false}"  # Default to False if Not Set
-          if [[ "$REKERNEL" == "true" ]]; then
-            echo "🎉 Enabling Re-Kernel Support..."
-            SETCONFIG "CONFIG_REKERNEL=y"
-            SETCONFIG "CONFIG_REKERNEL_NETWORK=y"
-            echo "🎉 ReKernel Enabled"
-          else
-            echo "☘️ ReKernel Disabled"
-          fi
 
           # Check if KSU Root Engine is ReSukiSU
           if [[ "$ROOT" == "ReSukiSU" ]]; then
@@ -5930,125 +6031,6 @@ jobs:
           echo ""
           echo "🎉 AnyKernel3 Packaging Completed Successfully"
 
-      - name: 📦 Package NoMount Userspace
-        if: ${{ inputs.NOMOUNT != 'None' }}
-        shell: bash
-        run: |
-          set -Eeuo pipefail
-
-          # Define Paths
-          WS="${GITHUB_WORKSPACE}/kernel_workspace"
-          NOMOUNTSOURCE="${WS}/nomount-source"
-          NOMOUNTBIN="${WS}/nomount-bin"
-          NOMOUNTMODULEDIR="${WS}/nomount-userspace"
-          NOMOUNTOUTDIR="${WS}/output"
-          NOMOUNTMODULESRC="${NOMOUNTSOURCE}/module"
-
-          echo "------------------------------"
-          echo "NoMount Userspace Packaging"
-          echo "------------------------------"
-          echo "📂 NoMount Source : $NOMOUNTSOURCE"
-          echo "📂 Module Source  : $NOMOUNTMODULESRC"
-          echo "📂 Binary Source  : $NOMOUNTBIN"
-          echo "📂 Output         : $NOMOUNTOUTDIR"
-          echo ""
-
-          # Verify NoMount Source
-          [[ -d "$NOMOUNTSOURCE" ]] || {
-            echo "⚠️ NoMount Source Directory Missing:"
-            echo "   $NOMOUNTSOURCE"
-            exit 1
-          }
-
-          # Verify NoMount Module Source
-          [[ -d "$NOMOUNTMODULESRC" ]] || {
-            echo "⚠️ NoMount Module Directory Missing:"
-            echo "   $NOMOUNTMODULESRC"
-            exit 1
-          }
-
-          [[ -f "$NOMOUNTMODULESRC/module.prop" ]] || {
-            echo "⚠️ NoMount Module.prop Missing"
-            exit 1
-          }
-
-          # Verify Compiled Userspace Binaries
-          [[ -x "$NOMOUNTBIN/nm-arm64" ]] || {
-            echo "⚠️ NoMount-ARM64 Missing"
-            exit 1
-          }
-
-          [[ -x "$NOMOUNTBIN/nm-arm" ]] || {
-            echo "⚠️ NoMount-ARM Missing"
-            exit 1
-          }
-
-          # Prepare Packaging Directories
-          rm -rf "$NOMOUNTMODULEDIR"
-          mkdir -p "$NOMOUNTMODULEDIR/bin"
-          mkdir -p "$NOMOUNTOUTDIR"
-
-          # Copy Original NoMount Userspace
-          cp -a "$NOMOUNTMODULESRC/." "$NOMOUNTMODULEDIR/"
-
-          # Install Newly Compiled Userspace Binaries
-          install -m 0755 \
-            "$NOMOUNTBIN/nm-arm64" \
-            "$NOMOUNTMODULEDIR/bin/nm-arm64"
-          install -m 0755 \
-            "$NOMOUNTBIN/nm-arm" \
-            "$NOMOUNTMODULEDIR/bin/nm-arm"
-
-          # Identify Exact NoMount Source Commit
-          NOMOUNTCOMMIT="$(git -C "$NOMOUNTSOURCE" rev-parse HEAD)"
-          echo "📌 NoMount Commit: $NOMOUNTCOMMIT"
-
-          # Record NoMount Source Commit
-          printf '%s\n' "$NOMOUNTCOMMIT" \
-            > "$NOMOUNTMODULEDIR/nm-commit-src"
-
-          # Normalize Module Version Code
-          if grep -q '^versionCode=' "$NOMOUNTMODULEDIR/module.prop"; then
-            sed -i 's/^versionCode=.*/versionCode=1/' \
-              "$NOMOUNTMODULEDIR/module.prop"
-          fi
-
-          # Define Package Name
-          NOMOUNTMODULEZIP="${NOMOUNTOUTDIR}/NoMount-${NOMOUNTCOMMIT}.zip"
-
-          # Remove Existing Package
-          rm -f "$NOMOUNTMODULEZIP"
-
-          # Package Userspace
-          echo "📦 Creating NoMount Userspace..."
-          (
-            cd "$NOMOUNTMODULEDIR"
-            zip -qr "$NOMOUNTMODULEZIP" .
-          )
-
-          # Generate SHA-256 Checksum
-          sha256sum "$NOMOUNTMODULEZIP" \
-            > "${NOMOUNTMODULEZIP}.sha256"
-
-          # Verify Package
-          [[ -s "$NOMOUNTMODULEZIP" ]] || {
-            echo "⚠️ NoMount Userspace ZIP Was Not Created"
-            exit 1
-          }
-
-          echo ""
-          echo "------------------------------"
-          echo "NoMount Userspace Ready"
-          echo "------------------------------"
-          echo "📦 ZIP      : $NOMOUNTMODULEZIP"
-          echo "🔐 SHA-256  : ${NOMOUNTMODULEZIP}.sha256"
-          echo ""
-          echo "📁 Contents:"
-          unzip -l "$NOMOUNTMODULEZIP"
-
-          echo ""
-          echo "🎉 NoMount Userspace Packaged Successfully"
-
       - name: 🌍 Regional Variant Detection
         shell: bash
         run: |
@@ -6718,18 +6700,6 @@ jobs:
           if-no-files-found: warn
           retention-days: 7
 
-      - name: 📤 Upload NoMount Userspace
-        if: ${{ inputs.NOMOUNT != 'None' }}
-        uses: actions/upload-artifact@v4
-        with:
-          # Build NoMount Userspace Artifact
-          name: NoMount-Userspace-${{ steps.extract-info.outputs.manifestbasefile }}-${{ inputs.ROOTENGINE }}-${{ steps.rootengine.outputs.ksuversion }}
-          # Upload NoMount Userspace Files
-          path: ${{ github.workspace }}/kernel_workspace/nomount-userspace/
-          # Warn When No ZIP is Found
-          if-no-files-found: warn
-          retention-days: 7
-
       - name: 📤 Upload CCache Tarball
         if: ${{ steps.buildprofile.outputs.builccache != 'Disabled' }}
         shell: bash
@@ -6934,238 +6904,164 @@ jobs:
             echo "| 🆔 Workflow Run ID                              | \`${GITHUB_RUN_ID}\`                             |"
           } >> $GITHUB_STEP_SUMMARY
 
-  upload-rekernel:
-    name: Upload Re-Kernel Module
-    if: ${{ inputs.REKERNEL == true }}
+  nomount-userspace:
+    name: Upload NoMount Userspace
+    if: ${{ inputs.NOMOUNT != 'None' }}
     needs: build
     runs-on: ubuntu-latest
     steps:
-      - name: 🔎 Find Re-Kernel Module ZIP
-        id: download-rekernel
-        uses: actions/github-script@v8
-        env:
-          # Kernel version exported by the build job.
-          # Example: android15-6.6 → 6.6
-          KERNELMAJOR: ${{ needs.build.outputs.kernelversion }}
+      - name: 📥 Download NoMount Build Files
+        uses: actions/download-artifact@v7
         with:
-          script: |
-            const owner = 'Sakion-Team';
-            const repo = 'Re-Kernel';
+          name: NoMount-Build-Files
+          path: nomount-build
 
-            // Read the detected kernel major version from the build job.
-            const kernelMajor = process.env.KERNELMAJOR;
-
-            // Validate detected kernel version
-            if (!kernelMajor || !/^\d+\.\d+$/.test(kernelMajor)) {
-              core.setFailed(
-                `Invalid or Missing Kernel Major Version: ${kernelMajor || 'empty'}`
-              );
-              return;
-            }
-
-            core.info(`📌 Detected Kernel Major: ${kernelMajor}`);
-            core.info(`🔎 Fetching Latest ${owner}/${repo} Release...`);
-
-            // Get the latest Re-Kernel GitHub release
-            const release = await github.rest.repos.getLatestRelease({
-              owner,
-              repo,
-            });
-
-            const releaseTag = release.data.tag_name;
-            const assets = release.data.assets || [];
-
-            core.info(`📦 Latest Release: ${releaseTag}`);
-            core.info(`📦 Release Assets: ${assets.length}`);
-
-            // Escape Dots in the Kernel Version for the Regular Expression
-            // Example: 6.6 → 6\.6
-            const escapedKernel =
-              kernelMajor.replace(/\./g, '\\.');
-
-            // Exact Kernel-Version Asset Pattern
-            // Example:
-            // Re-Kernel-v11.6-6.6.zip
-            // Re-Kernel-v11.6-6.12.zip
-            const exactPattern = new RegExp(
-              `^Re-Kernel-v([\\d.]+)-${escapedKernel}\\.zip$`,
-              'i'
-            );
-
-            // Fallback Pattern
-            const fallbackPattern =
-              /^Re-Kernel.*\.zip$/i;
-
-            let targetAsset = null;
-            let versionNumber = '';
-            let isExactMatch = false;
-
-            // First: Find an Exact Kernel-Version Match
-            core.info(
-              `🔎 Searching for exact Re-Kernel ${kernelMajor} module...`
-            );
-
-            for (const asset of assets) {
-              const match = asset.name.match(exactPattern);
-
-              if (!match) {
-                continue;
-              }
-
-              targetAsset = asset;
-              versionNumber = match[1];
-              isExactMatch = true;
-
-              core.info(
-                ` Exact ${kernelMajor} Module Found: ${asset.name}`
-              );
-
-              break;
-            }
-
-            // Second: Fallback to any Re-Kernel ZIP
-            if (!targetAsset) {
-              core.warning(
-                `⚠️ No Re-Kernel Module Found for Kernel ${kernelMajor}`
-              );
-
-              core.info(
-                `🔎 Searching for Fallback Re-Kernel Module...`
-              );
-
-              for (const asset of assets) {
-                if (!fallbackPattern.test(asset.name)) {
-                  continue;
-                }
-
-                targetAsset = asset;
-
-                // Extract the Re-Kernel Version From the Asset Name
-                // Example:
-                // Re-Kernel-v11.6-6.6.zip → 11.6
-                const versionMatch =
-                  asset.name.match(/^Re-Kernel-v?([\d.]+)/i);
-
-                if (versionMatch) {
-                  versionNumber = versionMatch[1];
-                } else {
-                  // If the asset name does not contain a version,
-                  // use the GitHub release tag instead.
-                  versionNumber =
-                    releaseTag.replace(/^v/i, '') || 'latest';
-                }
-
-                core.warning(
-                  `⚠️ Using Fallback Module: ${asset.name}`
-                );
-
-                break;
-              }
-            }
-
-            // No Re-Kernel Asset Found
-            if (!targetAsset) {
-              core.setFailed(
-                `❌ No Re-Kernel ZIP Found in ${releaseTag}`
-              );
-              return;
-            }
-
-            // 📋 Display Selected Asset Information
-            core.info('');
-            core.info('------------------------------------');
-            core.info(`📦 Asset   : ${targetAsset.name}`);
-            core.info(`🏷️ Version : ${versionNumber}`);
-            core.info(`🧩 Kernel  : ${kernelMajor}`);
-            core.info(
-              `🎯 Match   : ${isExactMatch ? 'Exact' : 'Fallback'}`
-            );
-            core.info(
-              `📏 Size    : ${(targetAsset.size / 1024).toFixed(1)} KB`
-            );
-            core.info('------------------------------------');
-
-            // 📤 Export Selected Asset Information to the Next Step
-            core.setOutput(
-              'asset-name',
-              targetAsset.name
-            );
-
-            core.setOutput(
-              'download-url',
-              targetAsset.browser_download_url
-            );
-
-            core.setOutput(
-              'version-number',
-              versionNumber
-            );
-
-            core.setOutput(
-              'exact-match',
-              isExactMatch ? 'true' : 'false'
-            );
-
-      - name: 📥 Download Re-Kernel Module
-        env:
-          ASSETNAME: ${{ steps.download-rekernel.outputs.asset-name }}
-          DLURL: ${{ steps.download-rekernel.outputs.download-url }}
-          VERSIONNUMBER: ${{ steps.download-rekernel.outputs.version-number }}
+      - name: 📦 Package NoMount Userspace
         shell: bash
         run: |
           set -Eeuo pipefail
 
-          # Artifact directory name.
-          ARTIFACTNAME="Re-Kernel-v${VERSIONNUMBER}"
+          # Define Paths
+          NOMOUNTBUILD="${GITHUB_WORKSPACE}/nomount-build"
+          NOMOUNTMODULESRC="${NOMOUNTBUILD}/module"
+          NOMOUNTMODULEDIR="${GITHUB_WORKSPACE}/nomount-userspace"
+          NOMOUNTOUTDIR="${GITHUB_WORKSPACE}/output"
+          NOMOUNTBIN="${NOMOUNTBUILD}"
 
-          echo "📦 Re-Kernel Asset : ${ASSETNAME}"
-          echo "🏷️ Version         : ${VERSIONNUMBER}"
-          echo "📁 Artifact        : ${ARTIFACTNAME}"
-          echo "🔗 Download URL    : ${DLURL}"
+          echo "📂 NoMount Build : $NOMOUNTBUILD"
+          echo "📂 Module Source : $NOMOUNTMODULESRC"
+          echo "📂 Binary Source : $NOMOUNTBIN"
+          echo "📂 Output        : $NOMOUNTOUTDIR"
           echo ""
 
-          # Download
-          echo "📥 Downloading Re-Kernel..."
-          curl \
-            --fail \
-            --location \
-            --retry 3 \
-            --retry-delay 2 \
-            --output "${ASSETNAME}" \
-            "${DLURL}"
-          echo "✔️ Re-Kernel Download Complete"
+          # Verify NoMount Module Source
+          [[ -d "$NOMOUNTMODULESRC" ]] || {
+            echo "⚠️ NoMount Module Directory Missing"
+            exit 1
+          }
 
-          # Display Downloaded Archive Information
-          echo "📊 Downloaded File:"
-          ls -lh "${ASSETNAME}"
+          [[ -f "$NOMOUNTMODULESRC/module.prop" ]] || {
+            echo "⚠️ NoMount Module.prop Missing"
+            exit 1
+          }
 
-          # Validate the Downloaded ZIP Before Extraction
-          echo "🔎 Validating ZIP Archive..."
-          unzip -tq "${ASSETNAME}"
+          # Verify Compiled Userspace Binaries
+          [[ -x "$NOMOUNTBIN/nm-arm64" ]] || {
+            echo "⚠️ NoMount-ARM64 Missing"
+            exit 1
+          }
+
+          [[ -x "$NOMOUNTBIN/nm-arm" ]] || {
+            echo "⚠️ NoMount-ARM Missing"
+            exit 1
+          }
+
+          # Verify Source Commit
+          [[ -f "$NOMOUNTBIN/nm-commit-src" ]] || {
+            echo "⚠️ NoMount Source Commit Missing"
+            exit 1
+          }
+
+          NOMOUNTCOMMIT="$(
+            tr -d '[:space:]' \
+              < "$NOMOUNTBIN/nm-commit-src"
+          )"
+
+          [[ "$NOMOUNTCOMMIT" =~ ^[0-9a-fA-F]{40}$ ]] || {
+            echo "⚠️ Invalid NoMount Commit: $NOMOUNTCOMMIT"
+            exit 1
+          }
+
+          echo "📌 NoMount Commit : $NOMOUNTCOMMIT"
+          echo ""
+
+          # Prepare Packaging Directories
+          rm -rf "$NOMOUNTMODULEDIR"
+          mkdir -p "$NOMOUNTMODULEDIR/bin"
+          mkdir -p "$NOMOUNTOUTDIR"
+
+          # Copy Original NoMount Module
+          cp -a "$NOMOUNTMODULESRC/." \
+            "$NOMOUNTMODULEDIR/"
+
+          # Install Compiled Userspace Binaries
+          install -m 0755 \
+            "$NOMOUNTBIN/nm-arm64" \
+            "$NOMOUNTMODULEDIR/bin/nm-arm64"
+
+          install -m 0755 \
+            "$NOMOUNTBIN/nm-arm" \
+            "$NOMOUNTMODULEDIR/bin/nm-arm"
+
+          # Record Exact NoMount Source Commit
+          printf '%s\n' "$NOMOUNTCOMMIT" \
+            > "$NOMOUNTMODULEDIR/nm-commit-src"
+
+          # Normalize Module Version Code
+          if grep -q '^versionCode=' \
+              "$NOMOUNTMODULEDIR/module.prop"; then
+            sed -i \
+              's/^versionCode=.*/versionCode=1/' \
+              "$NOMOUNTMODULEDIR/module.prop"
+          fi
+
+          # Define Package Name
+          NOMOUNTMODULEZIP="${NOMOUNTOUTDIR}/NoMount-${NOMOUNTCOMMIT}.zip"
+
+          # Remove Existing Package
+          rm -f "$NOMOUNTMODULEZIP"
+          rm -f "${NOMOUNTMODULEZIP}.sha256"
+
+          # Create NoMount Userspace Package
+          echo "📦 Creating NoMount Userspace..."
+          (
+            cd "$NOMOUNTMODULEDIR"
+            zip -qr "$NOMOUNTMODULEZIP" .
+          )
+          # Generate SHA-256 Checksum
+          sha256sum "$NOMOUNTMODULEZIP" \
+            > "${NOMOUNTMODULEZIP}.sha256"
+          # Verify Package
+          [[ -s "$NOMOUNTMODULEZIP" ]] || {
+            echo "⚠️ NoMount Userspace ZIP Was Not Created"
+            exit 1
+          }
+          [[ -s "${NOMOUNTMODULEZIP}.sha256" ]] || {
+            echo "⚠️ NoMount Userspace SHA-256 Was Not Created"
+            exit 1
+          }
+
+          echo ""
+          echo "📦 ZIP     : $NOMOUNTMODULEZIP"
+          echo "🔐 SHA-256 : ${NOMOUNTMODULEZIP}.sha256"
+          echo ""
+
+          # Validate ZIP Archive
+          echo "🔎 Validating ZIP..."
+          unzip -tq "$NOMOUNTMODULEZIP"
           echo "✔️ ZIP Validation Passed"
 
-          # Extract the Re-Kernel Module
-          echo "📂 Extracting Re-Kernel..."
-          mkdir -p "${ARTIFACTNAME}"
-          unzip -q \
-            "${ASSETNAME}" \
-            -d "${ARTIFACTNAME}"
-          echo "✔️ Re-Kernel Extraction Complete"
+          # Verify SHA-256
+          echo "🔐 Verifying SHA-256..."
+          (
+            cd "$NOMOUNTOUTDIR"
+            sha256sum -c "$(basename "${NOMOUNTMODULEZIP}.sha256")"
+          )
+          echo "✔️ SHA-256 Verification Passed"
 
-          # Display Extracted Files for Build-Log Verification
-          echo "📋 Extracted Re-Kernel Files:"
+          echo ""
+          echo "📁 Package Contents:"
+          unzip -l "$NOMOUNTMODULEZIP"
 
-          find "${ARTIFACTNAME}" \
-            -maxdepth 4 \
-            -type f \
-            -print \
-            | sort
+          echo ""
+          echo "🎉 NoMount Userspace Packaged Successfully"
 
-      # 📤 Upload extracted Re-Kernel as a GitHub Actions Artifact
-      - name: 📤 Upload Re-Kernel Artifact
-        uses: actions/upload-artifact@v6
+      - name: 📤 Upload NoMount Userspace Artifact
+        uses: actions/upload-artifact@v7
         with:
-          name: Re-Kernel-v${{ steps.download-rekernel.outputs.version-number }}
-          path: Re-Kernel-v${{ steps.download-rekernel.outputs.version-number }}
+          name: NoMount-Userspace-${{ steps.build.outputs.manifestbasefile }}
+          path: |
+            output/NoMount-*.zip
+            output/NoMount-*.zip.sha256
           if-no-files-found: error
           compression-level: 0
