@@ -1,0 +1,129 @@
+From: Bouteillepleine <76688492+Bouteillepleine@users.noreply.github.com>
+Date: Wed, 30 Sep 2026 12:00:00 +0200
+Subject: [PATCH] net: tcp: bbr3: own the private ctx per socket
+
+sk_clone_lock() byte-copies the whole inet_connection_sock, so a passive-open
+child inherits both icsk_ca_priv slot 0 -- the struct bbr3 * -- and
+icsk_ca_initialized from its parent, and inet_csk_clone_lock() clears neither.
+
+If the parent's congestion control was already initialized before the clone,
+tcp_init_transfer() skips tcp_init_congestion_control() for the child because
+icsk_ca_initialized is already 1. bbr3_init() therefore never runs for that
+child and it uses the parent's heap ctx for its whole lifetime, and
+tcp_cleanup_congestion_control() calls .release unconditionally, so every such
+child frees the parent's still-live ctx: a double kmem_cache_free plus a
+use-after-free in the parent, with concurrent children mutating one shared BBR
+state in between.
+
+Upstream BBR cannot hit this because its state lives inline in icsk_ca_priv,
+where the byte copy hands the child an independent copy. Storing a pointer
+there instead -- which is what keeps struct tcp_sock and struct rate_sample
+byte-identical for KMI -- is what turns that copy into shared ownership.
+
+No reachable trigger is known on a stock stack. A listener is the only clone
+source TCP has, and neither path that could initialize one does so:
+tcp_assign_congestion_control() never calls .init, and
+tcp_reinit_congestion_control(), where setsockopt(TCP_CONGESTION) lands, skips
+it outright --
+
+	if (!((1 << sk->sk_state) & (TCPF_CLOSE | TCPF_LISTEN)))
+		tcp_init_congestion_control(sk);
+
+-- so a listener reaches accept() with icsk_ca_initialized still 0 and slot 0
+still NULL, and tcp_init_transfer() then runs init for every child, which
+allocates each one its own ctx. This patch is therefore hardening of the
+ownership invariant, not a fix for an observed corruption. The only documented
+way the flag arrives already set is the case tcp_init_transfer() names in its
+own comment, BPF initializing congestion control ahead of it.
+
+Record the owning socket in the ctx and test it in both accessors. A ctx the
+socket does not own now reads as absent, so the guarded callbacks take the
+existing fail-closed Reno dispatch rather than another socket's state, and
+bbr3_release() frees only what bbr3_init() allocated for that same socket.
+This also makes the SLAB_TYPESAFE_BY_RCU recycling added in 0002 safe to
+observe, since a reused object carries its new owner before it is published.
+struct bbr3 sits behind the opaque icsk_ca_priv u64[], so the added member
+carries no CRC impact.
+
+tcp_notify_skb_loss_event() open-coded the slot read; route it through
+bbr3_ctx_if_active() so it inherits the same test.
+---
+diff --git a/include/net/tcp.h b/include/net/tcp.h
+index 4bde922..db2b661 100644
+--- a/include/net/tcp.h
++++ b/include/net/tcp.h
+@@ -2610,16 +2610,22 @@ struct bbr3 {
+ 
+ 	/* react to a specific lost skb (optional) */
+ 	void (*skb_marked_lost)(struct sock *sk, const struct sk_buff *skb);
++
++	const struct sock *owner;
+ };
+ 
+ /* bbr3 private ctx iff sk currently uses a CC with the loss hook (bbr3). */
+ static inline struct bbr3 *bbr3_ctx_if_active(const struct sock *sk)
+ {
+ 	const struct inet_connection_sock *icsk = inet_csk(sk);
++	struct bbr3 *bbr;
+ 
+ 	if (icsk->icsk_ca_ops &&
+-	    (icsk->icsk_ca_ops->flags & TCP_CONG_HAS_LOSS_HOOK))
+-		return *(struct bbr3 **)inet_csk_ca(sk);
++	    (icsk->icsk_ca_ops->flags & TCP_CONG_HAS_LOSS_HOOK)) {
++		bbr = *(struct bbr3 **)inet_csk_ca(sk);
++		if (bbr && bbr->owner == sk)
++			return bbr;
++	}
+ 	return NULL;
+ }
+ 
+diff --git a/net/ipv4/tcp_bbr3.c b/net/ipv4/tcp_bbr3.c
+index 256e6ef..147a160 100644
+--- a/net/ipv4/tcp_bbr3.c
++++ b/net/ipv4/tcp_bbr3.c
+@@ -348,7 +348,9 @@ static void bbr3_skb_marked_lost(struct sock *sk, const struct sk_buff *skb);
+  */
+ static inline struct bbr3 *bbr3_get_priv(const struct sock *sk)
+ {
+-	return *(struct bbr3 **)inet_csk_ca(sk);
++	struct bbr3 *bbr = *(struct bbr3 **)inet_csk_ca(sk);
++
++	return (bbr && bbr->owner == sk) ? bbr : NULL;
+ }
+ 
+ /* This connection can use ECN if both endpoints have signaled ECN support in
+@@ -2184,6 +2186,7 @@ static void bbr3_init(struct sock *sk)
+ 		return;
+ 	}
+ 
++	bbr->owner = sk;
+ 	*bbr3_ptr = bbr;
+ 
+ 	WRITE_ONCE(bbr->skb_marked_lost, bbr3_skb_marked_lost);
+@@ -2274,11 +2277,11 @@ static void bbr3_release(struct sock *sk)
+ 	struct bbr3 *bbr = *bbr3_ptr;
+ 
+ 	tp->ecn_flags &= ~TCP_ECN_ECT_PERMANENT;
++	*bbr3_ptr = NULL;
+ 
+-	if (!bbr)
++	if (!bbr || bbr->owner != sk)
+ 		return;
+ 
+-	*bbr3_ptr = NULL;
+ 	kmem_cache_free(bbr3_cache, bbr);
+ }
+ 
+diff --git a/net/ipv4/tcp_input.c b/net/ipv4/tcp_input.c
+index ce5ce23..515f6ce 100644
+--- a/net/ipv4/tcp_input.c
++++ b/net/ipv4/tcp_input.c
+@@ -1156,7 +1156,7 @@ static void tcp_notify_skb_loss_event(struct tcp_sock *tp, const struct sk_buff
+ 	if (ca_ops && (ca_ops->flags & TCP_CONG_HAS_LOSS_HOOK)) {
+ 		void (*hook)(struct sock *, const struct sk_buff *);
+ 
+-		bbr3 = *(struct bbr3 **)inet_csk_ca(sk);
++		bbr3 = bbr3_ctx_if_active(sk);
+ 		hook = bbr3 ? READ_ONCE(bbr3->skb_marked_lost) : NULL;
+ 		if (hook)
+ 			hook(sk, skb);
