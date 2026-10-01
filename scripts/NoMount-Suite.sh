@@ -30,21 +30,20 @@ clonepatches() {
 
     rm -rf "$REPO"
 
-    echo "cloning bouteillepleine/kernelpatches..."
+    echo "cloning Bouteillepleine/kernel_patches..."
+
     git clone \
         --depth 1 \
         --branch main \
         https://github.com/Bouteillepleine/kernel_patches.git \
         "$REPO" ||
-        die "could not clone bouteillepleine/kernelpatches"
+        die "could not clone Bouteillepleine/kernel_patches"
 
     [ -d "$REPO/common" ] ||
         die "kernelpatches: common directory is missing after clone"
 
     echo "kernelpatches: $(git -C "$REPO" rev-parse --short HEAD)"
 }
-
-clonepatches
 
 [ $# -ge 1 ] || usage
 COMMAND="$1"
@@ -54,18 +53,22 @@ shift
 resolvekv() {
     local mk="$KDIR/Makefile" v p
 
-    [ -f "$mk" ] || die "no $mk -- $KDIR is not a kernel tree"
+    [ -f "$mk" ] ||
+        die "no $mk -- $KDIR is not a kernel tree"
 
     v="$(sed -n 's/^VERSION[[:space:]]*=[[:space:]]*\([0-9]\+\).*/\1/p' "$mk" | head -n1)"
     p="$(sed -n 's/^PATCHLEVEL[[:space:]]*=[[:space:]]*\([0-9]\+\).*/\1/p' "$mk" | head -n1)"
 
-    [ -n "$v" ] && [ -n "$p" ] || die "cannot read version/patchlevel from $mk"
+    [ -n "$v" ] && [ -n "$p" ] ||
+        die "cannot read version/patchlevel from $mk"
 
     KV="$v.$p"
 
     case "$KV" in
-    5.10 | 5.15 | 6.1 | 6.6 | 6.12) ;;
-    *) die "kernel $KV is not one of 5.10 5.15 6.1 6.6 6.12 -- refusing to guess which variants it wants" ;;
+        5.10 | 5.15 | 6.1 | 6.6 | 6.12) ;;
+        *)
+            die "kernel $KV is not one of 5.10 5.15 6.1 6.6 6.12 -- refusing to guess which variants it wants"
+            ;;
     esac
 
     if [ -n "${KERNELVERSION:-}" ] && [ "$KERNELVERSION" != "$KV" ]; then
@@ -97,7 +100,8 @@ normalise() {
 applypatch() {
     local p="$1" root="${2:-$KDIR}"
 
-    [ -f "$p" ] || die "missing patch: $p"
+    [ -f "$p" ] ||
+        die "missing patch: $p"
 
     if patch -p1 -F0 --forward --dry-run -d "$root" <"$p" >/dev/null 2>&1; then
         patch -p1 -F0 --forward -d "$root" <"$p" >/dev/null
@@ -117,7 +121,8 @@ applypatchvariant() {
     local p base hits="" nhits=0 sel="" root="$KDIR"
 
     for p in "$@"; do
-        [ -f "$p" ] || die "$family: variant file is missing: $p"
+        [ -f "$p" ] ||
+            die "$family: variant file is missing: $p"
 
         if patch -p1 -F0 --forward --dry-run -d "$root" <"$p" >/dev/null 2>&1 ||
             patch -p1 -F0 --reverse --dry-run -d "$root" <"$p" >/dev/null 2>&1; then
@@ -142,11 +147,14 @@ applypatchvariant() {
             die "$family: $nhits variants apply on $KERNELVERSION ($hits ) and the table pins none... pin one, or refit them so exactly one claims this tree -- picking the first is how a guard lands in the wrong function"
     else
         case " $hits " in
-        *" $want "*) ;;
-        *) die "$family: pinned variant '$want' does not apply at fuzz 0 on $KERNELVERSION; these do:$hits, the variants do not carry the same hunks, so falling back would silently drop coverage... refit '$want' to this tree instead" ;;
+            *" $want "*) ;;
+            *)
+                die "$family: pinned variant '$want' does not apply at fuzz 0 on $KERNELVERSION; these do:$hits, the variants do not carry the same hunks, so falling back would silently drop coverage... refit '$want' to this tree instead"
+                ;;
         esac
 
-        [ "$nhits" -eq 1 ] || echo "  $family: '$want' pinned (also applicable:$hits )"
+        [ "$nhits" -eq 1 ] ||
+            echo "  $family: '$want' pinned (also applicable:$hits )"
     fi
 
     applypatch "$sel" "$root"
@@ -154,7 +162,8 @@ applypatchvariant() {
 
 # Require a Fixed String to Exist
 has() {
-    grep -qF -- "$2" "$1" || die "$3"
+    grep -qF -- "$2" "$1" ||
+        die "$3"
 }
 
 # Require a Fixed String to be Absent
@@ -269,18 +278,18 @@ verifyhook() {
         "hook: selinuxinodesetxattr() has no hidden-type guard -- setxattr(security.selinux) then tells an unprivileged caller apart 'type not in policy' (-einval) from 'type exists, denied' (-eacces), which is a probe for the hidden types"
 
     case "$KERNELVERSION" in
-    6.12)
-        infn "$KDIR/security/selinux/hooks.c" \
-            '^static int selinux_lsm_setattr' \
-            ':ksu:' \
-            "hook: selinuxlsmsetattr() has no hidden-type guard"
-        ;;
-    *)
-        infn "$KDIR/security/selinux/hooks.c" \
-            '^static int selinux_setprocattr' \
-            ':ksu:' \
-            "hook: selinuxsetprocattr() has no hidden-type guard"
-        ;;
+        6.12)
+            infn "$KDIR/security/selinux/hooks.c" \
+                '^static int selinux_lsm_setattr' \
+                ':ksu:' \
+                "hook: selinuxlsmsetattr() has no hidden-type guard"
+            ;;
+        *)
+            infn "$KDIR/security/selinux/hooks.c" \
+                '^static int selinux_setprocattr' \
+                ':ksu:' \
+                "hook: selinuxsetprocattr() has no hidden-type guard"
+            ;;
     esac
 
     has "$KDIR/security/selinux/avc.c" \
@@ -394,12 +403,12 @@ verifypathhide() {
         "pathhide: the statm size deduction is not inside taskstatm()"
 
     case "$KERNELVERSION" in
-    6.12)
-        infn "$KDIR/fs/proc/task_mmu.c" \
-            '^static int pagemap_scan_test_walk' \
-            'pathhide_match_file' \
-            "pathhide: the pagemapscan guard is not inside pagemap-scan-test-walk() -- the ioctl is a second residency window onto the same vma"
-        ;;
+        6.12)
+            infn "$KDIR/fs/proc/task_mmu.c" \
+                '^static int pagemap_scan_test_walk' \
+                'pathhide_match_file' \
+                "pathhide: the pagemapscan guard is not inside pagemap-scan-test-walk() -- the ioctl is a second residency window onto the same vma"
+            ;;
     esac
 
     hasnt "$KDIR/fs/proc/fd.c" \
@@ -416,7 +425,7 @@ infn() {
     seg="$(awk "/$2/,/^}/" "$1" 2>/dev/null)" || true
 
     case "$seg" in
-    *"$3"*) return 0 ;;
+        *"$3"*) return 0 ;;
     esac
 
     die "$4"
@@ -552,15 +561,17 @@ dohookless() {
 
     rm -rf "$NMSRC"
 
-    git clone --depth 1 -b "${NMREF:-main}" \
+    git clone \
+        --depth 1 \
+        -b "${NMREF:-main}" \
         https://github.com/Bouteillepleine/NoMount-Suite.git \
         "$NMSRC" ||
-        die "could not clone the NoMount engine at ref '${NMREF:-main}' from bouteillepleine/nomount-suite, it was bouteillepleine/nomount@suite before, and kbuild@hookless before that; if something still passes NMREF=suite or =hookless, neither exists in this repo -- use 'main'"
+        die "could not clone the NoMount engine at ref '${NMREF:-main}' from Bouteillepleine/NoMount-Suite"
 
     NMSHA="$(git -C "$NMSRC" rev-parse HEAD 2>/dev/null || echo unknown)"
     export NMSHA
 
-    echo "engine: bouteillepleine/nomount-suite@${NMREF:-main} = $NMSHA"
+    echo "engine: Bouteillepleine/NoMount-Suite@${NMREF:-main} = $NMSHA"
 
     if [ -n "${GITHUB_ENV:-}" ]; then
         echo "NMENGINEREF=${NMREF:-main}" >>"$GITHUB_ENV"
@@ -568,9 +579,9 @@ dohookless() {
     fi
 
     case "${NMREF:-main}" in
-    main | master)
-        echo "  note: nomount ref is a moving branch, so this build is not reproducible from kernelpatches alone. pass nomount ref = <tag> to pin it"
-        ;;
+        main | master)
+            echo "  note: nomount ref is a moving branch, so this build is not reproducible from kernelpatches alone. pass nomount ref = <tag> to pin it"
+            ;;
     esac
 
     # Locate Generic Integration Patch, then the Version-Specific Fallback
@@ -580,8 +591,7 @@ dohookless() {
         NMPATCH="$NMSRC/hookless/patches/nomount_${KERNELVERSION}_kernel_integration.patch"
 
         [ -f "$NMPATCH" ] ||
-            die "no hookless NoMount patch for $KERNELVERSION: neither\
- $NMSRC/hookless/patches/nomount_kernel_integration.patch nor $NMPATCH exists"
+            die "no hookless NoMount patch for $KERNELVERSION: neither $NMSRC/hookless/patches/nomount_kernel_integration.patch nor $NMPATCH exists"
     fi
 
     echo "hookless integration patch: ${NMPATCH##*/}"
@@ -608,11 +618,11 @@ dohookless() {
         echo "  hookless integration: already applied"
 
     else
-        echo "::warning::hookless integration patch does not apply at fuzz 0 on $KERNELVERSION; retrying at fuzz 1... a fuzzed hunk can land a hook in the wrong function -- check fs/proc/task_mmu.c and fs/makefile in the build output before trusting this kernel"
+        echo "::warning::hookless integration patch does not apply at fuzz 0 on $KERNELVERSION; retrying at fuzz 1... a fuzzed hunk can land a hook in the wrong function -- check fs/proc/task_mmu.c and fs/Makefile in the build output before trusting this kernel"
 
         patch -p1 --forward --fuzz=1 \
             -d "$KDIR" <"$NMPATCH" ||
-            die "momount hookless patch failed to apply for $KERNELVERSION, at fuzz 0 and at fuzz 1"
+            die "nomount hookless patch failed to apply for $KERNELVERSION, at fuzz 0 and at fuzz 1"
     fi
 
     sed -i '/^CONFIG_NOMOUNT=/d' "$DEFCONFIG"
@@ -644,21 +654,21 @@ dohook() {
     local REQSFS REQATTR REQAUDIT
 
     case "$KERNELVERSION" in
-    6.6 | 6.12)
-        REQSFS=hide_selinux_selinuxfs_6_12.patch
-        REQAUDIT=quiet_selinux_audit.patch
-        ;;
-    5.10 | 5.15 | 6.1)
-        REQSFS=hide_selinux_selinuxfs_5_10.patch
-        REQAUDIT=quiet_selinux_audit_legacy.patch
-        ;;
+        6.6 | 6.12)
+            REQSFS=hide_selinux_selinuxfs_6_12.patch
+            REQAUDIT=quiet_selinux_audit.patch
+            ;;
+        5.10 | 5.15 | 6.1)
+            REQSFS=hide_selinux_selinuxfs_5_10.patch
+            REQAUDIT=quiet_selinux_audit_legacy.patch
+            ;;
     esac
 
     case "$KERNELVERSION" in
-    6.12) REQATTR=hide_selinux_attr_6_12.patch ;;
-    6.6)  REQATTR=hide_selinux_attr_6_6.patch ;;
-    5.10 | 5.15 | 6.1) REQATTR=hide_selinux_attr_5_10.patch ;;
-    *) REQATTR=hide_selinux_attr.patch ;;
+        6.12) REQATTR=hide_selinux_attr_6_12.patch ;;
+        6.6)  REQATTR=hide_selinux_attr_6_6.patch ;;
+        5.10 | 5.15 | 6.1) REQATTR=hide_selinux_attr_5_10.patch ;;
+        *) REQATTR=hide_selinux_attr.patch ;;
     esac
 
     applypatchvariant selinuxfs "$REQSFS" \
@@ -763,21 +773,21 @@ doghost() {
     local REQXATTR REQLINKAT REQCHMOD
 
     case "$KERNELVERSION" in
-    6.12 | 6.6)
-        REQXATTR=ghost_xattr_6_12.patch
-        REQLINKAT=ghost_linkat_5_15.patch
-        REQCHMOD=ghost_chmod.patch
-        ;;
-    6.1 | 5.15)
-        REQXATTR=ghost_xattr_5_15.patch
-        REQLINKAT=ghost_linkat_5_15.patch
-        REQCHMOD=ghost_chmod_5_10.patch
-        ;;
-    5.10)
-        REQXATTR=ghost_xattr.patch
-        REQLINKAT=ghost_linkat.patch
-        REQCHMOD=ghost_chmod_5_10.patch
-        ;;
+        6.12 | 6.6)
+            REQXATTR=ghost_xattr_6_12.patch
+            REQLINKAT=ghost_linkat_5_15.patch
+            REQCHMOD=ghost_chmod.patch
+            ;;
+        6.1 | 5.15)
+            REQXATTR=ghost_xattr_5_15.patch
+            REQLINKAT=ghost_linkat_5_15.patch
+            REQCHMOD=ghost_chmod_5_10.patch
+            ;;
+        5.10)
+            REQXATTR=ghost_xattr.patch
+            REQLINKAT=ghost_linkat.patch
+            REQCHMOD=ghost_chmod_5_10.patch
+            ;;
     esac
 
     applypatch "$PDIR/_ghost/ghost_o_path.patch"
@@ -808,9 +818,9 @@ doghost() {
     local REQSTATX
 
     case "$KERNELVERSION" in
-    6.12) REQSTATX=ghost_statx_6_12.patch ;;
-    6.6 | 6.1) REQSTATX=ghost_statx_6_1.patch ;;
-    5.15 | 5.10) REQSTATX=ghost_statx_5_10.patch ;;
+        6.12) REQSTATX=ghost_statx_6_12.patch ;;
+        6.6 | 6.1) REQSTATX=ghost_statx_6_1.patch ;;
+        5.15 | 5.10) REQSTATX=ghost_statx_5_10.patch ;;
     esac
 
     applypatchvariant ghost-statx "$REQSTATX" \
@@ -821,8 +831,8 @@ doghost() {
     local REQREADLINK
 
     case "$KERNELVERSION" in
-    6.12) REQREADLINK=ghost_readlink_6_12.patch ;;
-    *) REQREADLINK=ghost_readlink_5_10.patch ;;
+        6.12) REQREADLINK=ghost_readlink_6_12.patch ;;
+        *) REQREADLINK=ghost_readlink_5_10.patch ;;
     esac
 
     applypatchvariant ghost-readlink "$REQREADLINK" \
@@ -832,8 +842,8 @@ doghost() {
     local REQRENAME
 
     case "$KERNELVERSION" in
-    5.10) REQRENAME=ghost_rename_5_10.patch ;;
-    *) REQRENAME=ghost_rename_5_15.patch ;;
+        5.10) REQRENAME=ghost_rename_5_10.patch ;;
+        *) REQRENAME=ghost_rename_5_15.patch ;;
     esac
 
     applypatchvariant ghost-rename "$REQRENAME" \
@@ -855,11 +865,11 @@ doverify() {
 
     for f in "$@"; do
         case "$f" in
-        hookless) verifyhookless ;;
-        hook) verifyhook ;;
-        pathhide) verifypathhide ;;
-        ghost) verifyghost ;;
-        *) die "verify: unknown family '$f'" ;;
+            hookless) verifyhookless ;;
+            hook) verifyhook ;;
+            pathhide) verifypathhide ;;
+            ghost) verifyghost ;;
+            *) die "verify: unknown family '$f'" ;;
         esac
     done
 
@@ -869,53 +879,64 @@ doverify() {
 
 # Command Dispatcher
 case "$COMMAND" in
-all)
-    resolvekv
-    dohookless
+    all)
+        resolvekv
+        dohookless
 
-    if [ -n "${GITHUB_ENV:-}" ]; then
+        if [ -n "${GITHUB_ENV:-}" ]; then
+            dorecordversion
+        fi
+
+        clonepatches
+        dohook
+        dopathhide
+        doghost
+        doverify hookless hook pathhide ghost
+        ;;
+
+    hookless)
+        resolvekv
+        dohookless
+        ;;
+
+    record-version)
         dorecordversion
-    fi
+        ;;
 
-    dohook
-    dopathhide
-    doghost
-    doverify hookless hook pathhide ghost
-    ;;
-hookless)
-    resolvekv
-    dohookless
-    ;;
-record-version)
-    dorecordversion
-    ;;
-hook)
-    resolvekv
-    dohook
-    ;;
-pathhide)
-    resolvekv
-    dopathhide
-    ;;
-ghost)
-    resolvekv
-    doghost
-    ;;
-verify)
-    resolvekv
-    doverify "$@"
-    ;;
-assert-config)
-    CONFIGSTRICT=1
+    hook)
+        resolvekv
+        clonepatches
+        dohook
+        ;;
 
-    assertconfig CONFIG_NOMOUNT \
-        "the engine is behind config-nomount; without it fs/nomount.o is not built at all"
+    pathhide)
+        resolvekv
+        clonepatches
+        dopathhide
+        ;;
 
-    assertconfig CONFIG_SECURITY_SELINUX \
-        "every hook guard is compiled only under config-security-selinux"
-    ;;
+    ghost)
+        resolvekv
+        clonepatches
+        doghost
+        ;;
 
-*)
-    usage
-    ;;
+    verify)
+        resolvekv
+        doverify "$@"
+        ;;
+
+    assert-config)
+        CONFIGSTRICT=1
+
+        assertconfig CONFIG_NOMOUNT \
+            "the engine is behind config-nomount; without it fs/nomount.o is not built at all"
+
+        assertconfig CONFIG_SECURITY_SELINUX \
+            "every hook guard is compiled only under config-security-selinux"
+        ;;
+
+    *)
+        usage
+        ;;
 esac
