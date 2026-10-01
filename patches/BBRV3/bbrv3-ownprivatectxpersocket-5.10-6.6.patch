@@ -1,0 +1,115 @@
+From: Bouteillepleine <76688492+Bouteillepleine@users.noreply.github.com>
+Date: Wed, 30 Sep 2026 12:00:00 +0200
+Subject: [PATCH] net: tcp: bbr3: own the private ctx per socket (5.10-6.6)
+
+Same defect and same fix as the 6.12 patch, cut against the four older
+backports. They share one shape: no bbr3_ctx_if_active(), a bbr3_release()
+that frees straight out of slot 0, and a tcp_notify_skb_loss_event() that
+reads the slot inline.
+
+sk_clone_lock() byte-copies the whole inet_connection_sock, so a passive-open
+child inherits both icsk_ca_priv slot 0 -- the struct bbr3 * -- and
+icsk_ca_initialized from its parent, and inet_csk_clone_lock() clears neither.
+If the parent's congestion control was already initialized before the clone,
+tcp_init_transfer() skips tcp_init_congestion_control() for the child because
+icsk_ca_initialized is already 1. bbr3_init() therefore never runs for that
+child and it uses the parent's heap ctx for its whole lifetime, and
+tcp_cleanup_congestion_control() calls .release unconditionally, so every such
+child frees the parent's still-live ctx: a double kmem_cache_free plus a
+use-after-free in the parent, with concurrent children mutating one shared BBR
+state in between.
+
+Upstream BBR cannot hit this because its state lives inline in icsk_ca_priv,
+where the byte copy hands the child an independent copy. Storing a pointer
+there instead -- which is what keeps struct tcp_sock and struct rate_sample
+byte-identical for KMI -- is what turns that copy into shared ownership.
+
+No reachable trigger is known on a stock stack. A listener is the only clone
+source TCP has, and neither path that could initialize one does so:
+tcp_assign_congestion_control() never calls .init, and
+tcp_reinit_congestion_control(), where setsockopt(TCP_CONGESTION) lands, skips
+it outright --
+
+	if (!((1 << sk->sk_state) & (TCPF_CLOSE | TCPF_LISTEN)))
+		tcp_init_congestion_control(sk);
+
+-- so a listener reaches accept() with icsk_ca_initialized still 0 and slot 0
+still NULL, and tcp_init_transfer() then runs init for every child, which
+allocates each one its own ctx. This patch is therefore hardening of the
+ownership invariant, not a fix for an observed corruption. The only documented
+way the flag arrives already set is the case tcp_init_transfer() names in its
+own comment, BPF initializing congestion control ahead of it.
+
+Record the owning socket in the ctx and test it in bbr3_get_priv(), the single
+accessor every BBR callback goes through, so a ctx the socket does not own
+reads as absent and the guarded callbacks take the existing fail-closed Reno
+dispatch rather than another socket's state. bbr3_release() then frees only
+what bbr3_init() allocated for that same socket, and the inline slot read in
+tcp_notify_skb_loss_event() gets the same test. struct bbr3 sits behind the
+opaque icsk_ca_priv u64[], so the added member carries no CRC impact.
+
+One patch covers android12-5.10, android13-5.15, android14-6.1 and
+android15-6.6: all five pre-images occur exactly once and byte-identical in
+each of the four.
+---
+--- a/include/net/tcp.h
++++ b/include/net/tcp.h
+@@ -2343,6 +2343,8 @@
+ 
+ 	/* react to a specific lost skb (optional) */
+ 	void (*skb_marked_lost)(struct sock *sk, const struct sk_buff *skb);
++
++	const struct sock *owner;
+ };
+ 
+ /* At how many usecs into the future should the RTO fire? */
+--- a/net/ipv4/tcp_bbr3.c
++++ b/net/ipv4/tcp_bbr3.c
+@@ -288,7 +288,9 @@
+ static inline struct bbr3 *bbr3_get_priv(const struct sock *sk)
+ {
+ 	/* Read the address value out of slot 0 of the 104-byte array space */
+-	return *(struct bbr3 **)inet_csk_ca(sk);
++	struct bbr3 *bbr = *(struct bbr3 **)inet_csk_ca(sk);
++
++	return (bbr && bbr->owner == sk) ? bbr : NULL;
+ }
+ 
+ /* This connection can use ECN if both endpoints have signaled ECN support in
+@@ -2038,6 +2040,7 @@
+ 		return;
+ 	}
+ 
++	bbr->owner = sk;
+ 	*bbr3_ptr = bbr;
+ 
+ 	WRITE_ONCE(bbr->skb_marked_lost, bbr3_skb_marked_lost);
+@@ -2125,13 +2128,13 @@
+ __used noinline static void bbr3_release(struct sock *sk)
+ {
+ 	struct bbr3 **bbr3_ptr = (struct bbr3 **)inet_csk_ca(sk);
++	struct bbr3 *bbr = *bbr3_ptr;
+ 
+ 	tcp_sk(sk)->ecn_flags &= ~TCP_ECN_ECT_PERMANENT;
++	*bbr3_ptr = NULL;
+ 
+-	if (*bbr3_ptr) {
+-		kmem_cache_free(bbr3_cache, *bbr3_ptr);
+-		*bbr3_ptr = NULL;
+-	}
++	if (bbr && bbr->owner == sk)
++		kmem_cache_free(bbr3_cache, bbr);
+ }
+ 
+ /* BBR marks the current round trip as a loss round. */
+--- a/net/ipv4/tcp_input.c
++++ b/net/ipv4/tcp_input.c
+@@ -1093,6 +1093,8 @@
+ 		void (*hook)(struct sock *, const struct sk_buff *);
+ 
+ 		bbr3 = *(struct bbr3 **)inet_csk_ca(sk);
++		if (bbr3 && bbr3->owner != sk)
++			bbr3 = NULL;
+ 		hook = bbr3 ? READ_ONCE(bbr3->skb_marked_lost) : NULL;
+ 		if (hook)
+ 			hook(sk, skb);
