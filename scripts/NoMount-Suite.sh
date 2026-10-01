@@ -4,7 +4,7 @@ set -euo pipefail
 
 # Base Paths
 WORKSPACE="$GITHUB_WORKSPACE"
-KERNELPLATFORM="$WORKSPACE/$CONFIG/kernel_platform"
+KERNELPLATFORM="$WORKSPACE/kernel_platform"
 KDIR="$KERNELPLATFORM/common"
 PDIR="$WORKSPACE/kernel_patches/common"
 
