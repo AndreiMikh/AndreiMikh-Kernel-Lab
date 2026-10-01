@@ -4400,61 +4400,152 @@ jobs:
           echo "   └─ BUILD Bazel : Checked"
 
       - name: 🌐 Congestion Control BBR Version 3
-        if: ${{ (inputs.TCPALGORITHM == 'BBRV1+BBRV3+ECN' || inputs.TCPALGORITHM == 'BBRV1+BBRV3+ECN+Brutal') && steps.kernel-version-setup.outputs.androidversion != 'android16' && steps.kernel-version-setup.outputs.kernelversion != '6.12' }}
+        if: >-
+          ${{
+            inputs.TCPALGORITHM == 'BBRV1+BBRV3+ECN' ||
+            inputs.TCPALGORITHM == 'BBRV1+BBRV3+ECN+Brutal'
+          }}
         shell: bash
         run: |
           set -Eeuo pipefail
 
-          # GKI Version Identifier
-          GKIVERSION="${ANDROIDVERSION}-${KERNELVERSION}"
+          echo "Apply BBRv3"
 
-          # Define Directories and Patch Files
+          # Define Kernel Source and BBRv3 Patch Directories
           PDIR="${GITHUB_WORKSPACE}/kernel_workspace/AndreiMikh-Kernel-Lab/patches/BBRV3"
           KDIR="${GITHUB_WORKSPACE}/kernel_workspace/kernel_platform/common"
-          PFILE="${PDIR}/0001-net-tcp-backport-BBRv3-to-${GKIVERSION}.patch"
 
-          # Move Into Kernel Source Directory
-          cd "${KDIR}"
+          # Select BBRv3 Backport Patch for the Current Android and Kernel Version
+          PFILE="${PDIR}/bbrv3-${ANDROIDVERSION}-${KERNELVERSION}.patch"
+          DEBUGFSPATCH="${PDIR}/bbrv3-adddebugfs-diagruntimetunables.patch"
 
-          # Apply Main BBRV3 Backport Patch for Selected GKI Version
-          echo "Applying BBRV3 Patch for ${GKIVERSION}..."
-          patchstatus=0
-          patch -p1 < "${PFILE}" || patchstatus=$?
-
-          # Android 12 (5.10) Kernels do Not Include PROC-DOU8VEC-MINMAX
-          # Apply Required Compatibility Patches Only if Function Not Already Present in Source
-          if [[ "${GKIVERSION}" == "android12-5.10" ]]; then
-            if ! grep -qF 'int proc_dou8vec_minmax(' include/linux/sysctl.h; then
-              echo "⚙️ Applying PROC-DOU8VEC-MINMAX Compatibility Patches..."
-              compatstatus=0
-              patch -p1 < "${PDIR}/sysctl_add_proc_dou8vec_minmax.patch" || compatstatus=$?
-              
-              if [[ "$compatstatus" -eq 0 ]]; then
-                patch -p1 < "${PDIR}/sysctl_fix_data-races_in_proc_dou8vec_minmax.patch" || compatstatus=$?
-              fi
-
-              if [[ "$compatstatus" -ne 0 ]]; then
-                patchstatus="$compatstatus"
-              fi
-            else
-              echo "🚀 PROC-DOU8VEC-MINMAX Already Exists, Skipping Compatibility Patches..."
-            fi
-          else
-            echo "☘️ Compatibility Patches are Not Required for ${GKIVERSION}"
+          # Validate BBRv3 Patch Directory
+          if [[ ! -d "${PDIR}" ]]; then
+            echo "⚠️ BBRv3 Patch Directory Not Found: ${PDIR}"
+            exit 1
           fi
 
-          # Load Reject Checker and Run Rejection Check
-          source "$REJECTCHECKER"
+          # Validate Main BBRv3 Patch
+          if [[ ! -f "${PFILE}" ]]; then
+            echo "⚠️ BBRv3 Patch Not Found for ${ANDROIDVERSION}-${KERNELVERSION}"
+            echo "Expected: ${PFILE}"
+            echo "Available BBRv3 Patches:"
+            find "${PDIR}" \
+              -maxdepth 1 \
+              -type f \
+              -name "*.patch" \
+              -print | sort
+            exit 1
+          fi
+
+          echo "📂 BBRv3 Patch Directory : ${PDIR}"
+          echo "📱 Android Version       : ${ANDROIDVERSION}"
+          echo "🐧 Kernel Version        : ${KERNELVERSION}"
+          echo "⚙️ BBRv3 Patch           : $(basename "${PFILE}")"
+          echo "🔧 DebugFS Patch         : $(basename "${DEBUGFSPATCH}")"
+
+          # Enter Kernel Source Directory
+          cd "${KDIR}"
+
+          # Apply Main BBRv3 Backport Patch
+          echo "⚙️ Applying BBRv3 main patch..."
+          patchstatus=0
+          if ! patch -p1 < "${PFILE}"; then
+            patchstatus=$?
+            echo "⚠️ BBRv3 Main Patch Failed with Status ${patchstatus}"
+          else
+            echo "🚀 Main BBRv3 Patch Applied Successfully"
+          fi
+
+          # Android 16 / Kernel 6.12 DebugFS and Runtime Tunables
+          # Additional Patch Compatible to Android 16 / 6.12 BBRv3 Backport
+          if [[ "${ANDROIDVERSION}" == "android16" && "${KERNELVERSION}" == "6.12" ]]; then
+            if [[ ! -f "${DEBUGFSPATCH}" ]]; then
+              echo "⚠️ Required BBRv3 DebugFS / Tunables Patch Not Found for Android16-6.12"
+              echo "Expected: ${DEBUGFSPATCH}"
+              if [[ "${patchstatus}" -eq 0 ]]; then
+                patchstatus=1
+              fi
+            else
+              echo "⚙️ Applying Android 16 / 6.12 DebugFS / Tunables Patch..."
+              echo "📄 Patch: $(basename "${DEBUGFSPATCH}")"
+              debugfsstatus=0
+              if patch -p1 < "${DEBUGFSPATCH}"; then
+                echo "🚀 BBRv3 DebugFS / Tunables Patch Applied Successfully"
+              else
+                debugfsstatus=$?
+                echo "⚠️ BBRv3 DebugFS / Tunables Patch Failed with Status ${debugfsstatus}"
+                if [[ "${patchstatus}" -eq 0 ]]; then
+                  patchstatus="${debugfsstatus}"
+                fi
+              fi
+            fi
+          else
+            echo "☘️ DebugFS / Tunables Patch Not Required for ${ANDROIDVERSION}-${KERNELVERSION}"
+          fi
+
+          # ProcDou8vecMinmax() Compatibility
+          # Apply Sysctl Compatibility Patches Whenever the Required Function is Missing From Kernel Tree
+          if ! grep -qE 'proc_dou8vec_minmax[[:space:]]*\(' include/linux/sysctl.h; then
+            echo "⚙️ ProcDou8vecMinmax() is Missing"
+            echo "Applying Required Sysctl Compatibility Patches..."
+            for COMPATPATCH in \
+              "sysctl-addprocdou8vec-minmax-pre-5-13.patch" \
+              "sysctl-fixdataracesproc-dou8vec-minmax-pre-5-13.patch"
+            do
+              COMPATFILE="${PDIR}/${COMPATPATCH}"
+              
+              # Make Sure the Required Compatibility Patch Exists Before Attempting to Apply
+              if [[ ! -f "${COMPATFILE}" ]]; then
+                echo "⚠️ Required Compatibility Patch Not Found:"
+                echo "         ${COMPATFILE}"
+                
+                if [[ "${patchstatus}" -eq 0 ]]; then
+                  patchstatus=1
+                fi
+                
+                continue
+              fi
+
+              echo "⚙️ Applying Compatibility Patch: ${COMPATPATCH}"
+             
+              compatstatus=0
+              if patch -p1 < "${COMPATFILE}"; then
+                echo "🚀 Applied ${COMPATPATCH}"
+              else
+                compatstatus=$?
+                echo "⚠️ Failed to Apply ${COMPATPATCH} (status ${compatstatus})"
+                
+                if [[ "${patchstatus}" -eq 0 ]]; then
+                  patchstatus="${compatstatus}"
+                fi
+              fi
+            done
+          else
+            echo "ℹ️ ProcDou8vecMinmax() Already Exists"
+            echo "☘️ Skipping Sysctl Compatibility Patches"
+          fi
+
+          # Reject Checker
+          echo "🔎 Running Reject Checker..."
+          if [[ ! -f "${REJECTCHECKER}" ]]; then
+            echo "⚠️ Reject Checker Not Found: ${REJECTCHECKER}"
+            exit 1
+          fi
+
+          source "${REJECTCHECKER}"
           checkrejects .
 
-          # Fail if Any Patch Application Failed
-          if [[ "$patchstatus" -ne 0 ]]; then
-            echo "⚠️ BBRV3 Patch Application Failed"
-            exit "$patchstatus"
+          # Final Patch Status
+          if [[ "${patchstatus}" -ne 0 ]]; then
+            echo "⚠️ BBRv3 patch application failed"
+            echo "Android : ${ANDROIDVERSION}"
+            echo "Kernel  : ${KERNELVERSION}"
+            exit "${patchstatus}"
           fi
 
           echo ""
-          echo "🎉 BBRV3 Patches Applied Successfully"
+          echo "🎉 BBRv3 Patches Applied Successfully"
 
       - name: ⚙️ Kernel Configuration
         run: |
