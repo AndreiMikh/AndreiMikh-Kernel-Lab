@@ -1,0 +1,351 @@
+From a715d61d5706b5de5bd5bac98180b3c78e5e519d Mon Sep 17 00:00:00 2001
+From: fatalcoder524 <11532648+fatalcoder524@users.noreply.github.com>
+Date: Mon, 13 Jul 2026 15:34:03 +0200
+Subject: [PATCH] net: tcp: bbr3: add debugfs diagnostics and runtime tunables
+ (v3)
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Additive follow-up to the BBRv3 backport; no frozen KMI type is
+touched and — unlike v1 — no per-connection hot-path code is added.
+
+1) /sys/kernel/debug/tcp_bbr3/sockets: one line per live bbr3
+   connection (ports, mode, bw_hi/lo, inflight_hi/lo, min_rtt_us,
+   ecn_alpha, gains, full_bw_reached). Implemented as a read-time
+   RCU walk of the TCP established hash (the /proc/net/tcp pattern):
+   no socket registry, no bbr3_init()/bbr3_release() changes, no
+   shared mutable state. v1 used a spinlock-protected registry
+   published from bbr3_init(); that build failed to boot on the
+   OnePlus 15 (mechanism undetermined; bisected to exactly those
+   hooks) — this rewrite removes the entire class.
+
+2) Runtime tunables under /sys/module/tcp_bbr3/parameters/ (0644):
+   bbr_min_rtt_win_sec, bbr_probe_rtt_mode_ms, bbr_probe_rtt_win_ms,
+   bbr_ecn_max_rtt_us, bbr_ecn_factor, bbr_ecn_thresh,
+   bbr_loss_thresh, bbr_full_loss_cnt. Fractions are BBR_UNIT=256
+   scaled where noted.
+
+3) Mobile ECN enablement: BBRv3's ECN logic ships with datacenter
+   tuning (bbr_ecn_max_rtt_us=5000 makes it ineligible at mobile
+   RTTs). To experiment on ECN-marking networks:
+     echo 0 > /sys/module/tcp_bbr3/parameters/bbr_ecn_max_rtt_us
+     sysctl -w net.ipv4.tcp_ecn=1
+   and set RTAX_FEATURE_ECN_LOW (1<<5) on the route via netlink.
+
+4) Build tcp_bbr3.o with -Os (CFLAGS_tcp_bbr3.o += -Os). The BBRv3
+   object's built-in size pushed the vmlinux Image just past the
+   OnePlus 15 recovery boot-image size limit (0x2700000 = 39 MiB),
+   which overlaps the larger recovery ramdisk and cold-resets before
+   the logo. Size-compiling only tcp_bbr3.o reclaims enough to clear
+   the boundary while keeping every feature config and leaving the
+   rest of the kernel at -O2.
+
+v3 (review hardening; diagnostics must not become the bug):
+- debugfs walk no longer dereferences the bbr3 heap ctx lock-free.
+  The ctx is freed by .release under the socket lock, so unlike the
+  scalar reads in /proc/net/tcp it can be freed under a racing reader.
+  Each socket is now spin_trylock_bh()'d and skipped if a process
+  context owns it (possibly mid-.release); the CC is re-checked under
+  the lock via bbr3_ctx_if_active(), the fields are snapshotted into
+  locals, and only then is the lock dropped and seq_printf() called.
+- Enter rcu_read_lock() before touching the bucket chain (drop the
+  pre-RCU hlist_nulls_empty() peek).
+- Use bbr3_ctx_if_active() instead of comparing icsk_ca_ops by
+  pointer identity, removing the tentative forward declaration of
+  tcp_bbr3_cong_ops.
+- Clamp the BBR_UNIT-scaled / windowed tunables at store time via
+  module_param_cb setters (ecn_factor/ecn_thresh 0..BBR_UNIT,
+  loss_thresh 0..BBR_UNIT-1 so the BBR_UNIT-loss_thresh divisor stays
+  >=1, full_loss_cnt 0..15, min_rtt_win_sec/probe_rtt_win_ms nonzero)
+  so an out-of-range write can't underflow the fixed-point math.
+- bbr_param() now uses READ_ONCE() so the writable tunables are read
+  without tearing on the hot paths; WRITE_ONCE() on the store side.
+- Guard the debugfs code with CONFIG_DEBUG_FS.
+- Drop the stale "registry is empty" comment in bbr3_unregister
+  (there is no registry) and state the actual .owner invariant.
+- Create bbr3_cache with SLAB_TYPESAFE_BY_RCU so the debugfs reader's
+  rcu_read_lock() ehash walk can never dereference a freed ctx: the
+  destroy-path bbr3_release() frees without the socket lock and the cache
+  has no grace period. The backing memory stays type-stable for the
+  reader's RCU section (no UAF); bbr3_release() is unchanged — no
+  init/release-path code, which is the boot-safe way to close the race.
+---
+ net/ipv4/Makefile   |   1 +
+ net/ipv4/tcp_bbr3.c | 171 ++++++++++++++++++++++++++++++++++++++++++++++++----
+ 2 files changed, 160 insertions(+), 12 deletions(-)
+
+diff --git a/net/ipv4/Makefile b/net/ipv4/Makefile
+index 45324da..cb73741 100644
+--- a/net/ipv4/Makefile
++++ b/net/ipv4/Makefile
+@@ -46,6 +46,7 @@ obj-$(CONFIG_INET_UDP_DIAG) += udp_diag.o
+ obj-$(CONFIG_INET_RAW_DIAG) += raw_diag.o
+ obj-$(CONFIG_TCP_CONG_BBR) += tcp_bbr.o
+ obj-$(CONFIG_TCP_CONG_BBR3) += tcp_bbr3.o
++CFLAGS_tcp_bbr3.o += -Os
+ obj-$(CONFIG_TCP_CONG_BIC) += tcp_bic.o
+ obj-$(CONFIG_TCP_CONG_CDG) += tcp_cdg.o
+ obj-$(CONFIG_TCP_CONG_CUBIC) += tcp_cubic.o
+diff --git a/net/ipv4/tcp_bbr3.c b/net/ipv4/tcp_bbr3.c
+index b65a91f..256e6ef 100644
+--- a/net/ipv4/tcp_bbr3.c
++++ b/net/ipv4/tcp_bbr3.c
+@@ -64,13 +64,42 @@
+ #include <linux/inet.h>
+ #include <linux/random.h>
+ #include <linux/win_minmax.h>
++#include <linux/debugfs.h>
++#include <linux/nsproxy.h>
++#include <linux/seq_file.h>
+ 
+ #include <trace/events/tcp.h>
+ #include "tcp_dctcp.h"
+ 
+ #define BBR_VERSION		3
+ 
+-#define bbr_param(sk, name)	(bbr_ ## name)
++/* READ_ONCE so the writable module_param tunables (see below) are read
++ * without tearing/reload on the hot paths; harmless on the static const
++ * defaults, which are plain scalars.
++ */
++#define bbr_param(sk, name)	READ_ONCE(bbr_ ## name)
++
++/* Clamp a writable BBRv3 tunable at store time so an out-of-range write
++ * cannot drive the BBR_UNIT-scaled fixed-point math into underflow (e.g.
++ * an ecn/loss threshold above BBR_UNIT). Reads stay plain global loads.
++ * WRITE_ONCE pairs with the READ_ONCE in bbr_param().
++ */
++#define BBR3_PARAM_CLAMP(name, minv, maxv)				\
++	static int bbr3_set_##name(const char *val,			\
++				   const struct kernel_param *kp)	\
++	{								\
++		u32 v;							\
++		int err = kstrtou32(val, 0, &v);			\
++									\
++		if (err)						\
++			return err;					\
++		WRITE_ONCE(bbr_##name, clamp_t(u32, v, (minv), (maxv)));	\
++		return 0;						\
++	}								\
++	static const struct kernel_param_ops bbr3_paramops_##name = {	\
++		.set = bbr3_set_##name,					\
++		.get = param_get_uint,					\
++	}
+ 
+ /* Scale factor for rate in pkt/uSec unit to avoid truncation in bandwidth
+  * estimation. The rate unit ~= (1500 bytes / 1 usec / 2^24) ~= 715 bps.
+@@ -106,14 +134,26 @@ struct bbr_context {
+ };
+ 
+ /* Window length of min_rtt filter (in sec): */
+-static const u32 bbr_min_rtt_win_sec = 10;
++static u32 bbr_min_rtt_win_sec __read_mostly = 10;
++BBR3_PARAM_CLAMP(min_rtt_win_sec, 1, 3600);	/* nonzero; win_sec * HZ must fit u32 */
++module_param_cb(bbr_min_rtt_win_sec, &bbr3_paramops_min_rtt_win_sec,
++		&bbr_min_rtt_win_sec, 0644);
++MODULE_PARM_DESC(bbr_min_rtt_win_sec, "min_rtt filter window (sec)");
+ /* Minimum time (in ms) spent at bbr_cwnd_min_target in BBR_PROBE_RTT mode: */
+-static const u32 bbr_probe_rtt_mode_ms = 200;
++static u32 bbr_probe_rtt_mode_ms __read_mostly = 200;
++BBR3_PARAM_CLAMP(probe_rtt_mode_ms, 0, U32_MAX);	/* 0 is valid */
++module_param_cb(bbr_probe_rtt_mode_ms, &bbr3_paramops_probe_rtt_mode_ms,
++		&bbr_probe_rtt_mode_ms, 0644);
++MODULE_PARM_DESC(bbr_probe_rtt_mode_ms, "min time at cwnd_min_target in PROBE_RTT (ms)");
+ /* Window length of probe_rtt_min_us filter (in ms), and consequently the
+  * typical interval between PROBE_RTT mode entries. The default is 5000ms.
+  * Note that bbr_probe_rtt_win_ms must be <= bbr_min_rtt_win_sec * MSEC_PER_SEC
+  */
+-static const u32 bbr_probe_rtt_win_ms = 5000;
++static u32 bbr_probe_rtt_win_ms __read_mostly = 5000;
++BBR3_PARAM_CLAMP(probe_rtt_win_ms, 1, U32_MAX);	/* nonzero window */
++module_param_cb(bbr_probe_rtt_win_ms, &bbr3_paramops_probe_rtt_win_ms,
++		&bbr_probe_rtt_win_ms, 0644);
++MODULE_PARM_DESC(bbr_probe_rtt_win_ms, "probe_rtt_min filter window / PROBE_RTT interval (ms)");
+ /* Proportion of cwnd to estimated BDP in PROBE_RTT, in units of BBR_UNIT: */
+ static const u32 bbr_probe_rtt_cwnd_gain = BBR_UNIT * 1 / 2;
+ 
+@@ -189,7 +227,11 @@ static const bool bbr_precise_ece_ack = true;
+ /* Max RTT (in usec) at which to use sender-side ECN logic.
+  * Disabled when 0 (ECN allowed at any RTT).
+  */
+-static const u32 bbr_ecn_max_rtt_us = 5000;
++static u32 bbr_ecn_max_rtt_us __read_mostly = 5000;
++BBR3_PARAM_CLAMP(ecn_max_rtt_us, 0, U32_MAX);	/* 0 = ECN at any RTT */
++module_param_cb(bbr_ecn_max_rtt_us, &bbr3_paramops_ecn_max_rtt_us,
++		&bbr_ecn_max_rtt_us, 0644);
++MODULE_PARM_DESC(bbr_ecn_max_rtt_us, "max RTT (us) for sender-side ECN logic; 0 = any RTT");
+ 
+ /* On losses, scale down inflight and pacing rate by beta scaled by BBR_SCALE.
+  * No loss response when 0.
+@@ -207,12 +247,20 @@ static const u32 bbr_ecn_alpha_init = BBR_UNIT;
+ /* On ECN, cut inflight_lo to (1 - ecn_factor * ecn_alpha) scaled by BBR_SCALE.
+  * No ECN based bounding when 0.
+  */
+-static const u32 bbr_ecn_factor = BBR_UNIT * 1 / 3;	 /* 1/3 = 33% */
++static u32 bbr_ecn_factor __read_mostly = BBR_UNIT * 1 / 3;	 /* 1/3 = 33% */
++BBR3_PARAM_CLAMP(ecn_factor, 0, BBR_UNIT);	/* fraction; >BBR_UNIT underflows bbr_ecn_cut() */
++module_param_cb(bbr_ecn_factor, &bbr3_paramops_ecn_factor,
++		&bbr_ecn_factor, 0644);
++MODULE_PARM_DESC(bbr_ecn_factor, "ECN inflight_lo cut factor (BBR_UNIT=256 fraction); 0 = off");
+ 
+ /* Estimate bw probing has gone too far if CE ratio exceeds this threshold.
+  * Scaled by BBR_SCALE. Disabled when 0.
+  */
+-static const u32 bbr_ecn_thresh = BBR_UNIT * 1 / 2;  /* 1/2 = 50% */
++static u32 bbr_ecn_thresh __read_mostly = BBR_UNIT * 1 / 2;  /* 1/2 = 50% */
++BBR3_PARAM_CLAMP(ecn_thresh, 0, BBR_UNIT);	/* CE-ratio fraction */
++module_param_cb(bbr_ecn_thresh, &bbr3_paramops_ecn_thresh,
++		&bbr_ecn_thresh, 0644);
++MODULE_PARM_DESC(bbr_ecn_thresh, "CE ratio probe-too-far threshold (BBR_UNIT=256 fraction); 0 = off");
+ 
+ /* If non-zero, if in a cycle with no losses but some ECN marks, after ECN
+  * clears then make the first round's increment to inflight_hi the following
+@@ -221,7 +269,11 @@ static const u32 bbr_ecn_thresh = BBR_UNIT * 1 / 2;  /* 1/2 = 50% */
+ static const u32 bbr_ecn_reprobe_gain = BBR_UNIT * 1 / 2;
+ 
+ /* Estimate bw probing has gone too far if loss rate exceeds this level. */
+-static const u32 bbr_loss_thresh = BBR_UNIT * 2 / 100;  /* 2% loss */
++static u32 bbr_loss_thresh __read_mostly = BBR_UNIT * 2 / 100;  /* 2% loss */
++BBR3_PARAM_CLAMP(loss_thresh, 0, BBR_UNIT - 1);	/* keep BBR_UNIT - loss_thresh >= 1 divisor */
++module_param_cb(bbr_loss_thresh, &bbr3_paramops_loss_thresh,
++		&bbr_loss_thresh, 0644);
++MODULE_PARM_DESC(bbr_loss_thresh, "loss-rate probe-too-far threshold (BBR_UNIT=256 fraction)");
+ 
+ /* Slow down for a packet loss recovered by TLP? */
+ static const bool bbr_loss_probe_recovery = true;
+@@ -230,7 +282,11 @@ static const bool bbr_loss_probe_recovery = true;
+  * and loss rate is higher than bbr_loss_thresh.
+  * Disabled if 0.
+  */
+-static const u32 bbr_full_loss_cnt = 6;
++static u32 bbr_full_loss_cnt __read_mostly = 6;
++BBR3_PARAM_CLAMP(full_loss_cnt, 0, 15);	/* STARTUP loss-event counter */
++module_param_cb(bbr_full_loss_cnt, &bbr3_paramops_full_loss_cnt,
++		&bbr_full_loss_cnt, 0644);
++MODULE_PARM_DESC(bbr_full_loss_cnt, "STARTUP exit: loss events per Recovery round; 0 = off");
+ 
+ /* Exit STARTUP if number of round trips with ECN mark rate above ecn_thresh
+  * meets this count.
+@@ -2035,6 +2091,84 @@ out:
+ 
+ static struct kmem_cache *bbr3_cache __read_mostly;
+ 
++#ifdef CONFIG_DEBUG_FS
++/* debugfs introspection: read-time walk of the TCP established hash
++ * (the /proc/net/tcp pattern). No per-socket bookkeeping, no shared
++ * mutable state, nothing on any connection hot path.
++ *
++ * Unlike the racy scalar reads in /proc/net/tcp, the bbr3 context is a
++ * heap object freed by .release under the socket lock, so it must not be
++ * dereferenced lock-free. Each socket is trylocked (best effort: any that
++ * is contended, or owned by a process context that may be mid-.release,
++ * is skipped) and its congestion control re-checked under that lock via
++ * bbr3_ctx_if_active() before its fields are snapshotted into locals; the
++ * snapshot is printed after the lock is dropped so seq_printf() never runs
++ * under the socket spinlock.
++ */
++static struct dentry *bbr3_debugfs_dir;
++
++static int bbr3_dbg_show(struct seq_file *m, void *v)
++{
++	unsigned int slot;
++
++	seq_puts(m, "# sport dport mode bw_hi0 bw_hi1 bw_lo inflight_hi inflight_lo min_rtt_us ecn_alpha pacing_gain cwnd_gain full_bw_reached\n");
++	seq_puts(m, "# bw unit: packets/uS << 24; gains: BBR_UNIT=256 fractions; ~0 = unset\n");
++	for (slot = 0; slot <= tcp_hashinfo.ehash_mask; slot++) {
++		struct inet_ehash_bucket *head = &tcp_hashinfo.ehash[slot];
++		struct hlist_nulls_node *node;
++		struct sock *sk;
++
++		rcu_read_lock();
++		sk_nulls_for_each_rcu(sk, node, &head->chain) {
++			u32 sport, dport, mode, bw_hi0, bw_hi1, bw_lo;
++			u32 inflight_hi, inflight_lo, min_rtt_us, ecn_alpha;
++			u32 pacing_gain, cwnd_gain, full_bw_reached;
++			const struct bbr3 *bbr;
++
++			if (!sk_fullsock(sk))
++				continue;	/* skip timewait/request socks */
++			if (!net_eq(sock_net(sk), current->nsproxy->net_ns))
++				continue;	/* other netns: not ours to report */
++			if (!spin_trylock_bh(&sk->sk_lock.slock))
++				continue;	/* contended: skip, don't block */
++			/* A process owner may be inside .release freeing the
++			 * bbr3 ctx; only read when nobody owns the socket. */
++			if (sock_owned_by_user(sk)) {
++				spin_unlock_bh(&sk->sk_lock.slock);
++				continue;
++			}
++			bbr = bbr3_ctx_if_active(sk);
++			if (!bbr || !bbr->initialized) {
++				spin_unlock_bh(&sk->sk_lock.slock);
++				continue;
++			}
++			sport = ntohs(inet_sk(sk)->inet_sport);
++			dport = ntohs(inet_sk(sk)->inet_dport);
++			mode = bbr->mode;
++			bw_hi0 = bbr->bw_hi[0];
++			bw_hi1 = bbr->bw_hi[1];
++			bw_lo = bbr->bw_lo;
++			inflight_hi = bbr->inflight_hi;
++			inflight_lo = bbr->inflight_lo;
++			min_rtt_us = bbr->min_rtt_us;
++			ecn_alpha = bbr->ecn_alpha;
++			pacing_gain = bbr->pacing_gain;
++			cwnd_gain = bbr->cwnd_gain;
++			full_bw_reached = bbr->full_bw_reached;
++			spin_unlock_bh(&sk->sk_lock.slock);
++
++			seq_printf(m, "%u %u %u %u %u %u %u %u %u %u %u %u %u\n",
++				   sport, dport, mode, bw_hi0, bw_hi1, bw_lo,
++				   inflight_hi, inflight_lo, min_rtt_us, ecn_alpha,
++				   pacing_gain, cwnd_gain, full_bw_reached);
++		}
++		rcu_read_unlock();
++	}
++	return 0;
++}
++DEFINE_SHOW_ATTRIBUTE(bbr3_dbg);
++#endif /* CONFIG_DEBUG_FS */
++
+ static void bbr3_init(struct sock *sk)
+ {
+ 	struct tcp_sock *tp = tcp_sk(sk);
+@@ -2354,18 +2486,33 @@ static int __init bbr3_register(void)
+ {
+ 	int ret;
+ 
+-	bbr3_cache = KMEM_CACHE(bbr3, SLAB_HWCACHE_ALIGN | SLAB_ACCOUNT);
++	bbr3_cache = KMEM_CACHE(bbr3, SLAB_HWCACHE_ALIGN | SLAB_ACCOUNT | SLAB_TYPESAFE_BY_RCU);
+ 	if (!bbr3_cache)
+ 		return -ENOMEM;
+ 
+ 	ret = tcp_register_congestion_control(&tcp_bbr3_cong_ops);
+-	if (ret)
++	if (ret) {
+ 		kmem_cache_destroy(bbr3_cache);
+-	return ret;
++		return ret;
++	}
++
++#ifdef CONFIG_DEBUG_FS
++	bbr3_debugfs_dir = debugfs_create_dir("tcp_bbr3", NULL);
++	debugfs_create_file("sockets", 0400, bbr3_debugfs_dir, NULL,
++			    &bbr3_dbg_fops);
++#endif
++	return 0;
+ }
+ 
+ static void __exit bbr3_unregister(void)
+ {
++#ifdef CONFIG_DEBUG_FS
++	/* .owner pins the module while any socket uses bbr3, so no socket can
++	 * still have icsk_ca_ops == &tcp_bbr3_cong_ops by the time module exit
++	 * runs; the debugfs walk cannot race a live connection here.
++	 */
++	debugfs_remove_recursive(bbr3_debugfs_dir);
++#endif
+ 	tcp_unregister_congestion_control(&tcp_bbr3_cong_ops);
+ 	kmem_cache_destroy(bbr3_cache);
+ }
