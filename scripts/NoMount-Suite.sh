@@ -19,6 +19,33 @@ die() {
     exit 1
 }
 
+# Clone NoMount Kernel Patches
+clonepatches() {
+    local REPO="$WORKSPACE/kernel_patches"
+
+    if [ -d "$REPO/.git" ]; then
+        echo "kernelpatches: repository already exists"
+        return 0
+    fi
+
+    rm -rf "$REPO"
+
+    echo "cloning bouteillepleine/kernelpatches..."
+    git clone \
+        --depth 1 \
+        --branch main \
+        https://github.com/Bouteillepleine/kernel_patches.git \
+        "$REPO" ||
+        die "could not clone bouteillepleine/kernelpatches"
+
+    [ -d "$REPO/common" ] ||
+        die "kernelpatches: common directory is missing after clone"
+
+    echo "kernelpatches: $(git -C "$REPO" rev-parse --short HEAD)"
+}
+
+clonepatches
+
 [ $# -ge 1 ] || usage
 COMMAND="$1"
 shift
