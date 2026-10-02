@@ -4039,6 +4039,11 @@ jobs:
           
           # Move to Kernel Common Directory
           cd "$COMMONKERNELFOLDER"
+          # Verify Defconfig Exists
+          [[ -f "$DEFCONFIG" ]] || {
+            echo "⚠️ Defconfig Not Found: $DEFCONFIG"
+            exit 1
+          }       
           # Get Github Environment Variables and GitHub Actions Inputs        
           KERNEL="${KERNELVERSION}"
           ROOT="${{ inputs.ROOTENGINE }}"
@@ -4056,22 +4061,24 @@ jobs:
           declare -a HIDECONFIGS=()          
           SETCONFIG() {
             local value="$1"
-            local key="${value%%=*}"         
-            if grep -qF "${key}=" "$DEFCONFIG" ||
-               grep -qF "# ${key} is not set" "$DEFCONFIG"; then         
-              VALUE="$value" awk -v key="$key" '
+            local key="${value%%=*}"
+            if grep -qE "^${key}=" "$DEFCONFIG" || \
+               grep -qF "# ${key} is not set" "$DEFCONFIG"; then
+              if ! VALUE="$value" awk -v key="$key" '
                 $0 == "# " key " is not set" || index($0, key "=") == 1 {
                   print ENVIRON["VALUE"]
                   next
                 }
                 { print }
-              ' "$DEFCONFIG" > "${DEFCONFIG}.tmp" &&
-                mv "${DEFCONFIG}.tmp" "$DEFCONFIG" ||
+              ' "$DEFCONFIG" > "${DEFCONFIG}.tmp"; then
                 rm -f "${DEFCONFIG}.tmp"
+                return 1
+              fi
+              mv "${DEFCONFIG}.tmp" "$DEFCONFIG"
             else
               printf '%s\n' "$value" >> "$DEFCONFIG"
             fi
-          }          
+          }
           HIDECONFIG() {
             local value="$1"
             local key="${value%%=*}"         
@@ -4122,7 +4129,7 @@ jobs:
           fi
 
           # Apply SUSFS Core Configuration
-          if [[ "$SUSFS" != "-1" && ! ("$FILE" =~ aosp$|AOSP$) ]]; then                      
+          if [[ -n "$SUSFS" && "$SUSFS" != "-1" ]]; then
             # Base SUSFS Core Configuration Settings (Common)
             SETCONFIG "CONFIG_KSU=y"
             SETCONFIG "CONFIG_KSU_SUSFS=y"
@@ -4142,13 +4149,8 @@ jobs:
             SETCONFIG "CONFIG_KSU_SUSFS_SUS_MAP=y"            
             echo "🎉 SUSFS Core Configuration Applied"       
           else
-            # Block SUSFS for oneplus_sm8750_lineage_aosp or Disabled SUSFS
-            if [[ ! "$FILE" =~ aosp$|AOSP$ ]]; then
-              SETCONFIG "CONFIG_KSU_SUSFS=n"
-              echo "☘️ SUSFS Core Configuration Settings Disabled"
-            else
-              echo "🧩 SUSFS Core Configuration Skipped for $FILE"
-            fi
+            SETCONFIG "CONFIG_KSU_SUSFS=n"
+            echo "☘️ SUSFS Core Configuration Settings Disabled"
           fi
           
           # TMPFS Configuration (Mountify)
@@ -4289,14 +4291,14 @@ jobs:
           fi
      
           # Apply Build Issues Fix
-          # Mediatek 6.1 Kernels
+          # Mediatek 5.15 Kernels
           if [[ "$KERNEL" == "5.15" && "$CPU" == mt* ]]; then
             SETCONFIG "CONFIG_OPLUS_SYSTEM_KERNEL=y"
             SETCONFIG "CONFIG_OPLUS_FEATURE_CMDLINE=m"
             SETCONFIG "CONFIG_OPLUS_FEATURE_OPLUSBOOT=m"
             SETCONFIG "CONFIG_OPLUS_FEATURE_BUILDVARIANT=m"
             SETCONFIG "CONFIG_OPLUS_FEATURE_OPROJECT=m"
-            echo "☘️ Configuration Disabled, Only for Mediatek with Kernel 5.15, Skipping..."
+            echo "🎉 Mediatek 5.15 OPlus Configuration Applied"
           fi
 
           # Enable Rust Support if Requested
@@ -4526,27 +4528,25 @@ jobs:
         if: ${{ steps.kernel-version-setup.outputs.kernelversion == '5.10' && startsWith(steps.extract-info.outputs.cpu, 'mt') }}
         shell: bash
         run: |
-          set -euo pipefail
-      
-          MAKEFILEGPUEB="${WORKDIR}/kernel-5.10/drivers/gpu/mediatek/Makefile"      
-          # Verify Makefile Exists
-          if [[ ! -f "$MAKEFILEGPUEB" ]]; then
-            echo "⚠️ Makefile Not Found: $MAKEFILEGPUEB — Skipping GPUEB Disable"
+          set -Eeuo pipefail
+
+          # GPU Embedded Bridge / Engine Makefile
+          MAKEFILEGPUEB="${COMMONKERNELFOLDER}/drivers/gpu/mediatek/Makefile"
+          echo "📂 GPU Makefile: $MAKEFILEGPUEB"
+          # Verify GPU Makefile Exists
+          [[ -f "$MAKEFILEGPUEB" ]] || {
+            echo "⚠️ GPU Embedded Bridge Makefile Not Found"
+            echo "📁 Expected Path: $MAKEFILEGPUEB"
             exit 0
-          fi
-      
-          echo "🛠️ Disabling GPUEB in $MAKEFILEGPUEB..."      
-          # Check if GPUEB Already Disabled
-          if grep -q 'obj-y.*gpueb' "$MAKEFILEGPUEB"; then          
-            # Remove Lines Containing GPUEB from OBJ-Y Assignments
-            sed -i '/obj-y.*gpueb/d' "$MAKEFILEGPUEB"
-            echo "🎉 GPUEB Entries Removed Successfully"
+          }
+          # Disable GPU Embedded Bridge / Engine
+          if grep -qE 'obj-y.*gpueb|obj-\+=.*gpueb' "$MAKEFILEGPUEB"; then
+            sed -i '/obj-y.*gpueb/d;/obj-\+=.*gpueb/d' "$MAKEFILEGPUEB"
+            echo "🚫 GPU Embedded Bridge / Engine Disabled"
           else
-            echo "✔ GPUEB Already Disabled — Nothing to Do"
+            echo "☘️ GPU Embedded Bridge / Engine Already Disabled"
           fi
-
-          echo "🎉 GPU Embedded Bridge / Engine Disable Stage Completed"
-
+    
       - name: ♻️ Restore ThinLTO Cache
         id: restore-thinlto
         if: ${{ startsWith(steps.kernel-version-setup.outputs.kernelversion, '5.') }}
