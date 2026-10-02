@@ -6150,97 +6150,90 @@ jobs:
         run: |
           set -Eeuo pipefail
 
+          export GH_TOKEN="$GITHUB_TOKEN"
           echo "🚀 AI APK Resolver Started..."
           MANAGERAPKDIR="${RUNNER_TEMP}/ManagerAPK-${ROOTENGINE}"
           rm -rf "$MANAGERAPKDIR"
           mkdir -p "$MANAGERAPKDIR"
           echo "------------------------------"
-          echo "ℹ️ Repository       : $KSUREPOSITORY"
-          echo "ℹ️ Branch           : $BRANCH"
-          echo "ℹ️ Manager Tag      : $MANAGERTAG"
-          echo "ℹ️ KSU Version      : $KSUVERSION"
-          echo "ℹ️ Output Directory : $MANAGERAPKDIR"
+          echo "ℹ️ [Info] Repository       : $KSUREPOSITORY"
+          echo "ℹ️ [Info] Branch           : $BRANCH"
+          echo "ℹ️ [Info] Output Directory : $MANAGERAPKDIR"
           echo "------------------------------"
           # Default Outputs
           APKMANAGER="false"
           APKCOUNT="0"
           selectedrun=""
-          echo "🔎 Fetching Successful Workflow Runs..."
+          echo "🔎 [Check] Fetching Latest Successful Workflow Runs..."
           # Fetch Successful Workflow Runs
           mapfile -t runs < <(
             gh api \
-              "repos/${KSUREPOSITORY}/actions/runs?branch=${BRANCH}&status=success&per_page=100" \
+              "repos/${KSUREPOSITORY}/actions/runs?branch=${BRANCH}&status=success&per_page=50" \
               --jq '.workflow_runs
                 | sort_by(.created_at)
                 | reverse
                 | .[].id'
           )
           if [[ ${#runs[@]} -eq 0 ]]; then
-            echo "⚠️ No Successful Runs Found"
+            echo "⚠️ [Error] No Successful Runs Found"
             exit 0
           fi
 
-          echo "ℹ️ Found ${#runs[@]} Successful Workflow Runs..."
-          echo "🔍 Searching for Run Matching Tag: $MANAGERTAG"
-          # Find the successful run associated with the resolved tag.
+          echo "ℹ️ [Info] Found ${#runs[@]} Workflow Runs..."
+          echo "🔍 [Check] Scanning Runs for APK Artifacts..."
+          bestscore=0
           for runid in "${runs[@]}"; do
             echo "------------------------------"
-            echo "🔍 Checking Run ID: $runid"
-            rundata="$(
-              gh api \
-                "repos/${KSUREPOSITORY}/actions/runs/${runid}" \
-                --jq '[.head_branch, .head_sha, .display_title, .name] | @tsv' \
-                2>/dev/null || true
-            )"
-            [[ -n "$rundata" ]] || {
-              echo "⚠️ Unable to Read Run Metadata"
-              continue
-            }
-            IFS=$'\t' read -r headbranch headsha displaytitle workflowname <<< "$rundata"
-            echo "🌿 Head Branch : $headbranch"
-            echo "📝 Title       : $displaytitle"
-            echo "⚙️ Workflow    : $workflowname"
-            # Check whether this run belongs to the resolved tag.
-            if [[ "$headbranch" != "$MANAGERTAG" ]]; then
-              echo "⚠️ Tag Mismatch — Skipping"
-              continue
-            fi
-
+            echo "🔍 [Check] Run ID: $runid"
             artifactnames="$(
               gh api \
                 "repos/${KSUREPOSITORY}/actions/runs/${runid}/artifacts" \
-                --jq '.artifacts[].name' \
-                2>/dev/null || true
+                --jq '.artifacts[].name' 2>/dev/null || true
             )"
-            if [[ -z "$artifactnames" ]]; then
-              echo "⚠️ No Artifacts Found"
+            if [[ -z "$artifactnames" ]] || \
+               ! echo "$artifactnames" | grep -qiE 'apk|manager|release|build'; then
+              echo "⚠️ [Skip] No Relevant Artifacts"
               continue
             fi
 
-            if ! echo "$artifactnames" | grep -qiE 'manager'; then
-              echo "⚠️ No Manager Artifacts Found"
-              continue
+            score=0
+            # APK Artifact Score
+            if echo "$artifactnames" | grep -Eqi '\.apk($|[^a-zA-Z])'; then
+              score=$((score + 50))
             fi
 
-            selectedrun="$runid"
-            echo "🏆 Matching Manager Workflow Found: $runid"
-            break
+            # Manager Artifact Score
+            if echo "$artifactnames" | grep -qi "manager"; then
+              score=$((score + 20))
+            fi
+
+            # Release / Build Artifact Score
+            if echo "$artifactnames" | grep -qiE 'release|build'; then
+              score=$((score + 10))
+            fi
+
+            echo "📊 [Info] Score for Run $runid = $score"
+            if [[ "$score" -gt "$bestscore" ]]; then
+              bestscore="$score"
+              selectedrun="$runid"
+              echo "🏆 [New Best] Selected Run Updated → $runid"
+            fi
           done
           if [[ -z "$selectedrun" ]]; then
-            echo "⚠️ No Successful Manager Workflow Found for Tag: $MANAGERTAG"
+            echo "⚠️ [Error] No Valid APK Workflow Found"
             exit 0
           fi
 
           echo "------------------------------"
-          echo "🏁 Selected Run: $selectedrun"
-          echo "🏷️ Manager Tag : $MANAGERTAG"
+          echo "🏁 [Result] Selected Run: $selectedrun"
+          echo "🏁 [Result] Best Score  : $bestscore"
           echo "------------------------------"
-          echo "🔍 Checking Manager Artifacts..."
+          echo "🔍 [Verify] Checking Artifacts..."
           gh api \
             "repos/${KSUREPOSITORY}/actions/runs/${selectedrun}/artifacts" \
             --jq '.artifacts[].name' || true
           echo "------------------------------"
-          echo "📩 Fetching Manager APK Artifacts..."
+          echo "📩 [Step 3] Fetching Manager APK Artifacts..."
           artifacturls="$(
             gh api \
               "repos/${KSUREPOSITORY}/actions/runs/${selectedrun}/artifacts" \
@@ -6249,6 +6242,7 @@ jobs:
                 | .archive_download_url' \
               2>/dev/null || true
           )"
+          echo "------------------------------"
           echo "🔍 Manager Artifact URLs:"
           echo "$artifacturls"
           echo "------------------------------"
@@ -6279,7 +6273,7 @@ jobs:
               --retry-delay 3 \
               --connect-timeout 30 \
               --max-time 600 \
-              -H "Authorization: Bearer ${GH_TOKEN}" \
+              -H "Authorization: Bearer $GITHUB_TOKEN" \
               -H "Accept: application/vnd.github+json" \
               -o "$zipfile" \
               "$url" || {
@@ -6297,15 +6291,15 @@ jobs:
               -d "$MANAGERAPKDIR" >/dev/null 2>&1 || true
             rm -f "$zipfile"
           done <<< "$artifacturls"
-          echo "🧹 Cleaning Non-APK Files..."
+          echo "🧹 [Step 4] Cleaning Non-APK Files..."
           find "$MANAGERAPKDIR" \
             -type f \
             ! -name "*.apk" \
             -delete || true
           # ReSukiSU ARM64 Release Filter
           if [[ "$KSUREPOSITORY" == "ReSukiSU/ReSukiSU" ]]; then
-            echo "ℹ️ ReSukiSU Repository Detected"
-            echo "🔍 Filtering ARM64-v8a Release APK..."
+            echo "ℹ️ [Info] ReSukiSU Repository Detected"
+            echo "🔍 Filtering Standard ARM64-v8a Release APK..."
             find "$MANAGERAPKDIR" \
               -type f \
               -name "*.apk" \
@@ -6317,7 +6311,7 @@ jobs:
               -delete || true
           fi
 
-          echo "🔍 Verifying Output..."
+          echo "🔍 [Step 5] Verifying Output..."
           APKCOUNT="$(
             find "$MANAGERAPKDIR" \
               -type f \
@@ -6328,11 +6322,11 @@ jobs:
           if [[ "$APKCOUNT" -gt 0 ]]; then
             APKMANAGER="true"
             echo "------------------------------"
-            echo "📦 APKs Found: $APKCOUNT"
+            echo "📦 [Success] APKs Found: $APKCOUNT"
             ls -lh "$MANAGERAPKDIR"
             echo "------------------------------"
           else
-            echo "⚠️ No APK Files Found"
+            echo "⚠️ [Warning] No APK Files Found"
           fi
 
           # Step Outputs
@@ -6343,7 +6337,6 @@ jobs:
             echo "selectedrun=$selectedrun"
             echo "ksuversion=$KSUVERSION"
           } >> "$GITHUB_OUTPUT"
-
           echo "📤 Manager APK Available : $APKMANAGER"
           echo "📦 APK Count             : $APKCOUNT"
           echo "🏁 Selected Run          : $selectedrun"
