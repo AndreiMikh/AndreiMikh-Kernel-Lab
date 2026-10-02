@@ -220,6 +220,8 @@ jobs:
       managerbranch: ${{ steps.manager.outputs.managerbranch }}
       branchpath: ${{ steps.manager.outputs.branchpath }}
       managerartifact: ${{ steps.manager.outputs.managerartifact }}
+      managertag: ${{ steps.manager.outputs.managertag }}
+      ksuversion: ${{ steps.manager.outputs.ksuversion }}
     steps:
       - name: 🧩 Solve Root Engine Source
         id: manager
@@ -293,19 +295,70 @@ jobs:
             echo "⚠️ Failed to Resolve Root Engine Repository"
             exit 1
           }
+          # Resolve Latest Root Engine Tag
+          echo "🔎 Fetching Latest Root Engine Tag..."
+          MANAGERTAG="$(
+            gh api \
+              "repos/${KSUREPO}/tags?per_page=100" \
+              --jq '.[].name' |
+            head -n 1
+          )"
+          [[ -n "$MANAGERTAG" ]] || {
+            echo "⚠️ Failed to Resolve Latest Root Engine Tag"
+            exit 1
+          }
+          echo "🏷️ Latest Root Engine Tag: $MANAGERTAG"
+          # Determine KSU Version
+          echo "🔎 Determining KSU Version..."
+          ROOTTEMP="${RUNNER_TEMP}/root-engine-version"
+          rm -rf "$ROOTTEMP"
+          git clone \
+            --filter=blob:none \
+            --no-checkout \
+            --branch "$MANAGERTAG" \
+            "https://github.com/${KSUREPO}.git" \
+            "$ROOTTEMP"
+          cd "$ROOTTEMP"
+          git fetch --unshallow --quiet
+          COMMITCOUNT="$(git rev-list --count HEAD)"
+          case "$ROOTENGINE" in
+            ReSukiSU)
+              KSUVERSION=$((COMMITCOUNT + 30700))
+              ;;
+            SukiSU-Ultra)
+              KSUVERSION=$((COMMITCOUNT + 37185))
+              ;;
+            KernelSU-Next|KernelSU)
+              KSUVERSION=$((COMMITCOUNT + 30000))
+              ;;
+            *)
+              echo "⚠️ Unsupported Root Engine: $ROOTENGINE"
+              exit 1
+              ;;
+          esac
+          cd "$GITHUB_WORKSPACE"
+          rm -rf "$ROOTTEMP"
+          [[ "$KSUVERSION" =~ ^[0-9]+$ ]] || {
+            echo "⚠️ Invalid KSU Version: $KSUVERSION"
+            exit 1
+          }
           {
             echo "managerbranch=$MANAGERBRANCH"
             echo "branchpath=$BRANCHPATH"
             echo "managerartifact=$MANAGERARTIFACT"
             echo "ksurepo=$KSUREPO"
+            echo "managertag=$MANAGERTAG"
+            echo "ksuversion=$KSUVERSION"
           } >> "$GITHUB_OUTPUT"
           echo "------------------------------"
           echo "✔️ Root Engine Source Resolved"
-          echo "📦 Engine     : $ROOTENGINE"
-          echo "📂 Repository : $KSUREPO"
-          echo "🌿 Branch     : $MANAGERBRANCH"
-          echo "📁 Setup Repo : $BRANCHPATH"
-          echo "📦 Artifact   : $MANAGERARTIFACT"
+          echo "📦 Engine      : $ROOTENGINE"
+          echo "📂 Repository  : $KSUREPO"
+          echo "🌿 Branch      : $MANAGERBRANCH"
+          echo "📁 Setup Repo  : $BRANCHPATH"
+          echo "📦 Artifact    : $MANAGERARTIFACT"
+          echo "🏷️ Manager Tag : $MANAGERTAG"
+          echo "🔢 KSU Version : $KSUVERSION"
           echo "------------------------------"
   kernel-build:
     needs: prepare
@@ -6084,6 +6137,8 @@ jobs:
       GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       KSUREPOSITORY: ${{ needs.prepare.outputs.ksurepo }}
       BRANCH: ${{ needs.prepare.outputs.managerbranch }}
+      MANAGERTAG: ${{ needs.prepare.outputs.managertag }}
+      KSUVERSION: ${{ needs.prepare.outputs.ksuversion }}
       ROOTENGINE: ${{ inputs.ROOTENGINE }}
     steps:
       - name: 🤖 APK Workflow Resolver
@@ -6092,90 +6147,97 @@ jobs:
         run: |
           set -Eeuo pipefail
 
-          export GH_TOKEN="$GITHUB_TOKEN"
           echo "🚀 AI APK Resolver Started..."
           MANAGERAPKDIR="${RUNNER_TEMP}/ManagerAPK-${ROOTENGINE}"
           rm -rf "$MANAGERAPKDIR"
           mkdir -p "$MANAGERAPKDIR"
           echo "------------------------------"
-          echo "ℹ️ [Info] Repository       : $KSUREPOSITORY"
-          echo "ℹ️ [Info] Branch           : $BRANCH"
-          echo "ℹ️ [Info] Output Directory : $MANAGERAPKDIR"
+          echo "ℹ️ Repository       : $KSUREPOSITORY"
+          echo "ℹ️ Branch           : $BRANCH"
+          echo "ℹ️ Manager Tag      : $MANAGERTAG"
+          echo "ℹ️ KSU Version      : $KSUVERSION"
+          echo "ℹ️ Output Directory : $MANAGERAPKDIR"
           echo "------------------------------"
           # Default Outputs
           APKMANAGER="false"
           APKCOUNT="0"
           selectedrun=""
-          echo "🔎 [Check] Fetching Latest Successful Workflow Runs..."
+          echo "🔎 Fetching Successful Workflow Runs..."
           # Fetch Successful Workflow Runs
           mapfile -t runs < <(
             gh api \
-              "repos/${KSUREPOSITORY}/actions/runs?branch=${BRANCH}&status=success&per_page=50" \
+              "repos/${KSUREPOSITORY}/actions/runs?branch=${BRANCH}&status=success&per_page=100" \
               --jq '.workflow_runs
                 | sort_by(.created_at)
                 | reverse
                 | .[].id'
           )
           if [[ ${#runs[@]} -eq 0 ]]; then
-            echo "⚠️ [Error] No Successful Runs Found"
+            echo "⚠️ No Successful Runs Found"
             exit 0
           fi
 
-          echo "ℹ️ [Info] Found ${#runs[@]} Workflow Runs..."
-          echo "🔍 [Check] Scanning Runs for APK Artifacts..."
-          bestscore=0
+          echo "ℹ️ Found ${#runs[@]} Successful Workflow Runs..."
+          echo "🔍 Searching for Run Matching Tag: $MANAGERTAG"
+          # Find the successful run associated with the resolved tag.
           for runid in "${runs[@]}"; do
             echo "------------------------------"
-            echo "🔍 [Check] Run ID: $runid"
-            artifactnames="$(
+            echo "🔍 Checking Run ID: $runid"
+            rundata="$(
               gh api \
-                "repos/${KSUREPOSITORY}/actions/runs/${runid}/artifacts" \
-                --jq '.artifacts[].name' 2>/dev/null || true
+                "repos/${KSUREPOSITORY}/actions/runs/${runid}" \
+                --jq '[.head_branch, .head_sha, .display_title, .name] | @tsv' \
+                2>/dev/null || true
             )"
-            if [[ -z "$artifactnames" ]] || \
-               ! echo "$artifactnames" | grep -qiE 'apk|manager|release|build'; then
-              echo "⚠️ [Skip] No Relevant Artifacts"
+            [[ -n "$rundata" ]] || {
+              echo "⚠️ Unable to Read Run Metadata"
+              continue
+            }
+            IFS=$'\t' read -r headbranch headsha displaytitle workflowname <<< "$rundata"
+            echo "🌿 Head Branch : $headbranch"
+            echo "📝 Title       : $displaytitle"
+            echo "⚙️ Workflow    : $workflowname"
+            # Check whether this run belongs to the resolved tag.
+            if [[ "$headbranch" != "$MANAGERTAG" ]]; then
+              echo "⚠️ Tag Mismatch — Skipping"
               continue
             fi
 
-            score=0
-            # APK Artifact Score
-            if echo "$artifactnames" | grep -Eqi '\.apk($|[^a-zA-Z])'; then
-              score=$((score + 50))
+            artifactnames="$(
+              gh api \
+                "repos/${KSUREPOSITORY}/actions/runs/${runid}/artifacts" \
+                --jq '.artifacts[].name' \
+                2>/dev/null || true
+            )"
+            if [[ -z "$artifactnames" ]]; then
+              echo "⚠️ No Artifacts Found"
+              continue
             fi
 
-            # Manager Artifact Score
-            if echo "$artifactnames" | grep -qi "manager"; then
-              score=$((score + 20))
+            if ! echo "$artifactnames" | grep -qiE 'manager'; then
+              echo "⚠️ No Manager Artifacts Found"
+              continue
             fi
 
-            # Release / Build Artifact Score
-            if echo "$artifactnames" | grep -qiE 'release|build'; then
-              score=$((score + 10))
-            fi
-
-            echo "📊 [Info] Score for Run $runid = $score"
-            if [[ "$score" -gt "$bestscore" ]]; then
-              bestscore="$score"
-              selectedrun="$runid"
-              echo "🏆 [New Best] Selected Run Updated → $runid"
-            fi
+            selectedrun="$runid"
+            echo "🏆 Matching Manager Workflow Found: $runid"
+            break
           done
           if [[ -z "$selectedrun" ]]; then
-            echo "⚠️ [Error] No Valid APK Workflow Found"
+            echo "⚠️ No Successful Manager Workflow Found for Tag: $MANAGERTAG"
             exit 0
           fi
 
           echo "------------------------------"
-          echo "🏁 [Result] Selected Run: $selectedrun"
-          echo "🏁 [Result] Best Score  : $bestscore"
+          echo "🏁 Selected Run: $selectedrun"
+          echo "🏷️ Manager Tag : $MANAGERTAG"
           echo "------------------------------"
-          echo "🔍 [Verify] Checking Artifacts..."
+          echo "🔍 Checking Manager Artifacts..."
           gh api \
             "repos/${KSUREPOSITORY}/actions/runs/${selectedrun}/artifacts" \
             --jq '.artifacts[].name' || true
           echo "------------------------------"
-          echo "📩 [Step 3] Fetching Manager APK Artifacts..."
+          echo "📩 Fetching Manager APK Artifacts..."
           artifacturls="$(
             gh api \
               "repos/${KSUREPOSITORY}/actions/runs/${selectedrun}/artifacts" \
@@ -6184,7 +6246,6 @@ jobs:
                 | .archive_download_url' \
               2>/dev/null || true
           )"
-          echo "------------------------------"
           echo "🔍 Manager Artifact URLs:"
           echo "$artifacturls"
           echo "------------------------------"
@@ -6215,7 +6276,7 @@ jobs:
               --retry-delay 3 \
               --connect-timeout 30 \
               --max-time 600 \
-              -H "Authorization: Bearer $GITHUB_TOKEN" \
+              -H "Authorization: Bearer ${GH_TOKEN}" \
               -H "Accept: application/vnd.github+json" \
               -o "$zipfile" \
               "$url" || {
@@ -6233,15 +6294,15 @@ jobs:
               -d "$MANAGERAPKDIR" >/dev/null 2>&1 || true
             rm -f "$zipfile"
           done <<< "$artifacturls"
-          echo "🧹 [Step 4] Cleaning Non-APK Files..."
+          echo "🧹 Cleaning Non-APK Files..."
           find "$MANAGERAPKDIR" \
             -type f \
             ! -name "*.apk" \
             -delete || true
           # ReSukiSU ARM64 Release Filter
           if [[ "$KSUREPOSITORY" == "ReSukiSU/ReSukiSU" ]]; then
-            echo "ℹ️ [Info] ReSukiSU Repository Detected"
-            echo "🔍 Filtering Standard ARM64-v8a Release APK..."
+            echo "ℹ️ ReSukiSU Repository Detected"
+            echo "🔍 Filtering ARM64-v8a Release APK..."
             find "$MANAGERAPKDIR" \
               -type f \
               -name "*.apk" \
@@ -6253,7 +6314,7 @@ jobs:
               -delete || true
           fi
 
-          echo "🔍 [Step 5] Verifying Output..."
+          echo "🔍 Verifying Output..."
           APKCOUNT="$(
             find "$MANAGERAPKDIR" \
               -type f \
@@ -6264,30 +6325,32 @@ jobs:
           if [[ "$APKCOUNT" -gt 0 ]]; then
             APKMANAGER="true"
             echo "------------------------------"
-            echo "📦 [Success] APKs Found: $APKCOUNT"
+            echo "📦 APKs Found: $APKCOUNT"
             ls -lh "$MANAGERAPKDIR"
             echo "------------------------------"
           else
-            echo "⚠️ [Warning] No APK Files Found"
+            echo "⚠️ No APK Files Found"
           fi
 
-          # Export Job Outputs
+          # Step Outputs
           {
             echo "managerapk=$APKMANAGER"
             echo "apkcount=$APKCOUNT"
             echo "managerapkdir=$MANAGERAPKDIR"
             echo "selectedrun=$selectedrun"
+            echo "ksuversion=$KSUVERSION"
           } >> "$GITHUB_OUTPUT"
-          echo "📤 [Output] Manager APK Available : $APKMANAGER"
-          echo "📦 [Output] APK Count             : $APKCOUNT"
-          echo "🏁 [Output] Selected Run          : $selectedrun"
-          echo "🎉 AI APK Resolver Completed Successfully"
 
+          echo "📤 Manager APK Available : $APKMANAGER"
+          echo "📦 APK Count             : $APKCOUNT"
+          echo "🏁 Selected Run          : $selectedrun"
+          echo "🎉 AI APK Resolver Completed"
+                    
       - name: 📤 Upload Manager APK
         if: ${{ steps.root-engine-apk.outputs.managerapk == 'true' }}
         uses: actions/upload-artifact@v7
         with:
-          name: ManagerAPK-${{ inputs.ROOTENGINE }}
+          name: ManagerAPK-${{ inputs.ROOTENGINE }}-${{ steps.root-engine-apk.outputs.ksuversion }}
           path: ${{ steps.root-engine-apk.outputs.managerapkdir }}/*.apk
           if-no-files-found: warn
           retention-days: 7
