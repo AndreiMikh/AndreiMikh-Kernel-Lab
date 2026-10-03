@@ -6196,24 +6196,29 @@ jobs:
           APKMANAGER="false"
           APKCOUNT="0"
           selectedrun=""
+          bestscore=0
           echo "🔎 [Check] Fetching Latest Successful Workflow Runs..."
           # Fetch Successful Workflow Runs
           mapfile -t runs < <(
             gh api \
               "repos/${KSUREPOSITORY}/actions/runs?branch=${BRANCH}&status=success&per_page=50" \
-              --jq '.workflow_runs
+              --jq '
+                .workflow_runs
                 | sort_by(.created_at)
                 | reverse
-                | .[].id'
+                | .[].id
+              '
           )
           if [[ ${#runs[@]} -eq 0 ]]; then
             echo "⚠️ [Error] No Successful Runs Found"
-            exit 0
+          else
+            echo "ℹ️ [Info] Found ${#runs[@]} Workflow Runs..."    
           fi
 
-          echo "ℹ️ [Info] Found ${#runs[@]} Workflow Runs..."
-          echo "🔍 [Check] Scanning Runs for APK Artifacts..."
-          bestscore=0
+          # Source Runs Based on Available Artifacts
+          # Score Runs Based on Available Artifacts
+          # Runs are Processed Newest-First, so Equal Scores Retain the Newest Matching Run
+          echo "🔍 [Check] Scanning Runs for Manager / APK Artifacts..."
           for runid in "${runs[@]}"; do
             echo "------------------------------"
             echo "🔍 [Check] Run ID: $runid"
@@ -6224,7 +6229,7 @@ jobs:
             )"
             if [[ -z "$artifactnames" ]] || \
                ! echo "$artifactnames" | grep -qiE 'apk|manager|release|build'; then
-              echo "⚠️ [Skip] No Relevant Artifacts"
+              echo "⚠️ [Skip] No Relevant Artifacts Found"
               continue
             fi
 
@@ -6251,78 +6256,106 @@ jobs:
               echo "🏆 [New Best] Selected Run Updated → $runid"
             fi
           done
+          # Display Selected Run and its Active Artifacts
           if [[ -z "$selectedrun" ]]; then
             echo "⚠️ [Error] No Valid APK Workflow Found"
-            exit 0
-          fi
-
-          echo "------------------------------"
-          echo "🏁 [Result] Selected Run: $selectedrun"
-          echo "🏁 [Result] Best Score  : $bestscore"
-          echo "------------------------------"
-          echo "🔍 [Verify] Checking Artifacts..."
-          gh api \
-            "repos/${KSUREPOSITORY}/actions/runs/${selectedrun}/artifacts" \
-            --jq '.artifacts[].name' || true
-          echo "------------------------------"
-          echo "📩 [Step 3] Fetching Manager APK Artifacts..."
-          artifacturls="$(
+          else
+            echo "------------------------------"
+            echo "🏁 [Result] Selected Run: $selectedrun"
+            echo "🏁 [Result] Best Score  : $bestscore"
+            echo "------------------------------"
+            echo "🔍 [Verify] Checking Artifacts..."
             gh api \
               "repos/${KSUREPOSITORY}/actions/runs/${selectedrun}/artifacts" \
-              --jq '.artifacts[]
-                | select(.name | test("manager"; "i"))
-                | .archive_download_url' \
-              2>/dev/null || true
-          )"
-          echo "------------------------------"
-          echo "🔍 Manager Artifact URLs:"
-          echo "$artifacturls"
-          echo "------------------------------"
-          artifactcount="$(
-            printf '%s\n' "$artifacturls" |
-            grep -c "api.github.com" || true
-          )"
-          echo "📦 Manager Artifact Count: $artifactcount"
-          if [[ "$artifactcount" -eq 0 ]]; then
-            echo "⚠️ No Manager APK Artifacts Found"
-            exit 0
+              --jq '
+                .artifacts[]
+                | select(.expired == false)
+                | .name
+              ' || true
+            echo "------------------------------"            
+          fi
+         
+          echo "📩 [Step 3] Fetching Manager APK Artifacts..."
+          # Resolve Manager Artifact Download URLs
+          artifacturls=""
+          if [[ -n "$selectedrun" ]]; then
+            echo "📩 Resolving Manager Artifact URLs..."
+            artifacturls="$(
+              gh api \
+                "repos/${KSUREPOSITORY}/actions/runs/${selectedrun}/artifacts" \
+                --jq '
+                  .artifacts[]
+                  | select(.expired == false)
+                  | select(.name | test("manager"; "i"))
+                  | .archive_download_url
+                ' \
+                2>/dev/null || true
+            )"
           fi
 
-          i=0
-          # Download Manager Artifacts
-          while read -r url; do
-            [[ -z "$url" ]] && continue
-            i=$((i + 1))
-            echo "⬇️ Downloading Artifact #$i"
-            zipfile="${MANAGERAPKDIR}/artifact_${i}.zip"
-            curl \
-              --location \
-              --fail \
-              --silent \
-              --show-error \
-              --retry 5 \
-              --retry-all-errors \
-              --retry-delay 3 \
-              --connect-timeout 30 \
-              --max-time 600 \
-              -H "Authorization: Bearer $GITHUB_TOKEN" \
-              -H "Accept: application/vnd.github+json" \
-              -o "$zipfile" \
-              "$url" || {
-                echo "⚠️ Download Failed, Skipping..."
+          if [[ -n "$artifacturls" ]]; then
+            echo "🔗 Manager Artifact URLs:"
+            echo "$artifacturls"
+          else
+            echo "⚠️ No Manager Artifact URLs Found"
+          fi
+
+          artifactcount="$(
+            if [[ -n "$artifacturls" ]]; then
+              printf '%s\n' "$artifacturls" |
+                grep -c 'api.github.com' || true
+            else
+              echo "0"
+            fi
+          )"
+
+          echo "📦 Manager Artifact Count: $artifactcount"
+
+          # Download and Extract Manager Artifacts
+          if [[ "$artifactcount" -gt 0 ]]; then
+            i=0
+            while read -r url; do
+              [[ -z "$url" ]] && continue
+              i=$((i + 1))
+              zipfile="${MANAGERAPKDIR}/artifact_${i}.zip"
+              echo "⬇️ Downloading Manager Artifact #$i"
+              if ! curl \
+                --location \
+                --fail \
+                --silent \
+                --show-error \
+                --retry 5 \
+                --retry-all-errors \
+                --retry-delay 3 \
+                --connect-timeout 30 \
+                --max-time 600 \
+                -H "Authorization: Bearer $GITHUB_TOKEN" \
+                -H "Accept: application/vnd.github+json" \
+                -o "$zipfile" \
+                "$url"; then
+                echo "⚠️ Artifact Download Failed, Skipping"
                 rm -f "$zipfile"
                 continue
-              }
-            # Verify Artifact
-            unzip -t "$zipfile" >/dev/null 2>&1 || {
-              echo "⚠️ Corrupted Artifact, Skipping..."
+              fi
+
+              if ! unzip -t "$zipfile" >/dev/null 2>&1; then
+                echo "⚠️ Invalid or Corrupted Artifact, Skipping"
+                rm -f "$zipfile"
+                continue
+              fi
+
+              echo "📦 Extracting Manager Artifact #$i"
+              if ! unzip -o "$zipfile" \
+                -d "$MANAGERAPKDIR" >/dev/null 2>&1; then
+                echo "⚠️ Artifact Extraction Failed, Skipping"
+                rm -f "$zipfile"
+                continue
+              fi
+
               rm -f "$zipfile"
-              continue
-            }
-            unzip -o "$zipfile" \
-              -d "$MANAGERAPKDIR" >/dev/null 2>&1 || true
-            rm -f "$zipfile"
-          done <<< "$artifacturls"
+            done <<< "$artifacturls"
+          fi      
+          
           echo "🧹 [Step 4] Cleaning Non-APK Files..."
           find "$MANAGERAPKDIR" \
             -type f \
@@ -6344,6 +6377,7 @@ jobs:
           fi
 
           echo "🔍 [Step 5] Verifying Output..."
+          # Verify Final Manager / APK Output
           APKCOUNT="$(
             find "$MANAGERAPKDIR" \
               -type f \
@@ -6353,12 +6387,15 @@ jobs:
           echo "📦 APK Count: $APKCOUNT"
           if [[ "$APKCOUNT" -gt 0 ]]; then
             APKMANAGER="true"
-            echo "------------------------------"
-            echo "📦 [Success] APKs Found: $APKCOUNT"
-            ls -lh "$MANAGERAPKDIR"
-            echo "------------------------------"
+            echo "✔️ Manager APK Resolution Successful"
+            echo "📦 APKs Found: $APKCOUNT"
+            find "$MANAGERAPKDIR" \
+              -type f \
+              -name "*.apk" \
+              -print \
+              -exec ls -lh {} \;
           else
-            echo "⚠️ [Warning] No APK Files Found"
+            echo "⚠️ No Usable Manager APK Files Found"
           fi
 
           # Step Outputs
