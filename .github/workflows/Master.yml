@@ -2898,6 +2898,10 @@ jobs:
           NOMOUNTBIN="${WORKDIR}/nomount-bin"
           NOMOUNTMODULEDIR="${WORKDIR}/nomount-userspace"
           NOMOUNTOUTDIR="${WORKDIR}/output"
+          # SHA-256 Helper
+          sha256file() {
+            sha256sum "$1" | awk '{print $1}'
+          }
           cd "$COMMONKERNELFOLDER"
           echo "------------------------------"
           echo "NoMount Kernel Integration and Package"
@@ -3199,14 +3203,21 @@ jobs:
                 continue
                 ;;
             esac
-            sha256sum "$FILE" > "${FILE}.sha256"
+            HASH="$(sha256file "$FILE")"
+            [[ "$HASH" =~ ^[[:xdigit:]]{64}$ ]] || {
+              echo "⛔ Invalid SHA-256 Generated: $RELATIVE"
+              exit 1
+            }
+            printf '%s\n' "$HASH" > "${FILE}.sha256"
             echo "  ✔️ ${RELATIVE}.sha256"
+            echo "     SHA-256: $HASH"
           done < <(
             find "$NOMOUNTMODULEDIR" \
               -type f \
               ! -name '*.sha256' \
               -print0
           )
+
           echo "✔️ SHA-256 Checksums Generated for All Module Files"
           # Verify Generated Per-File SHA-256 Checksums
           echo "🔎 Verifying Module SHA-256 Checksums..."
@@ -3219,15 +3230,28 @@ jobs:
               exit 1
             fi
 
-            EXPECTED="$(awk '{print $1}' "$CHECKSUM")"
-            ACTUAL="$(sha256sum "$FILE" | awk '{print $1}')"
-            if [[ -z "$EXPECTED" || "$EXPECTED" != "$ACTUAL" ]]; then
+            EXPECTED="$(awk 'NF {print $1; exit}' "$CHECKSUM")"
+            ACTUAL="$(sha256file "$FILE")"
+            if [[ ! "$EXPECTED" =~ ^[[:xdigit:]]{64}$ ]]; then
+              echo "⚠️ Hash Mismatch, Invalid SHA-256 Manifest: $RELATIVE"
+              exit 1
+            fi
+
+            if [[ "$(wc -w < "$CHECKSUM")" -ne 1 ]]; then
+              echo "⚠️ SHA-256 Manifest Contains Extra Fields: $RELATIVE"
+              exit 1
+            fi
+
+            if [[ "$EXPECTED" != "$ACTUAL" ]]; then
               echo "⚠️ Hash Mismatch: $RELATIVE"
+              echo "   Expected: $EXPECTED"
+              echo "   Actual  : $ACTUAL"
               exit 1
             fi
 
             CHECKSUMCOUNT=$((CHECKSUMCOUNT + 1))
             echo "✔️ $RELATIVE"
+            echo "   SHA-256: $ACTUAL"
           done < <(
             find "$NOMOUNTMODULEDIR" \
               -type f \
@@ -3301,21 +3325,32 @@ jobs:
           echo "✔️ Integrity Scripts Correctly Excluded From Self-Checksums"
           # Generate ZIP SHA-256
           echo "🔐 Generating ZIP SHA-256..."
-          sha256sum "$NOMOUNTMODULEZIP" \
+          ZIPHASH="$(sha256file "$NOMOUNTMODULEZIP")"
+          [[ "$ZIPHASH" =~ ^[[:xdigit:]]{64}$ ]] || {
+            echo "⛔ Invalid ZIP SHA-256 Generated"
+            exit 1
+          }
+          printf '%s\n' "$ZIPHASH" \
             > "${NOMOUNTMODULEZIP}.sha256"
           echo "✔️ NoMount ZIP SHA-256:"
           cat "${NOMOUNTMODULEZIP}.sha256"
           # Verify ZIP SHA-256
           echo "🔎 Verifying ZIP SHA-256..."
           EXPECTEDZIPHASH="$(
-            awk '{print $1}' "${NOMOUNTMODULEZIP}.sha256"
+            awk 'NF {print $1; exit}' "${NOMOUNTMODULEZIP}.sha256"
           )"
           ACTUALZIPHASH="$(
-            sha256sum "$NOMOUNTMODULEZIP" |
-            awk '{print $1}'
+            sha256file "$NOMOUNTMODULEZIP"
           )"
 
-          if [[ -z "$EXPECTEDZIPHASH" || "$EXPECTEDZIPHASH" != "$ACTUALZIPHASH" ]]; then
+          if [[ "$(wc -w < "${NOMOUNTMODULEZIP}.sha256")" -ne 1 ]]; then
+            echo "⚠️ NoMount ZIP SHA-256 Manifest Contains Extra Fields"
+            exit 1
+          fi
+
+          if [[ -z "$EXPECTEDZIPHASH" ||
+                ! "$EXPECTEDZIPHASH" =~ ^[[:xdigit:]]{64}$ ||
+                "$EXPECTEDZIPHASH" != "$ACTUALZIPHASH" ]]; then
             echo "⚠️ NoMount ZIP SHA-256 Verification Failed"
             echo "   Expected : $EXPECTEDZIPHASH"
             echo "   Actual   : $ACTUALZIPHASH"
@@ -3323,6 +3358,7 @@ jobs:
           fi
 
           echo "✔️ NoMount ZIP SHA-256 Verified"
+          echo "   SHA-256: $ACTUALZIPHASH"
           # Final Package Details
           echo "------------------------------"
           echo "NoMount Integration Complete"
@@ -3333,14 +3369,14 @@ jobs:
           echo "📦 ARM64 Binary    : ${NOMOUNTBIN}/nm-arm64"
           echo "📦 ARM32 Binary    : ${NOMOUNTBIN}/nm-arm"
           echo "📦 Userspace ZIP   : $NOMOUNTMODULEZIP"
-          echo "🔐 SHA-256         : ${NOMOUNTMODULEZIP}.sha256"
+          echo "🔐 SHA-256         : $ZIPHASH"
           ls -lh \
             "$NOMOUNTMODULEZIP" \
             "${NOMOUNTMODULEZIP}.sha256"
           echo "📋 NoMount ZIP Contents:"
           unzip -l "$NOMOUNTMODULEZIP"
           echo "🎉 NoMount Kernel Integration and Packaging Completed Successfully"
-  
+ 
       - name: ♻️ Fake Patches (Invert)
         if: ${{ inputs.SUSFSREPOSITORY != '-1' }}
         shell: bash
