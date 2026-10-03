@@ -6176,7 +6176,7 @@ jobs:
       KSUVERSION: ${{ needs.prepare.outputs.ksuversion }}
       ROOTENGINE: ${{ inputs.ROOTENGINE }}
     steps:
-      - name: 🤖 APK Workflow Resolver
+      - name: 🤖 Workflow APK Resolver
         id: root-engine-apk
         shell: bash
         run: |
@@ -6185,11 +6185,8 @@ jobs:
           export GH_TOKEN="$GITHUB_TOKEN"
           echo "🚀 AI APK Resolver Started..."
           MANAGERAPKDIR="${RUNNER_TEMP}/ManagerAPK-${ROOTENGINE}"
-          MANAGERARTIFACTDIR="${RUNNER_TEMP}/ManagerArtifact-${ROOTENGINE}"      
           rm -rf "$MANAGERAPKDIR"
           mkdir -p "$MANAGERAPKDIR"
-          rm -rf "$MANAGERARTIFACTDIR"
-          mkdir -p "$MANAGERARTIFACTDIR"
           echo "------------------------------"
           echo "ℹ️ [Info] Repository       : $KSUREPOSITORY"
           echo "ℹ️ [Info] Branch           : $BRANCH"
@@ -6291,16 +6288,14 @@ jobs:
             exit 0
           fi
 
-          echo "------------------------------"
-          echo "📩 Downloading Manager Artifacts"
-          echo "------------------------------"
           i=0
+          # Download Manager Artifacts
           while read -r url; do
             [[ -z "$url" ]] && continue
             i=$((i + 1))
-            zipfile="${MANAGERARTIFACTDIR}/manager-${i}.zip"
-            echo "⬇️ Downloading Manager Artifact #$i"
-            if ! curl \
+            echo "⬇️ Downloading Artifact #$i"
+            zipfile="${MANAGERAPKDIR}/artifact_${i}.zip"
+            curl \
               --location \
               --fail \
               --silent \
@@ -6310,35 +6305,29 @@ jobs:
               --retry-delay 3 \
               --connect-timeout 30 \
               --max-time 600 \
-              -H "Authorization: Bearer ${GH_TOKEN}" \
+              -H "Authorization: Bearer $GITHUB_TOKEN" \
               -H "Accept: application/vnd.github+json" \
               -o "$zipfile" \
-              "$url"; then
-              echo "⚠️ Artifact Download Failed"
+              "$url" || {
+                echo "⚠️ Download Failed, Skipping..."
+                rm -f "$zipfile"
+                continue
+              }
+            # Verify Artifact
+            unzip -t "$zipfile" >/dev/null 2>&1 || {
+              echo "⚠️ Corrupted Artifact, Skipping..."
               rm -f "$zipfile"
               continue
-            fi
-
-            if ! unzip -t "$zipfile" >/dev/null 2>&1; then
-              echo "⚠️ Invalid Artifact ZIP"
-              rm -f "$zipfile"
-              continue
-            fi
-
-            echo "📦 Artifact Saved: $zipfile"
-            unzip -o \
-              "$zipfile" \
-              -d "$MANAGERAPKDIR" >/dev/null 2>&1 ||
-              true
+            }
+            unzip -o "$zipfile" \
+              -d "$MANAGERAPKDIR" >/dev/null 2>&1 || true
+            rm -f "$zipfile"
           done <<< "$artifacturls"
-          echo "------------------------------"
-          echo "🧹 Cleaning Extracted Files"
-          echo "------------------------------"
+          echo "🧹 [Step 4] Cleaning Non-APK Files..."
           find "$MANAGERAPKDIR" \
             -type f \
             ! -name "*.apk" \
-            -delete ||
-            true
+            -delete || true
           # ReSukiSU ARM64 Release Filter
           if [[ "$KSUREPOSITORY" == "ReSukiSU/ReSukiSU" ]]; then
             echo "ℹ️ [Info] ReSukiSU Repository Detected"
@@ -6361,58 +6350,27 @@ jobs:
               -name "*.apk" |
             wc -l
           )"
-          APKCOUNT="${APKCOUNT//[[:space:]]/}"
-          ARTIFACTCOUNT="$(
-            find "$MANAGERARTIFACTDIR" \
-              -type f \
-              -name "*.zip" |
-            wc -l
-          )"
-          ARTIFACTCOUNT="${ARTIFACTCOUNT//[[:space:]]/}"
-          APKMANAGER="false"
-          echo "------------------------------"
-          echo "🔍 Verifying Manager APK"
-          echo "------------------------------"
           echo "📦 APK Count: $APKCOUNT"
           if [[ "$APKCOUNT" -gt 0 ]]; then
             APKMANAGER="true"
             echo "------------------------------"
-            echo "📦 Manager APKs"
-            find "$MANAGERAPKDIR" \
-              -type f \
-              -name "*.apk" \
-              -print
+            echo "📦 [Success] APKs Found: $APKCOUNT"
+            ls -lh "$MANAGERAPKDIR"
             echo "------------------------------"
           else
-            echo "⚠️ No Manager APK Found"
-          fi
-
-          if [[ "$ARTIFACTCOUNT" -gt 0 ]]; then
-            echo "------------------------------"
-            echo "📦 Downloaded Manager Artifacts"
-            find "$MANAGERARTIFACTDIR" \
-              -type f \
-              -name "*.zip" \
-              -print
-            echo "------------------------------"
-          else
-            echo "⚠️ No Downloaded Manager Artifact Found"
+            echo "⚠️ [Warning] No APK Files Found"
           fi
 
           # Step Outputs
           {
             echo "managerapk=$APKMANAGER"
             echo "apkcount=$APKCOUNT"
-            echo "artifactcount=$ARTIFACTCOUNT"
             echo "managerapkdir=$MANAGERAPKDIR"
-            echo "managerartifactdir=$MANAGERARTIFACTDIR"
             echo "selectedrun=$selectedrun"
             echo "ksuversion=$KSUVERSION"
           } >> "$GITHUB_OUTPUT"
           echo "📤 Manager APK Available : $APKMANAGER"
           echo "📦 APK Count             : $APKCOUNT"
-          echo "📦 Artifact Count        : $ARTIFACTCOUNT"
-          echo "🏷️ Manager Tag           : $MANAGERTAG"
           echo "🏁 Selected Run          : $selectedrun"
           echo "🎉 AI APK Resolver Completed"
                     
@@ -6420,10 +6378,8 @@ jobs:
         if: ${{ steps.root-engine-apk.outputs.managerapk == 'true' }}
         uses: actions/upload-artifact@v7
         with:
-          name: ManagerAPK-${{ inputs.ROOTENGINE }}
-          path: |
-            ${{ steps.root-engine-apk.outputs.managerapkdir }}/**/*.apk
-            ${{ steps.root-engine-apk.outputs.managerartifactdir }}/*.zip
+          name: ManagerAPK-${{ inputs.ROOTENGINE }}-${{ steps.root-engine-apk.outputs.ksuversion }}
+          path: ${{ steps.root-engine-apk.outputs.managerapkdir }}/*.apk
           if-no-files-found: warn
           retention-days: 7
  
