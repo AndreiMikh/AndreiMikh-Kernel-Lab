@@ -297,71 +297,85 @@ jobs:
           [[ -n "$KSUREPO" ]] || {
             echo "⚠️ Failed to Resolve Root Engine Repository"
             exit 1
-          }
-          # Resolve Latest Root Engine Tag
-          echo "🔎 Fetching Latest Root Engine Tag..."
-          MANAGERTAG="$(
-            gh api \
-              "repos/${KSUREPO}/tags?per_page=100" |
-            jq -r '
-              sort_by(.commit.sha) |
-              .[0].name
-            '
-          )"
-          [[ -n "$MANAGERTAG" ]] || {
-            echo "⚠️ Failed to Resolve Latest Root Engine Tag"
-            exit 1
-          }
-          echo "🏷️ Latest Root Engine Tag: $MANAGERTAG"
-        
-          # Determine KSU Version
-          echo "🔎 Determining KSU Version..."
-          ROOTTEMP="${RUNNER_TEMP}/root-engine-version"
-          rm -rf "$ROOTTEMP"
-          git clone \
-            --branch "$MANAGERTAG" \
-            --single-branch \
-            "https://github.com/${KSUREPO}.git" \
-            "$ROOTTEMP"
-          cd "$ROOTTEMP"
-          COMMITCOUNT="$(git rev-list --count HEAD)"
-          echo "📊 Commit Count: $COMMITCOUNT"
+          }         
+          echo ""
+          echo "------------------------------"
+          echo "🔗 Repository     : $KSUREPO"
+          echo "🌿 Manager Branch : $MANAGERBRANCH"
+          echo "📁 Setup Repo     : ${BRANCHPATH:-<None>}"
+          echo "📦 Manager Artifact: $MANAGERARTIFACT"
+          echo "------------------------------"
+          # Resolve KSU Version
           case "$ROOTENGINE" in
-            ReSukiSU)
-              COMMITCOUNT="$(git rev-list --count HEAD 2>/dev/null || echo 0)"
-              if [[ "$COMMITCOUNT" =~ ^[0-9]+$ ]]; then
-                KSUVERSION=$((COMMITCOUNT + 30724))
-              else
-                KSUVERSION=30724
-              fi
-              ;;
             SukiSU-Ultra)
-              COMMITCOUNT="$(git rev-list --count HEAD 2>/dev/null || echo 0)"
-              if [[ "$COMMITCOUNT" =~ ^[0-9]+$ ]]; then
-                KSUVERSION=$((COMMITCOUNT + 37185))
-              else
-                KSUVERSION=114514
-              fi
+              VERSIONOFFSET="37185"
+              VERSIONBRANCH="main"
+              ;;
+            ReSukiSU)
+              VERSIONOFFSET="30700"
+              VERSIONBRANCH="$MANAGERBRANCH"
               ;;
             KernelSU-Next|KernelSU)
-              COMMITCOUNT="$(git rev-list --count HEAD 2>/dev/null || echo 0)"
-              if [[ "$COMMITCOUNT" =~ ^[0-9]+$ ]]; then
-                KSUVERSION=$((COMMITCOUNT + 30000))
-              else
-                KSUVERSION=30000
-              fi
+              VERSIONOFFSET="30000"
+              VERSIONBRANCH="$MANAGERBRANCH"
               ;;
             *)
               echo "⚠️ Unsupported Root Engine: $ROOTENGINE"
               exit 1
               ;;
           esac
-          cd "$GITHUB_WORKSPACE"
-          rm -rf "$ROOTTEMP"
+          echo ""
+          echo "------------------------------"
+          echo "🔎 Resolving $ROOTENGINE KSU Version..."
+          COMMITCOUNT="$(
+            gh api graphql \
+              -f query='
+                query($owner: String!, $repo: String!, $expression: String!) {
+                  repository(owner: $owner, name: $repo) {
+                    object(expression: $expression) {
+                      ... on Commit {
+                        history(first: 1) {
+                          totalCount
+                        }
+                      }
+                    }
+                  }
+                }
+              ' \
+              -F owner="${KSUREPO%%/*}" \
+              -F repo="${KSUREPO#*/}" \
+              -F expression="$VERSIONBRANCH" \
+              --jq '.data.repository.object.history.totalCount'
+          )"
+          [[ "$COMMITCOUNT" =~ ^[0-9]+$ ]] || {
+            echo "⚠️ Failed to Resolve $ROOTENGINE Commit Count"
+            exit 1
+          }
+          KSUVERSION=$((COMMITCOUNT + VERSIONOFFSET))
           [[ "$KSUVERSION" =~ ^[0-9]+$ ]] || {
             echo "⚠️ Invalid KSU Version: $KSUVERSION"
             exit 1
           }
+          echo "📊 Commit Count : $COMMITCOUNT"
+          echo "➕ Offset       : $VERSIONOFFSET"
+          echo "🔢 KSU Version  : $KSUVERSION"
+          # Resolve Latest Manager Release Tag
+          echo "🔎 Fetching Latest Manager Release..."
+          MANAGERTAG="$(
+            gh api \
+              "repos/${KSUREPO}/releases?per_page=100" \
+              --jq '
+                sort_by(.published_at) |
+                reverse |
+                .[0].tag_name
+              '
+          )"
+          [[ -n "$MANAGERTAG" && "$MANAGERTAG" != "null" ]] || {
+            echo "⚠️ Failed to Resolve Latest Manager Release Tag"
+            exit 1
+          }
+          echo "🏷️ Latest Manager Tag: $MANAGERTAG"
+          # Export Outputs
           {
             echo "managerbranch=$MANAGERBRANCH"
             echo "branchpath=$BRANCHPATH"
@@ -370,15 +384,16 @@ jobs:
             echo "managertag=$MANAGERTAG"
             echo "ksuversion=$KSUVERSION"
           } >> "$GITHUB_OUTPUT"
+          echo ""
           echo "------------------------------"
-          echo "✔️ Root Engine Source Resolved"
-          echo "📦 Engine      : $ROOTENGINE"
-          echo "📂 Repository  : $KSUREPO"
-          echo "🌿 Branch      : $MANAGERBRANCH"
-          echo "📁 Setup Repo  : $BRANCHPATH"
-          echo "📦 Artifact    : $MANAGERARTIFACT"
-          echo "🏷️ Manager Tag : $MANAGERTAG"
-          echo "🔢 KSU Version : $KSUVERSION"
+          echo "📦 Engine       : $ROOTENGINE"
+          echo "📂 Repository   : $KSUREPO"
+          echo "🌿 Branch       : $MANAGERBRANCH"
+          echo "📁 Setup Repo   : ${BRANCHPATH:-<none>}"
+          echo "📦 Artifact     : $MANAGERARTIFACT"
+          echo "🏷️ Manager Tag  : $MANAGERTAG"
+          echo "📊 Commit Count : $COMMITCOUNT"
+          echo "🔢 KSU Version  : $KSUVERSION"
           echo "------------------------------"
   kernel-build:
     needs: prepare
