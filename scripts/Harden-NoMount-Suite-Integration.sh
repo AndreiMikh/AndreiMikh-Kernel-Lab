@@ -644,10 +644,10 @@ verifyhook() {
         sel_write_member
     do
         verifyfunctiongate \
-            "$d/security/selinux/selinuxfs.c" \
-            "^static ssize_t ${writefunction}\\(" \
-            'sel_ctx_hidden' \
-            "hook: ${writefunction}() has no sel_ctx_hidden() gate"
+          "$d/security/selinux/selinuxfs.c" \
+          "^static ssize_t ${writefunction}\\(" \
+          'sel_ctx_hidden' \
+          "hook: ${writefunction}() has no sel_ctx_hidden() gate"
     done
 
     nfs="$(
