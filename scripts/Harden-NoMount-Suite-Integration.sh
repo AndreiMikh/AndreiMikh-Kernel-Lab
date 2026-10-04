@@ -515,29 +515,38 @@ infn() {
     local start
     local body
     start="$(
-        grep -nE \
-            "^[[:space:]]*(static[[:space:]]+|inline[[:space:]]+|noinline[[:space:]]+)*[[:alnum:]_[:space:]\*]+[[:space:]]${function}[[:space:]]*\(" \
-            "$file" |
-        head -n1 |
-        cut -d: -f1
+        grep -nE "$function" "$file" |
+        while IFS=: read -r line text; do
+            case "$text" in
+                *';'*)
+                    case "$text" in
+                        *'{'*) echo "$line"; break ;;
+                    esac
+                    ;;
+                *)
+                    echo "$line"
+                    break
+                    ;;
+            esac
+        done
     )"
     [ -n "$start" ] ||
-        error "$message: function ${function}() was not found in ${file}"
+        error \
+            "$message: function ${function} was not found in ${file}"
     body="$(
         awk -v start="$start" '
             NR < start {
                 next
             }
-
             {
-                text = $0
-                body = body $0 "\n"
-                opens = gsub(/\{/, "{", text)
-                closes = gsub(/\}/, "}", text)
-                if (opens > 0 || closes > 0)
+                line = $0
+                body = body line "\n"
+                opens = gsub(/\{/, "{", line)
+                closes = gsub(/\}/, "}", line)
+                if (opens > 0)
                     started = 1
-                depth += opens
-                depth -= closes
+
+                depth += opens - closes
                 if (started && depth <= 0) {
                     print body
                     exit
