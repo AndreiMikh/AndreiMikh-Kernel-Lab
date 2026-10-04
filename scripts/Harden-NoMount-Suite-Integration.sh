@@ -35,8 +35,10 @@ error() {
 
 need() {
     local var
+
     for var in "$@"; do
-        [ -n "${!var:-}" ] || error "$var is not set"
+        [ -n "${!var:-}" ] ||
+            error "$var is not set"
     done
 }
 
@@ -44,13 +46,16 @@ has() {
     local needle="$1"
     local file="$2"
     local message="$3"
-    grep -Fq -- "$needle" "$file" || error "$message"
+
+    grep -Fq -- "$needle" "$file" ||
+        error "$message"
 }
 
 hasnt() {
     local needle="$1"
     local file="$2"
     local message="$3"
+
     if grep -Fq -- "$needle" "$file" 2>/dev/null; then
         error "$message"
     fi
@@ -61,7 +66,9 @@ objy() {
     local object="$2"
     local message="$3"
     local escaped
+
     escaped="${object//./[.]}"
+
     grep -qE \
         "^obj-y[[:space:]]*\\+=[[:space:]]*$escaped([[:space:]]|\$)" \
         "$makefile" ||
@@ -114,6 +121,7 @@ resolvekernelversion() {
 
     [ -n "$version" ] ||
         error "cannot read version from ${COMMONKERNELFOLDER}/Makefile"
+
     [ -n "$patchlevel" ] ||
         error "cannot read patchlevel from ${COMMONKERNELFOLDER}/Makefile"
 
@@ -129,6 +137,7 @@ resolvekernelversion() {
     esac
 
     export KERNELVERSION
+
     echo "kernel version: ${KERNELVERSION}"
 }
 
@@ -162,13 +171,16 @@ clonerepository() {
 
     if [ ! -d "${directory}/.git" ]; then
         echo "cloning ${url}@${branch}"
+
         rm -rf "$directory"
+
         git clone \
             --depth=1 \
             --branch "$branch" \
             "$url" \
             "$directory" ||
             error "failed to clone ${url}@${branch}"
+
         return 0
     fi
 
@@ -210,10 +222,13 @@ clonerepositories() {
 
     [ -d "$HOOKLESSDIR" ] ||
         error "NoMount Suite hookless directory not found: $HOOKLESSDIR"
+
     [ -d "$HOOKDIR" ] ||
         error "kernel patches hook directory not found: $HOOKDIR"
+
     [ -d "$PATHHIDEDIR" ] ||
         error "kernel patches pathhide directory not found: $PATHHIDEDIR"
+
     [ -d "$GHOSTDIR" ] ||
         error "kernel patches ghost directory not found: $GHOSTDIR"
 }
@@ -221,6 +236,7 @@ clonerepositories() {
 configpath() {
     [ -f "${DEFCONFIG:-}" ] ||
         error "defconfig not found: ${DEFCONFIG:-unset}"
+
     echo "$DEFCONFIG"
 }
 
@@ -246,13 +262,17 @@ setconfig() {
     config="$(configpath)"
     tmp="${config}.nomount.tmp"
 
-    awk -v symbol="$symbol" '$0 !~ "^" symbol "=" && $0 !~ "^# " symbol " is not set$"' \
+    awk \
+        -v symbol="$symbol" \
+        '$0 !~ "^" symbol "=" &&
+         $0 !~ "^# " symbol " is not set$"' \
         "$config" > "$tmp" || {
         rm -f "$tmp"
         error "failed to update ${symbol} in ${config}"
     }
 
     printf '%s=%s\n' "$symbol" "$value" >> "$tmp"
+
     mv -f "$tmp" "$config" || {
         rm -f "$tmp"
         error "failed to replace ${config}"
@@ -265,14 +285,17 @@ normalise() {
     if command -v dos2unix >/dev/null 2>&1; then
         for file in "$@"; do
             [ -f "$file" ] || continue
+
             dos2unix "$file" >/dev/null 2>&1 ||
                 error "failed to normalize line endings: $file"
         done
+
         return 0
     fi
 
     for file in "$@"; do
         [ -f "$file" ] || continue
+
         if grep -qU "$(printf '\r')" "$file" 2>/dev/null; then
             error "$file has CRLF line endings and dos2unix is not installed"
         fi
@@ -287,7 +310,13 @@ normalisepatches() {
     while IFS= read -r -d '' patch; do
         found=true
         normalise "$patch"
-    done < <(find "$directory" -maxdepth 1 -type f -name '*.patch' -print0)
+    done < <(
+        find "$directory" \
+            -maxdepth 1 \
+            -type f \
+            -name '*.patch' \
+            -print0
+    )
 
     [ "$found" = true ] ||
         error "no patch files found in ${directory}"
@@ -336,6 +365,7 @@ patchdiagnose() {
     local target="$2"
 
     echo "patch diagnostic: $(basename "$patchfile")"
+
     patch \
         --batch \
         --fuzz="$PATCH_FUZZ" \
@@ -379,6 +409,7 @@ applypatch() {
     fi
 
     patchdiagnose "$patchfile" "$target"
+
     error \
         "$(basename "$patchfile") does not apply at fuzz ${PATCH_FUZZ} and is not already applied in $target"
 }
@@ -386,6 +417,7 @@ applypatch() {
 applyfirst() {
     local family="$1"
     local wanted="$2"
+
     shift 2
 
     local patchfile
@@ -402,12 +434,14 @@ applyfirst() {
 
         if patchforward "$patchfile" "$COMMONKERNELFOLDER"; then
             forward_hits+=("$basename")
+
             if [ -z "$selected" ] && {
                 [ "$wanted" = "-" ] ||
                 [ "$basename" = "$wanted" ]
             }; then
                 selected="$patchfile"
             fi
+
         elif patchreverse "$patchfile" "$COMMONKERNELFOLDER"; then
             reverse_hits+=("$basename")
         fi
@@ -415,15 +449,18 @@ applyfirst() {
 
     if [ -n "$selected" ]; then
         if [ "${#forward_hits[@]}" -gt 1 ]; then
-            echo "  $(basename "$selected"): selected; other forward-applicable variants: ${forward_hits[*]}"
+            echo \
+                "  $(basename "$selected"): selected; other forward-applicable variants: ${forward_hits[*]}"
         else
             echo "  $(basename "$selected"): selected"
         fi
+
         applypatch "$selected" "$COMMONKERNELFOLDER"
         return 0
     fi
 
-    if [ "$wanted" != "-" ] && [ "${#forward_hits[@]}" -gt 0 ]; then
+    if [ "$wanted" != "-" ] &&
+       [ "${#forward_hits[@]}" -gt 0 ]; then
         error \
             "${family}: pinned variant '${wanted}' does not apply at fuzz ${PATCH_FUZZ}; forward-applicable variants: ${forward_hits[*]}"
     fi
@@ -436,19 +473,23 @@ applyfirst() {
     if [ "${#forward_hits[@]}" -eq 1 ]; then
         for patchfile in "$@"; do
             basename="$(basename "$patchfile")"
+
             if [ "$basename" = "${forward_hits[0]}" ]; then
                 selected="$patchfile"
                 break
             fi
         done
+
         [ -n "$selected" ] ||
             error "${family}: failed to resolve the applicable patch"
+
         applypatch "$selected" "$COMMONKERNELFOLDER"
         return 0
     fi
 
     if [ "${#reverse_hits[@]}" -eq 1 ]; then
-        if [ "$wanted" != "-" ] && [ "${reverse_hits[0]}" != "$wanted" ]; then
+        if [ "$wanted" != "-" ] &&
+           [ "${reverse_hits[0]}" != "$wanted" ]; then
             error \
                 "${family}: pinned variant '${wanted}' is not the already-applied variant; found: ${reverse_hits[*]}"
         fi
@@ -462,7 +503,8 @@ applyfirst() {
             "${family}: multiple variants appear already applied: ${reverse_hits[*]}"
     fi
 
-    error "${family}: no variant applies at fuzz ${PATCH_FUZZ} on ${KERNELVERSION}"
+    error \
+        "${family}: no variant applies at fuzz ${PATCH_FUZZ} on ${KERNELVERSION}"
 }
 
 infn() {
@@ -474,46 +516,81 @@ infn() {
 
     segment="$(
         awk -v start="$function" '
+            function clean(line,    p) {
+                while (1) {
+                    if (incomment) {
+                        p = index(line, "*/")
+
+                        if (p == 0) {
+                            line = ""
+                            return line
+                        }
+
+                        line = substr(line, p + 2)
+                        incomment = 0
+                    }
+
+                    p = index(line, "/*")
+
+                    if (p == 0)
+                        break
+
+                    line = substr(line, 1, p - 1)
+                    incomment = 1
+                }
+
+                gsub(/"([^"\\]|\\.)*"/, "", line)
+                gsub(/\047([^\\\047]|\\.)*\047/, "", line)
+
+                return line
+            }
+
             BEGIN {
-                candidate = 0
-                started = 0
+                found = 0
+                opened = 0
                 depth = 0
-                segment = ""
+                output = ""
             }
 
             {
-                line = $0
+                raw = $0
 
-                if (!candidate && line ~ start) {
-                    candidate = 1
-                    started = 0
-                    depth = 0
-                    segment = ""
+                if (!found) {
+                    if (raw ~ start) {
+                        found = 1
+                        output = ""
+                        opened = 0
+                        depth = 0
+                    } else {
+                        next
+                    }
                 }
 
-                if (!candidate)
-                    next
+                line = clean(raw)
 
-                segment = segment line "\n"
+                output = output raw "\n"
 
                 opens = gsub(/\{/, "{", line)
                 closes = gsub(/\}/, "}", line)
 
-                if (!started) {
+                if (!opened) {
                     if (opens > 0) {
-                        started = 1
+                        opened = 1
                         depth = opens - closes
-                    } else if (line ~ /;/) {
-                        candidate = 0
-                        segment = ""
+
+                        if (depth <= 0) {
+                            print output
+                            exit
+                        }
                     }
+
                     next
                 }
 
                 depth += opens - closes
 
-                if (depth == 0) {
-                    print segment
+                if (depth <= 0) {
+                    print output
                     exit
                 }
             }
@@ -526,6 +603,20 @@ infn() {
             ;;
     esac
 
+    echo "===== NoMount function verification failure =====" >&2
+    echo "file     : $file" >&2
+    echo "function : $function" >&2
+    echo "needle   : $needle" >&2
+    echo "-------------------------------------------------" >&2
+
+    if [ -n "$segment" ]; then
+        printf '%s\n' "$segment" >&2
+    else
+        echo "function body could not be extracted" >&2
+    fi
+
+    echo "=================================================" >&2
+
     error "$message"
 }
 
@@ -535,15 +626,18 @@ awkplacement() {
             fn = $0
             avc = 0
         }
+
         /avc_has_perm/ {
             avc = 1
         }
+
         /:ksu:/ {
             if (!avc) {
                 print "EARLY " fn > "/dev/stderr"
                 bad = 1
             }
         }
+
         END {
             exit bad ? 1 : 0
         }
@@ -555,6 +649,7 @@ verifyhookless() {
 
     [ -f "$d/fs/nomount.c" ] ||
         error "hookless: fs/nomount.c missing"
+
     [ -f "$d/fs/nomount.h" ] ||
         error "hookless: fs/nomount.h missing"
 
@@ -574,6 +669,7 @@ verifyhookless() {
         error "hookless: task_mmu.c hook missing"
 
     assertconfig CONFIG_NOMOUNT y
+
     echo "hookless: verified"
 }
 
@@ -583,7 +679,11 @@ verifyfunctiongate() {
     local needle="$3"
     local message="$4"
 
-    infn "$file" "$function" "$needle" "$message"
+    infn \
+        "$file" \
+        "$function" \
+        "$needle" \
+        "$message"
 }
 
 verifyhook() {
@@ -595,8 +695,10 @@ verifyhook() {
 
     [ -f "$d/security/selinux/selinuxfs.c" ] ||
         error "hook: security/selinux/selinuxfs.c missing"
+
     [ -f "$d/security/selinux/hooks.c" ] ||
         error "hook: security/selinux/hooks.c missing"
+
     [ -f "$d/security/selinux/avc.c" ] ||
         error "hook: security/selinux/avc.c missing"
 
@@ -617,7 +719,7 @@ verifyhook() {
 
     infn \
         "$d/security/selinux/hooks.c" \
-        '^static int selinux_inode_setxattr' \
+        'selinux_inode_setxattr[[:space:]]*\(' \
         ':ksu:' \
         "hook: selinux_inode_setxattr() has no hidden-type guard"
 
@@ -625,14 +727,14 @@ verifyhook() {
         6.12)
             infn \
                 "$d/security/selinux/hooks.c" \
-                '^static int selinux_lsm_setattr' \
+                'selinux_lsm_setattr[[:space:]]*\(' \
                 ':ksu:' \
                 "hook: selinux_lsm_setattr() has no hidden-type guard"
             ;;
         *)
             infn \
                 "$d/security/selinux/hooks.c" \
-                '^static int selinux_setprocattr' \
+                'selinux_setprocattr[[:space:]]*\(' \
                 ':ksu:' \
                 "hook: selinux_setprocattr() has no hidden-type guard"
             ;;
@@ -653,6 +755,8 @@ verifyhook() {
         "$d/security/selinux/Makefile" \
         "hook: selinuxfs.o is not in security/selinux/Makefile"
 
+    echo "verify: SELinux write gates"
+
     for writefunction in \
         sel_write_context \
         sel_write_validatetrans \
@@ -663,26 +767,31 @@ verifyhook() {
         sel_write_member
     do
         verifyfunctiongate \
-          "$d/security/selinux/selinuxfs.c" \
-          "^static ssize_t ${writefunction}\\(" \
-          'sel_ctx_hidden' \
-          "hook: ${writefunction}() has no sel_ctx_hidden() gate"
+            "$d/security/selinux/selinuxfs.c" \
+            "${writefunction}[[:space:]]*\\(" \
+            'sel_ctx_hidden' \
+            "hook: ${writefunction}() has no sel_ctx_hidden() gate"
+
+        echo "  verified: ${writefunction}()"
     done
 
     nfs="$(
-        grep -o ':[a-z_]*:' "$d/security/selinux/selinuxfs.c" |
+        grep -o ':[a-z_]*:' \
+            "$d/security/selinux/selinuxfs.c" |
         sort -u |
         tr '\n' ' '
     )"
 
     nhooks="$(
-        grep -o ':[a-z_]*:' "$d/security/selinux/hooks.c" |
+        grep -o ':[a-z_]*:' \
+            "$d/security/selinux/hooks.c" |
         sort -u |
         tr '\n' ' '
     )"
 
     navc="$(
-        grep -o ':[a-z_]*:' "$d/security/selinux/avc.c" |
+        grep -o ':[a-z_]*:' \
+            "$d/security/selinux/avc.c" |
         sort -u |
         tr '\n' ' '
     )"
@@ -721,6 +830,7 @@ verifyhook() {
         "hook: selnl_notify_policyload was removed"
 
     assertconfig CONFIG_SECURITY_SELINUX y
+
     echo "hook: verified"
 }
 
@@ -729,6 +839,7 @@ verifypathhide() {
 
     [ -f "$d/fs/pathhide.c" ] ||
         error "pathhide: fs/pathhide.c missing"
+
     [ -f "$d/fs/pathhide.h" ] ||
         error "pathhide: fs/pathhide.h missing"
 
@@ -749,25 +860,25 @@ verifypathhide() {
 
     infn \
         "$d/fs/proc/task_mmu.c" \
-        '^static int pagemap_pmd_range' \
+        'pagemap_pmd_range[[:space:]]*\(' \
         'pathhide_match_file' \
         "pathhide: pagemap guard is not inside pagemap_pmd_range()"
 
     infn \
         "$d/mm/mincore.c" \
-        '^static long do_mincore' \
+        'do_mincore[[:space:]]*\(' \
         'pathhide_match_file' \
         "pathhide: mincore guard is not inside do_mincore()"
 
     infn \
         "$d/fs/proc/task_mmu.c" \
-        '^void task_mem' \
+        'task_mem[[:space:]]*\(' \
         'pathhide_hidden_vm_pages' \
         "pathhide: vmsize/vmpeak deduction is not inside task_mem()"
 
     infn \
         "$d/fs/proc/task_mmu.c" \
-        '^unsigned long task_statm' \
+        'task_statm[[:space:]]*\(' \
         'pathhide_hidden_vm_pages' \
         "pathhide: statm size deduction is not inside task_statm()"
 
@@ -775,7 +886,7 @@ verifypathhide() {
         6.12)
             infn \
                 "$d/fs/proc/task_mmu.c" \
-                '^static int pagemap_scan_test_walk' \
+                'pagemap_scan_test_walk[[:space:]]*\(' \
                 'pathhide_match_file' \
                 "pathhide: pagemap scan guard is not inside pagemap_scan_test_walk()"
             ;;
@@ -796,6 +907,7 @@ verifyghost() {
 
     [ -f "$d/fs/proc/ghost.c" ] ||
         error "ghost: fs/proc/ghost.c missing"
+
     [ -f "$d/fs/proc/ghost.h" ] ||
         error "ghost: fs/proc/ghost.h missing"
 
@@ -806,79 +918,79 @@ verifyghost() {
 
     infn \
         "$d/fs/namei.c" \
-        '^static int do_o_path' \
+        'do_o_path[[:space:]]*\(' \
         'ghost_hidden_path(&path))' \
         "ghost: o_path guard is not inside do_o_path()"
 
     infn \
         "$d/fs/namei.c" \
-        '^static int do_open' \
-        'unlikely(ghost_hidden_path(&nd->path))' \
+        'do_open[[:space:]]*\(' \
+        'ghost_hidden_path(&nd->path))' \
         "ghost: open guard is not inside do_open()"
 
     infn \
         "$d/fs/namei.c" \
-        '^static int path_lookupat' \
+        'path_lookupat[[:space:]]*\(' \
         'unlikely(err == -ENOTDIR)' \
         "ghost: ENOTDIR guard is not inside path_lookupat()"
 
     infn \
         "$d/fs/namei.c" \
-        '^static int path_parentat' \
+        'path_parentat[[:space:]]*\(' \
         'unlikely(err == -ENOTDIR)' \
         "ghost: ENOTDIR guard is not inside path_parentat()"
 
     infn \
         "$d/fs/namei.c" \
-        '^static struct dentry \\*filename_create' \
+        'filename_create[[:space:]]*\(' \
         'error = err2 ? err2 : -EACCES' \
         "ghost: create guard is not inside filename_create()"
 
     infn \
         "$d/fs/namei.c" \
-        '^(static )?int do_linkat' \
+        'do_linkat[[:space:]]*\(' \
         'ghost_hidden_path(&old_path)' \
         "ghost: link guard is not inside do_linkat()"
 
     infn \
         "$d/fs/open.c" \
-        '^int do_fchownat' \
+        'do_fchownat[[:space:]]*\(' \
         'ghost_hidden_path(&path))' \
         "ghost: chown guard is not inside do_fchownat()"
 
     infn \
         "$d/fs/stat.c" \
-        '^static int do_readlinkat' \
+        'do_readlinkat[[:space:]]*\(' \
         'ghost_hidden_path(&path))' \
         "ghost: readlink guard is not inside do_readlinkat()"
 
     infn \
         "$d/fs/open.c" \
-        '^static long do_faccessat' \
+        'do_faccessat[[:space:]]*\(' \
         'unlikely(ghost_hidden_path(&path))' \
         "ghost: access guard is not inside do_faccessat()"
 
     infn \
         "$d/fs/stat.c" \
-        '^(static )?int vfs_statx' \
+        'vfs_statx[[:space:]]*\(' \
         'ghost_hidden_path(&path))' \
         "ghost: stat guard is not inside vfs_statx()"
 
     infn \
         "$d/fs/open.c" \
-        'do_fchmodat' \
+        'do_fchmodat[[:space:]]*\(' \
         'ghost_hidden_path(&path))' \
         "ghost: chmod guard is not inside do_fchmodat()"
 
     infn \
         "$d/fs/open.c" \
-        '^(long|int) do_sys_truncate' \
+        'do_sys_truncate[[:space:]]*\(' \
         'ghost_hidden_path(&path))' \
         "ghost: truncate guard is not inside do_sys_truncate()"
 
     infn \
         "$d/fs/utimes.c" \
-        '^(static )?(long|int) do_utimes_path' \
+        'do_utimes_path[[:space:]]*\(' \
         'ghost_hidden_path(&path))' \
         "ghost: utimensat guard is not inside do_utimes_path()"
 
@@ -890,7 +1002,7 @@ verifyghost() {
     do
         infn \
             "$d/fs/xattr.c" \
-            "^static (ssize_t|int) ${writefunction}\\(" \
+            "${writefunction}[[:space:]]*\\(" \
             'ghost_hidden_path(&path))' \
             "ghost: ${writefunction}() has no ghost_hidden_path() guard"
     done
@@ -908,7 +1020,7 @@ verifyghost() {
 
     infn \
         "$d/fs/namei.c" \
-        '^int do_renameat2' \
+        'do_renameat2[[:space:]]*\(' \
         'struct path gpath = { .mnt = old_path.mnt, .dentry = old_dentry }' \
         "ghost: rename source guard is not inside do_renameat2()"
 
@@ -939,10 +1051,12 @@ dohookless() {
 
     [ -f "$HOOKLESSDIR/src/nomount.c" ] ||
         error "NoMount Suite source missing: $HOOKLESSDIR/src/nomount.c"
+
     [ -f "$HOOKLESSDIR/src/nomount.h" ] ||
         error "NoMount Suite source missing: $HOOKLESSDIR/src/nomount.h"
 
     nmpatch="$HOOKLESSDIR/patches/nomount_kernel_integration.patch"
+
     if [ ! -f "$nmpatch" ]; then
         nmpatch="$HOOKLESSDIR/patches/nomount_${KERNELVERSION}_kernel_integration.patch"
     fi
@@ -969,10 +1083,13 @@ dohookless() {
         "$COMMONKERNELFOLDER/fs/nomount.h" ||
         error "failed to install fs/nomount.h"
 
-    applypatch "$nmpatch" "$COMMONKERNELFOLDER"
+    applypatch \
+        "$nmpatch" \
+        "$COMMONKERNELFOLDER"
 
     setconfig CONFIG_NOMOUNT y
     assertconfig CONFIG_NOMOUNT y
+
     verifyhookless
 
     echo "::endgroup::"
@@ -1044,6 +1161,36 @@ dohook() {
         "$HOOKDIR/hide_selinux_selinuxfs_6_12.patch" \
         "$HOOKDIR/hide_selinux_selinuxfs_5_10.patch"
 
+    echo "verify: SELinux selinuxfs gates"
+
+    for writefunction in \
+        sel_write_context \
+        sel_write_validatetrans \
+        sel_write_access \
+        sel_write_create \
+        sel_write_relabel \
+        sel_write_user \
+        sel_write_member
+    do
+        infn \
+            "$COMMONKERNELFOLDER/security/selinux/selinuxfs.c" \
+            "${writefunction}[[:space:]]*\\(" \
+            'sel_ctx_hidden' \
+            "hook: ${writefunction}() has no sel_ctx_hidden() gate"
+
+        echo "  verified: ${writefunction}()"
+    done
+
+    has \
+        'static bool sel_ctx_hidden' \
+        "$COMMONKERNELFOLDER/security/selinux/selinuxfs.c" \
+        "hook: sel_ctx_hidden() helper missing"
+
+    has \
+        'static bool sel_hidden_bytes' \
+        "$COMMONKERNELFOLDER/security/selinux/selinuxfs.c" \
+        "hook: sel_hidden_bytes() helper missing"
+
     applyfirst \
         attr \
         "$reqattr" \
@@ -1063,6 +1210,7 @@ dohook() {
         "$KSUDIR"
 
     verifyhook
+
     echo "::endgroup::"
 }
 
@@ -1078,12 +1226,14 @@ dopathhide() {
 
     [ -f "$PATHHIDEDIR/pathhide.c" ] ||
         error "pathhide source missing: $PATHHIDEDIR/pathhide.c"
+
     [ -f "$PATHHIDEDIR/pathhide.h" ] ||
         error "pathhide source missing: $PATHHIDEDIR/pathhide.h"
 
     normalise \
         "$PATHHIDEDIR/pathhide.c" \
         "$PATHHIDEDIR/pathhide.h"
+
     normalisepatches "$PATHHIDEDIR"
 
     install -m 0644 \
@@ -1122,11 +1272,13 @@ dopathhide() {
         "$d/fs/proc/task_mmu.c"
     then
         reqacct=pathhide_accounting_pgcompat_integration.patch
+
     elif grep -q \
         'get_mm_counter_sum(mm, MM_ANONPAGES)' \
         "$d/fs/proc/task_mmu.c"
     then
         reqacct=pathhide_accounting_6.6_integration.patch
+
     else
         reqacct=pathhide_accounting_integration.patch
     fi
@@ -1159,6 +1311,7 @@ dopathhide() {
     fi
 
     verifypathhide
+
     echo "::endgroup::"
 }
 
@@ -1177,12 +1330,14 @@ doghost() {
 
     [ -f "$GHOSTDIR/ghost.c" ] ||
         error "ghost source missing: $GHOSTDIR/ghost.c"
+
     [ -f "$GHOSTDIR/ghost.h" ] ||
         error "ghost source missing: $GHOSTDIR/ghost.h"
 
     normalise \
         "$GHOSTDIR/ghost.c" \
         "$GHOSTDIR/ghost.h"
+
     normalisepatches "$GHOSTDIR"
 
     install -m 0644 \
@@ -1294,6 +1449,7 @@ doghost() {
         "$GHOSTDIR/ghost_rename_5_15.patch"
 
     verifyghost
+
     echo "::endgroup::"
 }
 
@@ -1302,10 +1458,13 @@ verifykernelchange() {
 
     [ -d "$source" ] ||
         error "kernel fs directory not found: $source"
+
     [ -f "$source/nomount.c" ] ||
         error "fs/nomount.c is missing"
+
     [ -f "$source/pathhide.c" ] ||
         error "fs/pathhide.c is missing"
+
     [ -f "$source/proc/ghost.c" ] ||
         error "fs/proc/ghost.c is missing"
 
@@ -1377,24 +1536,29 @@ case "$CMD" in
     all)
         doall
         ;;
+
     clone)
         need \
             WORKDIR \
             KERNELPLATFORM \
             COMMONKERNELFOLDER \
             DEFCONFIG
+
         clonerepositories
         ;;
+
     hookless)
         need \
             WORKDIR \
             KERNELPLATFORM \
             COMMONKERNELFOLDER \
             DEFCONFIG
+
         resolvekernelversion
         clonerepositories
         dohookless
         ;;
+
     hook)
         need \
             WORKDIR \
@@ -1402,40 +1566,48 @@ case "$CMD" in
             COMMONKERNELFOLDER \
             DEFCONFIG \
             ROOTENGINE
+
         resolvekernelversion
         resolveksudir
         clonerepositories
         dohook
         ;;
+
     record-version)
         need \
             WORKDIR \
             KERNELPLATFORM \
             COMMONKERNELFOLDER \
             DEFCONFIG
+
         resolvepaths
         dorecordversion
         ;;
+
     pathhide)
         need \
             WORKDIR \
             KERNELPLATFORM \
             COMMONKERNELFOLDER \
             DEFCONFIG
+
         resolvekernelversion
         clonerepositories
         dopathhide
         ;;
+
     ghost)
         need \
             WORKDIR \
             KERNELPLATFORM \
             COMMONKERNELFOLDER \
             DEFCONFIG
+
         resolvekernelversion
         clonerepositories
         doghost
         ;;
+
     verify)
         need \
             WORKDIR \
@@ -1443,21 +1615,26 @@ case "$CMD" in
             COMMONKERNELFOLDER \
             DEFCONFIG \
             ROOTENGINE
+
         resolvekernelversion
         resolveksudir
         clonerepositories
         doverify
         ;;
+
     assert-config)
         need \
             COMMONKERNELFOLDER \
             DEFCONFIG
+
         assertconfig CONFIG_NOMOUNT y
         assertconfig CONFIG_SECURITY_SELINUX y
         ;;
+
     -h|--help|help)
         usage
         ;;
+
     *)
         usage
         error "unknown command: $CMD"
