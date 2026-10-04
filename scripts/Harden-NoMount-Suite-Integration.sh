@@ -514,39 +514,52 @@ infn() {
     local message="$4"
     local start
     local body
+
     start="$(
         grep -nE "$function" "$file" |
         while IFS=: read -r line text; do
             case "$text" in
                 *';'*)
-                    case "$text" in
-                        *'{'*) echo "$line"; break ;;
-                    esac
-                    ;;
-                *)
-                    echo "$line"
-                    break
+                    continue
                     ;;
             esac
+
+            if printf '%s\n' "$text" | grep -Eq '\{[[:space:]]*$'; then
+                echo "$line"
+                break
+            fi
+
+            next="$((line + 1))"
+
+            if sed -n "${next}p" "$file" | grep -Eq '^[[:space:]]*\{'; then
+                echo "$line"
+                break
+            fi
         done
     )"
+
     [ -n "$start" ] ||
         error \
             "$message: function ${function} was not found in ${file}"
+
     body="$(
         awk -v start="$start" '
             NR < start {
                 next
             }
+
             {
                 line = $0
                 body = body line "\n"
+
                 opens = gsub(/\{/, "{", line)
                 closes = gsub(/\}/, "}", line)
+
                 if (opens > 0)
                     started = 1
 
                 depth += opens - closes
+
                 if (started && depth <= 0) {
                     print body
                     exit
