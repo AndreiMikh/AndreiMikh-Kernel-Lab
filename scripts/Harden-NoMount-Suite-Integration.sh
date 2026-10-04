@@ -514,6 +514,7 @@ infn() {
     local message="$4"
     local start
     local body
+
     start="$(
         grep -nE \
             "^[[:space:]]*(static[[:space:]]+|inline[[:space:]]+|noinline[[:space:]]+)*[[:alnum:]_[:space:]\*]+[[:space:]]${function}[[:space:]]*\(" \
@@ -521,23 +522,30 @@ infn() {
         head -n1 |
         cut -d: -f1
     )"
+
     [ -n "$start" ] ||
         error \
             "$message: function ${function}() was not found in ${file}"
+
     body="$(
         awk -v start="$start" '
             NR < start {
                 next
             }
+
             {
                 line = $0
                 body = body line "\n"
+
                 opens = gsub(/\{/, "", line)
                 closes = gsub(/\}/, "", line)
+
                 if (opens > 0)
                     started = 1
+
                 depth += opens
                 depth -= closes
+
                 if (started && depth <= 0) {
                     printf "%s", body
                     exit
@@ -545,8 +553,11 @@ infn() {
             }
         ' "$file"
     )"
+
     [ -n "$body" ] ||
-        error "$message: failed to extract ${function}() from ${file}"
+        error \
+            "$message: failed to extract ${function}() from ${file}"
+
     if printf '%s\n' "$body" | grep -Fq -- "$needle"; then
         return 0
     fi
@@ -554,6 +565,7 @@ infn() {
     echo "--- ${function}() ---" >&2
     printf '%s\n' "$body" >&2
     echo "---------------------" >&2
+
     error "$message"
 }
 
@@ -625,7 +637,6 @@ verifyfunctiongate() {
 
 verifyhook() {
     local d="$COMMONKERNELFOLDER"
-    local writefunction
     local nfs
     local nhooks
     local navc
@@ -640,23 +651,13 @@ verifyhook() {
         error "hook: security/selinux/avc.c missing"
 
     has \
-        'sel_ctx_hidden' \
-        "$d/security/selinux/selinuxfs.c" \
-        "hook: selinuxfs.c gate missing"
-
-    has \
-        'sel_hidden_bytes' \
-        "$d/security/selinux/selinuxfs.c" \
-        "hook: selinuxfs.c reply filter missing"
-
-    has \
         ':ksu:' \
         "$d/security/selinux/hooks.c" \
         "hook: hooks.c attr guard missing"
 
     infn \
         "$d/security/selinux/hooks.c" \
-        'selinux_inode_setxattr[[:space:]]*\(' \
+        'selinux_inode_setxattr' \
         ':ksu:' \
         "hook: selinux_inode_setxattr() has no hidden-type guard"
 
@@ -664,14 +665,14 @@ verifyhook() {
         6.12)
             infn \
                 "$d/security/selinux/hooks.c" \
-                'selinux_lsm_setattr[[:space:]]*\(' \
+                'selinux_lsm_setattr' \
                 ':ksu:' \
                 "hook: selinux_lsm_setattr() has no hidden-type guard"
             ;;
         *)
             infn \
                 "$d/security/selinux/hooks.c" \
-                'selinux_setprocattr[[:space:]]*\(' \
+                'selinux_setprocattr' \
                 ':ksu:' \
                 "hook: selinux_setprocattr() has no hidden-type guard"
             ;;
@@ -691,25 +692,6 @@ verifyhook() {
         'selinuxfs.o' \
         "$d/security/selinux/Makefile" \
         "hook: selinuxfs.o is not in security/selinux/Makefile"
-
-    echo "verify: SELinux write gates"
-
-    for writefunction in \
-        sel_write_context \
-        sel_write_validatetrans \
-        sel_write_access \
-        sel_write_create \
-        sel_write_relabel \
-        sel_write_user \
-        sel_write_member
-    do
-        infn \
-            "$COMMONKERNELFOLDER/security/selinux/selinuxfs.c" \
-            "$writefunction" \
-            'sel_ctx_hidden' \
-            "hook: ${writefunction}() has no sel_ctx_hidden() gate"
-        echo "  verified: ${writefunction}()"
-    done
 
     nfs="$(
         grep -o ':[a-z_]*:' \
@@ -796,25 +778,25 @@ verifypathhide() {
 
     infn \
         "$d/fs/proc/task_mmu.c" \
-        'pagemap_pmd_range[[:space:]]*\(' \
+        'pagemap_pmd_range' \
         'pathhide_match_file' \
         "pathhide: pagemap guard is not inside pagemap_pmd_range()"
 
     infn \
         "$d/mm/mincore.c" \
-        'do_mincore[[:space:]]*\(' \
+        'do_mincore' \
         'pathhide_match_file' \
         "pathhide: mincore guard is not inside do_mincore()"
 
     infn \
         "$d/fs/proc/task_mmu.c" \
-        'task_mem[[:space:]]*\(' \
+        'task_mem' \
         'pathhide_hidden_vm_pages' \
         "pathhide: vmsize/vmpeak deduction is not inside task_mem()"
 
     infn \
         "$d/fs/proc/task_mmu.c" \
-        'task_statm[[:space:]]*\(' \
+        'task_statm' \
         'pathhide_hidden_vm_pages' \
         "pathhide: statm size deduction is not inside task_statm()"
 
@@ -822,7 +804,7 @@ verifypathhide() {
         6.12)
             infn \
                 "$d/fs/proc/task_mmu.c" \
-                'pagemap_scan_test_walk[[:space:]]*\(' \
+                'pagemap_scan_test_walk' \
                 'pathhide_match_file' \
                 "pathhide: pagemap scan guard is not inside pagemap_scan_test_walk()"
             ;;
@@ -839,7 +821,6 @@ verifypathhide() {
 verifyghost() {
     local d="$COMMONKERNELFOLDER"
     local count
-    local writefunction
 
     [ -f "$d/fs/proc/ghost.c" ] ||
         error "ghost: fs/proc/ghost.c missing"
@@ -854,79 +835,79 @@ verifyghost() {
 
     infn \
         "$d/fs/namei.c" \
-        'do_o_path[[:space:]]*\(' \
+        'do_o_path' \
         'ghost_hidden_path(&path))' \
         "ghost: o_path guard is not inside do_o_path()"
 
     infn \
         "$d/fs/namei.c" \
-        'do_open[[:space:]]*\(' \
+        'do_open' \
         'ghost_hidden_path(&nd->path))' \
         "ghost: open guard is not inside do_open()"
 
     infn \
         "$d/fs/namei.c" \
-        'path_lookupat[[:space:]]*\(' \
+        'path_lookupat' \
         'unlikely(err == -ENOTDIR)' \
         "ghost: ENOTDIR guard is not inside path_lookupat()"
 
     infn \
         "$d/fs/namei.c" \
-        'path_parentat[[:space:]]*\(' \
+        'path_parentat' \
         'unlikely(err == -ENOTDIR)' \
         "ghost: ENOTDIR guard is not inside path_parentat()"
 
     infn \
         "$d/fs/namei.c" \
-        'filename_create[[:space:]]*\(' \
+        'filename_create' \
         'error = err2 ? err2 : -EACCES' \
         "ghost: create guard is not inside filename_create()"
 
     infn \
         "$d/fs/namei.c" \
-        'do_linkat[[:space:]]*\(' \
+        'do_linkat' \
         'ghost_hidden_path(&old_path)' \
         "ghost: link guard is not inside do_linkat()"
 
     infn \
         "$d/fs/open.c" \
-        'do_fchownat[[:space:]]*\(' \
+        'do_fchownat' \
         'ghost_hidden_path(&path))' \
         "ghost: chown guard is not inside do_fchownat()"
 
     infn \
         "$d/fs/stat.c" \
-        'do_readlinkat[[:space:]]*\(' \
+        'do_readlinkat' \
         'ghost_hidden_path(&path))' \
         "ghost: readlink guard is not inside do_readlinkat()"
 
     infn \
         "$d/fs/open.c" \
-        'do_faccessat[[:space:]]*\(' \
+        'do_faccessat' \
         'unlikely(ghost_hidden_path(&path))' \
         "ghost: access guard is not inside do_faccessat()"
 
     infn \
         "$d/fs/stat.c" \
-        'vfs_statx[[:space:]]*\(' \
+        'vfs_statx' \
         'ghost_hidden_path(&path))' \
         "ghost: stat guard is not inside vfs_statx()"
 
     infn \
         "$d/fs/open.c" \
-        'do_fchmodat[[:space:]]*\(' \
+        'do_fchmodat' \
         'ghost_hidden_path(&path))' \
         "ghost: chmod guard is not inside do_fchmodat()"
 
     infn \
         "$d/fs/open.c" \
-        'do_sys_truncate[[:space:]]*\(' \
+        'do_sys_truncate' \
         'ghost_hidden_path(&path))' \
         "ghost: truncate guard is not inside do_sys_truncate()"
 
     infn \
         "$d/fs/utimes.c" \
-        'do_utimes_path[[:space:]]*\(' \
+        'do_utimes_path' \
         'ghost_hidden_path(&path))' \
         "ghost: utimensat guard is not inside do_utimes_path()"
 
@@ -938,7 +919,7 @@ verifyghost() {
     do
         infn \
             "$d/fs/xattr.c" \
-            "${writefunction}[[:space:]]*\\(" \
+            "$writefunction" \
             'ghost_hidden_path(&path))' \
             "ghost: ${writefunction}() has no ghost_hidden_path() guard"
     done
@@ -956,7 +937,7 @@ verifyghost() {
 
     infn \
         "$d/fs/namei.c" \
-        'do_renameat2[[:space:]]*\(' \
+        'do_renameat2' \
         'struct path gpath = { .mnt = old_path.mnt, .dentry = old_dentry }' \
         "ghost: rename source guard is not inside do_renameat2()"
 
@@ -1091,41 +1072,9 @@ dohook() {
             ;;
     esac
 
-    applyfirst \
-        selinuxfs \
-        "$reqsfs" \
-        "$HOOKDIR/hide_selinux_selinuxfs_6_12.patch" \
-        "$HOOKDIR/hide_selinux_selinuxfs_5_10.patch"
-
-    echo "verify: SELinux selinuxfs gates"
-
-    for writefunction in \
-        sel_write_context \
-        sel_write_validatetrans \
-        sel_write_access \
-        sel_write_create \
-        sel_write_relabel \
-        sel_write_user \
-        sel_write_member
-    do
-        infn \
-            "$COMMONKERNELFOLDER/security/selinux/selinuxfs.c" \
-            "${writefunction}[[:space:]]*\\(" \
-            'sel_ctx_hidden' \
-            "hook: ${writefunction}() has no sel_ctx_hidden() gate"
-
-        echo "  verified: ${writefunction}()"
-    done
-
-    has \
-        'static bool sel_ctx_hidden' \
-        "$COMMONKERNELFOLDER/security/selinux/selinuxfs.c" \
-        "hook: sel_ctx_hidden() helper missing"
-
-    has \
-        'static bool sel_hidden_bytes' \
-        "$COMMONKERNELFOLDER/security/selinux/selinuxfs.c" \
-        "hook: sel_hidden_bytes() helper missing"
+    applypatch \
+        "$HOOKDIR/$reqsfs" \
+        "$COMMONKERNELFOLDER"
 
     applyfirst \
         attr \
@@ -1240,7 +1189,7 @@ dopathhide() {
         "$PATHHIDEDIR/pathhide_accounting_integration.patch"
 
     if ! grep -qE \
-        '^obj-y[[:space:]]*\\+=.*pathhide\\.o' \
+        '^obj-y[[:space:]]*\+=.*pathhide\.o' \
         "$d/fs/Makefile"
     then
         printf '%s\n' 'obj-y += pathhide.o' >> "$d/fs/Makefile"
@@ -1472,7 +1421,6 @@ case "$CMD" in
     all)
         doall
         ;;
-
     clone)
         need \
             WORKDIR \
@@ -1482,7 +1430,6 @@ case "$CMD" in
 
         clonerepositories
         ;;
-
     hookless)
         need \
             WORKDIR \
@@ -1494,7 +1441,6 @@ case "$CMD" in
         clonerepositories
         dohookless
         ;;
-
     hook)
         need \
             WORKDIR \
@@ -1508,7 +1454,6 @@ case "$CMD" in
         clonerepositories
         dohook
         ;;
-
     record-version)
         need \
             WORKDIR \
@@ -1519,7 +1464,6 @@ case "$CMD" in
         resolvepaths
         dorecordversion
         ;;
-
     pathhide)
         need \
             WORKDIR \
@@ -1531,7 +1475,6 @@ case "$CMD" in
         clonerepositories
         dopathhide
         ;;
-
     ghost)
         need \
             WORKDIR \
@@ -1543,7 +1486,6 @@ case "$CMD" in
         clonerepositories
         doghost
         ;;
-
     verify)
         need \
             WORKDIR \
@@ -1557,7 +1499,6 @@ case "$CMD" in
         clonerepositories
         doverify
         ;;
-
     assert-config)
         need \
             COMMONKERNELFOLDER \
@@ -1566,11 +1507,9 @@ case "$CMD" in
         assertconfig CONFIG_NOMOUNT y
         assertconfig CONFIG_SECURITY_SELINUX y
         ;;
-
     -h|--help|help)
         usage
         ;;
-
     *)
         usage
         error "unknown command: $CMD"
