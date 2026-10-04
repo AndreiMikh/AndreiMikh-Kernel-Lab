@@ -802,19 +802,19 @@ dohook() {
     esac
     applyfirst \
         selinuxfs \
-        "$req_sfs" \
+        "$reqsfs" \
         "$HOOKDIR/hide_selinux_selinuxfs_6_12.patch" \
         "$HOOKDIR/hide_selinux_selinuxfs_5_10.patch"
     applyfirst \
         attr \
-        "$req_attr" \
+        "$reqattr" \
         "$HOOKDIR/hide_selinux_attr_6_12.patch" \
         "$HOOKDIR/hide_selinux_attr_6_6.patch" \
         "$HOOKDIR/hide_selinux_attr_5_10.patch" \
         "$HOOKDIR/hide_selinux_attr.patch"
     applyfirst \
         avc-audit \
-        "$req_audit" \
+        "$reqaudit" \
         "$HOOKDIR/quiet_selinux_audit.patch" \
         "$HOOKDIR/quiet_selinux_audit_legacy.patch"
     applypatch \
@@ -891,18 +891,18 @@ dopathhide() {
  
     applyfirst \
         pathhide-pagemap \
-        "$req_pagemap" \
+        "$reqpagemap" \
         "$PATHHIDEDIR/pathhide_pagemap_6.12_integration.patch" \
         "$PATHHIDEDIR/pathhide_pagemap_6.6_integration.patch" \
         "$PATHHIDEDIR/pathhide_pagemap_5.10_integration.patch"
     applyfirst \
         pathhide-mincore \
-        "$req_mincore" \
+        "$reqmincore" \
         "$PATHHIDEDIR/pathhide_mincore_6.12_integration.patch" \
         "$PATHHIDEDIR/pathhide_mincore_5.10_integration.patch"
     applyfirst \
         pathhide-accounting \
-        "$req_acct" \
+        "$reqacct" \
         "$PATHHIDEDIR/pathhide_accounting_6.6_integration.patch" \
         "$PATHHIDEDIR/pathhide_accounting_pgcompat_integration.patch" \
         "$PATHHIDEDIR/pathhide_accounting_integration.patch"
@@ -961,13 +961,13 @@ doghost() {
         "$GHOSTDIR/ghost_o_path.patch"
     applyfirst \
         ghost-xattr \
-        "$req_xattr" \
+        "$reqxattr" \
         "$GHOSTDIR/ghost_xattr_6_12.patch" \
         "$GHOSTDIR/ghost_xattr_5_15.patch" \
         "$GHOSTDIR/ghost_xattr.patch"
     applyfirst \
         ghost-linkat \
-        "$req_linkat" \
+        "$reqlinkat" \
         "$GHOSTDIR/ghost_linkat_5_15.patch" \
         "$GHOSTDIR/ghost_linkat.patch"
     applypatch \
@@ -978,7 +978,7 @@ doghost() {
         "$GHOSTDIR/ghost_utimes.patch"
     applyfirst \
         ghost-chmod \
-        "$req_chmod" \
+        "$reqchmod" \
         "$GHOSTDIR/ghost_chmod.patch" \
         "$GHOSTDIR/ghost_chmod_5_10.patch"
     applypatch \
@@ -1005,7 +1005,7 @@ doghost() {
     esac
     applyfirst \
         ghost-statx \
-        "$req_statx" \
+        "$reqstatx" \
         "$GHOSTDIR/ghost_statx_6_12.patch" \
         "$GHOSTDIR/ghost_statx_6_1.patch" \
         "$GHOSTDIR/ghost_statx_5_10.patch"
@@ -1020,7 +1020,7 @@ doghost() {
     esac
     applyfirst \
         ghost-readlink \
-        "$req_readlink" \
+        "$reqreadlink" \
         "$GHOSTDIR/ghost_readlink_6_12.patch" \
         "$GHOSTDIR/ghost_readlink_5_10.patch"
     local reqrename
@@ -1034,7 +1034,7 @@ doghost() {
     esac
     applyfirst \
         ghost-rename \
-        "$req_rename" \
+        "$reqrename" \
         "$GHOSTDIR/ghost_rename_5_10.patch" \
         "$GHOSTDIR/ghost_rename_5_15.patch"
     verifyghost
@@ -1080,7 +1080,7 @@ doverify() {
     assertconfig \
         CONFIG_SECURITY_SELINUX \
         y
-    echo "NoMount integration verification passed"
+    echo "nomount suite integration verification passed"
     echo "::endgroup::"
 }
 doall() {
