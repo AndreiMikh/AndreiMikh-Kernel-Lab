@@ -464,19 +464,33 @@ infn() {
     local needle="$3"
     local message="$4"
     local segment
-
     segment="$(
         awk -v start="$function" '
-            $0 ~ start, /^}/ { print }
+            BEGIN {
+                found = 0
+                started = 0
+                depth = 0
+            }
+            !found && $0 ~ start {
+                found = 1
+            }
+            found {
+                print
+                opens = gsub(/\{/, "{")
+                closes = gsub(/\}/, "}")
+                if (opens > 0)
+                    started = 1
+                depth += opens - closes
+                if (started && depth <= 0)
+                    exit
+            }
         ' "$file" 2>/dev/null
-    )" || true
-
+    )"
     case "$segment" in
         *"$needle"*)
             return 0
             ;;
     esac
-
     error "$message"
 }
 
