@@ -4,27 +4,27 @@ usage() {
 usage:
   applynomountstack <command>
 commands:
-  all          clone repositories and apply the complete NoMount stack
-  clone        clone or update NoMount repositories
-  hookless     apply the NoMount Prism hookless integration
-  hook         apply NoMount SELinux hook patches
-  pathhide     apply the matching pathhide patches
-  ghost        apply the matching ghost patches
-  verify       verify the complete NoMount integration
+  all            clone repositories and apply the complete nomount suite stack
+  clone          clone or update nomount suite repositories
+  hookless       apply the nomount suite prism hookless integration
+  hook           apply nomount suite selinux hook patches
+  pathhide       apply the matching pathhide patches
+  ghost          apply the matching ghost patches
+  verify         verify the complete nomount suite integration
   assert-config
-               verify required kernel configuration
+                 verify required kernel configuration
 environment:
-  WORKDIR              kernel workspace
-  KERNELPLATFORM       kernel_platform directory
+  WORKDIR               kernel workspace
+  KERNELPLATFORM        kernel platform directory
   COMMONKERNELFOLDER    common kernel source directory
-  DEFCONFIG            kernel defconfig
-  ROOTENGINE            selected KernelSU engine
-  NOMOUNT_REF           NoMount-Suite branch or tag, default: main
-  NOMOUNTPATCHES_REF    kernel_patches branch or tag, default: main
+  DEFCONFIG             kernel defconfig
+  ROOTENGINE            selected kernelsu engine
+  NOMOUNT_REF           nomount suite branch or tag, default: main
+  NOMOUNTPATCHES_REF    kernel patches branch or tag, default: main
 EOF
 }
 error() {
-    echo "::error::applynomountstack: $*" >&2
+    echo "::error::nm-suite-integration: $*" >&2
     exit 1
 }
 need() {
@@ -190,7 +190,6 @@ assertconfig() {
         "$config" ||
         error "${symbol}=${value} is missing from ${config}"
 }
-
 setconfig() {
     local symbol="$1"
     local value="$2"
@@ -204,7 +203,6 @@ setconfig() {
         printf '%s\n' "${symbol}=${value}" >> "$config"
     fi
 }
-
 normalise() {
     if command -v dos2unix >/dev/null 2>&1; then
         dos2unix "$@" >/dev/null 2>&1 || true
@@ -256,6 +254,7 @@ applypatch() {
         echo "already applied: $(basename "$patch")"
         return 0
     fi
+ 
     error \
         "$(basename "$patch") does not apply at fuzz 0 and is not already applied in $target"
 }
@@ -296,6 +295,7 @@ applyfirst() {
                 selected="$patch"
             fi
         fi
+
     done
     [ "${#hits[@]}" -gt 0 ] ||
         error \
@@ -311,6 +311,7 @@ applyfirst() {
                 found=true
                 break
             fi
+ 
         done
         [ "$found" = true ] ||
             error \
@@ -320,6 +321,7 @@ applyfirst() {
                 "${family}: '${wanted}' pinned; other applicable variants: ${hits[*]}"
         fi
     fi
+ 
     [ -n "$selected" ] ||
         error "${family}: no patch selected"
     applypatch "$selected" "$COMMONKERNELFOLDER"
@@ -503,7 +505,6 @@ verifyhook() {
         y
     echo "hook: verified"
 }
-
 verifypathhide() {
     local d="$COMMONKERNELFOLDER"
     [ -f "$d/fs/pathhide.c" ] ||
@@ -749,7 +750,6 @@ dohookless() {
     verifyhookless
     echo "::endgroup::"
 }
-
 dorecordversion() {
     resolvepaths
     local header="$HOOKLESSDIR/src/nomount.h"
@@ -768,7 +768,6 @@ dorecordversion() {
         echo "NMVER=${version:-unknown}" >> "$GITHUB_ENV"
     fi
 }
-
 dohook() {
     resolvepaths
     resolveksudir
@@ -824,7 +823,6 @@ dohook() {
     verifyhook
     echo "::endgroup::"
 }
-
 dopathhide() {
     resolvepaths
     local d="$COMMONKERNELFOLDER"
@@ -890,6 +888,7 @@ dopathhide() {
     else
         reqacct=pathhide_accounting_integration.patch
     fi
+ 
     applyfirst \
         pathhide-pagemap \
         "$req_pagemap" \
@@ -913,6 +912,7 @@ dopathhide() {
     then
         echo 'obj-y += pathhide.o' >> "$d/fs/Makefile"
     fi
+
     verifypathhide
     echo "::endgroup::"
 }
