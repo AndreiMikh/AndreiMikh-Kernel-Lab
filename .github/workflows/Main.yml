@@ -6241,8 +6241,17 @@ jobs:
 
   release-kernel:
     name: 🚀 Release Kernel
-    if: ${{ needs.kernel-build.result == 'success' && needs.repack-kernel.result == 'success' && needs.kernel-build.outputs.gitrelease == 'Enabled' }}
-    needs: [kernel-build, repack-kernel]
+    if: >-
+      ${{
+        needs.kernel-build.result == 'success' &&
+        needs.repack-kernel.result == 'success' &&
+        needs.kernel-build.outputs.gitrelease == 'Enabled' &&
+        (
+          inputs.REKERNEL != 'Module' ||
+          needs.upload-rekernel.result == 'success'
+        )
+      }}
+    needs: [kernel-build, repack-kernel, upload-rekernel]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -6256,6 +6265,41 @@ jobs:
           name: "Package-${{ needs.kernel-build.outputs.manifestbasefile }}-${{ needs.kernel-build.outputs.ksuversion }}"
           path: dist
 
+      - name: 📥 Download ReKernel Artifact
+        if: ${{ inputs.REKERNEL == 'Module' }}
+        uses: actions/download-artifact@v8
+        with:
+          name: ReKernel-Mpdule
+          path: rekernel
+
+      - name: 📦 Prepare ReKernel Release ZIP
+        if: ${{ inputs.REKERNEL == 'Module' }}
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          mkdir -p dist
+          REKERNELDIR="$(find rekernel -mindepth 1 -maxdepth 1 -type d -name 'ReKernel-v*' -print -quit)"
+          if [[ -z "$REKERNELDIR" ]]; then
+            echo "⚠️ [Warn] ReKernel Directory Not Found"
+            find rekernel -maxdepth 3 -print
+            exit 1
+          fi
+
+          REKERNELVERSION="$(basename "$REKERNELDIR")"
+          REKERNELZIP="${REKERNELVERSION}.zip"
+          echo "📦 [Info] ReKernel Directory : ${REKERNELDIR}"
+          echo "🏷️ [Info] ReKernel Version   : ${REKERNELVERSION}"
+          echo "📤 [Info] Release ZIP        : ${REKERNELZIP}"
+          (
+            cd "$REKERNELDIR"
+            zip -qr "../../dist/${REKERNELZIP}" .
+          )
+          echo "✔️ ReKernel Release ZIP Created"
+          ls -lh "dist/${REKERNELZIP}"
+          echo "🔎 [Info] Validating ReKernel Release ZIP..."
+          unzip -tq "dist/${REKERNELZIP}"
+          echo "✔️ [Info] ReKernel ZIP Validation Passed"
+    
       - name: 🏷️ Release Status Requirement
         id: ksu-check
         shell: bash
@@ -6264,21 +6308,33 @@ jobs:
         run: |
           set -Eeuo pipefail
           LATESTTAG="$(gh release view --json tagName -q .tagName 2>/dev/null || echo '')"
-          echo "📦 Latest Release Tag: ${LATESTTAG:-None}"
-          echo "🆕 Current KSU Version: ${KSUVERSION}"
+          echo "📦 [Info] Latest Release Tag: ${LATESTTAG:-None}"
+          echo "🆕 [Info] Current KSU Version: ${KSUVERSION}"
           if [[ -z "$LATESTTAG" ]]; then
-            echo "⚠️ No Previous Release Found → Proceeding"
+            echo "🔍 [Info] No Previous Release Found → Proceeding"
             echo "shouldrelease=true" >> "$GITHUB_OUTPUT"
             exit 0
           fi
 
           if [[ "$LATESTTAG" == *"${KSUVERSION}"* ]]; then
-            echo "⏭️ Same KSU Version Detected → Skipping Release"
+            echo "⏭️ [Info] Same KSU Version Detected → Skipping Release"
             echo "shouldrelease=false" >> "$GITHUB_OUTPUT"
           else
-            echo "🚀 New KSU Version Detected → Releasing"
+            echo "🚀 [Info] New KSU Version Detected → Releasing"
             echo "shouldrelease=true" >> "$GITHUB_OUTPUT"
           fi
+
+      - name: 📋 Release Package Contents
+        if: ${{ steps.ksu-check.outputs.shouldrelease == 'true' }}
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          echo "📦 Release Files:"
+          find dist \
+            -maxdepth 1 \
+            -type f \
+            -printf '  └─ %f\n' \
+            | sort
 
       - name: 📤 Upload Artifacts to Git Release
         if: ${{ steps.ksu-check.outputs.shouldrelease == 'true' }}
@@ -6795,7 +6851,7 @@ jobs:
       - name: 📤 Upload ReKernel Artifact
         uses: actions/upload-artifact@v6
         with:
-          name: ReKernel-v${{ steps.download-rekernel.outputs.version-number }}
+          name: ReKernel-Module
           path: ReKernel-v${{ steps.download-rekernel.outputs.version-number }}
           if-no-files-found: error
           compression-level: 0
