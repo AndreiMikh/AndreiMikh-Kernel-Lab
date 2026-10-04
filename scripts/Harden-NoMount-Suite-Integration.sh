@@ -475,28 +475,47 @@ infn() {
     segment="$(
         awk -v start="$function" '
             BEGIN {
-                found = 0
+                candidate = 0
                 started = 0
                 depth = 0
+                segment = ""
             }
 
-            !found && $0 ~ start {
-                found = 1
-            }
+            {
+                line = $0
 
-            found {
-                print
+                if (!candidate && line ~ start) {
+                    candidate = 1
+                    started = 0
+                    depth = 0
+                    segment = ""
+                }
 
-                opens = gsub(/\{/, "{")
-                closes = gsub(/\}/, "}")
+                if (!candidate)
+                    next
 
-                if (opens > 0)
-                    started = 1
+                segment = segment line "\n"
+
+                opens = gsub(/\{/, "{", line)
+                closes = gsub(/\}/, "}", line)
+
+                if (!started) {
+                    if (opens > 0) {
+                        started = 1
+                        depth = opens - closes
+                    } else if (line ~ /;/) {
+                        candidate = 0
+                        segment = ""
+                    }
+                    next
+                }
 
                 depth += opens - closes
 
-                if (started && depth <= 0)
+                if (depth == 0) {
+                    print segment
                     exit
+                }
             }
         ' "$file" 2>/dev/null
     )"
