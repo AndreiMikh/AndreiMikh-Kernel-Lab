@@ -512,111 +512,48 @@ infn() {
     local function="$2"
     local needle="$3"
     local message="$4"
-    local segment
-
-    segment="$(
-        awk -v start="$function" '
-            function clean(line,    p) {
-                while (1) {
-                    if (incomment) {
-                        p = index(line, "*/")
-
-                        if (p == 0) {
-                            line = ""
-                            return line
-                        }
-
-                        line = substr(line, p + 2)
-                        incomment = 0
-                    }
-
-                    p = index(line, "/*")
-
-                    if (p == 0)
-                        break
-
-                    line = substr(line, 1, p - 1)
-                    incomment = 1
-                }
-
-                gsub(/"([^"\\]|\\.)*"/, "", line)
-                gsub(/\047([^\\\047]|\\.)*\047/, "", line)
-
-                return line
-            }
-
-            BEGIN {
-                found = 0
-                opened = 0
-                depth = 0
-                output = ""
+    local start
+    local body
+    start="$(
+        grep -nE \
+            "^[[:space:]]*(static[[:space:]]+|inline[[:space:]]+|noinline[[:space:]]+)*[[:alnum:]_[:space:]\*]+[[:space:]]${function}[[:space:]]*\(" \
+            "$file" |
+        head -n1 |
+        cut -d: -f1
+    )"
+    [ -n "$start" ] ||
+        error "$message: function ${function}() was not found in ${file}"
+    body="$(
+        awk -v start="$start" '
+            NR < start {
+                next
             }
 
             {
-                raw = $0
-
-                if (!found) {
-                    if (raw ~ start) {
-                        found = 1
-                        output = ""
-                        opened = 0
-                        depth = 0
-                    } else {
-                        next
-                    }
-                }
-
-                line = clean(raw)
-
-                output = output raw "\n"
-
-                opens = gsub(/\{/, "{", line)
-                closes = gsub(/\}/, "}", line)
-
-                if (!opened) {
-                    if (opens > 0) {
-                        opened = 1
-                        depth = opens - closes
-
-                        if (depth <= 0) {
-                            print output
-                            exit
-                        }
-                    }
-
-                    next
-                }
-
-                depth += opens - closes
-
-                if (depth <= 0) {
-                    print output
+                text = $0
+                body = body $0 "\n"
+                opens = gsub(/\{/, "{", text)
+                closes = gsub(/\}/, "}", text)
+                if (opens > 0 || closes > 0)
+                    started = 1
+                depth += opens
+                depth -= closes
+                if (started && depth <= 0) {
+                    print body
                     exit
                 }
             }
-        ' "$file" 2>/dev/null
+        ' "$file"
     )"
-
-    case "$segment" in
-        *"$needle"*)
-            return 0
-            ;;
-    esac
-
-    echo "===== NoMount function verification failure =====" >&2
-    echo "file     : $file" >&2
-    echo "function : $function" >&2
-    echo "needle   : $needle" >&2
-    echo "-------------------------------------------------" >&2
-
-    if [ -n "$segment" ]; then
-        printf '%s\n' "$segment" >&2
-    else
-        echo "function body could not be extracted" >&2
+    [ -n "$body" ] ||
+        error "$message: failed to extract ${function}() from ${file}"
+    if printf '%s\n' "$body" | grep -Fq -- "$needle"; then
+        return 0
     fi
 
-    echo "=================================================" >&2
-
+    echo "--- ${function}() ---" >&2
+    printf '%s\n' "$body" >&2
+    echo "---------------------" >&2
     error "$message"
 }
 
@@ -766,13 +703,12 @@ verifyhook() {
         sel_write_user \
         sel_write_member
     do
-        verifyfunctiongate \
+        infn \
             "$d/security/selinux/selinuxfs.c" \
-            "${writefunction}[[:space:]]*\\(" \
+            "$writefunction" \
             'sel_ctx_hidden' \
             "hook: ${writefunction}() has no sel_ctx_hidden() gate"
-
-        echo "  verified: ${writefunction}()"
+            echo "  verified: ${writefunction}()"
     done
 
     nfs="$(
