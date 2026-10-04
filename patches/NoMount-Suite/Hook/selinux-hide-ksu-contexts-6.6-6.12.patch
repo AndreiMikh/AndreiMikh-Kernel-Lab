@@ -1,0 +1,148 @@
+diff --git a/security/selinux/selinuxfs.c b/security/selinux/selinuxfs.c
+--- a/security/selinux/selinuxfs.c
++++ b/security/selinux/selinuxfs.c
+@@ -608,6 +608,20 @@ static const struct file_operations sel_
+ 	.llseek		= generic_file_llseek,
+ };
+ 
++static bool sel_hidden_bytes(const char *buf, size_t size)
++{
++	if (__kuid_val(current_uid()) < 2000)
++		return false;
++
++	return strnstr(buf, ":ksu:", size) ||
++	       strnstr(buf, ":ksu_file:", size) ||
++	       strnstr(buf, ":lsposed_file:", size) ||
++	       strnstr(buf, ":zygisk_file:", size);
++}
++
++static bool sel_ctx_hidden(const char *ctx)
++{
++	return ctx && sel_hidden_bytes(ctx, strlen(ctx));
++}
++
+ static ssize_t sel_write_context(struct file *file, char *buf, size_t size)
+ {
+ 	char *canon = NULL;
+@@ -619,6 +633,11 @@ static ssize_t sel_write_context(struct
+ 	if (length)
+ 		goto out;
+ 
++	if (sel_ctx_hidden(buf)) {
++		length = -EINVAL;
++		goto out;
++	}
++
+ 	length = security_context_to_sid(buf, size, &sid, GFP_KERNEL);
+ 	if (length)
+ 		goto out;
+@@ -750,6 +769,10 @@ static ssize_t sel_write_validatetrans(s
+ 	if (sscanf(req, "%s %s %hu %s", oldcon, newcon, &tclass, taskcon) != 4)
+ 		goto out;
+ 
++	if (sel_ctx_hidden(oldcon) || sel_ctx_hidden(newcon) ||
++	    sel_ctx_hidden(taskcon))
++		goto out;
++
+ 	rc = security_context_str_to_sid(oldcon, &osid, GFP_KERNEL);
+ 	if (rc)
+ 		goto out;
+@@ -810,6 +833,8 @@ static ssize_t selinux_transaction_write
+ 		return PTR_ERR(data);
+ 
+ 	rv = write_op[ino](file, data, size);
++	if (rv > 0 && sel_hidden_bytes(data, rv))
++		return -EINVAL;
++
+ 	if (rv > 0) {
+ 		simple_transaction_set(file, rv);
+ 		rv = size;
+@@ -857,6 +882,9 @@ static ssize_t sel_write_access(struct f
+ 	if (sscanf(buf, "%s %s %hu", scon, tcon, &tclass) != 3)
+ 		goto out;
+ 
++	if (sel_ctx_hidden(scon) || sel_ctx_hidden(tcon))
++		goto out;
++
+ 	length = security_context_str_to_sid(scon, &ssid, GFP_KERNEL);
+ 	if (length)
+ 		goto out;
+@@ -914,6 +942,10 @@ static ssize_t sel_write_create(struct f
+ 	nargs = sscanf(buf, "%s %s %hu %s", scon, tcon, &tclass, namebuf);
+ 	if (nargs < 3 || nargs > 4)
+ 		goto out;
+ 
++	if (sel_ctx_hidden(scon) || sel_ctx_hidden(tcon))
++		goto out;
++
+ 	if (nargs == 4) {
+ 		/*
+ 		 * If and when the name of new object to be queried contains
+@@ -1008,6 +1040,9 @@ static ssize_t sel_write_relabel(struct
+ 	if (sscanf(buf, "%s %s %hu", scon, tcon, &tclass) != 3)
+ 		goto out;
+ 
++	if (sel_ctx_hidden(scon) || sel_ctx_hidden(tcon))
++		goto out;
++
+ 	length = security_context_str_to_sid(scon, &ssid, GFP_KERNEL);
+ 	if (length)
+ 		goto out;
+@@ -1066,6 +1101,9 @@ static ssize_t sel_write_user(struct fil
+ 	if (sscanf(buf, "%s %s", con, user) != 2)
+ 		goto out;
+ 
++	if (sel_ctx_hidden(con))
++		goto out;
++
+ 	length = security_context_str_to_sid(con, &sid, GFP_KERNEL);
+ 	if (length)
+ 		goto out;
+@@ -1128,6 +1166,9 @@ static ssize_t sel_write_member(struct f
+ 	if (sscanf(buf, "%s %s %hu", scon, tcon, &tclass) != 3)
+ 		goto out;
+ 
++	if (sel_ctx_hidden(scon) || sel_ctx_hidden(tcon))
++		goto out;
++
+ 	length = security_context_str_to_sid(scon, &ssid, GFP_KERNEL);
+ 	if (length)
+ 		goto out;
+diff --git a/security/selinux/avc.c b/security/selinux/avc.c
+--- a/security/selinux/avc.c
++++ b/security/selinux/avc.c
+@@ -778,6 +778,29 @@ noinline int slow_avc_audit(u32 ssid, u3
+ 
+ 	a->selinux_audit_data = &sad;
+ 
++	if (__kuid_val(current_uid()) >= 2000) {
++		u32 hidden_sids[2] = { tsid, ssid };
++		int i;
++
++		for (i = 0; i < 2; i++) {
++			char *ctx = NULL;
++			u32 len;
++			bool hidden;
++
++			if (i == 1 && ssid == tsid)
++				break;
++
++			if (security_sid_to_context(hidden_sids[i], &ctx, &len) ||
++			    !ctx)
++				continue;
++
++			hidden = strnstr(ctx, ":ksu:", len) ||
++				 strnstr(ctx, ":ksu_file:", len) ||
++				 strnstr(ctx, ":lsposed_file:", len) ||
++				 strnstr(ctx, ":zygisk_file:", len);
++
++			kfree(ctx);
++
++			if (hidden)
++				return 0;
++		}
++	}
++
+ 	common_lsm_audit(a, avc_audit_pre_callback, avc_audit_post_callback);
+ 	return 0;
+ }
