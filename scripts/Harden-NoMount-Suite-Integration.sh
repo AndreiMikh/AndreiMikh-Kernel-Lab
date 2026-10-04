@@ -514,54 +514,32 @@ infn() {
     local message="$4"
     local start
     local body
-
     start="$(
-        grep -nE "$function" "$file" |
-        while IFS=: read -r line text; do
-            case "$text" in
-                *';'*)
-                    continue
-                    ;;
-            esac
-
-            if printf '%s\n' "$text" | grep -Eq '\{[[:space:]]*$'; then
-                echo "$line"
-                break
-            fi
-
-            next="$((line + 1))"
-
-            if sed -n "${next}p" "$file" | grep -Eq '^[[:space:]]*\{'; then
-                echo "$line"
-                break
-            fi
-        done
+        grep -nE \
+            "^[[:space:]]*(static[[:space:]]+|inline[[:space:]]+|noinline[[:space:]]+)*[[:alnum:]_[:space:]\*]+[[:space:]]${function}[[:space:]]*\(" \
+            "$file" |
+        head -n1 |
+        cut -d: -f1
     )"
-
     [ -n "$start" ] ||
         error \
-            "$message: function ${function} was not found in ${file}"
-
+            "$message: function ${function}() was not found in ${file}"
     body="$(
         awk -v start="$start" '
             NR < start {
                 next
             }
-
             {
                 line = $0
                 body = body line "\n"
-
-                opens = gsub(/\{/, "{", line)
-                closes = gsub(/\}/, "}", line)
-
+                opens = gsub(/\{/, "", line)
+                closes = gsub(/\}/, "", line)
                 if (opens > 0)
                     started = 1
-
-                depth += opens - closes
-
+                depth += opens
+                depth -= closes
                 if (started && depth <= 0) {
-                    print body
+                    printf "%s", body
                     exit
                 }
             }
@@ -726,11 +704,11 @@ verifyhook() {
         sel_write_member
     do
         infn \
-            "$d/security/selinux/selinuxfs.c" \
+            "$COMMONKERNELFOLDER/security/selinux/selinuxfs.c" \
             "$writefunction" \
             'sel_ctx_hidden' \
             "hook: ${writefunction}() has no sel_ctx_hidden() gate"
-            echo "  verified: ${writefunction}()"
+        echo "  verified: ${writefunction}()"
     done
 
     nfs="$(
