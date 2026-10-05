@@ -306,17 +306,17 @@ gkidefconfigpath() {
 executehookless() {
     need WORKSPACEDIR COMMONKERNELFOLDER
     echo "::group::apply nomount-suite (hookless vfs) patch"
-    local NMSOURCE="$WORKSPACEDIR/nomount_hookless" NMSUITEPATCH DEFCONFIG
+    local NMSUITESOURCE="$WORKSPACEDIR/nmsuite" NMSUITEPATCH DEFCONFIG
     DEFCONFIG="$(gkidefconfigpath)"
     [ -f "$DEFCONFIG" ] || die "defconfig $DEFCONFIG does not exist and refusing to create it -- a defconfig invented here is not the one the build reads.. set nomount defconfig to the fragment this build actually uses.."
-    rm -rf "$NMSOURCE"
+    rm -rf "$NMSUITESOURCE"
   
     # engine moved into nomount suite repository..
-    git clone --depth 1 -b "${NOMOUNTREF:-main}" https://github.com/Bouteillepleine/NoMount-Suite.git "$NMSOURCE" \
-        || die "could not clone the NoMount engine at ref '${NOMOUNTREF:-main}' from Bouteillepleine/NoMount-Suite. It was Bouteillepleine/nomount@suite before, and kbuild@hookless before that; if something still passes nomount_ref=suite or =hookless, neither exists in this repo -- use 'main'."
+    git clone --depth 1 -b "${NOMOUNTREF:-main}" https://github.com/Bouteillepleine/NoMount-Suite.git "$NMSUITESOURCE" \
+        || die "could not clone the NoMount engine at ref '${NOMOUNTREF:-main}' from bouteillepleine/nomount-suite.. it was bouteillepleine/nomount@suite before, and kbuild@hookless before that; if something still passes nomount_ref=suite or =hookless, neither exists in this repo -- use 'main'."
   
     # resolve the ref to a commit and record it..
-    NMSUITESHA="$(git -C "$NMSOURCE" rev-parse HEAD 2>/dev/null || echo unknown)"
+    NMSUITESHA="$(git -C "$NMSUITESOURCE" rev-parse HEAD 2>/dev/null || echo unknown)"
     export NMSUITESHA
     echo "engine: bouteillepleine/nomountsuite@${NOMOUNTREF:-main} = $NMSUITESHA"
     if [ -n "${GITHUB_ENV:-}" ]; then
@@ -330,16 +330,16 @@ executehookless() {
     esac
     
     # engine collapsed the ten per-version integration patches into one..
-    NMSUITEPATCH="$NMSOURCE/hookless/patches/nomount_kernel_integration.patch"
+    NMSUITEPATCH="$NMSUITESOURCE/hookless/patches/nomount_kernel_integration.patch"
     if [ ! -f "$NMSUITEPATCH" ]; then
-        NMSUITEPATCH="$NMSOURCE/hookless/patches/nomount_${KERNELVERSION}_kernel_integration.patch"
+        NMSUITEPATCH="$NMSUITESOURCE/hookless/patches/nomount_${KERNELVERSION}_kernel_integration.patch"
         [ -f "$NMSUITEPATCH" ] || die "no hookless NoMount patch for $KERNELVERSION: neither\
- $NMSOURCE/hookless/patches/nomount_kernel_integration.patch nor $NMSUITEPATCH exists"
+ $NMSUITESOURCE/hookless/patches/nomount_kernel_integration.patch nor $NMSUITEPATCH exists"
     fi
     echo "hookless integration patch: ${NMSUITEPATCH##*/}.."
     rm -f "$COMMONKERNELFOLDER/fs/nomount.c" "$COMMONKERNELFOLDER/fs/nomount.h"
-    cp "$NMSOURCE/hookless/src/nomount.c" "$COMMONKERNELFOLDER/fs/nomount.c"
-    cp "$NMSOURCE/hookless/src/nomount.h" "$COMMONKERNELFOLDER/fs/nomount.h"
+    cp "$NMSUITESOURCE/hookless/src/nomount.c" "$COMMONKERNELFOLDER/fs/nomount.c"
+    cp "$NMSUITESOURCE/hookless/src/nomount.h" "$COMMONKERNELFOLDER/fs/nomount.h"
     
     # loud, annotated, and visible in the build log rather than the default..
     if patch -p1 -F0 --forward --dry-run -d "$COMMONKERNELFOLDER" <"$NMSUITEPATCH" >/dev/null 2>&1; then
