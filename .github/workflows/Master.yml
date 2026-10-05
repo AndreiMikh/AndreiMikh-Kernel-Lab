@@ -2882,16 +2882,12 @@ jobs:
           NOMOUNTBIN="${WORKDIR}/nomount-bin"
           NOMOUNTMODULEDIR="${WORKDIR}/nomount-userspace"
           NOMOUNTOUTDIR="${WORKDIR}/output"
-          # SHA-256 Helper
-          sha256file() {
-            sha256sum "$1" | awk '{print $1}'
-          }
-          cd "$COMMONKERNELFOLDER"
+          cd "$WORKDIR"
           echo "------------------------------"
           echo "NoMount Kernel Integration and Package"
           echo "------------------------------"
-          echo "📂 Kernel Source : $COMMONKERNELFOLDER"
-          echo "📦 NoMount Branch: $NOMOUNTBRANCH"
+          echo "📂 Work Directory : $WORKDIR"
+          echo "📦 NoMount Branch : $NOMOUNTBRANCH"
           # Resolve Selected NoMount Branch
           case "$NOMOUNTBRANCH" in
             NoMount)
@@ -2902,7 +2898,7 @@ jobs:
               ;;
             *)
               echo "⛔ Invalid NoMount Branch: $NOMOUNTBRANCH"
-              echo "⚠️ Supported Branches: Master, Dev"
+              echo "⚠️ Supported Branches: NoMount, NoMount-Dev"
               exit 1
               ;;
           esac
@@ -2929,7 +2925,7 @@ jobs:
             --depth=1 \
             --branch "$NOMOUNTGITBRANCH" \
             --single-branch \
-            https://github.com/maxsteeel/nomount.git \
+            "https://github.com/maxsteeel/nomount.git" \
             "$NOMOUNTSOURCE"
           # Detect Actual Branch and Commit
           ACTUALBRANCH="$(
@@ -2958,6 +2954,10 @@ jobs:
           }
           echo "✔️ NoMount Branch Verified"
           echo "✔️ NoMount Commit Verified"
+          # Generate 8-Digit Commit SHA
+          NOMOUNTSHA="${ACTUALCOMMIT:0:8}"
+          echo "📌 Full Commit SHA : $ACTUALCOMMIT"
+          echo "📌 Short Commit SHA: $NOMOUNTSHA"
           # Verify Required NoMount Files
           [[ -f "$NOMOUNTSOURCE/kernel/setup.sh" ]] || {
             echo "⚠️ NoMount Setup Script Missing"
@@ -2986,7 +2986,8 @@ jobs:
             exit 1
           }
           NOMOUNTKDIR="$(readlink -f "$COMMONKERNELFOLDER/fs/nomount")"
-          echo "📂 NoMount Kernel : $NOMOUNTKDIR"
+          echo "📂 Kernel Source   : $COMMONKERNELFOLDER"
+          echo "📂 NoMount Kernel  : $NOMOUNTKDIR"
           [[ -f "$COMMONKERNELFOLDER/fs/nomount/Kconfig" ]] || {
             echo "⚠️ NoMount Kernel Config Missing"
             exit 1
@@ -3032,6 +3033,10 @@ jobs:
           echo "NoMount Userspace Compilation"
           echo "------------------------------"
           echo "📂 Source : $NOMOUNTUSERSRC"
+          [[ -f "$NOMOUNTUSERSRC" ]] || {
+            echo "⛔ NoMount Userspace Source Not Found"
+            exit 1
+          }
           rm -rf "$NOMOUNTBIN"
           mkdir -p "$NOMOUNTBIN"
           cd "${NOMOUNTUSERDIR}/src"
@@ -3086,12 +3091,10 @@ jobs:
           echo "NoMount Userspace Packaging"
           echo "------------------------------"
           rm -rf "$NOMOUNTMODULEDIR"
-          mkdir -p \
-            "$NOMOUNTMODULEDIR/bin" \
-            "$NOMOUNTOUTDIR"
+          mkdir -p "$NOMOUNTMODULEDIR/bin"
+          mkdir -p "$NOMOUNTOUTDIR"
           # Copy Original NoMount Module
-          cp -a \
-            "$NOMOUNTSOURCE/module/." \
+          cp -a "$NOMOUNTSOURCE/module/." \
             "$NOMOUNTMODULEDIR/"
           # Install Compiled Binaries
           install -m 0755 \
@@ -3102,247 +3105,91 @@ jobs:
             "$NOMOUNTMODULEDIR/bin/nm-arm"
           # Record Exact Source Commit
           printf '%s\n' "$ACTUALCOMMIT" \
-            > "$NOMOUNTMODULEDIR/nm-commit-src"        
-          # Normalize Module Metadata
-          NOMOUNTVERSION="v2.0.0"
-          NOMOUNTAUTHOR="AndreiMikh & Maxsteeel"
-          # Remove Existing Metadata Entries
-          sed -i \
-            -e '/^version=/d' \
-            -e '/^versionCode=/d' \
-            -e '/^author=/d' \
-            "$NOMOUNTMODULEDIR/module.prop"
-          # Add Normalized Module Metadata
-          printf '%s\n' \
-            "version=${NOMOUNTVERSION}" \
-            "versionCode=1" \
-            "author=${NOMOUNTAUTHOR}" \
-            >> "$NOMOUNTMODULEDIR/module.prop"        
-          echo "✔️ Module Author: AndreiMikh & Maxsteeel"
-          # Create NoMount Integrity Verifier
-          echo "🔐 Creating NoMount Integrity Verifier..."
-          cat > "$NOMOUNTMODULEDIR/verify.sh" <<'VERIFYEOF'
-          #!/system/bin/sh
-          MODULEDIR="$1"
-          [ -n "$MODULEDIR" ] || exit 1
-          [ -d "$MODULEDIR" ] || exit 1
-          FAILED=0
-          CHECKED=0
-          CHECKSUMLIST="$MODULEDIR/.checksums.list"
-          cleanup() {
-              rm -f "$CHECKSUMLIST"
-          }
-          trap cleanup EXIT
-          find "$MODULEDIR" \
-            -type f \
-            -name '*.sha256' \
-            2>/dev/null > "$CHECKSUMLIST"
-          while IFS= read -r CHECKSUM; do
-              [ -n "$CHECKSUM" ] || continue
-              FILE="${CHECKSUM%.sha256}"
-              if [ ! -f "$FILE" ]; then
-                  FAILED=1
-                  continue
-              fi
-
-              EXPECTED="$(awk '{print $1}' "$CHECKSUM" 2>/dev/null)"
-              ACTUAL="$(sha256sum "$FILE" 2>/dev/null | awk '{print $1}')"
-              if [ -n "$EXPECTED" ] && [ "$EXPECTED" = "$ACTUAL" ]; then
-                  CHECKED=$((CHECKED + 1))
-              else
-                  FAILED=1
-              fi         
-       
-          done < "$CHECKSUMLIST"
-          [ "$CHECKED" -gt 0 ] || exit 1
-          [ "$FAILED" -eq 0 ] || exit 1
-          exit 0
-          VERIFYEOF
-          chmod 0755 "$NOMOUNTMODULEDIR/verify.sh"
-          echo "✔️ Verify Script Created"
-          # Remove Any Existing Checksums
-          find "$NOMOUNTMODULEDIR" \
-            -type f \
-            -name '*.sha256' \
-            -delete
-          # Generate Per-File SHA-256 Checksums
-          echo "🔐 Generating Module SHA-256 Checksums..."
-          while IFS= read -r -d '' FILE; do
-            RELATIVE="${FILE#$NOMOUNTMODULEDIR/}"
-            case "$RELATIVE" in
-              verify.sh|customize.sh)
-                continue
-                ;;
-            esac
-            HASH="$(sha256file "$FILE")"
-            [[ "$HASH" =~ ^[[:xdigit:]]{64}$ ]] || {
-              echo "⛔ Invalid SHA-256 Generated: $RELATIVE"
-              exit 1
-            }
-            printf '%s\n' "$HASH" > "${FILE}.sha256"
-            echo "  ✔️ ${RELATIVE}.sha256"
-            echo "     SHA-256: $HASH"
-          done < <(
-            find "$NOMOUNTMODULEDIR" \
-              -type f \
-              ! -name '*.sha256' \
-              -print0
-          )
-          echo "✔️ SHA-256 Checksums Generated for All Module Files"
-          # Verify Generated Per-File SHA-256 Checksums
-          echo "🔎 Verifying Module SHA-256 Checksums..."
-          CHECKSUMCOUNT=0
-          while IFS= read -r -d '' CHECKSUM; do
-            FILE="${CHECKSUM%.sha256}"
-            RELATIVE="${CHECKSUM#$NOMOUNTMODULEDIR/}"
-            if [[ ! -f "$FILE" ]]; then
-              echo "⚠️ Missing File: ${FILE#$NOMOUNTMODULEDIR/}"
-              exit 1
-            fi
-
-            EXPECTED="$(awk 'NF {print $1; exit}' "$CHECKSUM")"
-            ACTUAL="$(sha256file "$FILE")"
-            if [[ ! "$EXPECTED" =~ ^[[:xdigit:]]{64}$ ]]; then
-              echo "⚠️ Hash Mismatch, Invalid SHA-256 Manifest: $RELATIVE"
-              exit 1
-            fi
-
-            if [[ "$(wc -w < "$CHECKSUM")" -ne 1 ]]; then
-              echo "⚠️ SHA-256 Manifest Contains Extra Fields: $RELATIVE"
-              exit 1
-            fi
-
-            if [[ "$EXPECTED" != "$ACTUAL" ]]; then
-              echo "⚠️ Hash Mismatch: $RELATIVE"
-              echo "   Expected: $EXPECTED"
-              echo "   Actual  : $ACTUAL"
-              exit 1
-            fi
-
-            CHECKSUMCOUNT=$((CHECKSUMCOUNT + 1))
-            echo "✔️ $RELATIVE"
-            echo "   SHA-256: $ACTUAL"
-          done < <(
-            find "$NOMOUNTMODULEDIR" \
-              -type f \
-              -name '*.sha256' \
-              -print0
-          )
-          if [[ "$CHECKSUMCOUNT" -eq 0 ]]; then
-            echo "⚠️ No Module Checksums Were Generated"
-            exit 1
+            > "$NOMOUNTMODULEDIR/nm-commit-src"
+          # Record 8-Digit Source Commit
+          printf '%s\n' "$NOMOUNTSHA" \
+            > "$NOMOUNTMODULEDIR/nm-commit"
+          # Normalize Module Version
+          if grep -q '^versionCode=' "$NOMOUNTMODULEDIR/module.prop"; then
+            sed -i 's/^versionCode=.*/versionCode=1/' \
+              "$NOMOUNTMODULEDIR/module.prop"
           fi
 
-          echo "✔️ All Module File Checksums Verified"
-          # Verify Integrity Verifier Against Packaged Files          
-          echo "🔎 Testing NoMount Integrity Verifier..."
-          sh "$NOMOUNTMODULEDIR/verify.sh" \
-            "$NOMOUNTMODULEDIR"
-          echo "✔️ NoMount Integrity Verifier Passed"
-          # Define Final Package
-          NOMOUNTMODULEZIP="${NOMOUNTOUTDIR}/NoMount-${ACTUALCOMMIT}.zip"
-          rm -f \
-            "$NOMOUNTMODULEZIP" \
-            "${NOMOUNTMODULEZIP}.sha256"
-          # Create NoMount Userspace ZIP
+          # Set Module Author
+          if grep -q '^author=' "$NOMOUNTMODULEDIR/module.prop"; then
+            sed -i 's/^author=.*/author=Andrei \& Maxsteeel/' \
+              "$NOMOUNTMODULEDIR/module.prop"
+          else
+            printf '%s\n' 'author=AndreiMikh & Maxsteel' \
+              >> "$NOMOUNTMODULEDIR/module.prop"
+          fi
+
+          echo "✔️ Module Author: Andrei & Maxsteeel"
+          # Verify Package Metadata
+          [[ "$(cat "$NOMOUNTMODULEDIR/nm-commit-src")" == "$ACTUALCOMMIT" ]] || {
+            echo "⛔ Full Commit Metadata Verification Failed"
+            exit 1
+          }
+          [[ "$(cat "$NOMOUNTMODULEDIR/nm-commit")" == "$NOMOUNTSHA" ]] || {
+            echo "⛔ Short Commit Metadata Verification Failed"
+            exit 1
+          }
+          echo "✔️ Full Commit Metadata Verified"
+          echo "✔️ 8-Digit Commit Metadata Verified"
+          # Define Package
+          NOMOUNTMODULEZIP="${NOMOUNTOUTDIR}/NoMount-${NOMOUNTSHA}.zip"
+          rm -f "$NOMOUNTMODULEZIP"
           echo "📦 Creating NoMount Userspace ZIP..."
           (
             cd "$NOMOUNTMODULEDIR"
             zip -qr "$NOMOUNTMODULEZIP" .
           )
-          [[ -f "$NOMOUNTMODULEZIP" ]] || {
-            echo "⚠️ NoMount Userspace ZIP was Not Created"
-            exit 1
-          }
-          echo "✔️ NoMount Userspace ZIP Created"
-          # Verify ZIP Contents
-          echo "🔎 Verifying NoMount ZIP Contents..."
-          ZIPCONTENTS="$(
-            unzip -Z1 "$NOMOUNTMODULEZIP"
-          )"
-          for FILE in \
-            "module.prop" \
-            "customize.sh" \
-            "verify.sh" \
-            "nm-commit-src" \
-            "bin/nm-arm64" \
-            "bin/nm-arm"
-          do
-            if ! grep -Fxq "$FILE" <<< "$ZIPCONTENTS"; then
-              echo "⚠️ Required File Missing From ZIP: $FILE"
-              exit 1
-            fi
-          done
-
-          if ! grep -q '\.sha256$' <<< "$ZIPCONTENTS"; then
-            echo "⚠️ No Per-File SHA-256 Manifests Found in ZIP"
-            exit 1
-          fi
-
-          if grep -Fxq "customize.sh.sha256" <<< "$ZIPCONTENTS"; then
-            echo "⚠️ Customize.sh.SHA256 Must Not be Packaged"
-            exit 1
-          fi
-
-          if grep -Fxq "verify.sh.sha256" <<< "$ZIPCONTENTS"; then
-            echo "⚠️ Verify.sh.SHA256 Must Not be Packaged"
-            exit 1
-          fi
-
-          echo "✔️ Required Module Files Present"
-          echo "✔️ Per-File SHA-256 Manifests Present"
-          echo "✔️ Integrity Scripts Correctly Excluded From Self-Checksums"
-          # Generate ZIP SHA-256
-          echo "🔐 Generating ZIP SHA-256..."
-          ZIPHASH="$(sha256file "$NOMOUNTMODULEZIP")"
-          [[ "$ZIPHASH" =~ ^[[:xdigit:]]{64}$ ]] || {
-            echo "⛔ Invalid ZIP SHA-256 Generated"
-            exit 1
-          }
-          printf '%s\n' "$ZIPHASH" \
+          # Generate SHA-256
+          sha256sum "$NOMOUNTMODULEZIP" \
             > "${NOMOUNTMODULEZIP}.sha256"
-          echo "✔️ NoMount ZIP SHA-256:"
-          cat "${NOMOUNTMODULEZIP}.sha256"
-          # Verify ZIP SHA-256
-          echo "🔎 Verifying ZIP SHA-256..."
-          EXPECTEDZIPHASH="$(
-            awk 'NF {print $1; exit}' "${NOMOUNTMODULEZIP}.sha256"
-          )"
-          ACTUALZIPHASH="$(
-            sha256file "$NOMOUNTMODULEZIP"
-          )"
-
-          if [[ "$(wc -w < "${NOMOUNTMODULEZIP}.sha256")" -ne 1 ]]; then
-            echo "⚠️ NoMount ZIP SHA-256 Manifest Contains Extra Fields"
+          # Verify Package
+          [[ -s "$NOMOUNTMODULEZIP" ]] || {
+            echo "⚠️ NoMount Userspace ZIP Was Not Created"
             exit 1
-          fi
-
-          if [[ -z "$EXPECTEDZIPHASH" ||
-                ! "$EXPECTEDZIPHASH" =~ ^[[:xdigit:]]{64}$ ||
-                "$EXPECTEDZIPHASH" != "$ACTUALZIPHASH" ]]; then
-            echo "⚠️ NoMount ZIP SHA-256 Verification Failed"
-            echo "   Expected : $EXPECTEDZIPHASH"
-            echo "   Actual   : $ACTUALZIPHASH"
+          }
+          # Verify ZIP Integrity
+          unzip -tq "$NOMOUNTMODULEZIP" || {
+            echo "⛔ NoMount Userspace ZIP Integrity Check Failed"
             exit 1
-          fi
-
-          echo "✔️ NoMount ZIP SHA-256 Verified"
-          echo "   SHA-256: $ACTUALZIPHASH"
-          # Final Package Details
+          }
+          # Verify ZIP Contains Required Files
+          unzip -l "$NOMOUNTMODULEZIP" | grep -q 'module.prop' || {
+            echo "⛔ Module.prop Missing From NoMount ZIP"
+            exit 1
+          }
+          unzip -l "$NOMOUNTMODULEZIP" | grep -q 'bin/nm-arm64' || {
+            echo "⛔ NoMount-ARM64 Missing From NoMount ZIP"
+            exit 1
+          }
+          unzip -l "$NOMOUNTMODULEZIP" | grep -q 'bin/nm-arm' || {
+            echo "⛔ NoMount-ARM Missing From NoMount ZIP"
+            exit 1
+          }
+          unzip -l "$NOMOUNTMODULEZIP" | grep -q 'nm-commit-src' || {
+            echo "⛔ Full Commit Metadata Missing From NoMount ZIP"
+            exit 1
+          }
+          unzip -l "$NOMOUNTMODULEZIP" | grep -q 'nm-commit' || {
+            echo "⛔ 8-Digit Commit Metadata Missing From NoMount ZIP"
+            exit 1
+          }
           echo "------------------------------"
           echo "NoMount Integration Complete"
           echo "------------------------------"
+          echo "📂 Work Directory  : $WORKDIR"
           echo "📦 Selected Branch : $NOMOUNTBRANCH"
           echo "🌿 Git Branch      : $ACTUALBRANCH"
-          echo "📌 Commit          : $ACTUALCOMMIT"
+          echo "📌 Full Commit     : $ACTUALCOMMIT"
+          echo "📌 Short Commit    : $NOMOUNTSHA"
           echo "📦 ARM64 Binary    : ${NOMOUNTBIN}/nm-arm64"
           echo "📦 ARM32 Binary    : ${NOMOUNTBIN}/nm-arm"
           echo "📦 Userspace ZIP   : $NOMOUNTMODULEZIP"
-          echo "🔐 SHA-256         : $ZIPHASH"
-          ls -lh \
-            "$NOMOUNTMODULEZIP" \
-            "${NOMOUNTMODULEZIP}.sha256"
-          echo "📋 NoMount ZIP Contents:"
+          echo "🔐 SHA-256         : ${NOMOUNTMODULEZIP}.sha256"
           unzip -l "$NOMOUNTMODULEZIP"
           echo "🎉 NoMount Kernel Integration and Packaging Completed Successfully"
  
