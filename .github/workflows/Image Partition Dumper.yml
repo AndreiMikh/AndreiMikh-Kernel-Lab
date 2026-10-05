@@ -7,7 +7,6 @@ on:
         description: 'Device Model'
         required: true
         type: choice
-        default: 'OP 13'      
         options:
           - OP 10 PRO
           - OP 11
@@ -52,188 +51,178 @@ on:
           - OPPO RENO 15 PRO
           - Realme GT5 PRO
           - Realme GT7 PRO
-          - Realme GT8 PRO       
+          - Realme GT8 PRO
+        default: 'OP 13'
+        
       region:
         description: 'Regional Version'
         required: true
         type: choice
-        default: 'GLO'
         options:
           - GLO
           - EU
           - IN
           - CN
-          - NA              
-      indexversion:
+          - NA
+        default: 'GLO'
+        
+      version_index:
         description: 'Version Index (0=Latest, 1=Second Latest & So-on Etc)'
         required: true
         type: number
-        default: 0       
+        default: 0
+        
       partitions:
         description: 'Partitions to Extract (Comma Separated, Leave Empty to Extract Default Value)'
         required: false
         type: string
-        default: 'boot,dtbo,init_boot,vendor_boot,vbmeta'        
-      kernelinfo:
+        default: 'boot,dtbo,init_boot,vendor_boot,vbmeta'
+        
+      extract_kernel_info:
         description: 'Extract Kernel Build Time & Name'
         required: false
         type: boolean
-        default: true     
+        default: true
+        
       workers:
         description: 'Number of Parallel Working Threads'
         required: false
         type: number
         default: 4
+
 jobs:
   extract:
     name: 👾 Extract Partitions
     runs-on: ubuntu-latest
-    steps:
-      - name: 📥 Checkout Code
-        uses: actions/checkout@v7
 
+    steps:
+    
+      # =========================
+
+      # =========================
+      - name: 📥 Checkout Code
+        uses: actions/checkout@v4
+
+      # =========================
+
+      # =========================
       - name: 🔧 Setup Python Environment
         uses: actions/setup-python@v5
         with:
           python-version: '3.12'
 
+      # =========================
+
+      # =========================
       - name: 📦 Install Dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y aria2  # Install Aria2 as a System Package
-          pip install httpx beautifulsoup4  # Install Python Dependencies
+          sudo apt-get install -y aria2  # Install aria2 as a system package
+          pip install httpx beautifulsoup4  # Install Python dependencies
 
+      # =========================
+
+      # =========================
       - name: 🔗 Get OTA Download URL
-        id: ota-dl-url
+        id: get_ota
         run: |
           python3 << 'PYEOF'
           import httpx
           import json
           import os
-          from bs4 import BeautifulSoup     
+          import re
+          from bs4 import BeautifulSoup
+
           device = "${{ inputs.device }}"
           region = "${{ inputs.region }}"
-          indexversion = ${{ inputs.indexversion }}      
-          url = "https://roms.danielspringer.at/index.php?view=ota"      
-          resp = httpx.get(
-              url,
-              followredirects=True
-          )
-          resp.raise_for_status()      
-          soup = BeautifulSoup(
-              resp.text,
-              'html.parser'
-          )     
-          select = soup.find(
-              'select',
-              id='device'
-          )      
-          devices = json.loads(
-              select['data-devices']
-          )    
+          version_index = ${{ inputs.version_index }}
+
+          url = "https://roms.danielspringer.at/index.php?view=ota"
+          resp = httpx.get(url, follow_redirects=True)
+          resp.raise_for_status()
+
+          soup = BeautifulSoup(resp.text, 'html.parser')
+          select = soup.find('select', id='device')
+          devices = json.loads(select['data-devices'])
+
           if device not in devices:
-              raise Exception(
-                  f"Device '{device}' not found"
-              )    
-          deviceregions = devices[device]     
-          if region not in deviceregions:
-              raise Exception(
-                  f"Region '{region}' not available for '{device}'"
-              )    
-          versions = deviceregions[region]      
+              raise Exception(f"Device '{device}' not found")
+
+          device_regions = devices[device]
+          if region not in device_regions:
+              raise Exception(f"Region '{region}' not available for '{device}'")
+
+          versions = device_regions[region]
           if not versions:
-              raise Exception(
-                  f"No versions for '{device}' in '{region}'"
-              )      
-          if indexversion >= len(versions):
-              raise Exception(
-                  f"Version index {indexversion} "
-                  f"out of range (0-{len(versions) - 1})"
-              )      
-          version = versions[indexversion]      
-          print(
-              f"Selected: {device} | {region} | {version}"
-          )      
-          postdata = {
+              raise Exception(f"No versions for '{device}' in '{region}'")
+
+          if version_index >= len(versions):
+              raise Exception(f"Version index {version_index} out of range (0-{len(versions)-1})")
+
+          version = versions[version_index]
+          print(f"Selected: {device} | {region} | {version}")
+
+          post_data = {
               "device": device,
               "region": region,
-              "indexversion": str(indexversion)
-          }      
-          postresp = httpx.post(
-              url,
-              data=postdata,
-              followredirects=True
-          )
-          postresp.raise_for_status()      
-          postsoup = BeautifulSoup(
-              postresp.text,
-              'html.parser'
-          )    
-          downloadurl = None      
-          for a in postsoup.find_all(
-              'a',
-              href=True
-          ):
+              "version_index": str(version_index)
+          }
+
+          post_resp = httpx.post(url, data=post_data, follow_redirects=True)
+          post_resp.raise_for_status()
+
+          post_soup = BeautifulSoup(post_resp.text, 'html.parser')
+
+          download_url = None
+          for a in post_soup.find_all('a', href=True):
               href = a['href']
-              hreflower = href.lower()   
-              if any(
-                  kw in hreflower
-                  for kw in [
-                      'download',
-                      'ota',
-                      'firmware',
-                      'update',
-                      '.zip'
-                  ]
-              ):
+              if any(kw in href.lower() for kw in ['download', 'ota', 'firmware', 'update', '.zip']):
                   if href.startswith('http'):
-                      downloadurl = href
-                      break      
-          if not downloadurl:
-              debugfile = 'responsedebug.html'     
-              with open(
-                  debugfile,
-                  'w'
-              ) as f:
-                  f.write(postresp.text)  
-              raise Exception(
-                  "Could Not Find Download URL - "
-                  "Check Responsedebug.html"
-              )      
-          print(
-              f"Download URL: {downloadurl}"
-          )     
-          with open(
-              os.environ['GITHUB_OUTPUT'],
-              'a'
-          ) as f:
-              f.write(
-                  f'otadlurl={downloadurl}\n'
-              )
-              f.write(
-                  f'version={version}\n'
-              )
+                      download_url = href
+                      break
+
+          if not download_url:
+              with open('response_debug.html', 'w') as f:
+                  f.write(post_resp.text)
+              raise Exception("Could not find download URL. Check response_debug.html")
+
+          print(f"Download URL: {download_url}")
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as f:
+              f.write(f'ota_url={download_url}\n')
+              f.write(f'version={version}\n')
           PYEOF
-     
+
+      # =========================
+
+      # =========================
       - name: 📋 Show OTA Information
         run: |
           echo "📱 Device Information" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "- *Device*: ${{ inputs.device }}" >> $GITHUB_STEP_SUMMARY
           echo "- *Region*: ${{ inputs.region }}" >> $GITHUB_STEP_SUMMARY
-          echo "- *Version*: ${{ steps.ota-dl-url.outputs.version }}" >> $GITHUB_STEP_SUMMARY
-          echo "- *OTA URL*: \`${{ steps.ota-dl-url.outputs.otadlurl }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- *Version*: ${{ steps.get_ota.outputs.version }}" >> $GITHUB_STEP_SUMMARY
+          echo "- *OTA URL*: \`${{ steps.get_ota.outputs.ota_url }}\`" >> $GITHUB_STEP_SUMMARY
 
+      # =========================
+
+      # =========================
       - name: 🛠️ Install Payload-Dumper
         run: pip install git+https://github.com/5ec1cff/payload-dumper
 
+      # =========================
+
+      # =========================
       - name: 📁 Prepare Output Directory
         run: mkdir -p ./output
 
+      # =========================
+
+      # =========================
       - name: 📂 Download OTA and Extract Specified Partitions
         run: |
-          OTADLURL="${{ steps.ota-dl-url.outputs.otadlurl }}"
-          if [ -z "$OTADLURL" ]; then
+          OTA_URL="${{ steps.get_ota.outputs.ota_url }}"
+          if [ -z "$OTA_URL" ]; then
             echo "⚠️ OTA URL is Empty, Cannot Proceed"
             exit 1
           fi
@@ -242,11 +231,12 @@ jobs:
           if [ -f "./output/ota.zip" ]; then
             echo "📩 OTA Already Downloaded, Skipping Download"
           else
-            aria2c -x 16 -s 16 -j 4 -d ./output -o ota.zip "$OTADLURL"  # Download OTA File With Aria2c For Speed
+            aria2c -x 16 -s 16 -j 4 -d ./output -o ota.zip "$OTA_URL"  # Download OTA file with aria2c for speed
           fi
 
           # Handle Partitions Safely
           PARTITIONS="${{ inputs.partitions }}"
+
           # If Empty → Use Default
           if [[ -z "$PARTITIONS" ]]; then
             PARTITIONS="boot,dtbo,init_boot,vendor,vendor_boot,vbmeta"
@@ -254,6 +244,7 @@ jobs:
 
           # Remove .IMG if User Inputs File Names
           PARTITIONS=$(echo "$PARTITIONS" | sed 's/\.img//g')
+
           # Always Ensure Vendor is Included
           if [[ ",$PARTITIONS," != *",vendor,"* ]]; then
             echo "⚠️ Vendor Image Not Included — Auto-Adding for ROM Detection"
@@ -261,116 +252,153 @@ jobs:
           fi
 
           echo "📦 Final Partitions: $PARTITIONS"
+
           payload_dumper \
             --partitions "$PARTITIONS" \
             --workers ${{ inputs.workers }} \
             --out ./output \
             ./output/ota.zip
 
+      # =========================
+
+      # =========================
       - name: 🧹 Cleanup
         run: |
           echo "🧹 Cleaning Up Downloaded OTA File..."
           rm -f ./output/ota.zip  # Remove the Downloaded OTA File After Extraction
           echo "✔️ Cleanup Complete"
 
+      # =========================
+      
+      # =========================
       - name: 🔍 Extract Kernel Build Information
-        id: kernel-info
-        if: ${{ inputs.kernelinfo == true }}
+        id: kernel_info
+        if: ${{ inputs.extract_kernel_info == true }}
         run: |
-          BOOTIMAGE="output/boot.img"
-          if [ ! -f "$BOOTIMAGE" ]; then
+          BOOT_IMG="output/boot.img"
+
+          if [ ! -f "$BOOT_IMG" ]; then
             echo "⚠️ Boot Image Not Found, Skipping Kernel Info Extraction"
             echo "found=false" >> $GITHUB_OUTPUT
             exit 0
           fi
 
           echo "found=true" >> $GITHUB_OUTPUT
-          # 🧾 Extract Kernel Information Using Strings and Regex
+
+          # 🧾 Extract Kernel Information using strings and regex
           python3 << 'PYEOF'
           import subprocess
           import re
           import os
-          bootimagepath = "./output/boot.img"
-          kernelversion = None
-          kerneltime = None
-          fullstring = None
-          def searchversion(text):
-              global kernelversion, kerneltime, fullstring           
+
+          boot_img_path = "./output/boot.img"
+          kernel_version = None
+          kernel_time = None
+          full_string = None
+
+          def search_version(text):
+              global kernel_version, kernel_time, full_string
+              
               match = re.search(
                   r'Linux version (\S+)\s+\([^)]+\)\s+\([^)]+\)\s+#1\s+SMP\s+PREEMPT\s+(.+)',
                   text
               )
               if match:
-                  kernelversion = match.group(1)
-                  kerneltime = match.group(2).strip()
-                  fullstring = f"Linux version {kernelversion} ... #1 SMP PREEMPT {kerneltime}"
-                  return True            
-              versionmatch = re.search(r'Linux\s+version\s+(\d+\.\d+\.\d+-[^\s]+)', text)
-              if not versionmatch:
-                  versionmatch = re.search(r'(\d+\.\d+\.\d+-android\d+-[^\s]+)', text)            
-              if versionmatch:
-                  kernelversion = versionmatch.group(1)
-                  timematch = re.search(
+                  kernel_version = match.group(1)
+                  kernel_time = match.group(2).strip()
+                  full_string = f"Linux version {kernel_version} ... #1 SMP PREEMPT {kernel_time}"
+                  return True
+              
+              ver_match = re.search(r'Linux\s+version\s+(\d+\.\d+\.\d+-[^\s]+)', text)
+              if not ver_match:
+                  ver_match = re.search(r'(\d+\.\d+\.\d+-android\d+-[^\s]+)', text)
+              
+              if ver_match:
+                  kernel_version = ver_match.group(1)
+                  time_match = re.search(
                       r'#1\s+SMP\s+PREEMPT\s+((?:Mon|Tue|Wed|Thu|Fri|Sat|Sun)\s+\w+\s+\d+\s+[\d:]+\s+\w+\s+\d{4})',
                       text
                   )
-                  if timematch:
-                      kerneltime = timematch.group(1)
-                  fullstring = f"Linux version {kernelversion} ... #1 SMP PREEMPT {kerneltime or 'Unknown'}"
+                  if time_match:
+                      kernel_time = time_match.group(1)
+                  full_string = f"Linux version {kernel_version} ... #1 SMP PREEMPT {kernel_time or 'Unknown'}"
                   return True
               return False
-          result = subprocess.run(['strings', bootimagepath], capture_output=True, text=True)
-          if searchversion(result.stdout):
-              print("📂 Kernel Version Found: ", kernelversion)
-              print("📂 Kernel Build Time: ", kerneltime)
+
+          result = subprocess.run(['strings', boot_img_path], capture_output=True, text=True)
+          if search_version(result.stdout):
+              print("📂 Kernel Version Found: ", kernel_version)
+              print("📂 Kernel Build Time: ", kernel_time)
           else:
               print("⚠️ Could Not Extract Kernel Information")
+
           with open(os.environ['GITHUB_OUTPUT'], 'a') as f:
-              f.write(f'kernelversion={kernelversion}\n')
-              f.write(f'kerneltime={kerneltime or "Unknown"}\n')
+              f.write(f'kernel_version={kernel_version}\n')
+              f.write(f'kernel_time={kernel_time or "Unknown"}\n')
           PYEOF
 
+      # =========================
+
+      # =========================
       - name: 🧰 Install Android Tools
         run: |
           sudo apt-get update
           sudo apt-get install -y android-sdk-libsparse-utils
 
+      # =========================
+
+      # =========================
       - name: 🌏 Advanced ROM Base Detection
-        id: detect-region
+        id: detect_region
         run: |
+          echo "------------------------------"
           echo "🔍 Detecting ROM Base..."
+          echo "------------------------------"
+ 
           # Multi-Source String Extraction
-          OUTPUTSTRINGS=""
+          STRINGS_OUTPUT=""
+
           # Extract Vendor Image
           if [[ -f "output/vendor.img" ]]; then
             echo "🔧 Extracting Vendor Image..."
-            mkdir -p vendormount
+
+            mkdir -p vendor_mount
+
             # Convert Sparse → Raw (If Needed)
             simg2img output/vendor.img vendor_raw.img 2>/dev/null || cp output/vendor.img vendor_raw.img
+
             # Mount
-            if sudo mount -o loop vendor_raw.img vendormount; then
+            if sudo mount -o loop vendor_raw.img vendor_mount; then
               echo "✔️ Vendor Mounted Successfully"
+
               # Find All Build Properties Locations
               echo "🔍 Searching for build.prop files:"
-              find vendormount -iname "*build.prop" 2>/dev/null || echo "⚠️ No Build Properties Found"               
+              find vendor_mount -iname "*build.prop" 2>/dev/null || echo "⚠️ No Build Properties Found" 
+              
               # Debug
               echo "📂 Checking extracted files:"
               ls -lh output/ || echo "⚠️ Output / Folder Missing"
+
               # Direct Vendor Property Check (All Locations)
               echo "🔎 Direct Vendor Property Check (All Files):"
-              find vendormount -iname "*build.prop" 2>/dev/null | while read -r file; do
+
+              find vendor_mount -iname "*build.prop" 2>/dev/null | while read -r file; do
                 echo "📄 Checking: $file"
                 sudo grep -iE "oplus.region|product.locale|ro.boot.hwc|androidboot.hwc" "$file" 2>/dev/null || true
               done
-            
+             
               # Reading Vendor Build Properties in All Locations
               echo "📦 Reading Vendor Build Properties (All Locations)"
+
               while IFS= read -r file; do
                 echo "📄 Reading: $file"
-                OUTPUTSTRINGS+="$(sudo cat "$file" 2>/dev/null || true)\n"
-              done < <(find vendormount -iname "*build.prop" 2>/dev/null)
+                STRINGS_OUTPUT+="$(sudo cat "$file" 2>/dev/null || true)\n"
+              done < <(find vendor_mount -iname "*build.prop" 2>/dev/null)
+
+              echo "------------------------------"
               echo "🔬 Vendor Region Properties:"
-              echo "$OUTPUTSTRINGS" | grep -iE "oplus.region|product.locale|ro.boot.hwc|androidboot.hwc" || echo "⚠️ No Region Properties Found"
+              echo "------------------------------"
+              echo "$STRINGS_OUTPUT" | grep -iE "oplus.region|product.locale|ro.boot.hwc|androidboot.hwc" || echo "⚠️ No Region Properties Found"
             else
               echo "⚠️ Vendor Mount Failed — Skipping Vendor Detection"
             fi
@@ -378,38 +406,42 @@ jobs:
           
           if [[ -f "output/vendor_boot.img" ]]; then
             echo "📦 Using Vendor Boot Image (Primary Source)"
-            OUTPUTSTRINGS+="$(strings output/vendor_boot.img 2>/dev/null || true)\n"
+            STRINGS_OUTPUT+="$(strings output/vendor_boot.img 2>/dev/null || true)\n"
           fi
 
           if [[ -f "output/boot.img" ]]; then
             echo "📦 Using Boot Image (Secondary Source)"
-            OUTPUTSTRINGS+="$(strings output/boot.img 2>/dev/null || true)\n"
+            STRINGS_OUTPUT+="$(strings output/boot.img 2>/dev/null || true)\n"
           fi
 
           if [[ -f "output/dtbo.img" ]]; then
             echo "📦 Using DTBO Image (Cmdline Source)"
-            OUTPUTSTRINGS+="$(strings output/dtbo.img 2>/dev/null || true)\n"
+            STRINGS_OUTPUT+="$(strings output/dtbo.img 2>/dev/null || true)\n"
           fi
 
-          if [[ -z "$OUTPUTSTRINGS" ]]; then
+          if [[ -z "$STRINGS_OUTPUT" ]]; then
             echo "⚠️ No Valid Images Found"
             echo "variant=Unknown" >> $GITHUB_OUTPUT
             echo "confidence=Low" >> $GITHUB_OUTPUT
-            echo "romtype=Unknown" >> $GITHUB_OUTPUT
+            echo "rom_type=Unknown" >> $GITHUB_OUTPUT
             exit 0
           fi
 
-          LOWERSTRINGS=$(printf "%b" "$OUTPUTSTRINGS" 2>/dev/null \
+          LOWER_STRINGS=$(printf "%b" "$STRINGS_OUTPUT" 2>/dev/null \
             | tr '[:upper:]' '[:lower:]' \
             | tr -s '[:space:]' ' ')
+
           # Default
           REGION="UNKNOWN"
+
           # Normalize Detection Source Once
-          REGIONSRC="$LOWERSTRINGS"
+          REGION_SOURCE="$LOWER_STRINGS"
+
           # Extract Region Using Regex (Single Pass)
-          if [[ "$REGIONSRC" =~ (ro\.oplus\.region|ro\.vendor\.oplus\.region|androidboot\.hwc)=(cn|global|eu|india) ]]; then
-            DETECTEDREGION="${BASH_REMATCH[2]}"
-            case "$DETECTEDREGION" in
+          if [[ "$REGION_SOURCE" =~ (ro\.oplus\.region|ro\.vendor\.oplus\.region|androidboot\.hwc)=(cn|global|eu|india) ]]; then
+            DETECTED_REGION="${BASH_REMATCH[2]}"
+
+            case "$DETECTED_REGION" in
               cn)
                 REGION="🇨🇳 China"
                 ;;
@@ -426,142 +458,177 @@ jobs:
           fi
 
           # OSSI Detection (Modern OPlus Unified ROM)
-          if [[ "$LOWERSTRINGS" =~ oplus/ossi ]]; then
+          if [[ "$LOWER_STRINGS" =~ oplus/ossi ]]; then
             echo "🧠 Detected OPlus System Software Integration-Based (AOSP-Based Vendor)"
             REGION="🌐 OPlus System Software Integration (OSSI) (Modern OPlus Unified ROM)"
           fi
 
           # Fingerprint-Based Region Hint (OSSI Fallback)
-          if [[ "$LOWERSTRINGS" =~ fingerprint ]]; then
-            if [[ "$LOWERSTRINGS" =~ cn ]]; then
+          if [[ "$LOWER_STRINGS" =~ fingerprint ]]; then
+            if [[ "$LOWER_STRINGS" =~ cn ]]; then
               echo "🌏 Hint: Possible China-Based OPlus System Software Integration"
-            elif [[ "$LOWERSTRINGS" =~ global ]]; then
+            elif [[ "$LOWER_STRINGS" =~ global ]]; then
               echo "🌏 Hint: Possible Global-Based OPlus System Software Integration"
             fi
           fi
 
           # Conversion Detection (Debug)
-          if [[ "$REGION" == *"China"* && "$LOWERSTRINGS" =~ oxygen ]]; then
+          if [[ "$REGION" == *"China"* && "$LOWER_STRINGS" =~ oxygen ]]; then
             echo "⚠️ Detected CN base with Oxygen Components (Converted ROM)"
           fi
           
+          echo "------------------------------"
           echo "🔬 HWC / Cmdline Detection:"
-          echo "$LOWERSTRINGS" | grep -iE "androidboot\.hwc|hwc=" || echo "⚠️ No HWC Found"          
+          echo "------------------------------"
+          echo "$LOWER_STRINGS" | grep -iE "androidboot\.hwc|hwc=" || echo "⚠️ No HWC Found"
+          
           echo "🔎 Debug Matches (Top 20 Relevant Lines):"
-          printf "%b" "$OUTPUTSTRINGS" \
+          printf "%b" "$STRINGS_OUTPUT" \
             | grep -iE "androidboot|fingerprint|oplus|coloros|oxygen|hwc|build" \
             | head -n 20 || true
+
+          echo "------------------------------"
           echo "🧠 Analyzing Kernel Strings..."
-          COLORSCORE=0
-          OXYGENSCORE=0
+          echo "------------------------------"
+          SCORE_COLOROS=0
+          SCORE_OXYGEN=0
+
           # Strong Vendor Signals (Highest Priority)
           # China Variant Detection
-          [[ "$LOWERSTRINGS" =~ ro\.oplus\.region=cn ]] && ((COLORSCORE+=20))
-          [[ "$LOWERSTRINGS" =~ ro\.vendor\.oplus\.region=cn ]] && ((COLORSCORE+=20))
-          [[ "$LOWERSTRINGS" =~ ro\.product\.locale=zh-cn ]] && ((COLORSCORE+=10))
+          [[ "$LOWER_STRINGS" =~ ro\.oplus\.region=cn ]] && ((SCORE_COLOROS+=20))
+          [[ "$LOWER_STRINGS" =~ ro\.vendor\.oplus\.region=cn ]] && ((SCORE_COLOROS+=20))
+          [[ "$LOWER_STRINGS" =~ ro\.product\.locale=zh-cn ]] && ((SCORE_COLOROS+=10))
+
           # Global / Europe / India Variant Detection
-          [[ "$LOWERSTRINGS" =~ ro\.oplus\.region=global ]] && ((OXYGENSCORE+=20))
-          [[ "$LOWERSTRINGS" =~ ro\.oplus\.region=eu ]] && ((OXYGENSCORE+=20))
-          [[ "$LOWERSTRINGS" =~ ro\.oplus\.region=india ]] && ((OXYGENSCORE+=20))        
+          [[ "$LOWER_STRINGS" =~ ro\.oplus\.region=global ]] && ((SCORE_OXYGEN+=20))
+          [[ "$LOWER_STRINGS" =~ ro\.oplus\.region=eu ]] && ((SCORE_OXYGEN+=20))
+          [[ "$LOWER_STRINGS" =~ ro\.oplus\.region=india ]] && ((SCORE_OXYGEN+=20))
+          
           # Strong Cmdline Signals (DTBO / Bootloader)
-          [[ "$LOWERSTRINGS" =~ androidboot\.hwc=cn ]] && ((COLORSCORE+=15))
-          [[ "$LOWERSTRINGS" =~ androidboot\.hwc=global ]] && ((OXYGENSCORE+=15))
-          [[ "$LOWERSTRINGS" =~ androidboot\.hwc=eu ]] && ((OXYGENSCORE+=15))
-          [[ "$LOWERSTRINGS" =~ androidboot\.hwc=india ]] && ((OXYGENSCORE+=15))
+          [[ "$LOWER_STRINGS" =~ androidboot\.hwc=cn ]] && ((SCORE_COLOROS+=15))
+          [[ "$LOWER_STRINGS" =~ androidboot\.hwc=global ]] && ((SCORE_OXYGEN+=15))
+          [[ "$LOWER_STRINGS" =~ androidboot\.hwc=eu ]] && ((SCORE_OXYGEN+=15))
+          [[ "$LOWER_STRINGS" =~ androidboot\.hwc=india ]] && ((SCORE_OXYGEN+=15))
+
           # Medium Signals
-          [[ "$LOWERSTRINGS" =~ coloros ]] && ((COLORSCORE+=4))
-          [[ "$LOWERSTRINGS" =~ oxygenos ]] && ((OXYGENSCORE+=4))
+          [[ "$LOWER_STRINGS" =~ coloros ]] && ((SCORE_COLOROS+=4))
+          [[ "$LOWER_STRINGS" =~ oxygenos ]] && ((SCORE_OXYGEN+=4))
+
           # OSSI Detection (OPlus Unified Base)
-          if [[ "$LOWERSTRINGS" =~ oplus/ossi ]]; then
-            ((COLORSCORE+=5))
-            ((OXYGENSCORE+=5))
+          if [[ "$LOWER_STRINGS" =~ oplus/ossi ]]; then
+            ((SCORE_COLOROS+=5))
+            ((SCORE_OXYGEN+=5))
           fi
           
           # Weak Vendor Presence (Neutral)
-          if [[ "$LOWERSTRINGS" =~ oplus ]]; then
-            ((COLORSCORE+=1))
-            ((OXYGENSCORE+=1))
+          if [[ "$LOWER_STRINGS" =~ oplus ]]; then
+            ((SCORE_COLOROS+=1))
+            ((SCORE_OXYGEN+=1))
           fi
          
           # Fingerprint Hints
-          if echo "$LOWERSTRINGS" | grep -q "fingerprint"; then
+          if echo "$LOWER_STRINGS" | grep -q "fingerprint"; then
             echo "🔍 Found Build Fingerprint Hints..."
-            [[ "$LOWERSTRINGS" =~ user/release-keys ]] && ((OXYGENSCORE+=1))
-            [[ "$LOWERSTRINGS" =~ oppo || "$LOWERSTRINGS" =~ oplus ]] && ((COLORSCORE+=1))
+
+            [[ "$LOWER_STRINGS" =~ user/release-keys ]] && ((SCORE_OXYGEN+=1))
+            [[ "$LOWER_STRINGS" =~ oppo || "$LOWER_STRINGS" =~ oplus ]] && ((SCORE_COLOROS+=1))
           fi
 
           # Region Override (Highest Authority)
           if [[ "$REGION" == *"China"* ]]; then
-            ROMBASE="🇨🇳 ColorOS"
-            MAXSCORES=999
+            ROM_BASE="🇨🇳 ColorOS"
+            MAX_SCORE=999
+
           elif [[ "$REGION" == *"Global"* || "$REGION" == *"Europe"* || "$REGION" == *"India"* ]]; then
-            ROMBASE="🇺🇸 OxygenOS"
-            MAXSCORES=999
+            ROM_BASE="🇺🇸 OxygenOS"
+            MAX_SCORE=999
+
           elif [[ "$REGION" == *"OSSI"* ]]; then
-            ROMBASE="🌐 AOSP-Based Vendor (OPlus OSSI)"
-            MAXSCORES=999
+            ROM_BASE="🌐 AOSP-Based Vendor (OPlus OSSI)"
+            MAX_SCORE=999
+
           else
+
             # Fallback Decision Logic
-            if (( COLORSCORE > OXYGENSCORE )); then
-              ROMBASE="🇨🇳 ColorOS"
-              MAXSCORES=$COLORSCORE
-            elif (( OXYGENSCORE > COLORSCORE )); then
-              ROMBASE="🇺🇸 OxygenOS"
-              MAXSCORES=$OXYGENSCORE
-            elif (( COLORSCORE == 0 && OXYGENSCORE == 0 )); then
-              ROMBASE="🌐 AOSP / ❓ Unknown"
-              MAXSCORES=0
-            elif (( COLORSCORE <= 3 && OXYGENSCORE <= 3 )); then
-              ROMBASE="🌐 AOSP / 🏳️ OEM Neutral"
-              MAXSCORES=$COLORSCORE
+            if (( SCORE_COLOROS > SCORE_OXYGEN )); then
+              ROM_BASE="🇨🇳 ColorOS"
+              MAX_SCORE=$SCORE_COLOROS
+
+            elif (( SCORE_OXYGEN > SCORE_COLOROS )); then
+              ROM_BASE="🇺🇸 OxygenOS"
+              MAX_SCORE=$SCORE_OXYGEN
+
+            elif (( SCORE_COLOROS == 0 && SCORE_OXYGEN == 0 )); then
+              ROM_BASE="🌐 AOSP / ❓ Unknown"
+              MAX_SCORE=0
+
+            elif (( SCORE_COLOROS <= 3 && SCORE_OXYGEN <= 3 )); then
+              ROM_BASE="🌐 AOSP / 🏳️ OEM Neutral"
+              MAX_SCORE=$SCORE_COLOROS
+
             else
-              ROMBASE="🌏 Hybrid"
-              MAXSCORES=$COLORSCORE
+              ROM_BASE="🌏 Hybrid"
+              MAX_SCORE=$SCORE_COLOROS
             fi
           fi
 
           # Confidence Calculation
-          if (( MAXSCORES == 999 )); then
+          if (( MAX_SCORE == 999 )); then
             CONFIDENCE="Very High (Region Override)"
-          elif (( MAXSCORES >= 5 )); then
+          elif (( MAX_SCORE >= 5 )); then
             CONFIDENCE="High"
-          elif (( MAXSCORES >= 3 )); then
+          elif (( MAX_SCORE >= 3 )); then
             CONFIDENCE="Medium"
           else
             CONFIDENCE="Low"
           fi
 
+          echo "------------------------------"
           echo "📊 Score Breakdown:"
-          echo "🇨🇳 ColorOS : $COLORSCORE"
-          echo "🇺🇸 OxygenOS: $OXYGENSCORE"
-          echo "📌 Final ROM Base: $ROMBASE"
+          echo "🇨🇳 ColorOS : $SCORE_COLOROS"
+          echo "🇺🇸 OxygenOS: $SCORE_OXYGEN"
+          echo "------------------------------"
+
+          echo "📌 Final ROM Base: $ROM_BASE"
           echo "🎯 Confidence Level: $CONFIDENCE"
-          echo "variant=$ROMBASE" >> $GITHUB_OUTPUT
+          echo "------------------------------"
+
+          echo "variant=$ROM_BASE" >> $GITHUB_OUTPUT
           echo "confidence=$CONFIDENCE" >> $GITHUB_OUTPUT
-          echo "romtype=$ROMBASE" >> $GITHUB_OUTPUT
+          echo "rom_type=$ROM_BASE" >> $GITHUB_OUTPUT
           echo "region=$REGION" >> $GITHUB_OUTPUT
+
           # Cleanup
-          mountpoint -q vendormount && sudo umount vendormount || true
-          rm -rf vendormount vendor_raw.img 2>/dev/null || true
+          mountpoint -q vendor_mount && sudo umount vendor_mount || true
+          rm -rf vendor_mount vendor_raw.img 2>/dev/null || true
+
           # Remove Large Vendor Image After Analysis
           rm -f output/vendor.img 2>/dev/null || true
 
+      # =========================
+
+      # =========================
       - name: 📊 Build Summary
         run: |
-          KV="${{ steps.kernel-info.outputs.kernel_version }}"
-          KT="${{ steps.kernel-info.outputs.kernel_time }}"      
+          KV="${{ steps.kernel_info.outputs.kernel_version }}"
+          KT="${{ steps.kernel_info.outputs.kernel_time }}"
+      
           KV=${KV:-Unknown}
-          KT=${KT:-Unknown}      
+          KT=${KT:-Unknown}
+      
           echo "### 📊 Build Summary" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "| Category | Value |" >> $GITHUB_STEP_SUMMARY
           echo "|----------|-------|" >> $GITHUB_STEP_SUMMARY
-          echo "| 📱 ROM Type | \`${{ steps.detect-region.outputs.romtype }}\` |" >> $GITHUB_STEP_SUMMARY
-          echo "| 🌏 Variant | \`${{ steps.detect-region.outputs.variant }}\` |" >> $GITHUB_STEP_SUMMARY
-          echo "| 🎯 Confidence Level | \`${{ steps.detect-region.outputs.confidence }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| 📱 ROM Type | \`${{ steps.detect_region.outputs.rom_type }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| 🌏 Variant | \`${{ steps.detect_region.outputs.variant }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| 🎯 Confidence Level | \`${{ steps.detect_region.outputs.confidence }}\` |" >> $GITHUB_STEP_SUMMARY
           echo "| 🔧 Kernel Version | \`$KV\` |" >> $GITHUB_STEP_SUMMARY
           echo "| 🕒 Build Time | \`$KT\` |" >> $GITHUB_STEP_SUMMARY
           
+      # =========================
+
+      # =========================
       - name: 📤 Upload Extracted Partitions as Artifact
         uses: actions/upload-artifact@v4
         with:
