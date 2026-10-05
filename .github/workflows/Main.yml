@@ -3139,13 +3139,14 @@ jobs:
         shell: bash
         run: |
           set -Eeuo pipefail
+
           # NoMount-Suite paths
           NMSUITEDIR="${WORKSPACEDIR}/NoMount-Suite"
           NMSUITEKERNELPATCHESFOLDER="${WORKSPACEDIR}/nmsuitekernelpatches"
           echo "└─ 🫥 NoMount-Suite Kernel Integration"
           echo "└─ Kernel Source : ${COMMONKERNELFOLDER}"
           echo "└─ Defconfig     : ${DEFCONFIG}"
-          # Kernel Version
+          # Validate Kernel Version
           case "$KERNELVERSION" in
             5.10|5.15|6.1|6.6|6.12)
               ;;
@@ -3155,7 +3156,7 @@ jobs:
               ;;
           esac
           echo "└─ Kernel Version: ${KERNELVERSION}"
-          # Root Engine Directory
+          # Select KSU / Root Engine Variant
           ROOTENGINE="${{ inputs.ROOTENGINE }}"
           case "$ROOTENGINE" in
             SukiSU-Ultra|BakaSU|KernelSU)
@@ -3171,52 +3172,59 @@ jobs:
           esac
           echo "└─ Root Engine    : ${ROOTENGINE}"
           echo "└─ Root Directory : ${KSUFOLDER}"
-          # Apply Patch
+          # Apply One Patch
           applypatch() {
             local patchfile="$1"
             local patchroot="${2:-${COMMONKERNELFOLDER}}"
+            local patchname
             [[ -f "$patchfile" ]] || {
               echo "└─ ⚠️ Patch Not Found: $patchfile"
               return 1
             }
-            echo "└─ 📂 $(basename "$patchfile")"
+            patchname="$(basename "$patchfile")"
+            echo "└─ 📂 ${patchname}"
             if patch -p1 -F3 --forward --dry-run \
               -d "$patchroot" < "$patchfile" >/dev/null 2>&1; then
               patch -p1 -F3 --forward \
                 -d "$patchroot" < "$patchfile"
-              echo "└─ Applied: $(basename "$patchfile")"
+              echo "└─ Applied: ${patchname}"
             elif patch -p1 -F3 --reverse --dry-run \
               -d "$patchroot" < "$patchfile" >/dev/null 2>&1; then
-              echo "└─ Already Applied: $(basename "$patchfile")"
+              echo "└─ Already Applied: ${patchname}"
             else
               echo "└─ ⚠️ Failed to Apply: $patchfile"
               return 1
             fi
           }
 
-          # Select a Version-Specific Patch and Ensure Selected Variant
-          # Applies to Kernel Tree
+          # Select and Verify a Patch Variant
           applyvariant() {
             local family="$1"
             local selected="$2"
             shift 2
             local patchfile
             local applicable=()
+            [[ -f "$selected" ]] || {
+              echo "└─ ⚠️ ${family}: Selected Patch Not Found: $selected"
+              return 1
+            }
             for patchfile in "$@"; do
               [[ -f "$patchfile" ]] || {
                 echo "└─ ⚠️ ${family}: Missing Variant: $(basename "$patchfile")"
                 return 1
               }
               if patch -p1 -F3 --forward --dry-run \
-                -d "${COMMONKERNELFOLDER}" < "$patchfile" >/dev/null 2>&1 ||
-                 patch -p1 -F3 --reverse --dry-run \
+                -d "${COMMONKERNELFOLDER}" < "$patchfile" >/dev/null 2>&1; then
+                applicable+=("$(basename "$patchfile")")
+              elif patch -p1 -F3 --reverse --dry-run \
                 -d "${COMMONKERNELFOLDER}" < "$patchfile" >/dev/null 2>&1; then
                 applicable+=("$(basename "$patchfile")")
               fi
             done
 
             if [[ ! " ${applicable[*]} " =~ " $(basename "$selected") " ]]; then
-              echo "└─ ⚠️ ${family}: Selected Variant Does Not Apply to ${KERNELVERSION}"
+              echo "└─ ⚠️ ${family}: Selected Variant Does Not Apply"
+              echo "└─ Kernel Version: ${KERNELVERSION}"
               echo "└─ Selected: $(basename "$selected")"
               echo "└─ Applicable: ${applicable[*]:-None}"
               return 1
@@ -3225,6 +3233,7 @@ jobs:
             echo "└─ 🎯 ${family}: $(basename "$selected")"
             applypatch "$selected"
           }
+          # Copy Source File
           copyfile() {
             local source="$1"
             local destination="$2"
@@ -3235,6 +3244,8 @@ jobs:
             mkdir -p "$(dirname "$destination")"
             cp -f "$source" "$destination"
           }
+
+          # Set Kernel Config
           addconfig() {
             local config="$1"
             local value="$2"
@@ -3242,8 +3253,7 @@ jobs:
             sed -i "/^${config}=/d" "$file"
             echo "${config}=${value}" >> "$file"
           }
-
-          # 1. Clone Required Repositories
+          # 1. Clone Repositories
           echo "└─ 📥 [1/7] Clone repositories"
           if [[ -d "${NMSUITEDIR}/.git" ]]; then
             echo "└─ 🧾 NoMount-Suite Already Cloned"
@@ -3291,8 +3301,8 @@ jobs:
             "y" \
             "${DEFCONFIG}"
 
-          # 3. Record NoMount version
-          echo "└─ 🏷️ [3/7] Record version"
+          # 3. Record NoMount-Suite Version
+          echo "└─ 🏷️ [3/7] Record Version"
           NMMODULEVERSION="$(
             sed -n \
               's/^[[:space:]]*#define[[:space:]]\+NM_MODULE_VERSION[[:space:]]\+"\([^"]*\)".*/\1/p' \
@@ -3301,7 +3311,7 @@ jobs:
           )"
           NMMODULEVERSION="${NMMODULEVERSION:-Unknown}"
           echo "└─ NoMount Version: ${NMMODULEVERSION}"
-      
+
           # 4. Hook
           echo "└─ 🪝 [4/7] Hook"
           HOOKDIR="${NMSUITEKERNELPATCHESFOLDER}/common/_hook"
@@ -3329,9 +3339,6 @@ jobs:
             5.10|5.15|6.1)
               REQATTR="hide_selinux_attr_5_10.patch"
               ;;
-            *)
-              REQATTR="hide_selinux_attr.patch"
-              ;;
           esac
           applyvariant \
             "selinuxfs" \
@@ -3343,15 +3350,13 @@ jobs:
             "${HOOKDIR}/${REQATTR}" \
             "${HOOKDIR}/hide_selinux_attr_6_12.patch" \
             "${HOOKDIR}/hide_selinux_attr_6_6.patch" \
-            "${HOOKDIR}/hide_selinux_attr_5_10.patch" \
-            "${HOOKDIR}/hide_selinux_attr.patch"
+            "${HOOKDIR}/hide_selinux_attr_5_10.patch"
           applyvariant \
             "selinux-audit" \
             "${HOOKDIR}/${REQAUDIT}" \
             "${HOOKDIR}/quiet_selinux_audit.patch" \
             "${HOOKDIR}/quiet_selinux_audit_legacy.patch"
-          # Fix SELinux Seqno Patch Targets Root Engine Tree
-          # Not Kernel Source Tree
+          # Seqno Patch Targets Root Engine
           applypatch \
             "${HOOKDIR}/fix_selinux_seqno.patch" \
             "${KSUFOLDER}"
@@ -3378,7 +3383,7 @@ jobs:
             6.1|5.15)
               REQXATTR="ghost_xattr_5_15.patch"
               REQLINKAT="ghost_linkat_5_15.patch"
-              REQCHMOD="ghost_chmod_5_10.patch"
+              REQCHMOD="ghost_chmod.patch"
               ;;
             5.10)
               REQXATTR="ghost_xattr.patch"
@@ -3386,8 +3391,41 @@ jobs:
               REQCHMOD="ghost_chmod_5_10.patch"
               ;;
           esac
-          applypatch \
-            "${GHOSTDIR}/ghost_o_path.patch"
+          # Integrate Ghost 0 Path Directly
+          NAMEIFILE="${COMMONKERNELFOLDER}/fs/namei.c"
+          if grep -qF 'ghost_hidden_path(&path)' "$NAMEIFILE"; then
+            echo "└─ Already Integrated: Ghost 0 Path"
+          else
+            perl -0pi -e '
+              my $count = s{
+                (static int do_o_path\(.*?\n\})
+              }{
+                my $func = $1;
+                $func =~ s{
+                  (^[ \t]*int error = path_lookupat\(nd, flags, &path\);\n)
+                }{
+                  $1 . "\t" . "extern bool ghost_hidden_path(const struct path *gp);\n"
+                }m;
+                $func =~ s{
+                  (^([ \t]*)if \(!error\) \{\n)
+                }{
+                  $1 .
+                  "$2\tif (ghost_hidden_path(\&path)) {\n" .
+                  "$2\t\tpath_put(\&path);\n" .
+                  "$2\t\treturn -ENOENT;\n" .
+                  "$2\t}\n"
+                }me;
+                $func
+              }gex;
+              die "ERROR: Ghost 0 Path Integration Failed\n" unless $count;
+            ' "$NAMEIFILE"
+            grep -qF 'ghost_hidden_path(&path)' "$NAMEIFILE" || {
+              echo "└─ ⚠️ Ghost 0 Path Integration Failed"
+              exit 1
+            }
+            echo "└─ Ghost 0 Path Integrated"
+          fi
+
           applyvariant \
             "ghost-xattr" \
             "${GHOSTDIR}/${REQXATTR}" \
@@ -3481,15 +3519,21 @@ jobs:
             "${PATHHIDEDIR}/pathhide_${KERNELVERSION}_integration.patch"
           applypatch \
             "${PATHHIDEDIR}/pathhide_mapfiles_${KERNELVERSION}_integration.patch"
-
-          # Pagemap
-          if grep -q 'pagemap_scan_test_walk' \
+          # Select Pagemap Variant From Source Layout
+          if grep -q \
+            'pagemap_scan_test_walk' \
             "${COMMONKERNELFOLDER}/fs/proc/task_mmu.c"; then
             REQPAGEMAP="pathhide_pagemap_6.12_integration.patch"
-          elif awk \
-            '/^static int pagemap_pmd_range/,/^}/' \
-            "${COMMONKERNELFOLDER}/fs/proc/task_mmu.c" |
-            grep -q 'bool migration'; then
+          elif awk '
+            /^static int pagemap_pmd_range/,/^}/ {
+              if (/bool migration/) {
+                found=1
+              }
+            }
+            END {
+              exit !found
+            }
+          ' "${COMMONKERNELFOLDER}/fs/proc/task_mmu.c"; then
             REQPAGEMAP="pathhide_pagemap_5.10_integration.patch"
           else
             REQPAGEMAP="pathhide_pagemap_6.6_integration.patch"
@@ -3497,12 +3541,13 @@ jobs:
 
           applyvariant \
             "pathhide-pagemap" \
-            "${PATHHIDEDIR}/${REQ_PAGEMAP}" \
+            "${PATHHIDEDIR}/${REQPAGEMAP}" \
             "${PATHHIDEDIR}/pathhide_pagemap_6.12_integration.patch" \
             "${PATHHIDEDIR}/pathhide_pagemap_6.6_integration.patch" \
             "${PATHHIDEDIR}/pathhide_pagemap_5.10_integration.patch"
-          # Mincore
-          if grep -q 'vma_lookup(current->mm, addr)' \
+          # Select Mincore Variant From Source Layout
+          if grep -q \
+            'vma_lookup(current->mm, addr)' \
             "${COMMONKERNELFOLDER}/mm/mincore.c"; then
             REQMINCORE="pathhide_mincore_6.12_integration.patch"
           else
@@ -3511,10 +3556,10 @@ jobs:
 
           applyvariant \
             "pathhide-mincore" \
-            "${PATHHIDEDIR}/${REQ_MINCORE}" \
+            "${PATHHIDEDIR}/${REQMINCORE}" \
             "${PATHHIDEDIR}/pathhide_mincore_6.12_integration.patch" \
             "${PATHHIDEDIR}/pathhide_mincore_5.10_integration.patch"
-          # Accounting
+          # Select Accounting Variant From Source Layout
           if grep -q \
             '__page_size_count(mm->total_vm)' \
             "${COMMONKERNELFOLDER}/fs/proc/task_mmu.c"; then
@@ -3529,17 +3574,26 @@ jobs:
 
           applyvariant \
             "pathhide-accounting" \
-            "${PATHHIDEDIR}/${REQ_ACCT}" \
+            "${PATHHIDEDIR}/${REQACCT}" \
             "${PATHHIDEDIR}/pathhide_accounting_6.6_integration.patch" \
             "${PATHHIDEDIR}/pathhide_accounting_pgcompat_integration.patch" \
             "${PATHHIDEDIR}/pathhide_accounting_integration.patch"
           if ! grep -qE \
             '^obj-y[[:space:]]*\+=.*pathhide\.o' \
             "${COMMONKERNELFOLDER}/fs/Makefile"; then
-            echo 'obj-y += pathhide.o' >> "${COMMONKERNELFOLDER}/fs/Makefile"
+            echo 'obj-y += pathhide.o' \
+              >> "${COMMONKERNELFOLDER}/fs/Makefile"
           fi
 
-          # 7. Assert NoMount-Suite Kernel Integration
+          # Add Ghost to Proc Build
+          if ! grep -qE \
+            '^[[:space:]]*obj-y[[:space:]]*\+=[[:space:]]*ghost\.o' \
+            "${COMMONKERNELFOLDER}/fs/proc/Makefile"; then
+            echo 'obj-y += ghost.o' \
+              >> "${COMMONKERNELFOLDER}/fs/proc/Makefile"
+          fi
+
+          # 7. Verify Integration
           echo "└─ 🔎 [7/7] Assert NoMount-Suite Kernel Integration"
           FAILED=0
           assertfile() {
@@ -3578,16 +3632,10 @@ jobs:
             '^CONFIG_NOMOUNT=y$'
           assertcontains \
             "${COMMONKERNELFOLDER}/fs/Makefile" \
-            'obj-y[[:space:]]*\+=[[:space:]]*pathhide\.o'
-          if ! grep -qE \
-            '^[[:space:]]*obj-y[[:space:]]*\+=[[:space:]]*ghost\.o' \
-            "${COMMONKERNELFOLDER}/fs/proc/Makefile"; then
-            echo 'obj-y += ghost.o' >> "${COMMONKERNELFOLDER}/fs/proc/Makefile"
-          fi
-
+            '^[[:space:]]*obj-y[[:space:]]*\+=[[:space:]]*pathhide\.o'
           assertcontains \
             "${COMMONKERNELFOLDER}/fs/proc/Makefile" \
-            'obj-y[[:space:]]*\+=[[:space:]]*ghost\.o'
+            '^[[:space:]]*obj-y[[:space:]]*\+=[[:space:]]*ghost\.o'
           if [[ "${FAILED}" -ne 0 ]]; then
             echo "└─ ⚠️ NoMount-Suite Assertion Failed"
             exit 1
@@ -3596,7 +3644,7 @@ jobs:
           echo "└─ 🎉 NoMount-Suite Integration Completed"
           echo "└─ Kernel Version : ${KERNELVERSION}"
           echo "└─ NoMount Version: ${NMMODULEVERSION}"
-                       
+    
       - name: 🧩 NoMount Kernel Integration and Package
         if: ${{ inputs.NOMOUNT == 'NoMount' || inputs.NOMOUNT == 'NoMount-Dev' }}
         shell: bash
