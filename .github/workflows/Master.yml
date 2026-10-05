@@ -422,44 +422,47 @@ jobs:
           echo "🔢 KSU Version  : $KSUVERSION"
           # Resolve Latest Manager Tag
           echo "------------------------------"
-          echo "🔎 Resolving Latest Manager Tag..."
-          # Primary: Git Tags
-          MANAGERTAG="$(
+          echo "🔎 Resolving Latest Manager Tag..."         
+          MANAGERTAG=""          
+          # Primary: Latest Stable GitHub Release
+          RELEASEJSON="$(
             gh api \
-              "repos/${RELEASEREPO}/git/matching-refs/tags/" \
+              "repos/${RELEASEREPO}/releases?per_page=100" \
               --paginate \
-              --jq '.[].ref | sub("^refs/tags/"; "")' |
-            sort -V |
-            tail -n 1
-          )"
-          if [[ -n "$MANAGERTAG" ]]; then
-            echo "✔ Latest Manager Tag: $MANAGERTAG"
-          else
-            echo "⚠️ No Git Tag Found"
-            echo "🔄 Falling Back to GitHub Releases..."
-            RELEASEJSON="$(
-              gh api \
-                "repos/${RELEASEREPO}/releases?per_page=100" \
-                2>/dev/null || true
+              2>/dev/null || true
+          )"          
+          if [[ -n "$RELEASEJSON" ]] && \
+             jq -e 'type == "array"' >/dev/null 2>&1 <<< "$RELEASEJSON"; then
+            MANAGERTAG="$(
+              jq -r '
+                map(select(
+                  .draft == false and
+                  .prerelease == false and
+                  (.tag_name // "") != ""
+                )) |
+                sort_by(.published_at // .created_at // "") |
+                reverse |
+                .[0].tag_name // empty
+              ' <<< "$RELEASEJSON"
             )"
-            if [[ -n "$RELEASEJSON" ]] && \
-               jq -e 'type == "array"' >/dev/null 2>&1 <<< "$RELEASEJSON"; then
-              MANAGERTAG="$(
-                jq -r '
-                  map(select(
-                    .draft == false and
-                    .prerelease == false and
-                    (.tag_name // "") != ""
-                  )) |
-                  sort_by(.published_at // "") |
-                  reverse |
-                  .[0].tag_name // empty
-                ' <<< "$RELEASEJSON"
-              )"
-            fi
-
+          fi
+          
+          if [[ -n "$MANAGERTAG" ]]; then
+            echo "✔ Latest Stable Manager Release: $MANAGERTAG"
+          else
+            echo "⚠️ No Stable GitHub Release Found"
+            echo "🔄 Falling Back to Git Tags..."          
+            MANAGERTAG="$(
+              gh api \
+                "repos/${RELEASEREPO}/git/matching-refs/tags/" \
+                --paginate \
+                --jq '.[].ref | sub("^refs/tags/"; "")' |
+              awk 'NF' |
+              sort -V |
+              tail -n 1
+            )"       
             if [[ -n "$MANAGERTAG" ]]; then
-              echo "✔ Manager Tag From Release: $MANAGERTAG"
+              echo "✔ Latest Manager Tag: $MANAGERTAG"
             else
               echo "⚠️ No Manager Tag Found"
               echo "   Release Repository : $RELEASEREPO"
@@ -467,7 +470,8 @@ jobs:
               echo "   Continuing Without Release Tag"
             fi
           fi
-         
+          
+          echo "🏷️ Latest Manager Tag: ${MANAGERTAG:-<None>}"         
           echo "🏷️ Latest Manager Tag: $MANAGERTAG"
           # Export Outputs
           {
