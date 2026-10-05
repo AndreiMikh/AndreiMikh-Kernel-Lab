@@ -3391,71 +3391,88 @@ jobs:
               REQCHMOD="ghost_chmod_5_10.patch"
               ;;
           esac
-          # Integrate Ghost Do OPath() Directly
+
+          # Integrate Ghost OPATH Directly
           NAMEIFILE="${COMMONKERNELFOLDER}/fs/namei.c"
           if grep -qF 'ghost_hidden_path(&path)' "$NAMEIFILE"; then
-            echo "└─ Already Integrated: Ghost OPath"
+            echo "└─ Already Integrated: Ghost OPATH"
           else
-            perl -0pi -e '
-              my $start = index($_, "static int do_o_path");
-              die "ERROR: do_o_path() not found\n" if $start < 0;
-              my $brace = index($_, "{", $start);
-              die "ERROR: Do OPath() Body Not Found\n" if $brace < 0;
-              my $depth = 0;
-              my $end = -1;
-              for (my $i = $brace; $i < length($_); $i++) {
-                  my $c = substr($_, $i, 1);
-                  if ($c eq "{") {
-                      $depth++;
-                  } elsif ($c eq "}") {
-                      $depth--;
-                      if ($depth == 0) {
-                          $end = $i + 1;
-                          last;
-                      }
-                  }
-              }
-              die "ERROR: Could Not Determine Do OPath() Boundary\n"
-                if $end < 0;
-              my $function = substr($_, $start, $end - $start);
-              die "ERROR: Ghost O PATH Already Integrated\n"
-                if index($function, "ghost_hidden_path(&path)") >= 0;
-              my $lookup = "int error = path_lookupat(nd, flags, &path);";
-              my $lookup_pos = index($function, $lookup);
-              die "ERROR: PathLookupat() Line Not Found in Do OPath()\n"
-                if $lookup_pos < 0;
-              my $lookup_end = $lookup_pos + length($lookup);
-              substr(
-                  $function,
-                  $lookup_end,
-                  0,
-                  "\n\textern bool ghost_hidden_path(const struct path *gp);"
-              );
-              my $block = "if (!error) {";
-              my $block_pos = index($function, $block);
-              die "ERROR: Do OPath() Error Block Not Found\n"
-                if $block_pos < 0;
-              my $replacement =
-                  "if (!error) {\n" .
-                  "\t\tif (ghost_hidden_path(&path)) {\n" .
-                  "\t\t\tpath_put(&path);\n" .
-                  "\t\t\treturn -ENOENT;\n" .
-                  "\t\t}\n";
-              substr(
-                  $function,
-                  $block_pos,
-                  length($block),
-                  $replacement
-              );
-              substr($_, $start, $end - $start, $function);
-            ' "$NAMEIFILE"
+            python3 - "$NAMEIFILE" <<'PY'
+          import re
+          import sys
+          path = sys.argv[1]
+          with open(path, "r", encoding="utf-8") as f:
+              data = f.read()
+          start = data.find("static int do_o_path")
+          if start < 0:
+              print("ERROR: DO-OPATH() Not Found")
+              sys.exit(1)
+          brace = data.find("{", start)
+          if brace < 0:
+              print("ERROR: DO-OPATH() Body Not Found")
+              sys.exit(1)
+          depth = 0
+          end = None
+          for i in range(brace, len(data)):
+              if data[i] == "{":
+                  depth += 1
+              elif data[i] == "}":
+                  depth -= 1
+                  if depth == 0:
+                      end = i + 1
+                      break
+          if end is None:
+              print("ERROR: Could Not Determine DO-OPATH() Boundary")
+              sys.exit(1)
+          function = data[start:end]
+          if "ghost_hidden_path(&path)" in function:
+              print("Ghost OPATH Already Integrated")
+              sys.exit(0)
+          lookup = re.search(
+              r"(?m)^([ \t]*)int error = path_lookupat\(nd, flags, &path\);$",
+              function,
+          )
+          if not lookup:
+              print("ERROR: Path-Lookupat() Line Not Found in DO-OPATH()")
+              sys.exit(1)
+          indent = lookup.group(1)
+          function = (
+              function[:lookup.end()]
+              + f"\n{indent}extern bool ghost_hidden_path(const struct path *gp);"
+              + function[lookup.end():]
+          )
+          error_block = re.search(
+              r"(?m)^([ \t]*)if \(!error\) \{$",
+              function,
+          )
+          if not error_block:
+              print("ERROR: DO-OPATH() Error Block Not Found")
+              sys.exit(1)
+          indent = error_block.group(1)
+          replacement = (
+              f"{indent}if (!error) {{\n"
+              f"{indent}\tif (ghost_hidden_path(&path)) {{\n"
+              f"{indent}\t\tpath_put(&path);\n"
+              f"{indent}\t\treturn -ENOENT;\n"
+              f"{indent}\t}}"
+          )
+          function = (
+              function[:error_block.start()]
+              + replacement
+              + function[error_block.end():]
+          )
+          data = data[:start] + function + data[end:]
+          with open(path, "w", encoding="utf-8") as f:
+              f.write(data)
+          print("Ghost OPATH Integrated")
+          PY
             if grep -qF 'ghost_hidden_path(&path)' "$NAMEIFILE"; then
-              echo "└─ Ghost O PATH Integrated"
+              echo "└─ Ghost OPATH integrated"
             else
-              echo "└─ ⚠️ Ghost O PATH Integration Failed"
+              echo "└─ ⚠️ Ghost OPATH Integration Failed"
               exit 1
             fi
-          fi
+          fi  
 
           applyvariant \
             "ghost-xattr" \
