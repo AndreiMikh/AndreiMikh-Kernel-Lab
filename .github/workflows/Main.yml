@@ -3176,19 +3176,20 @@ jobs:
           applypatch() {
             local patchfile="$1"
             local patchroot="${2:-${COMMONKERNELFOLDER}}"
+            local fuzz="${3:-0}"
             local patchname
             [[ -f "$patchfile" ]] || {
               echo "└─ ⚠️ Patch Not Found: $patchfile"
               return 1
             }
             patchname="$(basename "$patchfile")"
-            echo "└─ 📂 ${patchname}"
-            if patch -p1 -F0 --forward --dry-run \
+            echo "└─ 📂 ${patchname} (F${fuzz})"
+            if patch -p1 -F"$fuzz" --forward --dry-run \
               -d "$patchroot" < "$patchfile" >/dev/null 2>&1; then
-              patch -p1 -F0 --forward \
+              patch -p1 -F"$fuzz" --forward \
                 -d "$patchroot" < "$patchfile"
               echo "└─ Applied: ${patchname}"
-            elif patch -p1 -F0 --reverse --dry-run \
+            elif patch -p1 -F"$fuzz" --reverse --dry-run \
               -d "$patchroot" < "$patchfile" >/dev/null 2>&1; then
               echo "└─ Already Applied: ${patchname}"
             else
@@ -3295,7 +3296,11 @@ jobs:
           copyfile \
             "${HOOKLESSDIR}/src/nomount.h" \
             "${COMMONKERNELFOLDER}/fs/nomount.h"
-          applypatch "$HOOKLESSPATCH"
+          # NoMount integration patch is designed for F3.
+          applypatch \
+            "$HOOKLESSPATCH" \
+            "${COMMONKERNELFOLDER}" \
+            3
           addconfig \
             "CONFIG_NOMOUNT" \
             "y" \
@@ -3392,11 +3397,16 @@ jobs:
               ;;
           esac
 
-          # Integrate Ghost OPATH Directly
+          
+          # Integrate Ghost OPATH
           NAMEIFILE="${COMMONKERNELFOLDER}/fs/namei.c"
+          GHOSTOPATHPATCH="${GHOSTDIR}/ghost_o_path.patch"
           if grep -qF 'ghost_hidden_path(&path)' "$NAMEIFILE"; then
-            echo "└─ Already Integrated: Ghost OPATH"
+            echo "└─ Already Integrated: Ghost O_PATH"
+          elif [[ -f "$GHOSTOPATHPATCH" ]] && applypatch "$GHOSTOPATHPATCH"; then
+            echo "└─ Ghost OPATH Patch Applied"
           else
+            echo "└─ ⚠️ Ghost OPATH Patch Failed, Using Python Fallback"
             python3 - "$NAMEIFILE" <<'PY'
           import re
           import sys
@@ -3408,6 +3418,7 @@ jobs:
               print("ERROR: DO-OPATH() Not Found")
               sys.exit(1)
           brace = data.find("{", start)
+
           if brace < 0:
               print("ERROR: DO-OPATH() Body Not Found")
               sys.exit(1)
@@ -3421,17 +3432,20 @@ jobs:
                   if depth == 0:
                       end = i + 1
                       break
+      
           if end is None:
               print("ERROR: Could Not Determine DO-OPATH() Boundary")
               sys.exit(1)
           function = data[start:end]
+
           if "ghost_hidden_path(&path)" in function:
-              print("Ghost OPATH Already Integrated")
+              print("Ghost O_PATH Already Integrated")
               sys.exit(0)
           lookup = re.search(
               r"(?m)^([ \t]*)int error = path_lookupat\(nd, flags, &path\);$",
               function,
           )
+
           if not lookup:
               print("ERROR: Path-Lookupat() Line Not Found in DO-OPATH()")
               sys.exit(1)
@@ -3445,6 +3459,7 @@ jobs:
               r"(?m)^([ \t]*)if \(!error\) \{$",
               function,
           )
+
           if not error_block:
               print("ERROR: DO-OPATH() Error Block Not Found")
               sys.exit(1)
@@ -3466,13 +3481,14 @@ jobs:
               f.write(data)
           print("Ghost OPATH Integrated")
           PY
-            if grep -qF 'ghost_hidden_path(&path)' "$NAMEIFILE"; then
-              echo "└─ Ghost OPATH integrated"
-            else
-              echo "└─ ⚠️ Ghost OPATH Integration Failed"
-              exit 1
-            fi
-          fi  
+          fi
+
+          if grep -qF 'ghost_hidden_path(&path)' "$NAMEIFILE"; then
+            echo "└─ ✓ Ghost OPATH Integrated"
+          else
+            echo "└─ ⚠️ Ghost OPATH Integration Failed"
+            exit 1
+          fi
 
           applyvariant \
             "ghost-xattr" \
