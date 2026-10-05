@@ -3134,88 +3134,256 @@ jobs:
           "$KOTLINC" -script "$FAKESCRIPT" Revert "$COMMONKERNELFOLDER"
           echo "🎉 Fake Patches Reverted"
 
-      - name: 🛠️ NoMount-Suite Kernel Integration
+      - name: 🫥 NoMount-Suite Kernel Integration
         if: ${{ inputs.NOMOUNT == 'NoMount-Suite' }}
         shell: bash
         run: |
           set -Eeuo pipefail
-          # NoMount-Suite Paths
+          # NoMount-Suite paths
+          NMSUITEDIR="${WORKSPACEDIR}/NoMount-Suite"
           NMSUITEKERNELPATCHESFOLDER="${WORKSPACEDIR}/nmsuitekernelpatches"
-          NMSUITEDEFCONFIG="${COMMONKERNELFOLDER}/arch/arm64/configs/${NOMOUNTSUITEDEFCONFIG:-gki_defconfig}"
-          NOMOUNTREF="main"
-          # Clone NoMount-Suite Kernel Patches
+          echo "🫥 NoMount-Suite Kernel Integration"
+          echo "└─ Kernel Source : ${COMMONKERNELFOLDER}"
+          echo "└─ Kernel Version: ${KERNELVERSION}"
+          echo "└─ Defconfig     : ${DEFCONFIG}"        
+          # Apply Patch Safely
+          applypatch() {
+            local patchfile="$1"
+            local patchroot="${2:-${COMMONKERNELFOLDER}}"
+            [[ -f "${patchfile}" ]] || {
+              echo "└─ ⚠️ Patch Not Found: ${patchfile}"
+              return 1
+            }
+            echo "└─ 📂 $(basename "${patchfile}")"
+            if patch -p1 -F0 --forward --dry-run \
+              -d "${patchroot}" < "${patchfile}" >/dev/null 2>&1; then
+              patch -p1 -F0 --forward \
+                -d "${patchroot}" < "${patchfile}"
+            elif patch -p1 -F0 --reverse --dry-run \
+              -d "${patchroot}" < "${patchfile}" >/dev/null 2>&1; then
+              echo "└─ ♻️ Already Applied"
+            else
+              echo "└─ ⚠️ Failed to Apply: ${patchfile}"
+              return 1
+            fi
+          }
+          copyfile() {
+            local source="$1"
+            local destination="$2"
+            [[ -f "${source}" ]] || {
+              echo "└─ ⚠️ Source File Not Found: ${source}"
+              return 1
+            }
+            mkdir -p "$(dirname "${destination}")"
+            cp -f "${source}" "${destination}"
+          }
+          addconfig() {
+            local config="$1"
+            local value="$2"
+            local file="$3"
+            sed -i "/^${config}=/d" "${file}"
+            echo "${config}=${value}" >> "${file}"
+          }
+          # 1. Clone Required Repositories
+          echo "└─ 📥 [1/7] Clone repositories"
+          if [[ -d "${NMSUITEDIR}/.git" ]]; then
+            echo "└─ 🧾 NoMount-Suite Already Cloned"
+          else
+            rm -rf "${NMSUITEDIR}"
+            git clone \
+              --depth=1 \
+              --branch main \
+              https://github.com/Bouteillepleine/NoMount-Suite.git \
+              "${NMSUITEDIR}"
+          fi
+
           if [[ -d "${NMSUITEKERNELPATCHESFOLDER}/.git" ]]; then
-            echo "└─ ℹ️ Kernel Patches Already Cloned"
+            echo "└─ 🧾 Kernel Patches Already Cloned"
           else
             rm -rf "${NMSUITEKERNELPATCHESFOLDER}"
-            git clone --depth=1 \
+            git clone \
+              --depth=1 \
               --branch main \
               https://github.com/Bouteillepleine/kernel_patches.git \
               "${NMSUITEKERNELPATCHESFOLDER}"
           fi
 
-          # Resolve KernelSU Source Tree
-          if [[ -d "${KERNELPLATFORM}/KernelSU" ]]; then
-            KSUFOLDER="${KERNELPLATFORM}/KernelSU"
-          elif [[ -d "${KERNELPLATFORM}/KernelSU-Next" ]]; then
-            KSUFOLDER="${KERNELPLATFORM}/KernelSU-Next"
+          # 2. Hookless Integration
+          echo "└─ 🧩 [2/7] Hookless"
+          HOOKLESSDIR="${NMSUITEDIR}/hookless"
+          case "${KERNELVERSION}" in
+            5.10|5.15|6.1|6.6|6.12)
+              ;;
+            *)
+              echo "└─ ⚠️ Unsupported Kernel Version: ${KERNELVERSION}"
+              exit 1
+              ;;
+          esac
+          HOOKLESSPATCH=""
+          for patchfile in \
+            "${HOOKLESSDIR}/patches/nomount_${KERNELVERSION}_kernel_integration.patch" \
+            "${HOOKLESSDIR}/patches/nomount_kernel_integration.patch"
+          do
+            if [[ -f "${patchfile}" ]]; then
+              HOOKLESSPATCH="${patchfile}"
+              break
+            fi
+          done
+
+          [[ -n "${HOOKLESSPATCH}" ]] || {
+            echo "└─ ⚠️ No Hookless Integration Patch Found"
+            exit 1
+          }
+          copyfile \
+            "${HOOKLESSDIR}/src/nomount.c" \
+            "${COMMONKERNELFOLDER}/fs/nomount.c"
+          copyfile \
+            "${HOOKLESSDIR}/src/nomount.h" \
+            "${COMMONKERNELFOLDER}/fs/nomount.h"
+          applypatch "${HOOKLESSPATCH}"
+          addconfig "CONFIG_NOMOUNT" "y" "${DEFCONFIG}"
+     
+          # 3. Fetch NoMount-Suite Module Version
+          echo "└─ 🏷️ [3/7] Record version"
+          NMMODULEVERSION="$(
+            sed -n \
+              's/^[[:space:]]*#define[[:space:]]\+NM_MODULE_VERSION[[:space:]]\+"\([^"]*\)".*/\1/p' \
+              "${COMMONKERNELFOLDER}/fs/nomount.h" |
+            head -n1
+          )"
+          NMMODULEVERSION="${NMMODULEVERSION:-Unknown}"
+          echo "└─ NoMount Version: ${NMMODULEVERSION}"
+
+          # 4. Hook
+          echo "└─ 🪝 [4/7] Hook"
+          HOOKDIR="${NMSUITEKERNELPATCHESFOLDER}/common/_hook"
+          test -d "${HOOKDIR}" || {
+            echo "└─ ⚠️ Hook Directory Not Found: ${HOOKDIR}"
+            exit 1
+          }
+          while IFS= read -r patchfile; do
+            applypatch "${patchfile}"
+          done < <(
+            find "${HOOKDIR}" \
+              -maxdepth 1 \
+              -type f \
+              -name '*.patch' \
+              -print |
+            sort
+          )
+          if [[ -n "${KSU_FOLDER:-}" ]]; then
+            KSUSEQNOPATCH="${HOOKDIR}/fix_selinux_seqno.patch"
+            if [[ -f "${KSUSEQNOPATCH}" ]]; then
+              applypatch "${KSUSEQNOPATCH}" "${KSU_FOLDER}"
+            fi
           else
-            echo "└─ ⚠️ Neither KernelSU Nor KernelSU-Next Directory Was Found Under ${KERNELPLATFORM}"
+            echo "└─ ⚠️ KSU Directory is Not Set; Skipping KSU Seqno Patch"
+          fi
+
+          # 5. Ghost
+          echo "└─ 👻 [5/7] Ghost"
+          GHOSTDIR="${NMSUITEKERNELPATCHESFOLDER}/common/_ghost"
+          test -d "${GHOSTDIR}" || {
+            echo "└─ ⚠️ Ghost Directory Not Found: ${GHOSTDIR}"
+            exit 1
+          }
+          copyfile \
+            "${GHOSTDIR}/ghost.c" \
+            "${COMMONKERNELFOLDER}/fs/proc/ghost.c"
+          copyfile \
+            "${GHOSTDIR}/ghost.h" \
+            "${COMMONKERNELFOLDER}/fs/proc/ghost.h"
+          while IFS= read -r patchfile; do
+            applypatch "${patchfile}"
+          done < <(
+            find "${GHOSTDIR}" \
+              -maxdepth 1 \
+              -type f \
+              -name '*.patch' \
+              -print |
+            sort
+          )
+          if ! grep -qE \
+            '^[[:space:]]*obj-y[[:space:]]*\+=[[:space:]]*ghost\.o' \
+            "${COMMONKERNELFOLDER}/fs/proc/Makefile"; then
+            echo 'obj-y += ghost.o' >> "${COMMONKERNELFOLDER}/fs/proc/Makefile"
+          fi
+
+          # 6. Pathhide
+          echo "└─ 🫥 [6/7] Pathhide"
+          PATHHIDEDIR="${NMSUITEKERNELPATCHESFOLDER}/common/_pathhide"
+          test -d "${PATHHIDEDIR}" || {
+            echo "└─ ⚠️ Pathhide Directory Not Found: ${PATHHIDEDIR}"
+            exit 1
+          }
+          copyfile \
+            "${PATHHIDEDIR}/pathhide.c" \
+            "${COMMONKERNELFOLDER}/fs/pathhide.c"
+          copyfile \
+            "${PATHHIDEDIR}/pathhide.h" \
+            "${COMMONKERNELFOLDER}/fs/pathhide.h"
+          while IFS= read -r patchfile; do
+            applypatch "${patchfile}"
+          done < <(
+            find "${PATHHIDEDIR}" \
+              -maxdepth 1 \
+              -type f \
+              -name '*.patch' \
+              -print |
+            sort
+          )
+          if ! grep -qE \
+            '^[[:space:]]*obj-y[[:space:]]*\+=[[:space:]]*pathhide\.o' \
+            "${COMMONKERNELFOLDER}/fs/Makefile"; then
+            echo 'obj-y += pathhide.o' >> "${COMMONKERNELFOLDER}/fs/Makefile"
+          fi
+
+          # 7. Assert
+          echo "└─ 🔎 [7/7] Assert"
+          FAILED=0
+          assertfile() {
+            local file="$1"
+            if [[ -f "${file}" ]]; then
+              echo "└─ ✓ ${file}"
+            else
+              echo "└─ ✗ Missing: ${file}"
+              FAILED=1
+            fi
+          }
+          assertcontains() {
+            local file="$1"
+            local pattern="$2"   
+            if grep -Eq "${pattern}" "${file}"; then
+              echo "└─ ✓ ${file}"
+            else
+              echo "└─ ✗ Missing in ${file}: ${pattern}"
+              FAILED=1
+            fi
+          }
+          assertfile "${COMMONKERNELFOLDER}/fs/nomount.c"
+          assertfile "${COMMONKERNELFOLDER}/fs/nomount.h"
+          assertfile "${COMMONKERNELFOLDER}/fs/pathhide.c"
+          assertfile "${COMMONKERNELFOLDER}/fs/pathhide.h"
+          assertfile "${COMMONKERNELFOLDER}/fs/proc/ghost.c"
+          assertfile "${COMMONKERNELFOLDER}/fs/proc/ghost.h"
+          assertcontains \
+            "${DEFCONFIG}" \
+            '^CONFIG_NOMOUNT=y$'
+          assertcontains \
+            "${COMMONKERNELFOLDER}/fs/Makefile" \
+            'obj-y[[:space:]]*\+=[[:space:]]*pathhide\.o'  
+          assertcontains \
+            "${COMMONKERNELFOLDER}/fs/proc/Makefile" \
+            'obj-y[[:space:]]*\+=[[:space:]]*ghost\.o'
+          if [[ "${FAILED}" -ne 0 ]]; then
+            echo "└─ ⚠️ NoMount-Suite Assertion Failed"
             exit 1
           fi
 
-          # Export NoMount-Suite Paths
-          {
-            echo "NMSUITEKERNELPATCHESFOLDER=${NMSUITEKERNELPATCHESFOLDER}"
-            echo "NMSUITEDEFCONFIG=${NMSUITEDEFCONFIG}"
-            echo "NOMOUNTREF=${NOMOUNTREF}"
-            echo "KSUFOLDER=${KSUFOLDER}"
-          } >> "${GITHUB_ENV}"
-          export NMSUITEKERNELPATCHESFOLDER
-          export NMSUITEDEFCONFIG
-          export NOMOUNTREF
-          export KSUFOLDER                    
-          # Display Resolved Integration Paths
-          echo "------------------------------"
-          echo "└─ 📂 NoMount-Suite Integration"
-          echo "------------------------------"
-          echo "└─ 📌 Kernel Platform   : ${KERNELPLATFORM}"
-          echo "└─ 📌 Common Kernel     : ${COMMONKERNELFOLDER}"
-          echo "└─ 📌 KernelSU          : ${KSUFOLDER}"
-          echo "└─ 📌 NoMount-Suite Ref : ${NOMOUNTREF}"
-          echo "└─ 📌 NoMount Patches   : ${NMSUITEKERNELPATCHESFOLDER}"
-          echo "└─ 📌 NoMount Config    : ${NMSUITEDEFCONFIG}"
-          echo "└─ 📌 Defconfig         : ${DEFCONFIG}"
-          echo "└─ 📌 Output            : ${OUTDIR}"
-          echo "------------------------------"
-          # Validate Required Kernel Directories and Files
-          test -d "$COMMONKERNELFOLDER" || {
-            echo "└─ ⚠️ Common Kernel Directory Not Found: $COMMONKERNELFOLDER"
-            exit 1
-          }
-          test -f "$NMSUITEDEFCONFIG" || {
-            echo "└─ ⚠️ NoMount-Suite Defconfig Not Found: $NMSUITEDEFCONFIG"
-            exit 1
-          }
-          # Prepare NoMount-Suite Integration Scripts
-          chmod +x "${SCRIPTSDIR}/HardenNoMountSuiteIntegration.sh"
-          # Apply NoMount-Suite Integration Families
-          "${SCRIPTSDIR}/NoMount-Suite-Integration.sh" hookless
-          "${SCRIPTSDIR}/NoMount-Suite-Integration.sh" record-version
-          "${SCRIPTSDIR}/NoMount-Suite-Integration.sh" hook
-          "${SCRIPTSDIR}/NoMount-Suite-Integration.sh" ghost
-          "${SCRIPTSDIR}/NoMount-Suite-Integration.sh" pathhide
-          # Verify All Applied NoMount-Suite Families
-          "${SCRIPTSDIR}/NoMount-Suite-Integration.sh" verify hookless hook pathhide ghost
-          # Confirm Successful Integration
-          echo "------------------------------"
-          echo "└─ 📂 NoMount-Suite Integration Complete"
-          echo "------------------------------"
-          echo "└─ 📂 NoMount Version : ${NMVER:-unknown}"
-          echo "└─ 📂 Engine Ref      : ${NMSENGINERREF:-Unknown}"
-          echo "└─ 📂 Engine SHA      : ${NMSENGINESHA:-Unknown}"
-          echo "------------------------------"
-
+          echo "└─ 🎉 NoMount-Suite Integration Completed"
+          echo "└─ Kernel Version : ${KERNELVERSION}"
+          echo "└─ NoMount Version: ${NMMODULEVERSION}"
+          
       - name: 🧩 NoMount Kernel Integration and Package
         if: ${{ inputs.NOMOUNT == 'NoMount' || inputs.NOMOUNT == 'NoMount-Dev' }}
         shell: bash
