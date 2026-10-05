@@ -3224,7 +3224,7 @@ jobs:
             fi
           }
 
-          # Apply One Patch at F0
+          # Apply Patch with F0, Then F1 Fallback
           applypatch() {
             local patchfile="$1"
             local patchroot="${2:-${COMMONKERNELFOLDER}}"
@@ -3235,18 +3235,34 @@ jobs:
             }
 
             patchname="$(basename "$patchfile")"
-            echo "└─ 📂 ${patchname} (F0)"
+            echo "└─ 📂 ${patchname} (F0)"           
             if patch -p1 -F0 --forward --dry-run \
               -d "$patchroot" < "$patchfile" >/dev/null 2>&1; then
-              patch -p1 -F0 --forward \
-                -d "$patchroot" < "$patchfile" >/dev/null
-              echo "└─ Applied: ${patchname}"
-            elif patch -p1 -F0 --reverse --dry-run \
+                patch -p1 -F0 --forward \
+              -d "$patchroot" < "$patchfile" >/dev/null
+              echo "└─ Applied: ${patchname} (F0)"
+              return 0
+            fi
+
+            echo "└─ ⚠️ ${patchname} F0 Failed, Retrying F1"
+            if patch -p1 -F1 --forward --dry-run \
+              -d "$patchroot" < "$patchfile" >/dev/null 2>&1; then
+                 patch -p1 -F1 --forward \
+              -d "$patchroot" < "$patchfile" >/dev/null
+              echo "└─ Applied: ${patchname} (F1)"
+              return 0
+            fi
+
+            if patch -p1 -F0 --reverse --dry-run \
+              -d "$patchroot" < "$patchfile" >/dev/null 2>&1 ||
+                 patch -p1 -F1 --reverse --dry-run \
               -d "$patchroot" < "$patchfile" >/dev/null 2>&1; then
               echo "└─ Already Applied: ${patchname}"
-            else
-              return 1
+              return 0
             fi
+
+            echo "└─ ✗ Failed: ${patchname} (F0/F1)"
+            return 1
           }
 
           # Select a Pinned Variant and Verify it Applies
@@ -3267,15 +3283,24 @@ jobs:
 
               if patch -p1 -F0 --forward --dry-run \
                 -d "${COMMONKERNELFOLDER}" < "$patchfile" >/dev/null 2>&1 ||
-                 patch -p1 -F0 --reverse --dry-run \
+                   patch -p1 -F0 --reverse --dry-run \
                 -d "${COMMONKERNELFOLDER}" < "$patchfile" >/dev/null 2>&1; then
                 applicable+=("$(basename "$patchfile")")
                 if [[ "$(basename "$patchfile")" == "$selected" ]]; then
                   selectedpath="$patchfile"
                 fi
+
+              elif patch -p1 -F1 --forward --dry-run \
+                -d "${COMMONKERNELFOLDER}" < "$patchfile" >/dev/null 2>&1 ||
+                   patch -p1 -F1 --reverse --dry-run \
+                -d "${COMMONKERNELFOLDER}" < "$patchfile" >/dev/null 2>&1; then
+                applicable+=("$(basename "$patchfile") [F1]")
+                if [[ "$(basename "$patchfile")" == "$selected" ]]; then
+                  selectedpath="$patchfile"
+                fi
               fi
             done
-
+        
             if [[ -z "$selectedpath" ]]; then
               echo "└─ ⚠️ ${family}: Pinned Variant Does Not Apply"
               echo "└─ Kernel Version: ${KERNELVERSION}"
