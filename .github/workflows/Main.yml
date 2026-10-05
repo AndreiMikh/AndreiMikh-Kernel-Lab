@@ -3139,97 +3139,14 @@ jobs:
         shell: bash
         run: |
           set -Eeuo pipefail
-          # NoMount-Suite Paths          
+          # NoMount-Suite paths
           NMSUITEDIR="${WORKSPACEDIR}/NoMount-Suite"
           NMSUITEKERNELPATCHESFOLDER="${WORKSPACEDIR}/nmsuitekernelpatches"
           echo "└─ 🫥 NoMount-Suite Kernel Integration"
           echo "└─ Kernel Source : ${COMMONKERNELFOLDER}"
-          echo "└─ Kernel Version: ${KERNELVERSION}"
-          echo "└─ Defconfig     : ${DEFCONFIG}"        
-
-          # Root Engine Directory
-          ROOTENGINE="${{ inputs.ROOTENGINE }}"
-          case "$ROOTENGINE" in
-            SukiSU-Ultra|BakaSU|KernelSU)
-              KSUFOLDER="$KERNELPLATFORM/KernelSU"
-              ;;
-            KernelSU-Next)
-              KSUFOLDER="$KERNELPLATFORM/KernelSU-Next"
-              ;;
-            *)
-              echo "└─ ⚠️ [Error] Unsupported Root Engine: $ROOTENGINE"
-              exit 1
-              ;;
-          esac
-          echo "└─ 📂 [Info] Root Engine Directory : $KSUFOLDER"
-          echo "KSUFOLDER=$KSUFOLDER" >> "$GITHUB_ENV"
-          
-          # Apply Patch Safely
-          applypatch() {
-            local patchfile="$1"
-            local patchroot="${2:-${COMMONKERNELFOLDER}}"
-            [[ -f "${patchfile}" ]] || {
-              echo "└─ ⚠️ Patch Not Found: ${patchfile}"
-              return 1
-            }
-            echo "└─ 📂 $(basename "${patchfile}")"
-            if patch -p1 -F0 --forward --dry-run \
-              -d "${patchroot}" < "${patchfile}" >/dev/null 2>&1; then
-              patch -p1 -F0 --forward \
-                -d "${patchroot}" < "${patchfile}"
-            elif patch -p1 -F0 --reverse --dry-run \
-              -d "${patchroot}" < "${patchfile}" >/dev/null 2>&1; then
-              echo "└─ ♻️ Already Applied"
-            else
-              echo "└─ ⚠️ Failed to Apply: ${patchfile}"
-              return 1
-            fi
-          }
-          copyfile() {
-            local source="$1"
-            local destination="$2"
-            [[ -f "${source}" ]] || {
-              echo "└─ ⚠️ Source File Not Found: ${source}"
-              return 1
-            }
-            mkdir -p "$(dirname "${destination}")"
-            cp -f "${source}" "${destination}"
-          }
-          addconfig() {
-            local config="$1"
-            local value="$2"
-            local file="$3"
-            sed -i "/^${config}=/d" "${file}"
-            echo "${config}=${value}" >> "${file}"
-          }
-          # 1. Clone Required Repositories
-          echo "└─ 📥 [1/7] Clone repositories"
-          if [[ -d "${NMSUITEDIR}/.git" ]]; then
-            echo "└─ 🧾 NoMount-Suite Already Cloned"
-          else
-            rm -rf "${NMSUITEDIR}"
-            git clone \
-              --depth=1 \
-              --branch main \
-              https://github.com/Bouteillepleine/NoMount-Suite.git \
-              "${NMSUITEDIR}"
-          fi
-
-          if [[ -d "${NMSUITEKERNELPATCHESFOLDER}/.git" ]]; then
-            echo "└─ 🧾 Kernel Patches Already Cloned"
-          else
-            rm -rf "${NMSUITEKERNELPATCHESFOLDER}"
-            git clone \
-              --depth=1 \
-              --branch main \
-              https://github.com/Bouteillepleine/kernel_patches.git \
-              "${NMSUITEKERNELPATCHESFOLDER}"
-          fi
-
-          # 2. Hookless Integration
-          echo "└─ 🧩 [2/7] Hookless"
-          HOOKLESSDIR="${NMSUITEDIR}/hookless"
-          case "${KERNELVERSION}" in
+          echo "└─ Defconfig     : ${DEFCONFIG}"
+          # Kernel Version
+          case "$KERNELVERSION" in
             5.10|5.15|6.1|6.6|6.12)
               ;;
             *)
@@ -3237,18 +3154,128 @@ jobs:
               exit 1
               ;;
           esac
-          HOOKLESSPATCH=""
-          for patchfile in \
-            "${HOOKLESSDIR}/patches/nomount_${KERNELVERSION}_kernel_integration.patch" \
-            "${HOOKLESSDIR}/patches/nomount_kernel_integration.patch"
-          do
-            if [[ -f "${patchfile}" ]]; then
-              HOOKLESSPATCH="${patchfile}"
-              break
+          echo "└─ Kernel Version: ${KERNELVERSION}"
+          # Root Engine Directory
+          ROOTENGINE="${{ inputs.ROOTENGINE }}"
+          case "$ROOTENGINE" in
+            SukiSU-Ultra|BakaSU|KernelSU)
+              KSUFOLDER="${KERNELPLATFORM}/KernelSU"
+              ;;
+            KernelSU-Next)
+              KSUFOLDER="${KERNELPLATFORM}/KernelSU-Next"
+              ;;
+            *)
+              echo "└─ ⚠️ Unsupported Root Engine: ${ROOTENGINE}"
+              exit 1
+              ;;
+          esac
+          echo "└─ Root Engine    : ${ROOTENGINE}"
+          echo "└─ Root Directory : ${KSUFOLDER}"
+          # Apply Patch
+          applypatch() {
+            local patchfile="$1"
+            local patchroot="${2:-${COMMONKERNELFOLDER}}"
+            [[ -f "$patchfile" ]] || {
+              echo "└─ ⚠️ Patch Not Found: $patchfile"
+              return 1
+            }
+            echo "└─ 📂 $(basename "$patchfile")"
+            if patch -p1 -F3 --forward --dry-run \
+              -d "$patchroot" < "$patchfile" >/dev/null 2>&1; then
+              patch -p1 -F3 --forward \
+                -d "$patchroot" < "$patchfile"
+              echo "└─ Applied: $(basename "$patchfile")"
+            elif patch -p1 -F3 --reverse --dry-run \
+              -d "$patchroot" < "$patchfile" >/dev/null 2>&1; then
+              echo "└─ Already Applied: $(basename "$patchfile")"
+            else
+              echo "└─ ⚠️ Failed to Apply: $patchfile"
+              return 1
             fi
-          done
+          }
 
-          [[ -n "${HOOKLESSPATCH}" ]] || {
+          # Select a Version-Specific Patch and Ensure Selected Variant
+          # Applies to Kernel Tree
+          applyvariant() {
+            local family="$1"
+            local selected="$2"
+            shift 2
+            local patchfile
+            local applicable=()
+            for patchfile in "$@"; do
+              [[ -f "$patchfile" ]] || {
+                echo "└─ ⚠️ ${family}: Missing Variant: $(basename "$patchfile")"
+                return 1
+              }
+              if patch -p1 -F3 --forward --dry-run \
+                -d "${COMMONKERNELFOLDER}" < "$patchfile" >/dev/null 2>&1 ||
+                 patch -p1 -F3 --reverse --dry-run \
+                -d "${COMMONKERNELFOLDER}" < "$patchfile" >/dev/null 2>&1; then
+                applicable+=("$(basename "$patchfile")")
+              fi
+            done
+
+            if [[ ! " ${applicable[*]} " =~ " $(basename "$selected") " ]]; then
+              echo "└─ ⚠️ ${family}: Selected Variant Does Not Apply to ${KERNELVERSION}"
+              echo "└─ Selected: $(basename "$selected")"
+              echo "└─ Applicable: ${applicable[*]:-None}"
+              return 1
+            fi
+
+            echo "└─ 🎯 ${family}: $(basename "$selected")"
+            applypatch "$selected"
+          }
+          copyfile() {
+            local source="$1"
+            local destination="$2"
+            [[ -f "$source" ]] || {
+              echo "└─ ⚠️ Source File Not Found: $source"
+              return 1
+            }
+            mkdir -p "$(dirname "$destination")"
+            cp -f "$source" "$destination"
+          }
+          addconfig() {
+            local config="$1"
+            local value="$2"
+            local file="$3"
+            sed -i "/^${config}=/d" "$file"
+            echo "${config}=${value}" >> "$file"
+          }
+
+          # 1. Clone Required Repositories
+          echo "└─ 📥 [1/7] Clone repositories"
+          if [[ -d "${NMSUITEDIR}/.git" ]]; then
+            echo "└─ 🧾 NoMount-Suite Already Cloned"
+          else
+            rm -rf "$NMSUITEDIR"
+            git clone \
+              --depth=1 \
+              --branch main \
+              https://github.com/Bouteillepleine/NoMount-Suite.git \
+              "$NMSUITEDIR"
+          fi
+
+          if [[ -d "${NMSUITEKERNELPATCHESFOLDER}/.git" ]]; then
+            echo "└─ 🧾 Kernel Patches Already Cloned"
+          else
+            rm -rf "$NMSUITEKERNELPATCHESFOLDER"
+            git clone \
+              --depth=1 \
+              --branch main \
+              https://github.com/Bouteillepleine/kernel_patches.git \
+              "$NMSUITEKERNELPATCHESFOLDER"
+          fi
+
+          # 2. Hookless
+          echo "└─ 🧩 [2/7] Hookless"
+          HOOKLESSDIR="${NMSUITEDIR}/hookless"
+          HOOKLESSPATCH="${HOOKLESSDIR}/patches/nomount_kernel_integration.patch"
+          if [[ ! -f "$HOOKLESSPATCH" ]]; then
+            HOOKLESSPATCH="${HOOKLESSDIR}/patches/nomount_${KERNELVERSION}_kernel_integration.patch"
+          fi
+
+          [[ -f "$HOOKLESSPATCH" ]] || {
             echo "└─ ⚠️ No Hookless Integration Patch Found"
             exit 1
           }
@@ -3258,10 +3285,13 @@ jobs:
           copyfile \
             "${HOOKLESSDIR}/src/nomount.h" \
             "${COMMONKERNELFOLDER}/fs/nomount.h"
-          applypatch "${HOOKLESSPATCH}"
-          addconfig "CONFIG_NOMOUNT" "y" "${DEFCONFIG}"
-     
-          # 3. Fetch NoMount-Suite Module Version
+          applypatch "$HOOKLESSPATCH"
+          addconfig \
+            "CONFIG_NOMOUNT" \
+            "y" \
+            "${DEFCONFIG}"
+
+          # 3. Record NoMount version
           echo "└─ 🏷️ [3/7] Record version"
           NMMODULEVERSION="$(
             sed -n \
@@ -3271,38 +3301,66 @@ jobs:
           )"
           NMMODULEVERSION="${NMMODULEVERSION:-Unknown}"
           echo "└─ NoMount Version: ${NMMODULEVERSION}"
-
+      
           # 4. Hook
           echo "└─ 🪝 [4/7] Hook"
           HOOKDIR="${NMSUITEKERNELPATCHESFOLDER}/common/_hook"
-          test -d "${HOOKDIR}" || {
-            echo "└─ ⚠️ Hook Directory Not Found: ${HOOKDIR}"
+          [[ -d "$HOOKDIR" ]] || {
+            echo "└─ ⚠️ Hook Directory Not Found: $HOOKDIR"
             exit 1
           }
-          while IFS= read -r patchfile; do
-            applypatch "${patchfile}"
-          done < <(
-            find "${HOOKDIR}" \
-              -maxdepth 1 \
-              -type f \
-              -name '*.patch' \
-              -print |
-            sort
-          )
-          if [[ -n "${KSUFOLDER:-}" ]]; then
-            KSUSEQNOPATCH="${HOOKDIR}/fix_selinux_seqno.patch"
-            if [[ -f "${KSUSEQNOPATCH}" ]]; then
-              applypatch "${KSUSEQNOPATCH}" "${KSUFOLDER}"
-            fi
-          else
-            echo "└─ ⚠️ KSU Directory is Not Set; Skipping KSU Seqno Patch"
-          fi
+          case "$KERNELVERSION" in
+            6.6|6.12)
+              REQSFS="hide_selinux_selinuxfs_6_12.patch"
+              REQAUDIT="quiet_selinux_audit.patch"
+              ;;
+            5.10|5.15|6.1)
+              REQSFS="hide_selinux_selinuxfs_5_10.patch"
+              REQAUDIT="quiet_selinux_audit_legacy.patch"
+              ;;
+          esac
+          case "$KERNELVERSION" in
+            6.12)
+              REQATTR="hide_selinux_attr_6_12.patch"
+              ;;
+            6.6)
+              REQATTR="hide_selinux_attr_6_6.patch"
+              ;;
+            5.10|5.15|6.1)
+              REQATTR="hide_selinux_attr_5_10.patch"
+              ;;
+            *)
+              REQATTR="hide_selinux_attr.patch"
+              ;;
+          esac
+          applyvariant \
+            "selinuxfs" \
+            "${HOOKDIR}/${REQSFS}" \
+            "${HOOKDIR}/hide_selinux_selinuxfs_6_12.patch" \
+            "${HOOKDIR}/hide_selinux_selinuxfs_5_10.patch"
+          applyvariant \
+            "selinux-attr" \
+            "${HOOKDIR}/${REQATTR}" \
+            "${HOOKDIR}/hide_selinux_attr_6_12.patch" \
+            "${HOOKDIR}/hide_selinux_attr_6_6.patch" \
+            "${HOOKDIR}/hide_selinux_attr_5_10.patch" \
+            "${HOOKDIR}/hide_selinux_attr.patch"
+          applyvariant \
+            "selinux-audit" \
+            "${HOOKDIR}/${REQAUDIT}" \
+            "${HOOKDIR}/quiet_selinux_audit.patch" \
+            "${HOOKDIR}/quiet_selinux_audit_legacy.patch"
+          # Fix SELinux Seqno Patch Targets Root Engine Tree
+          # Not Kernel Source Tree
+          applypatch \
+            "${HOOKDIR}/fix_selinux_seqno.patch" \
+            "${KSUFOLDER}"
 
           # 5. Ghost
           echo "└─ 👻 [5/7] Ghost"
           GHOSTDIR="${NMSUITEKERNELPATCHESFOLDER}/common/_ghost"
-          test -d "${GHOSTDIR}" || {
-            echo "└─ ⚠️ Ghost Directory Not Found: ${GHOSTDIR}"
+          [[ -d "$GHOSTDIR" ]] || {
+            echo "└─ ⚠️ Ghost Directory Not Found: $GHOSTDIR"
             exit 1
           }
           copyfile \
@@ -3311,27 +3369,106 @@ jobs:
           copyfile \
             "${GHOSTDIR}/ghost.h" \
             "${COMMONKERNELFOLDER}/fs/proc/ghost.h"
-          while IFS= read -r patchfile; do
-            applypatch "${patchfile}"
-          done < <(
-            find "${GHOSTDIR}" \
-              -maxdepth 1 \
-              -type f \
-              -name '*.patch' \
-              -print |
-            sort
-          )
-          if ! grep -qE \
-            '^[[:space:]]*obj-y[[:space:]]*\+=[[:space:]]*ghost\.o' \
-            "${COMMONKERNELFOLDER}/fs/proc/Makefile"; then
-            echo 'obj-y += ghost.o' >> "${COMMONKERNELFOLDER}/fs/proc/Makefile"
-          fi
+          case "$KERNELVERSION" in
+            6.12|6.6)
+              REQXATTR="ghost_xattr_6_12.patch"
+              REQLINKAT="ghost_linkat_5_15.patch"
+              REQCHMOD="ghost_chmod.patch"
+              ;;
+            6.1|5.15)
+              REQXATTR="ghost_xattr_5_15.patch"
+              REQLINKAT="ghost_linkat_5_15.patch"
+              REQCHMOD="ghost_chmod_5_10.patch"
+              ;;
+            5.10)
+              REQXATTR="ghost_xattr.patch"
+              REQLINKAT="ghost_linkat.patch"
+              REQCHMOD="ghost_chmod_5_10.patch"
+              ;;
+          esac
+          applypatch \
+            "${GHOSTDIR}/ghost_o_path.patch"
+          applyvariant \
+            "ghost-xattr" \
+            "${GHOSTDIR}/${REQXATTR}" \
+            "${GHOSTDIR}/ghost_xattr_6_12.patch" \
+            "${GHOSTDIR}/ghost_xattr_5_15.patch" \
+            "${GHOSTDIR}/ghost_xattr.patch"
+          applyvariant \
+            "ghost-linkat" \
+            "${GHOSTDIR}/${REQLINKAT}" \
+            "${GHOSTDIR}/ghost_linkat_5_15.patch" \
+            "${GHOSTDIR}/ghost_linkat.patch"
+          applypatch \
+            "${GHOSTDIR}/ghost_notdir.patch"
+          applypatch \
+            "${GHOSTDIR}/ghost_truncate.patch"
+          applypatch \
+            "${GHOSTDIR}/ghost_utimes.patch"
+          applyvariant \
+            "ghost-chmod" \
+            "${GHOSTDIR}/${REQCHMOD}" \
+            "${GHOSTDIR}/ghost_chmod.patch" \
+            "${GHOSTDIR}/ghost_chmod_5_10.patch"
+          applypatch \
+            "${GHOSTDIR}/ghost_chown.patch"
+          applypatch \
+            "${GHOSTDIR}/ghost_access.patch"
+          applypatch \
+            "${GHOSTDIR}/ghost_open.patch"
+          applypatch \
+            "${GHOSTDIR}/ghost_create.patch"
+          applypatch \
+            "${GHOSTDIR}/ghost_build_integration.patch"
+          case "$KERNELVERSION" in
+            6.12)
+              REQSTATX="ghost_statx_6_12.patch"
+              ;;
+            6.6|6.1)
+              REQSTATX="ghost_statx_6_1.patch"
+              ;;
+            5.15|5.10)
+              REQSTATX="ghost_statx_5_10.patch"
+              ;;
+          esac
+          applyvariant \
+            "ghost-statx" \
+            "${GHOSTDIR}/${REQSTATX}" \
+            "${GHOSTDIR}/ghost_statx_6_12.patch" \
+            "${GHOSTDIR}/ghost_statx_6_1.patch" \
+            "${GHOSTDIR}/ghost_statx_5_10.patch"
+          case "$KERNELVERSION" in
+            6.12)
+              REQREADLINK="ghost_readlink_6_12.patch"
+              ;;
+            *)
+              REQREADLINK="ghost_readlink_5_10.patch"
+              ;;
+          esac
+          applyvariant \
+            "ghost-readlink" \
+            "${GHOSTDIR}/${REQREADLINK}" \
+            "${GHOSTDIR}/ghost_readlink_6_12.patch" \
+            "${GHOSTDIR}/ghost_readlink_5_10.patch"
+          case "$KERNELVERSION" in
+            5.10)
+              REQRENAME="ghost_rename_5_10.patch"
+              ;;
+            *)
+              REQRENAME="ghost_rename_5_15.patch"
+              ;;
+          esac
+          applyvariant \
+            "ghost-rename" \
+            "${GHOSTDIR}/${REQRENAME}" \
+            "${GHOSTDIR}/ghost_rename_5_10.patch" \
+            "${GHOSTDIR}/ghost_rename_5_15.patch"
 
           # 6. Pathhide
           echo "└─ 🫥 [6/7] Pathhide"
           PATHHIDEDIR="${NMSUITEKERNELPATCHESFOLDER}/common/_pathhide"
-          test -d "${PATHHIDEDIR}" || {
-            echo "└─ ⚠️ Pathhide Directory Not Found: ${PATHHIDEDIR}"
+          [[ -d "$PATHHIDEDIR" ]] || {
+            echo "└─ ⚠️ Pathhide Directory Not Found: $PATHHIDEDIR"
             exit 1
           }
           copyfile \
@@ -3340,56 +3477,114 @@ jobs:
           copyfile \
             "${PATHHIDEDIR}/pathhide.h" \
             "${COMMONKERNELFOLDER}/fs/pathhide.h"
-          while IFS= read -r patchfile; do
-            applypatch "${patchfile}"
-          done < <(
-            find "${PATHHIDEDIR}" \
-              -maxdepth 1 \
-              -type f \
-              -name '*.patch' \
-              -print |
-            sort
-          )
+          applypatch \
+            "${PATHHIDEDIR}/pathhide_${KERNELVERSION}_integration.patch"
+          applypatch \
+            "${PATHHIDEDIR}/pathhide_mapfiles_${KERNELVERSION}_integration.patch"
+
+          # Pagemap
+          if grep -q 'pagemap_scan_test_walk' \
+            "${COMMONKERNELFOLDER}/fs/proc/task_mmu.c"; then
+            REQPAGEMAP="pathhide_pagemap_6.12_integration.patch"
+          elif awk \
+            '/^static int pagemap_pmd_range/,/^}/' \
+            "${COMMONKERNELFOLDER}/fs/proc/task_mmu.c" |
+            grep -q 'bool migration'; then
+            REQPAGEMAP="pathhide_pagemap_5.10_integration.patch"
+          else
+            REQPAGEMAP="pathhide_pagemap_6.6_integration.patch"
+          fi
+
+          applyvariant \
+            "pathhide-pagemap" \
+            "${PATHHIDEDIR}/${REQ_PAGEMAP}" \
+            "${PATHHIDEDIR}/pathhide_pagemap_6.12_integration.patch" \
+            "${PATHHIDEDIR}/pathhide_pagemap_6.6_integration.patch" \
+            "${PATHHIDEDIR}/pathhide_pagemap_5.10_integration.patch"
+          # Mincore
+          if grep -q 'vma_lookup(current->mm, addr)' \
+            "${COMMONKERNELFOLDER}/mm/mincore.c"; then
+            REQMINCORE="pathhide_mincore_6.12_integration.patch"
+          else
+            REQMINCORE="pathhide_mincore_5.10_integration.patch"
+          fi
+
+          applyvariant \
+            "pathhide-mincore" \
+            "${PATHHIDEDIR}/${REQ_MINCORE}" \
+            "${PATHHIDEDIR}/pathhide_mincore_6.12_integration.patch" \
+            "${PATHHIDEDIR}/pathhide_mincore_5.10_integration.patch"
+          # Accounting
+          if grep -q \
+            '__page_size_count(mm->total_vm)' \
+            "${COMMONKERNELFOLDER}/fs/proc/task_mmu.c"; then
+            REQACCT="pathhide_accounting_pgcompat_integration.patch"
+          elif grep -q \
+            'get_mm_counter_sum(mm, MM_ANONPAGES)' \
+            "${COMMONKERNELFOLDER}/fs/proc/task_mmu.c"; then
+            REQACCT="pathhide_accounting_6.6_integration.patch"
+          else
+            REQACCT="pathhide_accounting_integration.patch"
+          fi
+
+          applyvariant \
+            "pathhide-accounting" \
+            "${PATHHIDEDIR}/${REQ_ACCT}" \
+            "${PATHHIDEDIR}/pathhide_accounting_6.6_integration.patch" \
+            "${PATHHIDEDIR}/pathhide_accounting_pgcompat_integration.patch" \
+            "${PATHHIDEDIR}/pathhide_accounting_integration.patch"
           if ! grep -qE \
-            '^[[:space:]]*obj-y[[:space:]]*\+=[[:space:]]*pathhide\.o' \
+            '^obj-y[[:space:]]*\+=.*pathhide\.o' \
             "${COMMONKERNELFOLDER}/fs/Makefile"; then
             echo 'obj-y += pathhide.o' >> "${COMMONKERNELFOLDER}/fs/Makefile"
           fi
 
-          # 7. Assert
-          echo "└─ 🔎 [7/7] Assert"
+          # 7. Assert NoMount-Suite Kernel Integration
+          echo "└─ 🔎 [7/7] Assert NoMount-Suite Kernel Integration"
           FAILED=0
           assertfile() {
             local file="$1"
-            if [[ -f "${file}" ]]; then
-              echo "└─ ✓ ${file}"
+            if [[ -f "$file" ]]; then
+              echo "└─ ✓ $file"
             else
-              echo "└─ ✗ Missing: ${file}"
+              echo "└─ ✗ Missing: $file"
               FAILED=1
             fi
           }
           assertcontains() {
             local file="$1"
-            local pattern="$2"   
-            if grep -Eq "${pattern}" "${file}"; then
-              echo "└─ ✓ ${file}"
+            local pattern="$2"
+            if grep -Eq "$pattern" "$file"; then
+              echo "└─ ✓ $file"
             else
-              echo "└─ ✗ Missing in ${file}: ${pattern}"
+              echo "└─ ✗ Missing in $file: $pattern"
               FAILED=1
             fi
           }
-          assertfile "${COMMONKERNELFOLDER}/fs/nomount.c"
-          assertfile "${COMMONKERNELFOLDER}/fs/nomount.h"
-          assertfile "${COMMONKERNELFOLDER}/fs/pathhide.c"
-          assertfile "${COMMONKERNELFOLDER}/fs/pathhide.h"
-          assertfile "${COMMONKERNELFOLDER}/fs/proc/ghost.c"
-          assertfile "${COMMONKERNELFOLDER}/fs/proc/ghost.h"
+          assertfile \
+            "${COMMONKERNELFOLDER}/fs/nomount.c"
+          assertfile \
+            "${COMMONKERNELFOLDER}/fs/nomount.h"
+          assertfile \
+            "${COMMONKERNELFOLDER}/fs/pathhide.c"
+          assertfile \
+            "${COMMONKERNELFOLDER}/fs/pathhide.h"
+          assertfile \
+            "${COMMONKERNELFOLDER}/fs/proc/ghost.c"
+          assertfile \
+            "${COMMONKERNELFOLDER}/fs/proc/ghost.h"
           assertcontains \
             "${DEFCONFIG}" \
             '^CONFIG_NOMOUNT=y$'
           assertcontains \
             "${COMMONKERNELFOLDER}/fs/Makefile" \
-            'obj-y[[:space:]]*\+=[[:space:]]*pathhide\.o'  
+            'obj-y[[:space:]]*\+=[[:space:]]*pathhide\.o'
+          if ! grep -qE \
+            '^[[:space:]]*obj-y[[:space:]]*\+=[[:space:]]*ghost\.o' \
+            "${COMMONKERNELFOLDER}/fs/proc/Makefile"; then
+            echo 'obj-y += ghost.o' >> "${COMMONKERNELFOLDER}/fs/proc/Makefile"
+          fi
+
           assertcontains \
             "${COMMONKERNELFOLDER}/fs/proc/Makefile" \
             'obj-y[[:space:]]*\+=[[:space:]]*ghost\.o'
@@ -3401,7 +3596,7 @@ jobs:
           echo "└─ 🎉 NoMount-Suite Integration Completed"
           echo "└─ Kernel Version : ${KERNELVERSION}"
           echo "└─ NoMount Version: ${NMMODULEVERSION}"
-          
+                       
       - name: 🧩 NoMount Kernel Integration and Package
         if: ${{ inputs.NOMOUNT == 'NoMount' || inputs.NOMOUNT == 'NoMount-Dev' }}
         shell: bash
