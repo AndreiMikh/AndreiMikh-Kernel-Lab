@@ -409,44 +409,42 @@ jobs:
           REMOVECODEQL: true
           REMOVEDOCKERIMAGES: true
         run: |
-          set -Eeuo pipefail     
+          set -Eeuo pipefail
+          # Paths
           WORKSPACEDIR="${GITHUB_WORKSPACE}"
-          VGNAME="buildvg"      
-          # Validate Required Configuration
-          : "${MBROOTRESERVE:?Root Reserve is Not Set}"
-          : "${MBTEMPORARYRESERVE:?Temporary Reserve is Not Set}"
-          : "${BUILDMOUNTPATH:?Build Mount Path is Not Set}"
-          : "${MOUNTOWNERSHIP:?Mount Ownership is Not Set}"
-          : "${PVLOOPPATH:?Root PV Loop Path is Not Set}"
-          : "${TEMPORARYPVLOOPPATH:?Temporary PV Loop Path is Not Set}"      
+          VGNAME=buildvg  
           # Display Build Space Configuration
           echo "📌 Build Space Configuration"
-          echo "└─ 📂 Root Reserve      : ${MBROOTRESERVE} MiB"
-          echo "└─ 📂 Temp Reserve      : ${MBTEMPORARYRESERVE} MiB"
-          echo "└─ 📂 Mount Path        : ${BUILDMOUNTPATH}"      
+          echo "└─ 📂 Root reserve       : ${MBROOTRESERVE} MiB"
+          echo "└─ 📂 Temp reserve       : ${MBTEMPORARYRESERVE} MiB"
+          echo "└─ 📂 Mount path         : ${BUILDMOUNTPATH}"
+          echo "└─ 📂 Root PV loop path  : ${PVLOOPPATH}"
+          echo "└─ 📂 Temp PV loop path  : ${TEMPORARYPVLOOPPATH}"
+          echo "└─ 📂 Removing           : dotnet=${REMOVEDOTNET} android=${REMOVEANDROID} haskell=${REMOVEHASKELL} codeql=${REMOVECODEQL} docker=${REMOVEDOCKERIMAGES}"     
           # Preserve Original Workspace Ownership
           WORKSPACEOWNER="$(stat -c '%U:%G' "${WORKSPACEDIR}")"    
           # Display Available Space Before Cleanup
           echo "└─ 📊 Available Space Before Cleanup:"
-          sudo df -h     
+          sudo df -h      
           # Ensure Build Mount Directory Exists
-          sudo mkdir -p "${BUILDMOUNTPATH}"     
+          sudo mkdir -p "${BUILDMOUNTPATH}"      
           # Remove Unneeded Pre-Installed Software
-          echo "└─ 🧹 Removing Pre-Installed Software(s)..."
-          [[ "${REMOVEDOTNET}" == "true" ]] && sudo rm -rf /usr/share/dotnet
-          [[ "${REMOVEANDROID}" == "true" ]] && sudo rm -rf /usr/local/lib/android
-          [[ "${REMOVEHASKELL}" == "true" ]] && sudo rm -rf /opt/ghc
-          [[ "${REMOVECODEQL}" == "true" ]] && sudo rm -rf /opt/hostedtoolcache/CodeQL
-          [[ "${REMOVEDOCKERIMAGES}" == "true" ]] && sudo docker image prune -af || true
-          echo "└─ ✔️ Cleanup Complete"   
+          echo "└─ 🧹 Removing Pre-Installed Software(s)..."     
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          sudo docker image prune --all --force || true
+          echo "└─ ✔️ Pre-Installed Software Cleanup Complete"   
           # Remove Existing Swap
           echo "└─ 🗑️ Removing Existing Swap..."
           sudo swapoff -a || true
-          sudo rm -f /mnt/swapfile    
+          sudo rm -f /mnt/swapfile      
           # Calculate Available Root Filesystem Space
-          echo "└─ 💽 Creating LVM PV From Root Filesystem..."
-          KBROOTRESERVE=$((MBROOTRESERVE * 1024))
-          KBROOTFREE="$(df -Pk / | awk 'NR==2 {print $4}')"    
+          echo "└─ 💽 Creating LVM PV From Root Filesystem..."      
+          KBROOTRESERVE=$((MBROOTRESERVE * 1024))      
+          KBROOTFREE="$(
+            df --block-size=1024 --output=avail / |
+              tail -n 1 |
+              tr -d ' '
+          )"      
           # Ensure Root Reserve Can Be Preserved
           if (( KBROOTFREE <= KBROOTRESERVE )); then
             echo "└─ ⚠️ Insufficient Root Filesystem Space"
@@ -459,16 +457,24 @@ jobs:
           BROOTLVMSIZE=$(( (KBROOTFREE - KBROOTRESERVE) * 1024 ))     
           # Create Root-Backed Loop Image
           sudo rm -f "${PVLOOPPATH}"
-          sudo fallocate -z -l "${BROOTLVMSIZE}" "${PVLOOPPATH}"     
+          sudo touch "${PVLOOPPATH}"
+          sudo fallocate -z -l "${BROOTLVMSIZE}" "${PVLOOPPATH}"      
           # Attach Root Image to Loop Device
-          ROOTLOOPDEV="$(sudo losetup --find --show "${PVLOOPPATH}")"      
+          ROOTLOOPDEV="$(
+            sudo losetup --find --show "${PVLOOPPATH}"
+          )"      
           # Initialize Root Loop Device as LVM PV
-          sudo pvcreate -f "${ROOTLOOPDEV}"
-          echo "└─ ✔️ Root PV          : ${ROOTLOOPDEV}"    
+          sudo pvcreate -f "${ROOTLOOPDEV}"      
+          echo "└─ ✔️ Root PV : ${ROOTLOOPDEV}"      
           # Calculate Available /Mount Filesystem Space
-          echo "└─ 💽 Creating LVM PV From /Mount..."
-          KBTEMPORARYRESERVE=$((MBTEMPORARYRESERVE * 1024))
-          KBTEMPORARYFREE="$(df -Pk /mnt | awk 'NR==2 {print $4}')"      
+          echo "└─ 💽 Creating LVM PV From /Mount..."      
+          KBTEMPORARYRESERVE=$((MBTEMPORARYRESERVE * 1024))      
+          KBTEMPORARYFREE="$(
+            df --block-size=1024 --output=avail /mnt |
+              tail -n 1 |
+              tr -d ' '
+          )"
+      
           # Ensure /Mount Reserve Can Be Preserved
           if (( KBTEMPORARYFREE <= KBTEMPORARYRESERVE )); then
             echo "└─ ⚠️ Insufficient /Mount Filesystem Space"
@@ -478,57 +484,47 @@ jobs:
           fi
       
           # Calculate /Mount PV Size
-          BTEMPORARYLVMSIZE=$(( (KBTEMPORARYFREE - KBTEMPORARYRESERVE) * 1024 ))      
+          BTEMPORARYLVMSIZE=$(( (KBTEMPORARYFREE - KBTEMPORARYRESERVE) * 1024 ))
+      
           # Create /Mount-Backed Loop Image
           sudo rm -f "${TEMPORARYPVLOOPPATH}"
+          sudo touch "${TEMPORARYPVLOOPPATH}"
           sudo fallocate -z -l "${BTEMPORARYLVMSIZE}" "${TEMPORARYPVLOOPPATH}"      
           # Attach /Mount Image to Loop Device
-          TEMPORARYLOOPDEV="$(sudo losetup --find --show "${TEMPORARYPVLOOPPATH}")"      
+          TEMPORARYLOOPDEV="$(
+            sudo losetup --find --show "${TEMPORARYPVLOOPPATH}"
+          )"     
           # Initialize /Mount Loop Device as LVM PV
-          sudo pvcreate -f "${TEMPORARYLOOPDEV}"
-          echo "└─ ✔️ Temp PV : ${TEMPORARYLOOPDEV}"      
+          sudo pvcreate -f "${TEMPORARYLOOPDEV}"      
+          echo "└─ ✔️ Temp PV : ${TEMPORARYLOOPDEV}"
           # Combine Root and /Mount PVs Into One Volume Group
-          echo "└─ 🔗 Creating Volume Group : ${VGNAME}"
-          sudo vgcreate "${VGNAME}" "${TEMPORARYLOOPDEV}" "${ROOTLOOPDEV}"
+          echo "└─ 🔗 Creating Volume Group : ${VGNAME}"     
+          sudo vgcreate \
+            "${VGNAME}" \
+            "${TEMPORARYLOOPDEV}" \
+            "${ROOTLOOPDEV}"      
           echo "└─ ✔️ Volume Group Created"      
           # Allocate All Remaining Space to Build Volume
-          echo "└─ 📦 Creating Build Volume..."
-          sudo lvcreate -l 100%FREE -n buildlv "${VGNAME}"      
-          # Install Latest Available MKE2FS
-          echo "└─ 📦 Installing E2FSPROGS 1.47.4..."
-          E2FSPROGSVERSION="1.47.4"
-          E2FSPROGSDIR="/opt/e2fsprogs"
-          E2FSPROGSSRC="/tmp/e2fsprogs-${E2FSPROGSVERSION}"      
-          sudo rm -rf "${E2FSPROGSDIR}" "${E2FSPROGSSRC}"      
-          curl -L --fail --retry 5 \
-            -o "${E2FSPROGSSRC}.tar.gz" \
-            "https://www.kernel.org/pub/linux/kernel/people/tytso/e2fsprogs/v${E2FSPROGSVERSION}/e2fsprogs-${E2FSPROGSVERSION}.tar.gz"     
-          tar -xzf "${E2FSPROGSSRC}.tar.gz" -C /tmp
-          cd "${E2FSPROGSSRC}"      
-          ./configure \
-            --prefix="${E2FSPROGSDIR}" \
-            --disable-fuse2fs \
-            --disable-uuidd      
-          make -j"$(nproc)"
-          sudo make install      
-          echo "└─ ✔️ MKE2FS Version:"
-          sudo "${E2FSPROGSDIR}/sbin/mke2fs" -V    
-          # Format Build Volume as EXT4
-          sudo "${E2FSPROGSDIR}/sbin/mkfs.ext4" \
+          echo "└─ 📦 Creating Build Volume..."      
+          sudo lvcreate \
+            -l 100%FREE \
+            -n buildlv \
+            "${VGNAME}"    
+          # Format Build Volume as Ext4
+          sudo mkfs.ext4 \
             -Enodiscard \
             -m0 \
             "/dev/mapper/${VGNAME}-buildlv"     
-          sudo rm -rf "${E2FSPROGSSRC}" "${E2FSPROGSSRC}.tar.gz"      
-          echo "└─ ✔️ Build Filesystem Created"      
+          echo "└─ ✔️ Build Filesystem Created"     
           # Mount Build Volume Over GitHub Workspace
-          echo "└─ 📂 Mounting Build Volume to ${BUILDMOUNTPATH}..."
+          echo "└─ 📂 Mounting Build Volume to ${BUILDMOUNTPATH}..."     
           sudo mount \
             "/dev/mapper/${VGNAME}-buildlv" \
-            "${BUILDMOUNTPATH}"
+            "${BUILDMOUNTPATH}"     
           # Restore Runner Ownership
           sudo chown -R \
             "${MOUNTOWNERSHIP}" \
-            "${BUILDMOUNTPATH}"
+            "${BUILDMOUNTPATH}"  
           # Restore Workspace Ownership if Required
           if [[ ! -d "${WORKSPACEDIR}" ]]; then
             sudo mkdir -p "${WORKSPACEDIR}"
@@ -539,7 +535,7 @@ jobs:
       
           # Display Available Space After Setup
           echo "└─ 📊 Available Space After Cleanup:"
-          sudo df -h "${BUILDMOUNTPATH}"
+          sudo df -h      
           # Display LVM Configuration
           echo "└─ 💾 LVM Status:"
           sudo vgs
