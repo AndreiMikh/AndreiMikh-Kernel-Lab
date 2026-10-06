@@ -6553,147 +6553,24 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
-  release-kernel:
-    name: 🚀 Release Kernel
-    if: >-
-      ${{
-        needs.kernel-build.result == 'success' &&
-        needs.repack-kernel.result == 'success' &&
-        needs.kernel-build.outputs.gitrelease == 'Enabled' &&
-        (
-          needs.root-engine-apk.result == 'success' ||
-          needs.root-engine-apk.result == 'skipped'
-        )
-      }}
+release-kernel:
     needs:
       - kernel-build
       - repack-kernel
       - root-engine-apk
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-      actions: read
-    env:
-      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-    steps:
-      - name: 📥 Download Kernel Package
-        uses: actions/download-artifact@v8
-        with:
-          name: "Package-${{ needs.kernel-build.outputs.manifestbasefile }}-${{ needs.kernel-build.outputs.ksuversion }}"
-          path: dist
-
-      - name: 📥 Download Manager APK Artifact
-        if: ${{ needs.root-engine-apk.outputs.managerapk == 'true' }}
-        uses: actions/download-artifact@v8
-        with:
-          name: "ManagerAPK-${{ inputs.ROOTENGINE }}-${{ needs.kernel-build.outputs.ksuversion }}"
-          path: manager-apk          
-        
-      - name: 🏷️ Release Status Requirement
-        id: ksu-check
-        shell: bash
-        env:
-          KSUVERSION: ${{ needs.kernel-build.outputs.ksuversion }}
-        run: |
-          set -Eeuo pipefail
-          LATESTTAG="$(gh release view --json tagName -q .tagName 2>/dev/null || echo '')"
-          echo "└─ 📦 [Info] Latest Release Tag: ${LATESTTAG:-None}"
-          echo "└─ 🆕 [Info] Current KSU Version: ${KSUVERSION}"
-          if [[ -z "$LATESTTAG" ]]; then
-            echo "└─ 🔍 [Info] No Previous Release Found → Proceeding"
-            echo "shouldrelease=true" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-
-          if [[ "$LATESTTAG" == *"${KSUVERSION}"* ]]; then
-            echo "└─ ⏭️ [Info] Same KSU Version Detected → Skipping Release"
-            echo "shouldrelease=false" >> "$GITHUB_OUTPUT"
-          else
-            echo "└─ 🚀 [Info] New KSU Version Detected → Releasing"
-            echo "shouldrelease=true" >> "$GITHUB_OUTPUT"
-          fi
-
-      - name: 📋 Release Package Contents
-        if: ${{ steps.ksu-check.outputs.shouldrelease == 'true' && needs.root-engine-apk.outputs.managerapk == 'true' }}
-        env:
-          ROOTENGINE: ${{ inputs.ROOTENGINE }}      
-        shell: bash
-        run: |
-          set -Eeuo pipefail
-          echo "└─ 📦 Release Files:"
-          find dist \
-            -maxdepth 1 \
-            -type f \
-            -printf '  └─ %f\n' \
-            | sort
-          echo "└─ 📦 Root Engine : ${ROOTENGINE:-None}"
-          find manager-apk \
-            -type f \
-            -name "*.apk" \
-            -print
-          APKCOUNT="$(
-            find manager-apk \
-              -type f \
-              -name "*.apk" |
-            wc -l
-          )"
-          if [[ "$APKCOUNT" -eq 0 ]]; then
-            echo "└─ ⚠️ [Warn] Manager APK Artifact Contains No APK Files"
-            find manager-apk -maxdepth 5 -print
-            exit 1
-          fi
-
-      - name: 📤 Upload Artifacts to Git Release
-        if: ${{ steps.ksu-check.outputs.shouldrelease == 'true' }}
-        continue-on-error: true
-        uses: softprops/action-gh-release@v3
-        with:
-          tag_name: ${{ needs.kernel-build.outputs.manifestbasefile }}
-          name: ${{ needs.kernel-build.outputs.manifestbasefile }}-${{ needs.kernel-build.outputs.fullversion }}-${{ needs.kernel-build.outputs.suffix }}
-          body: |
-            ### 📋 **INSTALLATION GUIDE**:
-            ### 📩 **DOWNLOAD THE KERNEL ZIP FILE**:
-            ---
-            - Navigate to the Release Page & Download the Correct Kernel Zip File for Your Device & Kernel Version
-            - Ensure that You Select the File that Matches Your Device's Model & the Kernel Version You're Installing
-            ### 📲 **PREPARE YOUR DEVICE**:
-            ---
-            - Make Sure Your Device has an **Unlocked Bootloader** & a Compatible Custom Recovery (TWRP/OrangeFox/Etc)
-            - It's Recommended to **Backup Your Data** Before Proceeding with the Installation to Avoid Any Loss
-            ### 📤 **INSTALL THROUGH RECOVERY TOOL**:
-            ---
-            - Reboot Your Device Into **Recovery Mode** (TWRP/OrangeFox/Etc)
-            - In the Recovery Menu, Select **Install** & Navigate to the Downloaded Kernel Zip File
-            - Select the Kernel Zip File & Swipe to Confirm Installation
-            - After the Installation Completes, Reboot Your Device Into the System
-            ### 📥 **INSTALLATION VIA KERNELFLASHER APP**:
-            ---
-            - **Download KernelFlasher**: Get the **KernelFlasher** App from https://github.com/fatalcoder524/KernelFlasher
-            - **Launch KernelFlasher**: Open the App & Make Sure Your **Device is Rooted**
-            - **Select Kernel**: Choose the Downloaded Kernel Zip File Within the App
-            - **Flash the Kernel**: Follow the Prompts to Flash the Kernel Directly Onto your Device
-            - **Reboot**: After the Installation Completes, Reboot Your Device
-            ### 📥 **INSTALLATION VIA HORIZON FLASHER APP**:
-            ---
-            - **Download Horizon Flasher**: https://github.com/libxzr/HorizonKernelFlasher/releases
-            - **Install the App**: Launch the App & Select the Downloaded Kernel Zip File
-            - **Flash**: Follow the Application's Flashing Instructions
-            - **Reboot the System**: Reboot After Flashing Completes
-            ### 🛠️ **TROUBLESHOOTING**:
-            ---
-            - **Bootloops**: If Your Device is Stuck in a Bootloop After Installation, Try Clearing the Cache & Dalvik Cache from the Recovery Menu
-            - **Kernel Panic**: This May Occur if Your Device is Incompatible with the Kernel. Check Device-Specific Patches or Revert to a Compatible Kernel
-            - **Stuck on Recovery**: Reflash the Recovery & Reattempt the Installation
-            ### 🧩 **TIPS**:
-            ---
-            - **Root Access**: If You Need Root Access, Ensure that the Corresponding Root Manager (`ReSukiSU (BakaSU)`, Etc) is Installed After Flashing the Kernel
-            ### 📊 **AFTER INSTALLATION**:
-            ---
-            - Once Installed, You Can Verify the Kernel Version & Root Access Using a Kernel Checker or Root Checker
-            - Enjoy the New Kernel Features & Enhancements Designed for Your Device
-          files: |
-            dist/*.zip
-            manager-apk/*.zip
+    uses: AndreiMikh/AndreiMikh-Kernel-Lab/.github/workflows/Kernel-GitRelease.yml@LiquidAndrei
+    with:
+      ROOTENGINE: ${{ inputs.ROOTENGINE }}
+      MANIFESTBASEFILE: ${{ needs.kernel-build.outputs.manifestbasefile }}
+      KSUVERSION: ${{ needs.kernel-build.outputs.ksuversion }}
+      FULLVERSION: ${{ needs.kernel-build.outputs.fullversion }}
+      SUFFIX: ${{ needs.kernel-build.outputs.suffix }}
+      GITRELEASE: ${{ needs.kernel-build.outputs.gitrelease }}
+      KERNELBUILDRESULT: ${{ needs.kernel-build.result }}
+      REPACKKERNELRESULT: ${{ needs.repack-kernel.result }}
+      ROOTENGINEAPKRESULT: ${{ needs.root-engine-apk.result }}
+      MANAGERAPK: ${{ needs.root-engine-apk.outputs.managerapk }}
+    secrets: inherit
 
   root-engine-apk:
     uses: AndreiMikh/AndreiMikh-Kernel-Lab/.github/workflows/Engine-APK.yml@Workflow-Caller
