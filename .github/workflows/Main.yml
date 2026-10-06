@@ -812,15 +812,15 @@ jobs:
         if: ${{ steps.buildprofile.outputs.buildccache != 'Disabled' }}
         shell: bash
         env:
-          GH_TOKEN: ${{ github.token }}
+          GHTOKEN: ${{ github.token }}
+          OWNER: ${{ github.repository }}
         run: |
           set -Eeuo pipefail      
           # Default Cache Restoration State
           echo "cache-restored=false" >> "$GITHUB_OUTPUT"      
           # Define Release and Cache Paths
           TAG="${{ steps.extract-info.outputs.cpu }}"
-          FILE="Cache-${{ steps.extract-info.outputs.manifestbasefile }}-${{ inputs.ROOTENGINE }}-${{ github.ref_name }}.tar.zst"
-          REPO="${GITHUB_REPOSITORY}"
+          FILE="Cache-${{ inputs.FILE }}-${{ inputs.ROOTENGINE }}-${{ github.ref_name }}.tar.zst"
           CACHEDIR="${{ env.CCACHE_DIR }}"
           ARCHIVE="${RUNNER_TEMP}/${FILE}"
           RESTOREDIR="${CACHEDIR}.restore"      
@@ -835,9 +835,9 @@ jobs:
           ASSETJSON=$(curl -fsSL \
             --retry 3 \
             --retry-delay 2 \
-            -H "Authorization: Bearer $GH_TOKEN" \
+            -H "Authorization: Bearer $GHTOKEN" \
             -H "Accept: application/vnd.github+json" \
-            "https://api.github.com/repos/${REPO}/releases/tags/${TAG}") || {
+            "https://api.github.com/repos/${OWNER}/releases/tags/${TAG}") || {
               echo "└─ ⚠️ Release Metadata Unavailable"
               exit 0
           }      
@@ -863,7 +863,7 @@ jobs:
             --retry-delay 3 \
             --retry-all-errors \
             --connect-timeout 30 \
-            -H "Authorization: Bearer $GH_TOKEN" \
+            -H "Authorization: Bearer $GHTOKEN" \
             -H "Accept: application/octet-stream" \
             -A "Mozilla/5.0" \
             "$ASSETURL" \
@@ -875,7 +875,7 @@ jobs:
       
           # Verify the Downloaded Archive Exists and Is Not Empty
           [[ -s "$ARCHIVE" ]] || {
-            echo "└─ ⚠️ Cache Archive Is Empty"
+            echo "└─ ⚠️ Cache Archive is Empty"
             rm -f "$ARCHIVE"
             exit 0
           }      
@@ -923,12 +923,12 @@ jobs:
         uses: actions/cache/restore@v6
         with:
           path: ${{ env.CCACHE_DIR }}          
-          key: CCache-${{ runner.os }}-${{ steps.extract-info.outputs.manifestbasefile }}-${{ steps.extract-info.outputs.cpu }}-${{ github.ref_name }}
+          key: CCache-${{ runner.os }}-${{ inputs.FILE }}-${{ steps.extract-info.outputs.cpu }}-${{ github.ref_name }}
           # Restore Hierarchy for Partial Cache Reuse
           restore-keys: |
-            CCache-${{ runner.os }}-${{ steps.extract-info.outputs.manifestbasefile }}-${{ steps.extract-info.outputs.cpu }}-${{ github.ref_name }}
-            CCache-${{ runner.os }}-${{ steps.extract-info.outputs.manifestbasefile }}-${{ steps.extract-info.outputs.cpu }}-
-            CCache-${{ runner.os }}-${{ steps.extract-info.outputs.manifestbasefile }}-
+            CCache-${{ runner.os }}-${{ inputs.FILE }}-${{ steps.extract-info.outputs.cpu }}-${{ github.ref_name }}
+            CCache-${{ runner.os }}-${{ inputs.FILE }}-${{ steps.extract-info.outputs.cpu }}-
+            CCache-${{ runner.os }}-${{ inputs.FILE }}-
   
       - name: ⚙️ Configure and Setup Compiler Cache
         if: ${{ steps.buildprofile.outputs.buildccache != 'Disabled' }}
@@ -973,7 +973,7 @@ jobs:
         if: ${{ steps.buildprofile.outputs.buildccache != 'Disabled' }}
         uses: ./kernel_workspace/AndreiMikh-Kernel-Lab/.github/actions/resolve-cachekey-status
         with:
-          MANIFESTBASEFILE: ${{ steps.extract-info.outputs.manifestbasefile }}
+          MANIFESTBASEFILE: ${{ inputs.FILE }}
           ROOTENGINE: ${{ inputs.ROOTENGINE }}
           CPU: ${{ steps.extract-info.outputs.cpu }}
           LOCAL: ${{ steps.ccache-restore.outputs.cache-hit }}
@@ -3558,7 +3558,7 @@ jobs:
         if: ${{ steps.kernel-version-setup.outputs.kernelversion == '6.6' && inputs.WINDSPEED && !endsWith(inputs.FILE, 'aosp') }}
         shell: bash
         env:
-          FILE: ${{ inputs.FILE }}
+          FILE: ${{ steps.resolve-file.outputs.file }}
           CPU: ${{ env.CPU }}
           CPUD: ${{ env.CPUD }}
         run: |
@@ -4124,7 +4124,7 @@ jobs:
           KERNEL="${KERNELVERSION}"
           ROOT="${{ inputs.ROOTENGINE }}"
           SUSFS="${{ inputs.SUSFSREPOSITORY }}"
-          FILE="${{ inputs.FILE }}" 
+          FILE="${{ steps.resolve-file.outputs.file }}" 
           GKI="${ANDROIDVERSION}-${KERNELVERSION}"
           KERNELPATCH="${{ inputs.KERNELPATCH }}"
           TCP="${{ inputs.TCPALGORITHM }}"
@@ -4629,6 +4629,8 @@ jobs:
 
       - name: 🏗️ Kernel Build
         id: kernelbuild
+        env:
+          FILE: ${{ inputs.FILE }}
         run: |
           set -Eeuo pipefail
           # Handle Expected Fast Build Fallback
@@ -4658,7 +4660,7 @@ jobs:
           echo "------------------------------"
           echo "🚀 Kernel Build Metadata"
           echo "------------------------------"
-          echo "📂 File     : ${MANIFESTBASEFILE:-Unknown}"
+          echo "📂 File     : ${FILE:-Unknown}"
           echo "🌿 Branch   : ${MANIFESTBRANCH:-Unknown}"
           echo "📱 CPUD     : ${CPUD:-Unknown}"
           echo "⚙️ Method   : ${BUILDMETHOD:-Perf}"
@@ -5042,6 +5044,8 @@ jobs:
       - name: 🏗️ Fallback Kernel Build
         if: ${{ steps.kernelbuild.outputs.fallback == 'true' }}
         shell: bash
+        env:
+          FILE: ${{ inputs.FILE }}
         run: |
           set -Eeuo pipefail          
           # Report Fallback Errors While Preserving the Original Exit Code
@@ -5052,8 +5056,8 @@ jobs:
             echo "⚠️ Kernel Platform Directory Not Found"
             exit 1
           }      
-          # Environment Variables
-          FILEBASE="${MANIFESTBASEFILE:-Unknown}"
+          # Define
+          FILE="${FILE:-Unknown}"
           CPU="${CPUD:-Unknown}"
           METHOD="${BUILDMETHOD:-Perf}"
           ANDROIDVER="${ANDROIDVERSION:-Unknown}"
@@ -5252,6 +5256,7 @@ jobs:
         shell: bash
         env:
           PROFILE: ${{ inputs.PROFILE }}
+          FILE: ${{ inputs.FILE }}
         run: |
           set -Eeuo pipefail
           # Define compiler cache variables
@@ -5358,7 +5363,7 @@ jobs:
           # Create Compiler Cache Archive When Required
           if [[ "$CCACHESAVE" == "true" ]]; then
             echo "📦 Creating Compiler Cache Archive"
-            TAR="Cache-${{ steps.extract-info.outputs.manifestbasefile }}-${{ inputs.ROOTENGINE }}-${{ github.ref_name }}.tar.zst"
+            TAR="Cache-${FILE}-${{ inputs.ROOTENGINE }}-${{ github.ref_name }}.tar.zst"
             TMPTAR="${TAR}.tmp"
             echo "TAR=$TAR" >> "$GITHUB_ENV"
             echo "tar=$TAR" >> "$GITHUB_OUTPUT"
@@ -5764,13 +5769,13 @@ jobs:
         uses: actions/cache/save@v6
         with:
           path: ${{ env.CCACHE_DIR }}
-          key: CCache-${{ runner.os }}-${{ steps.extract-info.outputs.manifestbasefile }}-${{ steps.extract-info.outputs.cpu }}-${{ github.ref_name }}
+          key: CCache-${{ runner.os }}-${{ inputs.FILE }}-${{ steps.extract-info.outputs.cpu }}-${{ github.ref_name }}
 
       - name: 📤 Upload Flashable Kernel Artifact
         uses: actions/upload-artifact@v7
         with:
           # Build Kernel Artifact Name
-          name: "${{ steps.kernel-version-setup.outputs.fullversion }}-${{ env.KSUVERSION }}-${{ steps.extract-info.outputs.manifestbasefile }}-${{ steps.suffix.outputs.suffix }}"      
+          name: "${{ steps.kernel-version-setup.outputs.fullversion }}-${{ env.KSUVERSION }}-${{ inputs.FILE }}-${{ steps.suffix.outputs.suffix }}"      
           # Upload Flashable Kernel Files
           path: ./AnyKernel3/*      
           # Retain Artifact for 7 Days
