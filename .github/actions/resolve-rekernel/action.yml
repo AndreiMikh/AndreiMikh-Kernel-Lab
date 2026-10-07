@@ -1,8 +1,5 @@
 name: 🔧 Resolve ReKernel
 description: Resolve and Download ReKernel Module
-inputs:
-  KERNELMAJOR:
-    required: true
 outputs:
   asset-name:
     description: Selected ReKernel asset
@@ -13,33 +10,17 @@ outputs:
   version-number:
     description: ReKernel version
     value: ${{ steps.download-rekernel.outputs.version-number }}
-  exact-match:
-    description: Whether the kernel version was an exact match
-    value: ${{ steps.download-rekernel.outputs.exact-match }}
 runs:
   using: composite
   steps:
     - name: 🔎 Find ReKernel Module ZIP
       id: download-rekernel
       uses: actions/github-script@v8
-      env:
-        KERNELMAJOR: ${{ inputs.KERNELMAJOR }}
       with:
         script: |
           const owner = 'Sakion-Team';
           const repo = 'Re-Kernel';
-          // Read Detected Kernel Major Version From Kernel-Build Job
-          const kernelMajor = process.env.KERNELMAJOR;
-          // Validate Detected Kernel Version
-          if (!kernelMajor || !/^\d+\.\d+$/.test(kernelMajor)) {
-            core.setFailed(
-              `└─ ⚠️ [Warn] Invalid or Missing Kernel Major Version: ${kernelMajor || 'Empty'}`
-            );
-            return;
-          }
-          core.info(`└─ 📌 [Info] Detected Kernel Major: ${kernelMajor}`);
-          core.info(`└─ 🔎 [Info] Fetching Latest ${owner}/${repo} Release...`);
-          // Get Latest ReKernel GitHub Release
+          core.info(`└─ 🔎 Fetching Latest ${owner}/${repo} Release...`);
           const release = await github.rest.repos.getLatestRelease({
             owner,
             repo,
@@ -48,72 +29,15 @@ runs:
           const assets = release.data.assets || [];
           core.info(`└─ 📦 Latest Release: ${releaseTag}`);
           core.info(`└─ 📦 Release Assets: ${assets.length}`);
-          // Escape Dots in the Kernel Version for the Regular Expression
-          // Example: 6.6 → 6\.6
-          const escapedKernel =
-            kernelMajor.replace(/\./g, '\\.');
-          // Exact Kernel-Version Asset Pattern
-          // Example:
-          // ReKernel-v11.6-6.6.zip, ReKernel-v11.7-6.6.zip,
-          // ReKernel-v11.6-6.12.zip, ReKernel-v11.7-6.12.zip
-          const exactPattern = new RegExp(
-            `^Re-Kernel-v([\\d.]+)-${escapedKernel}\\.zip$`,
-            'i'
-          );
-          // Fallback Pattern
-          const fallbackPattern =
-            /^Re-Kernel.*\.zip$/i;
+          // Find ReKernel ZIP
+          const pattern = /^Re-Kernel.*\.zip$/i;
           let targetAsset = null;
-          let versionNumber = '';
-          let isExactMatch = false;
-          // First: Find Exact Kernel-Version Match
-          core.info(
-            `└─ 🔎 [Info] Searching for Exact ReKernel ${kernelMajor} Module...`
-          );
           for (const asset of assets) {
-            const match = asset.name.match(exactPattern);
-            if (!match) {
+            if (!pattern.test(asset.name)) {
               continue;
             }
             targetAsset = asset;
-            versionNumber = match[1];
-            isExactMatch = true;
-            core.info(
-              `└─ 🔍 [Info] Exact ${kernelMajor} Module Found: ${asset.name}`
-            );
             break;
-          }
-          // Second: Fallback to Any ReKernel ZIP
-          if (!targetAsset) {
-            core.warning(
-              `└─ ⚠️ [Warn] No ReKernel Module Found for Kernel ${kernelMajor}`
-            );
-            core.info(
-              `└─ 🔎 [Info] Searching for Fallback ReKernel Module...`
-            );
-            for (const asset of assets) {
-              if (!fallbackPattern.test(asset.name)) {
-                continue;
-              }
-              targetAsset = asset;                
-              // Extract ReKernel Version From Asset Name
-              // Example:
-              // ReKernel-v11.6-6.6.zip → 11.6
-              const versionMatch =
-                asset.name.match(/^Re-Kernel-v?([\d.]+)/i);
-              if (versionMatch) {
-                versionNumber = versionMatch[1];
-              } else {
-                // If Asset Name Does Not Contain Version
-                // Use GitHub Release Tag Instead
-                versionNumber =
-                  releaseTag.replace(/^v/i, '') || 'latest';
-              }
-              core.warning(
-                `└─ ♻️ [Info] Using Fallback Module: ${asset.name}`
-              );
-              break;
-            }
           }
           // No ReKernel Asset Found
           if (!targetAsset) {
@@ -122,20 +46,20 @@ runs:
             );
             return;
           }
-          // 📋 Display Selected Asset Information
+          // Extract ReKernel Version From Asset Name
+          const versionMatch =
+            targetAsset.name.match(/^Re-Kernel-v?([\d.]+)/i);
+          const versionNumber = versionMatch
+            ? versionMatch[1]
+            : releaseTag.replace(/^v/i, '') || 'latest';
+          // Display Selected Asset Information
           core.info('');
-          core.info('------------------------------------');
+          core.info('-----------------------------');
           core.info(`└─ 📦 [Result] Asset   : ${targetAsset.name}`);
           core.info(`└─ 🏷️ [Result] Version : ${versionNumber}`);
-          core.info(`└─ 🧩 [Result] Kernel  : ${kernelMajor}`);
-          core.info(
-            `└─ 🎯 [Result] Match   : ${isExactMatch ? 'Exact' : 'Fallback'}`
-          );
-          core.info(
-            `└─ 📏 [Result] Size    : ${(targetAsset.size / 1024).toFixed(1)} KB`
-          );
-          core.info('------------------------------------');
-          // 📤 Export Selected Asset Information to the Next Step
+          core.info(`└─ 📏 [Result] Size    : ${(targetAsset.size / 1024).toFixed(1)} KB`);
+          core.info('-----------------------------');
+          // Export Selected Asset Information
           core.setOutput(
             'asset-name',
             targetAsset.name
@@ -148,10 +72,6 @@ runs:
             'version-number',
             versionNumber
           );
-          core.setOutput(
-            'exact-match',
-            isExactMatch ? 'true' : 'false'
-          );
 
     - name: 📥 Download ReKernel Module
       env:
@@ -161,13 +81,11 @@ runs:
       shell: bash
       run: |
         set -Eeuo pipefail
-        # Artifact Directory Name
         ARTIFACTNAME="ReKernel-v${VERSIONNUMBER}"
         echo "└─ 📦 [Info] ReKernel Asset  : ${ASSETNAME}"
         echo "└─ 🏷️ [Info] Version         : ${VERSIONNUMBER}"
         echo "└─ 📁 [Info] Artifact        : ${ARTIFACTNAME}"
         echo "└─ 🔗 [Info] Download URL    : ${DLURL}"
-        # Download
         echo "└─ 📥 Downloading ReKernel..."
         curl \
           --fail \
@@ -177,21 +95,17 @@ runs:
           --output "${ASSETNAME}" \
           "${DLURL}"
         echo "└─ ✔️ [Result] ReKernel Download Complete"
-        # Display Downloaded Archive Information
         echo "└─ 📊 [Info] Downloaded File:"
         ls -lh "${ASSETNAME}"
-        # Validate Downloaded ZIP Before Extraction
         echo "└─ 🔎 [Info] Validating ZIP Archive..."
         unzip -tq "${ASSETNAME}"
-        echo "✔️ [Info] ZIP Validation Passed"
-        # Extract ReKernel Module
+        echo "└─ ✔️ [Info] ZIP Validation Passed"
         echo "└─ 📂 [Info] Extracting ReKernel..."
         mkdir -p "${ARTIFACTNAME}"
         unzip -q \
           "${ASSETNAME}" \
           -d "${ARTIFACTNAME}"
         echo "└─ ✔️ [Info] ReKernel Extraction Complete"
-        # Display Extracted Files for Build-Log Verification
         echo "└─ 📋 [Info] Extracted ReKernel Files:"
         find "${ARTIFACTNAME}" \
           -maxdepth 4 \
@@ -199,7 +113,6 @@ runs:
           -print \
           | sort
 
-    # 📤 Upload Extracted ReKernel as GitHub Actions Artifact
     - name: 📤 Upload ReKernel Artifact
       uses: actions/upload-artifact@v6
       with:
