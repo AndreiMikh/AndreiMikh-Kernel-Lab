@@ -1,18 +1,26 @@
 name: 🔧 Resolve ReKernel
 description: Resolve and Download ReKernel Module
 outputs:
+  # Selected ReKernel ZIP Asset Name
   asset-name:
-    description: Selected ReKernel asset
+    description: Selected ReKernel Asset
     value: ${{ steps.download-rekernel.outputs.asset-name }}
+  # Direct Download URL of Selected ReKernel ZIP
   download-url:
-    description: ReKernel download URL
+    description: ReKernel Download URL
     value: ${{ steps.download-rekernel.outputs.download-url }}
+  # ReKernel Version Extracted From Asset Name
   version-number:
-    description: ReKernel version
+    description: ReKernel Version
     value: ${{ steps.download-rekernel.outputs.version-number }}
+  # Path to Extracted Re-Kernel.ko Module
+  module-path:
+    description: Extracted ReKernel Module Path
+    value: ${{ steps.extract-rekernel.outputs.module-path }}
 runs:
   using: composite
   steps:
+    # Find Latest Published ReKernel Release and Select its ZIP Asset
     - name: 🔎 Find ReKernel Module ZIP
       id: download-rekernel
       uses: actions/github-script@v8
@@ -20,6 +28,7 @@ runs:
         script: |
           const owner = 'Sakion-Team';
           const repo = 'Re-Kernel';
+          // Fetch Latest Published GitHub Release
           core.info(`└─ 🔎 Fetching Latest ${owner}/${repo} Release...`);
           const release = await github.rest.repos.getLatestRelease({
             owner,
@@ -27,39 +36,36 @@ runs:
           });
           const releaseTag = release.data.tag_name;
           const assets = release.data.assets || [];
-          core.info(`└─ 📦 Latest Release: ${releaseTag}`);
-          core.info(`└─ 📦 Release Assets: ${assets.length}`);
-          // Find ReKernel ZIP
+          // Display Latest Release Information
+          core.info(`└─ 📦 Latest Release : ${releaseTag}`);
+          core.info(`└─ 📦 Release Assets : ${assets.length}`);
+          // Match ReKernel ZIP Assets
           const pattern = /^Re-Kernel.*\.zip$/i;
-          let targetAsset = null;
-          for (const asset of assets) {
-            if (!pattern.test(asset.name)) {
-              continue;
-            }
-            targetAsset = asset;
-            break;
-          }
-          // No ReKernel Asset Found
+          const targetAsset = assets.find(asset =>
+            pattern.test(asset.name)
+          );
+          // Fail if No ReKernel ZIP Exists in Latest Release
           if (!targetAsset) {
             core.setFailed(
               `└─ ⚠️ [Error] No ReKernel ZIP Found in ${releaseTag}`
             );
             return;
           }
-          // Extract ReKernel Version From Asset Name
+          // Extract Version Number From ReKernel Asset Name
+          // Example: Re-Kernel-v1.2.3.zip → 1.2.3
           const versionMatch =
             targetAsset.name.match(/^Re-Kernel-v?([\d.]+)/i);
           const versionNumber = versionMatch
             ? versionMatch[1]
             : releaseTag.replace(/^v/i, '') || 'latest';
-          // Display Selected Asset Information
+          // Display Selected ReKernel Asset Information
           core.info('');
           core.info('-----------------------------');
           core.info(`└─ 📦 [Result] Asset   : ${targetAsset.name}`);
           core.info(`└─ 🏷️ [Result] Version : ${versionNumber}`);
           core.info(`└─ 📏 [Result] Size    : ${(targetAsset.size / 1024).toFixed(1)} KB`);
           core.info('-----------------------------');
-          // Export Selected Asset Information
+          // Export Selected Asset Information to Next Step
           core.setOutput(
             'asset-name',
             targetAsset.name
@@ -73,46 +79,82 @@ runs:
             versionNumber
           );
 
+    # Download, Validate, Extract, and Locate ReKernel Module
     - name: 📥 Download ReKernel Module
+      id: extract-rekernel
       env:
+        # ReKernel Asset Selected by Previous Step
         ASSETNAME: ${{ steps.download-rekernel.outputs.asset-name }}
+        # Direct Download URL for Selected Asset
         DLURL: ${{ steps.download-rekernel.outputs.download-url }}
+
+        # ReKernel version
         VERSIONNUMBER: ${{ steps.download-rekernel.outputs.version-number }}
       shell: bash
       run: |
         set -Eeuo pipefail
+        # Directory Where ReKernel ZIP will be Extracted
         ARTIFACTNAME="ReKernel-v${VERSIONNUMBER}"
+        # Display ReKernel information
         echo "└─ 📦 [Info] ReKernel Asset  : ${ASSETNAME}"
         echo "└─ 🏷️ [Info] Version         : ${VERSIONNUMBER}"
         echo "└─ 📁 [Info] Artifact        : ${ARTIFACTNAME}"
         echo "└─ 🔗 [Info] Download URL    : ${DLURL}"
+        # Download Selected ReKernel Rwlease Asset
         echo "└─ 📥 Downloading ReKernel..."
         curl \
           --fail \
           --location \
           --retry 3 \
           --retry-delay 2 \
+          --silent \
+          --show-error \
           --output "${ASSETNAME}" \
           "${DLURL}"
         echo "└─ ✔️ [Result] ReKernel Download Complete"
-        echo "└─ 📊 [Info] Downloaded File:"
+        # Display Downloaded ZIP Information
+        echo "└─ 📊 [Info] Downloaded File :"
         ls -lh "${ASSETNAME}"
+        # Verify that the Downloaded File is a Valid ZIP Archive
         echo "└─ 🔎 [Info] Validating ZIP Archive..."
         unzip -tq "${ASSETNAME}"
         echo "└─ ✔️ [Info] ZIP Validation Passed"
+        # Remove Any Previous Extraction Directory
         echo "└─ 📂 [Info] Extracting ReKernel..."
+        rm -rf "${ARTIFACTNAME}"
+        # Create a Clean Extraction Directory
         mkdir -p "${ARTIFACTNAME}"
+        # Extract ReKernel ZIP
         unzip -q \
           "${ASSETNAME}" \
           -d "${ARTIFACTNAME}"
         echo "└─ ✔️ [Info] ReKernel Extraction Complete"
-        echo "└─ 📋 [Info] Extracted ReKernel Files:"
+        # Display Extracted Files for Verification
+        echo "└─ 📋 [Info] Extracted ReKernel Files :"
         find "${ARTIFACTNAME}" \
-          -maxdepth 4 \
+          -maxdepth 6 \
           -type f \
           -print \
           | sort
+        # Find ReKernel Kernel Module
+        REKERNELMODULE="$(find "${ARTIFACTNAME}" \
+          -type f \
+          -name 're-kernel.ko' \
+          -print \
+          -quit)"
+        # Fail if Expected Kernel Module Was Not Found
+        if [[ -z "$REKERNELMODULE" ]]; then
+          echo "⚠️ [Error] Re-Kernel.ko Was Not Found"
+          exit 1
+        fi
 
+        # Display the discovered ReKernel module
+        echo "└─ ✔️ [Result] ReKernel Module Found"
+        echo "└─ 📦 [Module] ${REKERNELMODULE}"
+        # Export Module Path as a Composite Action Output
+        echo "module-path=${REKERNELMODULE}" >> "$GITHUB_OUTPUT"
+
+    # Upload the complete extracted ReKernel release as a workflow artifact
     - name: 📤 Upload ReKernel Artifact
       uses: actions/upload-artifact@v6
       with:
