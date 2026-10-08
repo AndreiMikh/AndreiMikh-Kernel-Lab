@@ -106,14 +106,35 @@ runs:
       shell: bash
       run: |
         set -Eeuo pipefail
-        # Directory Where ReKernel ZIP will be Extracted
+        # Directory Where ReKernel ZIP will be Temporarily Extracted
         ARTIFACTNAME="ReKernel-v${VERSIONNUMBER}"
+        # Normalize ANDROIDVERSION to the ReKernel Android Format
+        if [[ "${ANDROIDVERSION}" == android* ]]; then
+          ANDROIDVERSION="${ANDROIDVERSION}"
+        else
+          ANDROIDVERSION="android${ANDROIDVERSION}"
+        fi
+
+        # Normalize KERNELVERSION to the ReKernel Kernel Series
+        # Example: 6.6.118 → 6.6
+        # Example: 6.6 → 6.6
+        if [[ "${KERNELVERSION}" == *.*.* ]]; then
+          KERNELSERIES="${KERNELVERSION%.*}"
+        else
+          KERNELSERIES="${KERNELVERSION}"
+        fi
+
+        # Build ReKernel Module Search Pattern
+        REKERNELPATTERN="rekernel-${ANDROIDVERSION}-${KERNELSERIES}-*.ko"
+        # Directory Containing Only the Selected ReKernel Module
+        REKERNELOUTPUT="${ARTIFACTNAME}-Module"
         # Display ReKernel Information
         echo "└─ 📦 [Info] ReKernel Asset  : ${ASSETNAME}"
         echo "└─ 🏷️ [Info] Version         : ${VERSIONNUMBER}"
         echo "└─ 🤖 [Info] Android Version  : ${ANDROIDVERSION}"
         echo "└─ 🐧 [Info] Kernel Version   : ${KERNELVERSION}"
-        echo "└─ 📁 [Info] Artifact         : ${ARTIFACTNAME}"
+        echo "└─ 🔎 [Info] Kernel Series    : ${KERNELSERIES}"
+        echo "└─ 🔎 [Info] Module Pattern   : ${REKERNELPATTERN}"
         echo "└─ 🔗 [Info] Download URL     : ${DLURL}"
         # Download Selected ReKernel Release Asset
         echo "└─ 📥 Downloading ReKernel..."
@@ -134,80 +155,60 @@ runs:
         echo "└─ 🔎 [Info] Validating ZIP Archive..."
         unzip -tq "${ASSETNAME}"
         echo "└─ ✔️ [Info] ZIP Validation Passed"
-        # Remove Any Previous Extraction Directory
-        echo "└─ 📂 [Info] Extracting ReKernel..."
-        rm -rf "${ARTIFACTNAME}"
-        # Create a Clean Extraction Directory
+        # Remove Previous Temporary Extraction and Output Directories
+        rm -rf \
+          "${ARTIFACTNAME}" \
+          "${REKERNELOUTPUT}"
+        # Create Temporary Extraction Directory
         mkdir -p "${ARTIFACTNAME}"
         # Extract ReKernel ZIP
+        echo "└─ 📂 Extracting ReKernel..."
         unzip -q \
-          "${ASSETNAME}" \
+          "${ASSETNAME" \
           -d "${ARTIFACTNAME}"
         echo "└─ ✔️ [Result] ReKernel Extraction Complete"
-        # Display Extracted Files for Verification
-        echo "└─ 📋 [Info] Extracted ReKernel Files :"
-        find "${ARTIFACTNAME}" \
-          -maxdepth 6 \
-          -type f \
-          -print \
-          | sort
-        # Normalize Kernel Version to ReKernel Kernel Series
-        # Example: 6.6.118 → 6.6
-        # Example: 6.6 → 6.6
-        if [[ "${KERNELVERSION}" == *.*.* ]]; then
-          KERNELSERIES="${KERNELVERSION%.*}"
-        else
-          KERNELSERIES="${KERNELVERSION}"
-        fi
-
-        # Normalize ANDROIDVERSION to the ReKernel Android Format
-        if [[ "${ANDROIDVERSION}" == android* ]]; then
-          ANDROIDVERSION="${ANDROIDVERSION}"
-        else
-          ANDROIDVERSION="android${ANDROIDVERSION}"
-        fi
-
-        # Build ReKernel Module Search Pattern
-        REKERNELPATTERN="rekernel-${ANDROIDVERSION}-${KERNELSERIES}-*.ko"
-        echo "└─ 🔎 [Info] Android Version : ${ANDROIDVERSION}"
-        echo "└─ 🔎 [Info] Kernel Series   : ${KERNELSERIES}"
-        echo "└─ 🔎 [Info] Module Pattern  : ${REKERNELPATTERN}"
-        # Find All ReKernel Modules Matching Android and Kernel Versions
-        mapfile -t REKERNELMODULES < <(
+        # Find Only the ReKernel Module Matching Android and Kernel Versions
+        REKERNELMODULE="$(
           find "${ARTIFACTNAME}" \
             -type f \
             -name "${REKERNELPATTERN}" \
             -print \
-            | sort -V
-        )
+            | sort -V \
+            | tail -n 1
+        )"
         # Fail if No Matching ReKernel Module Was Found
-        if [[ ${#REKERNELMODULES[@]} -eq 0 ]]; then
+        if [[ -z "${REKERNELMODULE}" ]]; then
           echo "⚠️ [Error] No ReKernel Module Found"
           echo "└─ 🤖 Android Version : ${ANDROIDVERSION}"
-          echo "└─ 🐧 Kernel Series  : ${KERNELSERIES}"
+          echo "└─ 🐧 Kernel Series   : ${KERNELSERIES}"
           echo "└─ 🔎 Pattern        : ${REKERNELPATTERN}"
           exit 1
         fi
 
-        # Select Newest Matching ReKernel Module
-        REKERNELMODULE="${REKERNELMODULES[-1]}"
+        # Create Clean Output Directory
+        mkdir -p "${REKERNELOUTPUT}"
+        # Copy Only the Matching ReKernel Module
+        cp \
+          "${REKERNELMODULE}" \
+          "${REKERNELOUTPUT}/"
+        # Remove Temporary Extraction Directory
+        rm -rf "${ARTIFACTNAME}"
+        # Remove Downloaded ZIP
+        rm -f "${ASSETNAME}"
         # Display Selected ReKernel Module
         echo "└─ ✔️ [Result] ReKernel Module Found"
         echo "└─ 📦 [Module] ${REKERNELMODULE}"
-        # Display Other Matching Modules When Multiple Versions Exist
-        if [[ ${#REKERNELMODULES[@]} -gt 1 ]]; then
-          echo "└─ 📋 [Info] Matching ReKernel Modules :"
-          printf '   └─ %s\n' "${REKERNELMODULES[@]}"
-        fi
-
-        # Export Selected Module Path as a Composite Action Output
-        echo "module-path=${REKERNELMODULE}" >> "$GITHUB_OUTPUT"
-
+        # Display Final Output
+        echo "└─ 📋 [Result] Selected ReKernel Module :"
+        ls -lh "${REKERNELOUTPUT}"
+        # Export Selected Module Path
+        echo "module-path=${REKERNELOUTPUT}/$(basename "${REKERNELMODULE}")" >> "$GITHUB_OUTPUT"
+   
     # Upload Complete Extracted ReKernel Release as a Workflow Artifact
     - name: 📤 Upload ReKernel Artifact
       uses: actions/upload-artifact@v7
       with:
         name: ReKernel-Module
-        path: ReKernel-v${{ steps.download-rekernel.outputs.version-number }}
+        path: ReKernel-v${{ steps.download-rekernel.outputs.version-number }}-Module
         if-no-files-found: error
         compression-level: 0
