@@ -1,5 +1,14 @@
 name: 🔧 Resolve ReKernel
 description: Resolve and Download ReKernel Module
+inputs:
+  # Android Version Used by Kernel
+  ANDROIDVERSION:
+    description: Android Version
+    required: true
+  # Kernel Version or Kernel Series Used by the Kernel
+  KERNELVERSION:
+    description: Kernel Version
+    required: true
 outputs:
   # Selected ReKernel ZIP Asset Name
   asset-name:
@@ -13,10 +22,11 @@ outputs:
   version-number:
     description: ReKernel Version
     value: ${{ steps.download-rekernel.outputs.version-number }}
-  # Path to Extracted Re-Kernel.ko Module
+  # Path to Selected ReKernel Kernel Module
   module-path:
-    description: Extracted ReKernel Module Path
+    description: Selected ReKernel Module Path
     value: ${{ steps.extract-rekernel.outputs.module-path }}
+
 runs:
   using: composite
   steps:
@@ -52,7 +62,7 @@ runs:
             return;
           }
           // Extract Version Number From ReKernel Asset Name
-          // Example: Re-Kernel-v1.2.3.zip → 1.2.3
+          // Example: Re-Kernel-v11.7.zip → 11.7
           const versionMatch =
             targetAsset.name.match(/^Re-Kernel-v?([\d.]+)/i);
           const versionNumber = versionMatch
@@ -87,20 +97,25 @@ runs:
         ASSETNAME: ${{ steps.download-rekernel.outputs.asset-name }}
         # Direct Download URL for Selected Asset
         DLURL: ${{ steps.download-rekernel.outputs.download-url }}
-
-        # ReKernel version
+        # ReKernel Version
         VERSIONNUMBER: ${{ steps.download-rekernel.outputs.version-number }}
+        # Android Version Used by the Kernel
+        ANDROIDVERSION: ${{ inputs.ANDROIDVERSION }}
+        # Kernel Version or Kernel Series Used by the Kernel
+        KERNELVERSION: ${{ inputs.KERNELVERSION }}
       shell: bash
       run: |
         set -Eeuo pipefail
         # Directory Where ReKernel ZIP will be Extracted
         ARTIFACTNAME="ReKernel-v${VERSIONNUMBER}"
-        # Display ReKernel information
+        # Display ReKernel Information
         echo "└─ 📦 [Info] ReKernel Asset  : ${ASSETNAME}"
         echo "└─ 🏷️ [Info] Version         : ${VERSIONNUMBER}"
-        echo "└─ 📁 [Info] Artifact        : ${ARTIFACTNAME}"
-        echo "└─ 🔗 [Info] Download URL    : ${DLURL}"
-        # Download Selected ReKernel Rwlease Asset
+        echo "└─ 🤖 [Info] Android Version  : ${ANDROIDVERSION}"
+        echo "└─ 🐧 [Info] Kernel Version   : ${KERNELVERSION}"
+        echo "└─ 📁 [Info] Artifact         : ${ARTIFACTNAME}"
+        echo "└─ 🔗 [Info] Download URL     : ${DLURL}"
+        # Download Selected ReKernel Release Asset
         echo "└─ 📥 Downloading ReKernel..."
         curl \
           --fail \
@@ -128,7 +143,7 @@ runs:
         unzip -q \
           "${ASSETNAME}" \
           -d "${ARTIFACTNAME}"
-        echo "└─ ✔️ [Info] ReKernel Extraction Complete"
+        echo "└─ ✔️ [Result] ReKernel Extraction Complete"
         # Display Extracted Files for Verification
         echo "└─ 📋 [Info] Extracted ReKernel Files :"
         find "${ARTIFACTNAME}" \
@@ -136,25 +151,51 @@ runs:
           -type f \
           -print \
           | sort
-        # Find ReKernel Kernel Module
-        REKERNELMODULE="$(find "${ARTIFACTNAME}" \
-          -type f \
-          -name 're-kernel.ko' \
-          -print \
-          -quit)"
-        # Fail if Expected Kernel Module Was Not Found
-        if [[ -z "$REKERNELMODULE" ]]; then
-          echo "⚠️ [Error] Re-Kernel.ko Was Not Found"
+        # Normalize Kernel Version to ReKernel Kernel Series
+        # Example: 6.6.118 → 6.6
+        # Example: 6.6 → 6.6
+        if [[ "${KERNELVERSION}" =~ ^([0-9]+\.[0-9]+)\. ]]; then
+          KERNELSERIES="${BASH_REMATCH[1]}"
+        else
+          KERNELSERIES="${KERNELVERSION}"
+        fi
+
+        # Build ReKernel Module Search Pattern
+        REKERNELPATTERN="rekernel-android${ANDROIDVERSION}-${KERNELSERIES}-*.ko"
+        echo "└─ 🔎 [Info] Kernel Series   : ${KERNELSERIES}"
+        echo "└─ 🔎 [Info] Module Pattern  : ${REKERNELPATTERN}"
+        # Find All ReKernel Modules Matching Android and Kernel Versions
+        mapfile -t REKERNELMODULES < <(
+          find "${ARTIFACTNAME}" \
+            -type f \
+            -name "${REKERNELPATTERN}" \
+            -print \
+            | sort -V
+        )
+        # Fail if No Matching ReKernel Module Was Found
+        if [[ ${#REKERNELMODULES[@]} -eq 0 ]]; then
+          echo "⚠️ [Error] No ReKernel Module Found"
+          echo "└─ 🤖 Android Version : ${ANDROIDVERSION}"
+          echo "└─ 🐧 Kernel Series  : ${KERNELSERIES}"
+          echo "└─ 🔎 Pattern        : ${REKERNELPATTERN}"
           exit 1
         fi
 
-        # Display the discovered ReKernel module
+        # Select Newest Matching ReKernel Module
+        REKERNELMODULE="${REKERNELMODULES[-1]}"
+        # Display Selected ReKernel Module
         echo "└─ ✔️ [Result] ReKernel Module Found"
         echo "└─ 📦 [Module] ${REKERNELMODULE}"
-        # Export Module Path as a Composite Action Output
+        # Display Other Matching Modules When Multiple Versions Exist
+        if [[ ${#REKERNELMODULES[@]} -gt 1 ]]; then
+          echo "└─ 📋 [Info] Matching ReKernel Modules :"
+          printf '   └─ %s\n' "${REKERNELMODULES[@]}"
+        fi
+
+        # Export Selected Module Path as a Composite Action Output
         echo "module-path=${REKERNELMODULE}" >> "$GITHUB_OUTPUT"
 
-    # Upload the complete extracted ReKernel release as a workflow artifact
+    # Upload Complete Extracted ReKernel Release as a Workflow Artifact
     - name: 📤 Upload ReKernel Artifact
       uses: actions/upload-artifact@v7
       with:
