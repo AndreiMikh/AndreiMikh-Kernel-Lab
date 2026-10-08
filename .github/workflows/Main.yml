@@ -3870,6 +3870,7 @@ jobs:
         id: kernelbuild
         env:
           FILE: ${{ inputs.FILE }}
+          PYTHONWARNINGS: "ignore:invalid escape sequence"
         run: |
           set -Eeuo pipefail
           # Handle Expected Fast Build Fallback
@@ -3967,17 +3968,17 @@ jobs:
             fallback "missingcommon"
           fi
 
-          # Configure Explicit Android Kernel Build Environment
-          echo "└─ 🔧 Configuring Android Kernel Build Environment..."          
+          # Load Android Kernel Build Environment
           SETUPENVSH="${KERNELPLATFORM}/build/kernel/_setup_env.sh"
           if [[ -f "$SETUPENVSH" ]]; then
-            echo "🔧 Loading Android Kernel Build Environment..."
-            # Temporarily Disable Unset Variable Checking
+            echo "└─ 🔧 Loading Android Kernel Build Environment"
             set +u
             source "$SETUPENVSH" 2>/dev/null || true
-            set -u          
-            # Restore Explicitly Selected Clang Environment
-            export PATH="${CLANGBIN}:${PATH}"
+            set -u
+            # Restore Explicitly Selected Clang After Sourcing Android Build Environment
+            if [[ -n "${CLANGBIN:-}" ]]; then
+              export PATH="${CLANGBIN}:${PATH}"
+            fi
           fi
 
           # Physical Kernel Source Root
@@ -3985,6 +3986,46 @@ jobs:
           ROOTREALPATH="$(realpath ../..)" ||
             fallback "realpathfailed"
           ROOTREALPATH="${ROOTREALPATH%/}"
+          # Read Git Metadata for Reproducible Builds
+          COMMITTIMESTAMP="$(
+            git log -1 --format=%ct 2>/dev/null ||
+            date +%s
+          )"
+          COMMITDATE="$(
+            git log -1 \
+              --format=%cd \
+              --date=format:'%Y-%m-%d %H:%M:%S' \
+              2>/dev/null ||
+            date -u '+%Y-%m-%d %H:%M:%S'
+          )"
+          COMMITHASH="$(
+            git rev-parse --short=8 HEAD 2>/dev/null ||
+            echo unknown
+          )"
+          COMMITSUBJECT="$(
+            git log -1 --format=%s 2>/dev/null ||
+            echo unknown
+          )"
+          echo "└─ 📝 Commit Hash    : ${COMMITHASH}"
+          echo "└─ 📝 Commit Date    : ${COMMITDATE}"
+          echo "└─ 📝 Commit Subject : ${COMMITSUBJECT}"
+          # Reproducible Build Timestamp
+          export SOURCE_DATE_EPOCH="${COMMITTIMESTAMP}"
+          echo "SOURCE_DATE_EPOCH=${SOURCE_DATE_EPOCH}" >> "$GITHUB_ENV"
+          echo "KERNELCOMMIT=${COMMITHASH}" >> "$GITHUB_ENV"
+          # Preserve Custom Build Timestamp Configured
+          if [[ -n "${KBUILD_BUILD_TIMESTAMP:-}" ]]; then
+            export KBUILD_BUILD_TIMESTAMP
+            echo "└─ 🕒 Custom Build Timestamp : ${KBUILD_BUILD_TIMESTAMP}"
+          else
+            echo "└─ 🕒 Custom Build Timestamp : Not Set"
+          fi
+
+          export KBUILD_BUILD_USER="${BUILD_USER:-kernel}"
+          export KBUILD_BUILD_HOST="${BUILD_HOST:-kleaf}"
+          export KBUILD_BUILD_VERSION=1
+          echo "└─ 👤 Build User : ${KBUILD_BUILD_USER}"
+          echo "└─ 🖥️ Build Host : ${KBUILD_BUILD_HOST}"       
           # Configure Compiler Path Mapping and Warning Flags
           MAP="-fdebug-prefix-map=${ROOTREALPATH}=."
           MPMAP="-fmacro-prefix-map=${ROOTREALPATH}=."
@@ -4002,59 +4043,135 @@ jobs:
           )
           # Apply Macro Prefix Mapping
           KCPPFLAGS="$MPMAP"
-          # Create CCache Clang Wrapper
-          REALCLANGBIN="$CLANGFULLPATH"
+          # Test Whether Selected Clang Understands Oryon
+          ORYONCPUSUPPORTED=false
+          if printf '%s\n' \
+            'int main(void)' \
+            '{' \
+            '  return 0;' \
+            '}' |
+            "${CLANGFULLPATH}" \
+              --target=aarch64-linux-gnu \
+              -mcpu=oryon-1 \
+              -fsyntax-only \
+              -x c - \
+              >/dev/null 2>&1
+          then
+            ORYONCPUSUPPORTED=true
+          fi
+
+          echo "└─ 🧪 Oryon CPU Support : ${ORYONCPUSUPPORTED}"
+          # Oryon is useful for Qualcomm SM8750 / SM8850 / SM8845
+          case "${CPUD:-}" in
+            sm8750|sm8850|sm8845)
+              if [[ "$ORYON_CPU_SUPPORTED" == "true" ]]; then
+                KCFLAGS+=("-mcpu=oryon-1")
+                echo "└─ 🚀 CPU Tuning : -mcpu=oryon-1"
+              else
+                echo "└─ ⚠️ Selected Clang Does Not Support -mcpu=oryon-1"
+                echo "└─ ☘️ Continuing Without Oryon CPU Tuning"
+              fi
+              ;;
+            *)
+              echo "└─ ℹ️ Oryon CPU Tuning Not Requested"
+              ;;
+          esac         
+          # Create Compiler Cache Wrappers Around the Exact Selected Clang
+          REALCLANGBIN="${CLANGFULLPATH}"
+          CLANGXXBIN="$(
+            dirname "$REALCLANGBIN"
+          )/clang++"
+          if [[ ! -x "$CLANGXXBIN" ]]; then
+            CLANGXXBIN="$(
+              command -v clang++ 2>/dev/null ||
+              true
+            )"
+          fi
+
+          [[ -x "${CLANGXXBIN:-}" ]] || {
+            echo "└─ ⚠️ Clang++ Not Found"
+            fallback "missingclangxx"
+          }
           CCACHEWRAPPER="${WORKDIR}/cc-wrapper"
-          printf '#!/bin/bash\nexec ccache "%s" "$@"\n' \
-            "$REALCLANGBIN" > "$CCACHEWRAPPER"
-          chmod +x "$CCACHEWRAPPER"
-          echo "└─ 🎉 CCache Wrapper Created"
-          echo "└─ 📦 Wrapper : $CCACHEWRAPPER"
-          echo "└─ 📦 Clang   : $REALCLANGBIN"
-          # Configure ThinLTO Linker Cache for Supported 5.x Kernels
+          CCACHECXXWRAPPER="${WORKDIR}/cxx-wrapper"
+          printf '%s\n' \
+            '#!/usr/bin/env bash' \
+            'exec ccache "'"${REALCLANGBIN}"'" "$@"' \
+            > "$CCACHEWRAPPER"
+          printf '%s\n' \
+            '#!/usr/bin/env bash' \
+            'exec ccache "'"${CLANGXXBIN}"'" "$@"' \
+            > "$CCACHECXXWRAPPER"
+          chmod +x \
+            "$CCACHEWRAPPER" \
+            "$CCACHECXXWRAPPER"
+          echo "└─ 🎉 CCache Compiler Wrappers Created"
+          echo "└─ 📦 C Wrapper   : ${CCACHEWRAPPER}"
+          echo "└─ 📦 C++ Wrapper : ${CCACHECXXWRAPPER}"
+          echo "└─ 📦 Clang       : ${REALCLANGBIN}"
+          echo "└─ 📦 Clang++     : ${CLANGXXBIN}"
+          # Display Compiler Cache Diagnostics
+          if command -v ccache >/dev/null 2>&1; then
+            echo "└─ 📊 CCache Version:"
+            ccache --version | head -n1
+            echo "└─ 📍 CCache Binary:"
+            command -v ccache
+            echo "└─ ⚙️ CCache Configuration:"
+            ccache -p 2>/dev/null |
+              grep -E \
+                'compression|direct_mode|readonly_direct|depend_mode|sloppiness|base_dir|compiler_check' ||
+              true
+            echo "└─ 📊 CCache Statistics Before Build :"
+            ccache -s || true
+          else
+            echo "└─ ⚠️ CCache Is Not Installed"
+          fi
+
+          # Configure ThinLTO linker cache only for supported 5.x builds.
           LDLLDWRAPPER=""
-          if [[ "${BUILDCCACHE:-Disabled}" != "Disabled" ]] && \
-             [[ "${{ steps.kernel-version-setup.outputs.kernelversion }}" == 5.* ]]; then
+          if [[ "${BUILDCCACHE:-Disabled}" != "Disabled" ]] &&
+             [[ "${{ steps.kernel-version-setup.outputs.kernelversion }}" == 5.* ]]
+          then
             LDCACHEDIR="${WORKDIR}/.thinlto-cache"
             LDLLDWRAPPER="${WORKDIR}/ld-wrapper"
-            # Create ThinLTO Cache Directory
             mkdir -p "$LDCACHEDIR"
-            # Locate LLVM LLD
             LLDBIN="$(command -v ld.lld 2>/dev/null || true)"
             if [[ -z "$LLDBIN" ]]; then
-              echo "└─ ⚠️ LD.LLD Not Found"
+              echo "└─ ⚠️ ld.lld Not Found"
               echo "└─ 📊 ThinLTO Linker Cache: Disabled"
               LDLLDWRAPPER=""
             else
-              # Create ThinLTO LLD Wrapper
-              printf '#!/bin/bash\nexec "%s" "$@" --thinlto-cache-dir="%s" --thinlto-cache-policy=cache_size_bytes=3g --thinlto-jobs=%s\n' \
-                "$LLDBIN" \
-                "$LDCACHEDIR" \
-                "$(nproc --all)" > "$LDLLDWRAPPER"
+              printf '%s\n' \
+                '#!/usr/bin/env bash' \
+                'exec "'"${LLDBIN}"'" "$@" --thinlto-cache-dir="'"${LDCACHEDIR}"'" --thinlto-cache-policy=cache_size_bytes=3g --thinlto-jobs='"$(nproc --all)" \
+                > "$LDLLDWRAPPER"
               chmod +x "$LDLLDWRAPPER"
               echo "└─ 🎉 ThinLTO Linker Wrapper Created"
-              echo "└─ 📦 Wrapper : $LDLLDWRAPPER"
-              echo "└─ 📦 LLD     : $LLDBIN"
-              echo "└─ 📂 Cache   : $LDCACHEDIR"
-              echo "└─ 💾 Cache   : 2Gb"
+              echo "└─ 📦 Wrapper : ${LDLLDWRAPPER}"
+              echo "└─ 📦 LLD     : ${LLDBIN}"
+              echo "└─ 📂 Cache   : ${LDCACHEDIR}"
+              echo "└─ 💾 Cache   : 3GB"
               echo "└─ ⚙️ Jobs    : $(nproc --all)"
             fi
           else
             echo "└─ 📊 ThinLTO Linker Cache: Disabled"
           fi
 
-          # Prepare Kernel Based Arguments Shared by Build Configurations
+          # Prepare common kernel build arguments.
           MAKE_ARGS=(
             LLVM=1
             ARCH=arm64
             CROSS_COMPILE=aarch64-linux-gnu-
             CC="$CCACHEWRAPPER"
+            CXX="$CCACHECXXWRAPPER"
             HOSTCC="$CCACHEWRAPPER"
+            HOSTCXX="$CCACHECXXWRAPPER"
             HOSTLD="${LDLLDWRAPPER:-ld.lld}"
             PAHOLE="$PAHOLEBIN"
             KCFLAGS="${KCFLAGS[*]}"
             KCPPFLAGS="$KCPPFLAGS"
           )
+         
           # Enable LLVM Integrated Assembler When Requested
           if [[ "${LLVMENABLED:-false}" == "true" ]]; then
             MAKE_ARGS+=(LLVM_IAS=1)
@@ -4100,7 +4217,7 @@ jobs:
             fallback "gkidefconfigfailed"
           fi
 
-          # Locate scripts/config
+          # Locate Scripts / Configuration
           CONFIGTOOL=""
           for path in \
             ../scripts/config \
