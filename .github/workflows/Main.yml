@@ -196,7 +196,7 @@ on:
           - None
       DISABLEVENDORMODULE:
         type: boolean
-        description: "Enable Vendor Module(s) Blacklist"
+        description: "Enable Vendor Module(s) Blacklist for Kernel Series 6.12"
         required: true
         default: false        
       PROFILE:
@@ -3660,85 +3660,44 @@ jobs:
 
           echo "└─ 🎉 IPv6 NAT Fix Stage Completed"
 
-      - name: 🚫 Verify and Configure Conditional Vendor Module Blacklist
-        if: ${{ inputs.DISABLEVENDORMODULE }}
+      - name: 🚫 Configure and Verify Conditional Vendor Module Blacklist
+        if: ${{ inputs.DISABLEVENDORMODULE && steps.kernel-version-setup.outputs.kernelversion == '6.12' }}
         shell: bash
-        env:
-          TCPALGORITHM: ${{ inputs.TCPALGORITHM }}
         run: |
-          set -Eeuo pipefail      
+          set -Eeuo pipefail
           # Paths
           BLACKLISTSCRIPT="${SCRIPTSDIR}/ConditionalVendorBlacklist.kts"
-          VERIFYSCRIPT="${PATCHDIR}/VerifyVendorModule.kts"      
+          VERIFYSCRIPT="${PATCHDIR}/VerifyVendorModule.kts"
           # Kotlin Environment
           KOTLINHOME="${KOTLINHOME:-$HOME/kotlinc}"
-          KOTLINC="${KOTLINHOME}/bin/kotlinc"      
+          KOTLINC="${KOTLINHOME}/bin/kotlinc"
           # Display Build Configuration
-          echo "└─ 📌 Script        : $BLACKLISTSCRIPT"
-          echo "└─ 📌 Work Dir      : $COMMONKERNELFOLDER"
-          echo "└─ 📌 Kernel        : ${{ steps.kernel-version-setup.outputs.kernelversion }}"
-          echo "└─ 📌 Compiler      : $KOTLINC"
-          echo "└─ 📡 TCP Algorithm : ${TCPALGORITHM:-Unknown}"
+          echo "└─ 📌 Script   : ${BLACKLISTSCRIPT}"
+          echo "└─ 📌 Work Dir : ${COMMONKERNELFOLDER}"
+          echo "└─ 📌 Kernel   : ${KERNELVERSION}"
+          echo "└─ 📌 Compiler : ${KOTLINC}"
           # Verify Kotlin Compiler
-          echo "└─ ☕ Kotlin Compiler:"
-          "$KOTLINC" -version  
-          # Select Kernel-Specific Module Blacklist
-          MODULES=""      
-          case "${{ steps.kernel-version-setup.outputs.kernelversion }}" in
+          echo "└─ ☕ Kotlin Compiler :"
+          "${KOTLINC}" -version
+          # Select Kernel-Specific Vendor Modules
+          MODULES=""
+          case "${KERNELVERSION}" in
             6.12)
-              # Blacklist OPlus Secure Guard on Android 16 / Kernel 6.12
+              # Additional Vendor Modules to Block on Kernel 6.6 and 6.12
               MODULES="oplus_secure_guard_new"
               ;;
             *)
-              # Skip Conditional Vendor Module Blacklist For Other Kernel Versions
-              echo "└─ ℹ️ No Conditional Vendor Modules Required For Kernel ${{ steps.kernel-version-setup.outputs.kernelversion }}"
-              MODULES=""
+              echo "└─ ℹ️ No Kernel-Specific Vendor Modules Required for ${KERNELVERSION}"
               ;;
           esac
-          # Select Network Optimization Modules Based on TCP Algorithm
-          NETWORKMODULE=""
-          case "${TCPALGORITHM:-None}" in
-            BBRV1+BBRV3+ECN|BBRV1+BBRV3+ECN+Brutal)
-              # BBR / BBRv3 Configurations Use Custom TCP Handling
-              # Blacklist Both OPlus Network Optimization Modules so
-              # Vendor Tuning Modules Do Not Interfere with
-              # Selected TCP Algorithm Configuration
-              NETWORKMODULE="oplus_network_tuning,oplus_networks_tuning"
-              ;;
-            None|"")
-              # No Custom TCP Algorithm Selected
-              # Do Not Blacklist OPlus Network Optimization Modules
-              NETWORKMODULE=""
-              ;;
-            *)
-              echo "└─ ⚠️ Unsupported TCP Algorithm: ${TCPALGORITHM}"
-              exit 1
-              ;;
-          esac
-          # Add TCP Network Module to Blacklist Selection
-          if [[ -n "${NETWORKMODULE}" ]]; then
-            if [[ -n "${MODULES}" ]]; then
-              MODULES="${MODULES},${NETWORKMODULE}"
-            else
-              MODULES="${NETWORKMODULE}"
-            fi
-          fi
-
-          # Display Final Module Selection
-          echo "└─ 📡 TCP Algorithm : ${TCPALGORITHM:-Unknown}"
-          if [[ -n "${NETWORKMODULE}" ]]; then
-            echo "└─ 🌐 Network Module: ${NETWORKMODULE}"
-          else
-            echo "└─ 🌐 Network Module: None"
-          fi
-
+          # Display Selected Modules
           if [[ -n "${MODULES}" ]]; then
-            echo "└─ 📦 Modules : ${MODULES}"
+            echo "└─ 📦 Modules to Block: ${MODULES}"
           else
-            echo "└─ 📦 Modules : None"
+            echo "└─ 📦 Modules to Block: None"
           fi
 
-          # Nothing To Blacklist
+          # Skip When No Modules Are Selected
           if [[ -z "${MODULES}" ]]; then
             echo "└─ ℹ️ No Modules Selected"
             echo "└─ ⏭️ Skipping Conditional Vendor Module Blacklist"
@@ -3746,8 +3705,8 @@ jobs:
             exit 0
           fi
 
-          # Verify Configured Vendor Modules
-          # If Any Configured Module is Missing From the Kernel Source, Skip the Entire Blacklist Operation
+          # Verify All Selected Vendor Modules
+          # If Any Module Is Missing, Skip the Entire Blacklist Operation
           echo "└─ 🔎 Verifying Configured Vendor Modules..."
           echo "└─ 📦 Modules to Verify: ${MODULES}"
           if ! "${KOTLINC}" -script "${VERIFYSCRIPT}" \
@@ -3760,13 +3719,13 @@ jobs:
             exit 0
           fi
 
-          echo "└─ ✔️ All Configured Vendor Modules Were Found in Source"         
+          echo "└─ ✔️ All Configured Vendor Modules Were Found in Source"
           # Apply Conditional Vendor Module Blacklist
           echo "└─ 🛡️ Configuring Conditional Vendor Module Blacklist..."
           "${KOTLINC}" -script "${BLACKLISTSCRIPT}" \
             "${WORKDIR}" \
             "${MODULES}" \
-            "${{ steps.kernel-version-setup.outputs.kernelversion }}"
+            "${KERNELVERSION}"
           echo "└─ ✔️ Blacklisted Modules: ${MODULES}"
           echo "└─ 🎉 Conditional Vendor Module Blacklist Applied"
 
