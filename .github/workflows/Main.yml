@@ -1636,6 +1636,7 @@ jobs:
         id: rootengine
         shell: bash
         env:
+          GITHUB_TOKEN: ${{ github.token }}
           KERNELPLATFORM: ${{ env.KERNELPLATFORM }}
           ROOTENGINE: ${{ inputs.ROOTENGINE }}
           ROOTCOMMIT: ${{ needs.prepare.outputs.rootcommitfull }}
@@ -1672,28 +1673,67 @@ jobs:
           echo "------------------------------"
           # Setup Root Engine
           # Setup Root Engine From Exact Commit
+          # Setup Root Engine From Exact Commit
           setupengine() {
             local repo="$1"
             local branch="$2"
             local argument="$3"
             local commit="${4:-}"
-            local urlrootsource
-            urlrootsource="https://raw.githubusercontent.com/${repo}/${commit}/kernel/setup.sh"
+            local sourcedir="${RUNNER_TEMP:-/tmp}/RootSource-${ROOTENGINE}"
+            local actual=""
+            if [[ ! "$commit" =~ ^[a-fA-F0-9]{40}$ ]]; then
+              echo "└─ ⚠️ [Error] Invalid Setup Commit: $commit"
+              return 1
+            fi
+
             echo "└─ 🔗 Setup Repository : $repo"
             echo "└─ 🌿 Setup Branch     : $branch"
             echo "└─ 📌 Setup Argument   : $argument"
-            echo "└─ 🔖 Setup Commit     : ${commit:-Latest Branch Commit}"
-            if [[ -z "$commit" ]] || ! curl -fsSL "$urlrootsource" -o /tmp/root-setup.sh; then
-              urlrootsource="https://raw.githubusercontent.com/${repo}/${branch}/kernel/setup.sh"
-              echo "└─ ↩️ Falling Back to Branch Setup Script"
-              curl -fsSL "$urlrootsource" -o /tmp/root-setup.sh || {
-                echo "└─ ⚠️ [Error] Failed to Download Setup Script"
+            echo "└─ 🔖 Setup Commit     : $commit"
+            rm -rf "$sourcedir" || return 1
+            mkdir -p "$sourcedir" || return 1
+            git -C "$sourcedir" init -q || return 1
+            git -C "$sourcedir" remote add origin \
+              "https://github.com/${repo}.git" || return 1
+            echo "└─ 📥 Fetching Exact Commit..."
+            if ! git -C "$sourcedir" fetch --depth=1 --no-tags origin "$commit"; then
+              echo "└─ ↩️ Direct fetch failed; checking branch history..."
+              git -C "$sourcedir" fetch --no-tags origin \
+                "refs/heads/${branch}:refs/remotes/origin/${branch}" || {
+                echo "└─ ⚠️ [Error] Failed to Fetch Branch: $branch"
                 return 1
               }
+
+              actual="$(git -C "$sourcedir" rev-parse \
+                --verify "${commit}^{commit}" 2>/dev/null)" || actual=""
+              if [[ -z "$actual" ]]; then
+                git -C "$sourcedir" fetch --unshallow --no-tags origin \
+                  "refs/heads/${branch}:refs/remotes/origin/${branch}" 2>/dev/null || true
+                actual="$(git -C "$sourcedir" rev-parse \
+                  --verify "${commit}^{commit}" 2>/dev/null)" || actual=""
+              fi
+            else
+              actual="$(git -C "$sourcedir" rev-parse \
+                'FETCH_HEAD^{commit}')" || return 1
             fi
 
-            echo "└─ 🔗 Setup Script : $urlrootsource"
-            bash /tmp/root-setup.sh "$argument" "$commit"
+            if [[ -z "$actual" || "${actual,,}" != "${commit,,}" ]]; then
+              echo "└─ ⚠️ [Error] Requested Commit Not Found or Mismatched"
+              echo "└─ Requested : $commit"
+              echo "└─ Resolved  : ${actual:-Not Found}"
+              return 1
+            fi
+
+            git -C "$sourcedir" checkout -q --detach "$actual" || return 1
+            if [[ ! -f "$sourcedir/kernel/setup.sh" ]]; then
+              echo "└─ ⚠️ [Error] Kernel / Setup Script Not Found at Selected Commit"
+              return 1
+            fi
+
+            echo "└─ ✔️ Verified Source Commit: $actual"
+            echo "└─ 📂 Source Tree: $sourcedir"
+            echo "└─ 🚀 Executing Setup Script..."
+            bash "$sourcedir/kernel/setup.sh" "$argument" "$commit"
           }
             actual="$(git -C "$sourcedir" rev-parse FETCH_HEAD^{commit})"
             if [[ "${actual,,}" != "${commit,,}" ]]; then
@@ -5343,6 +5383,7 @@ jobs:
           KSUREPOSITORY: ${{ needs.prepare.outputs.ksurepo }}
           RELEASEREPOSITORY: ${{ needs.prepare.outputs.releaserepo }}
           BRANCH: ${{ needs.prepare.outputs.releasebranch }}
+          ROOTCOMMIT: ${{ needs.prepare.outputs.rootcommitfull }}
           MANAGERTAG: ${{ needs.prepare.outputs.managertag }}
           KSUVERSION: ${{ needs.prepare.outputs.ksuversion }}
 
