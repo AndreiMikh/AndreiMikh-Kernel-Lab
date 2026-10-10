@@ -3296,71 +3296,127 @@ jobs:
           GKI="${{ steps.kernel-version-setup.outputs.androidversion }}-${{ steps.kernel-version-setup.outputs.kernelversion }}"
           MAKEFILE="$PWD/Makefile"        
           # Fake Configuration Management
-          # Track Kernel Configuration Options to Hide in the Embedded Configuration Data
+          # Track Kernel Configuration Options to Hide in the Embedded Configuration Data          
           declare -a HIDECONFIGS=()
-          # Set or Update Kernel Configuration Option in DefConfiguration
+          # Set or Append a Kernel Configuration Option
           SETCONFIG() {
             local value="$1"
             local key="${value%%=*}"
             local tmp="${DEFCONFIG}.tmp"
-            # Validate Configuration Key=Value Assignment
-            [[ "$value" == *=* && -n "$key" ]] || {
-              echo "⚠️ Invalid Configuration Assignment : $value" >&2
-              return 1
-            }
-            # Replace an Existing Assignment or Disabled Configuration Entry
-            if grep -qF "${key}=" "$DEFCONFIG" ||
+            echo "┌─ ⚙️ Applying Kernel Config"
+            echo "├─ 📌 Config : $key"
+            echo "├─ 📝 Value  : ${value#*=}"
+            if grep -qE "^${key}=" "$DEFCONFIG" ||
                grep -qF "# ${key} is not set" "$DEFCONFIG"; then
+              echo "├─ 🔄 Action : Updating Existing Config"
               if ! VALUE="$value" awk -v key="$key" '
-                $0 == "# " key " is not set" || index($0, key "=") == 1 {
+                $0 == "# " key " is not set" ||
+                index($0, key "=") == 1 {
                   print ENVIRON["VALUE"]
                   next
                 }
                 { print }
               ' "$DEFCONFIG" > "$tmp"; then
                 rm -f "$tmp"
+                echo "└─ ⚠️ Failed to Update $key"
                 return 1
               fi
 
-              # Replace DefConfiguration Only After Successful Processing
-              mv "$tmp" "$DEFCONFIG" || {
+              if ! mv "$tmp" "$DEFCONFIG"; then
                 rm -f "$tmp"
+                echo "└─ ⚠️ Failed to Replace Defconfig"
                 return 1
-              }
+              fi
+
+              echo "└─ ✔️ Updated : $key"
             else
-              # Append Configuration if it Does Not Exist in DefConfiguration
-              printf '%s\n' "$value" >> "$DEFCONFIG" || return 1
+              echo "└─ ➕ Action : Adding new config"
+
+              if ! printf '%s\n' "$value" >> "$DEFCONFIG"; then
+                echo "└─ ⚠️ Failed to Append $key"
+                return 1
+              fi
+
+              echo "└─ ✔️ Added : $key"
             fi
           }
 
-          # Set Configuration Option and Register its Name for Fake Configuration Handling
+          # Apply a Config and Register its Key for Fake-Config Injection
           HIDECONFIG() {
             local value="$1"
             local key="${value%%=*}"
             local existing
-            # Do Not Register Option if Updating DefConfiguration Fails
-            SETCONFIG "$value" || return 1
-            # Prevent Duplicate Configuration Names in Fake Configuration List
+            echo "└─ 🫥 Fake Config Registration"
+            echo "└─ 📌 Config : $key"
+            if ! SETCONFIG "$value"; then
+              echo "└─ ⚠️ Config Application Failed : $key"
+              return 1
+            fi
+
             for existing in "${HIDECONFIGS[@]}"; do
-              [[ "$existing" == "$key" ]] && return 0
+              if [[ "$existing" == "$key" ]]; then
+                echo "└─ ℹ️ Already Registered : $key"
+                return 0
+              fi
             done
+
             HIDECONFIGS+=("$key")
+            echo "└─ ✔️ Registered : $key"
           }
-          # Export Fake Configuration Options to Current Build and Later Steps
-          EXPORTFAKECONFIG() {
-            # Skip Export if No Options Were Registered
-            ((${#HIDECONFIGS[@]} > 0)) || {
-              echo "└─ ⚠️ No Fake Configuration Options Requested"
+
+          # Inject Fake-Config Handling Into Kconfig Makefile
+          FAKECONFIG() {
+            local marker="# --- Fake Config Injector ---"
+            local count="${#HIDECONFIGS[@]}"
+            local key
+            echo "└─ 🫥 Fake Config Injector"
+            echo "└─ 📊 Config Count : $count"
+            if [[ "$count" -eq 0 ]]; then
+              echo "└─ ⏭️ No Fake Configs Registered"
               return 0
-            }
-            # Pass Space-Separated Configuration List to Makefile
-            export CONFIG_FAKE_DISABLE="${HIDECONFIGS[*]}"
-            # Persist Variable For Subsequent GitHub Actions Steps
-            printf 'CONFIG_FAKE_DISABLE=%s\n' \
-              "$CONFIG_FAKE_DISABLE" >> "$GITHUB_ENV"
-            echo "└─ 🧩 Fake Configuration Override : Enabled"
-            printf '└─ 🧩 Configuration Options : %s\n' "$CONFIG_FAKE_DISABLE"
+            fi
+
+            for key in "${HIDECONFIGS[@]}"; do
+              echo "└─ 📌 Fake Config : $key"
+            done
+
+            if [[ ! -f "$MAKEFILE" ]]; then
+              echo "└─ ⚠️ Makefile Not Found : $MAKEFILE"
+              return 1
+            fi
+
+            if grep -qF "$marker" "$MAKEFILE"; then
+              echo "└─ ℹ️ Injector Already Exists"
+            else
+              echo "└─ 📝 Action : Injecting Makefile Rule"
+              if ! {
+                printf '\n%s\n' "$marker"
+                printf 'ifneq ($(strip $(CONFIG_FAKE_DISABLE)),)\n'
+                printf '$(obj)/config_data: $(KCONFIG_CONFIG) FORCE\n'
+                printf '\t$(Q)sed $(foreach opt,$(CONFIG_FAKE_DISABLE),-e '"'"'s|^$(opt)=.*|# $(opt) is not set|'"'"') $(KCONFIG_CONFIG) > $@\n'
+                printf 'endif\n'
+              } >> "$MAKEFILE"; then
+                echo "└─ ⚠️ Failed to Inject Makefile Rule"
+                return 1
+              fi
+
+              echo "└─ ✔️ Injector Added"
+            fi
+
+            CONFIG_FAKE_DISABLE="${HIDECONFIGS[*]}"
+            export CONFIG_FAKE_DISABLE
+            if [[ -n "${GITHUB_ENV:-}" ]]; then
+              if ! printf 'DISABLEFAKECONFIG=%s\n' \
+                "$DISABLEFAKECONFIG" >> "$GITHUB_ENV"; then
+                echo "└─ ⚠️ Failed to Export GitHub Environment"
+                return 1
+              fi
+            fi
+
+            echo "└─ 📤 CONFIG_FAKE_DISABLE=$CONFIG_FAKE_DISABLE"
+            echo "└─ ✔️ Fake Config Setup Complete"
           }
+          trap 'FAKECONFIG' EXIT
           # Check if Root Source is ReSukiSU (BakaSU)
           if [[ "$ROOT" == "BakaSU" ]]; then
             # Enable Multi-Manager Support if the Condition is True
