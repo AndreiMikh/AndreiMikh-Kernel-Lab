@@ -6,7 +6,8 @@ inputs:
   ROOTENGINE:
     required: true
   ROOTCOMMIT:
-    required: true
+    required: false
+    default: ""
 outputs:
   ksurepo:
     description: Root Source Setup Repository
@@ -46,11 +47,11 @@ runs:
       shell: bash
       env:
         GH_TOKEN: ${{ github.token }}
+        ROOTBRANCHSOURCE: ${{ inputs.ROOTBRANCHSOURCE }}
+        ROOTENGINE: ${{ inputs.ROOTENGINE }}
+        ROOTCOMMIT: ${{ inputs.ROOTCOMMIT }}
       run: |
         set -Eeuo pipefail
-        ROOTBRANCHSOURCE="${{ inputs.ROOTBRANCHSOURCE }}"
-        ROOTENGINE="${{ inputs.ROOTENGINE }}"
-        ROOTCOMMIT="${{ inputs.ROOTCOMMIT }}"
         MANAGERBRANCH=""
         BRANCHPATH=""
         MANAGERARTIFACT=""
@@ -131,11 +132,11 @@ runs:
         [[ -n "$KSUREPO" ]] || {
           echo "└─ ⚠️ Failed to Resolve Root Engine Repository"
           exit 1
-        } 
+        }
         [[ -n "$VERSIONREPO" ]] || {
           echo "└─ ⚠️ Failed to Resolve Root Engine Repository"
           exit 1
-        }         
+        }
         echo ""
         echo "------------------------------"
         echo "└─ 🔗 Repository     : $KSUREPO"
@@ -207,22 +208,24 @@ runs:
           fi
 
           echo "└─ 📌 Resolving Requested Commit: $ROOTCOMMIT"
-
-          ROOTCOMMITFULL="$(
+          if ! ROOTCOMMITFULL="$(
             gh api \
               "repos/${VERSIONREPO}/commits/${ROOTCOMMIT}" \
               --jq '.sha'
-          )" || {
+          )"; then
             echo "└─ ⚠️ Requested Commit Not Found: $ROOTCOMMIT"
             exit 1
-          }
+          fi
         else
           echo "└─ 🔄 Using Latest Commit From Branch : $VERSIONBRANCH"
-          ROOTCOMMITFULL="$(
+          if ! ROOTCOMMITFULL="$(
             gh api \
               "repos/${VERSIONREPO}/commits/${VERSIONBRANCH}" \
               --jq '.sha'
-          )"
+          )"; then
+            echo "└─ ⚠️ Failed to Resolve Version Branch Commit"
+            exit 1
+          fi
         fi
 
         [[ "$ROOTCOMMITFULL" =~ ^[a-fA-F0-9]{40}$ ]] || {
@@ -230,31 +233,29 @@ runs:
           exit 1
         }
         ROOTCOMMITSHORT="${ROOTCOMMITFULL:0:7}"
+        echo "rootcommitfull=$ROOTCOMMITFULL" >> "$GITHUB_OUTPUT"
         echo "rootcommit=$ROOTCOMMITSHORT" >> "$GITHUB_OUTPUT"
         echo "└─ 🔖 Root Engine Commit : $ROOTCOMMITSHORT"
         echo "└─ 🔖 Full Commit SHA    : $ROOTCOMMITFULL"
-      
         echo ""
-        echo "------------------------------"         
+        echo "------------------------------"
         echo "└─ 🔎 Resolving $ROOTENGINE Root Source Version..."
-        if [[ -n "$ROOTCOMMIT" ]]; then
-          if [[ "$ROOTCOMMIT" =~ ^[a-fA-F0-9]{40}$ ]]; then
-            COMMITREF="${ROOTCOMMITFULL}^{commit}"
-          else
-            COMMITREF="${ROOTCOMMITSHORT}^{commit}"
-          fi
-  
-        else
+        if [[ -z "$ROOTCOMMIT" ]]; then
           COMMITREF="${VERSIONBRANCH}^{commit}"
+        elif [[ ${#ROOTCOMMIT} -eq 40 ]]; then
+          COMMITREF="${ROOTCOMMITFULL}^{commit}"
+        else
+          COMMITREF="${ROOTCOMMITSHORT}^{commit}"
         fi
-        
-        COMMITCOUNT="$(
+
+        VERSIONDATA="$(
           gh api graphql \
             -f query='
               query($owner: String!, $repo: String!, $expression: String!) {
                 repository(owner: $owner, name: $repo) {
                   object(expression: $expression) {
                     ... on Commit {
+                      oid
                       history(first: 1) {
                         totalCount
                       }
@@ -265,9 +266,20 @@ runs:
             ' \
             -F owner="${VERSIONREPO%%/*}" \
             -F repo="${VERSIONREPO#*/}" \
-            -F expression="$COMMITREF" \
-            --jq '.data.repository.object.history.totalCount // empty'
+            -F expression="$COMMITREF"
         )"
+        RESOLVEDCOMMIT="$(jq -r '.data.repository.object.oid // empty' <<< "$VERSIONDATA")"
+        COMMITCOUNT="$(jq -r '.data.repository.object.history.totalCount // empty' <<< "$VERSIONDATA")"
+        [[ -n "$RESOLVEDCOMMIT" ]] || {
+          echo "└─ ⚠️ Failed to Resolve Commit Reference: $COMMITREF"
+          exit 1
+        }
+        [[ "${RESOLVEDCOMMIT,,}" == "${ROOTCOMMITFULL,,}" ]] || {
+          echo "└─ ⚠️ Selected Commit Does Not Match Resolved Commit"
+          echo "└─ Expected : $ROOTCOMMITFULL"
+          echo "└─ Resolved : $RESOLVEDCOMMIT"
+          exit 1
+        }
         # Calculate Root Source Version
         [[ "$COMMITCOUNT" =~ ^[0-9]+$ ]] || {
           echo "└─ ⚠️ Failed to Resolve $ROOTENGINE Commit Count"
@@ -292,7 +304,8 @@ runs:
             --jq '.[].ref | sub("^refs/tags/"; "")' |
           sort -V |
           tail -n 1
-        )"
+        )" || true
+    
         if [[ -n "$MANAGERTAG" ]]; then
           echo "└─ ✔ Latest Manager Tag: $MANAGERTAG"
         else
@@ -328,7 +341,7 @@ runs:
             echo "└─ Continuing Without Release Tag"
           fi
         fi
-       
+
         echo "└─ 🏷️ Latest Manager Tag: $MANAGERTAG"
         # Export Outputs
         {
@@ -339,7 +352,7 @@ runs:
           echo "releaserepo=$RELEASEREPO"
           echo "releasebranch=$RELEASEBRANCH"
           echo "managertag=$MANAGERTAG"
-          echo "ksuversion=$KSUVERSION"        
+          echo "ksuversion=$KSUVERSION"
         } >> "$GITHUB_OUTPUT"
         echo "└─ 📦 Engine       : $ROOTENGINE"
         echo "└─ 📂 Repository   : $KSUREPO"
