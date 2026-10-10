@@ -1636,6 +1636,7 @@ jobs:
         id: rootengine
         shell: bash
         env:
+          GITHUB_TOKEN: ${{ github.token }}
           KERNELPLATFORM: ${{ env.KERNELPLATFORM }}
           ROOTENGINE: ${{ inputs.ROOTENGINE }}
           ROOTCOMMIT: ${{ needs.prepare.outputs.rootcommitfull }}
@@ -1671,28 +1672,50 @@ jobs:
           echo "└─ 🔖 Full Commit      : $ROOTCOMMIT"
           echo "------------------------------"
           # Setup Root Engine
+          # Setup Root Engine From Exact Commit
           setupengine() {
             local repo="$1"
             local branch="$2"
             local argument="$3"
             local commit="${4:-}"
-            local urlrootsource
-            urlrootsource="https://raw.githubusercontent.com/${repo}/${commit}/kernel/setup.sh"
-            echo "└─ 🔗 Setup Repository : $repo"
-            echo "└─ 🌿 Setup Branch     : $branch"
-            echo "└─ 📌 Setup Argument   : $argument"
-            echo "└─ 🔖 Setup Commit     : ${commit:-Latest Branch Commit}"
-            if [[ -z "$commit" ]] || ! curl -fsSL "$urlrootsource" -o /tmp/root-setup.sh; then
-              urlrootsource="https://raw.githubusercontent.com/${repo}/${branch}/kernel/setup.sh"
-              echo "└─ ↩️ Falling Back to Branch Setup Script"
-              curl -fsSL "$urlrootsource" -o /tmp/root-setup.sh || {
-                echo "└─ ⚠️ [Error] Failed to Download Setup Script"
-                return 1
-              }
+            local sourcedir="${RUNNER_TEMP}/RootSource-${ROOTENGINE}"
+            local actual=""
+            if [[ ! "$commit" =~ ^[a-fA-F0-9]{40}$ ]]; then
+              echo "└─ ⚠️ [Error] Invalid Setup Commit: $commit"
+              return 1
             fi
 
-            echo "└─ 🔗 Setup Script : $urlrootsource"
-            bash /tmp/root-setup.sh "$argument" "$commit"
+            echo "└─ 📦 Source Repository : $repo"
+            echo "└─ 🌿 Source Branch     : $branch"
+            echo "└─ 🔖 Selected Commit   : $commit"
+            rm -rf "$sourcedir"
+            mkdir -p "$sourcedir"
+            git -C "$sourcedir" init -q
+            git -C "$sourcedir" remote add origin \
+              "https://x-access-token:${GITHUB_TOKEN}@github.com/${repo}.git"
+            echo "└─ 📥 Fetching Exact Source Commit..."
+            git -C "$sourcedir" fetch --depth=1 --no-tags origin "$commit" || {
+              echo "└─ ⚠️ [Error] Failed to Fetch Selected Commit"
+              return 1
+            }
+            actual="$(git -C "$sourcedir" rev-parse FETCH_HEAD^{commit})"
+            if [[ "${actual,,}" != "${commit,,}" ]]; then
+              echo "└─ ⚠️ [Error] Source Commit Mismatch"
+              echo "└─ Requested : $commit"
+              echo "└─ Actual    : $actual"
+              return 1
+            fi
+
+            git -C "$sourcedir" checkout -q --detach "$actual" || return 1
+            if [[ ! -f "$sourcedir/kernel/setup.sh" ]]; then
+              echo "└─ ⚠️ [Error] kernel/setup.sh Not Found at Selected Commit"
+              return 1
+            fi
+
+            echo "└─ ✔️ Source Commit Verified: $actual"
+            echo "└─ 📂 Source Tree: $sourcedir"
+            echo "└─ 🚀 Executing setup.sh From Selected Commit..."
+            bash "$sourcedir/kernel/setup.sh" "$argument" "$commit"
           }
           # Checkout and Verify Exact Root Engine Commit
           checkoutrootcommit() {
