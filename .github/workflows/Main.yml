@@ -3664,18 +3664,15 @@ jobs:
         if: ${{ inputs.DISABLEVENDORMODULE }}
         shell: bash
         env:
-          OP_BLACKLIST_MODULES: ${{ inputs.DISABLEVENDORMODULE }}        
-          OP_BBR: ${{ contains(inputs.TCPALGORITHM, 'BBRV1') }}
-          OP_BBR3: ${{ contains(inputs.TCPALGORITHM, 'BBRV3') }}
-          KERNEL_VERSION: ${{ steps.kernel-version-setup.outputs.kernelversion }}
+          BLACKLISTMODULES: ${{ inputs.DISABLEVENDORMODULE }}        
+          BBRV1: ${{ contains(inputs.TCPALGORITHM, 'BBRV1') }}
+          BBRV3: ${{ contains(inputs.TCPALGORITHM, 'BBRV3') }}      
         run: |
           set -Eeuo pipefail
-
-          # Switch to the common kernel source directory.
+          # Switch to Common Kernel Source Directory
           cd "$COMMONKERNELFOLDER"
-
-          # Define modules that must not be included in the blacklist.
-          RISKY_MODULES=(
+          # Define Modules That Must Not be Included in Blacklist
+          RISKYMODULES=(
             coresight
             rust_binder
             msm_kgsl
@@ -3691,91 +3688,84 @@ jobs:
             bootloader_log
           )
 
-          # Initialize module lists and duplicate tracking.
+          # Initialize Module Lists and Duplicate Tracking
           declare -a modules=()
-          declare -a validated_modules=()
-          declare -A SEEN_MODULES=()
+          declare -a validatedmodules=()
+          declare -A SEENMODULES=()
 
-          # Parse the comma-separated vendor module blacklist input.
-          IFS=',' read -r -a ADDR <<< "${OP_BLACKLIST_MODULES:-}"
-
+          # Parse the Comma-Separated Vendor Module Blacklist Input
+          IFS=',' read -r -a ADDR <<< "${OPBLACKLISTMODULES:-}"
           for mod in "${ADDR[@]}"; do
-            # Remove whitespace from module names.
+            # Remove Whitespace From Module Names
             mod="${mod//[[:space:]]/}"
             [[ -z "$mod" ]] && continue
-
-            # Reject invalid module names to prevent malformed configuration.
+            # Reject Invalid Module Names to Prevent Malformed Configuration
             if [[ ! "$mod" =~ ^[a-zA-Z0-9_-]+$ ]]; then
-              echo "::error::Invalid module name: $mod"
+              echo "⚠️ Invalid Module Name(s) : $mod"
               exit 1
             fi
 
-            # Add each module only once, preserving the input order.
-            if [[ -z "${SEEN_MODULES[$mod]+x}" ]]; then
-              SEEN_MODULES["$mod"]=1
+            # Add Each Module Only Once, Preserving Input Order
+            if [[ -z "${SEENMODULES[$mod]+x}" ]]; then
+              SEENMODULES["$mod"]=1
               modules+=("$mod")
             fi
           done
 
-          # Automatically blacklist OPlus network tuning modules when
-          # either BBRv1 or BBRv3 is enabled.
-          if [[ "$OP_BBR" == "true" || "$OP_BBR3" == "true" ]]; then
+          # Automatically Blacklist OPlus Network Tuning Modules When
+          # Either BBRv1 or BBRv3 is Enabled
+          if [[ "$BBRV1" == "true" || "$BBRV3" == "true" ]]; then
             for mod in oplus_network_tuning oplus_networks_tuning; do
-              if [[ -z "${SEEN_MODULES[$mod]+x}" ]]; then
-                SEEN_MODULES["$mod"]=1
+              if [[ -z "${SEENMODULES[$mod]+x}" ]]; then
+                SEENMODULES["$mod"]=1
                 modules+=("$mod")
               fi
             done
           fi
 
-          # Exclude protected modules from the blacklist.
+          # Exclude Protected Modules From Blacklist
           for mod in "${modules[@]}"; do
-            is_risky=false
-
-            for risky in "${RISKY_MODULES[@]}"; do
+            isrisky=false
+            for risky in "${RISKYMODULES[@]}"; do
               if [[ "$mod" == "$risky" ]]; then
-                is_risky=true
-                echo "⚠️ Protected module excluded: $mod"
+                isrisky=true
+                echo "⚠️ Protected Module Excluded : $mod"
                 break
               fi
             done
 
-            # Keep only modules that passed the protection checks.
-            if [[ "$is_risky" == "false" ]]; then
-              validated_modules+=("$mod")
+            # Keep Only Modules That Passed Protection Checks
+            if [[ "$isrisky" == "false" ]]; then
+              validatedmodules+=("$mod")
             fi
           done
 
-          # Format the validated module names as a comma-separated
-          # Kconfig string, enclosed in double quotes.
-          RAW_JOINED=$(IFS=,; printf '%s' "${validated_modules[*]}")
-          RESULT_LIST="\"${RAW_JOINED}\""
+          # Format Validated Module Names as a Comma-Separated
+          # Kconfig String, Enclosed in Double Quotes
+          RAWJOINED=$(IFS=,; printf '%s' "${validatedmodules[*]}")
+          RESULTLIST="\"${RAWJOINED}\""
+          echo "└─ 📂 Defconfig : $DEFCONFIG"
+          echo "└─ 📦 Module Blacklist : $RESULTLIST"
+          echo "└─ 🌐 BBRv1 Enabled : $BBRV1"
+          echo "└─ 🌐 BBRv3 Enabled : $BBRV3"
 
-          # Resolve and validate the target defconfig.
-          CONFIG_FILE="$DEFCONFIG"
-
-          echo "└─ 📂 Defconfig: $CONFIG_FILE"
-          echo "└─ 📦 Module blacklist: $RESULT_LIST"
-          echo "└─ 🌐 BBRv1 enabled: $OP_BBR"
-          echo "└─ 🌐 BBRv3 enabled: $OP_BBR3"
-
-          if [[ ! -f "$CONFIG_FILE" ]]; then
-            echo "::error::Defconfig not found: $CONFIG_FILE"
+          if [[ ! -f "$DEFCONFIG" ]]; then
+            echo "⚠️ Defconfig Not Found: $DEFCONFIG"
             exit 1
           fi
 
-          # Update existing blacklist option or append it if missing.
-          if grep -q '^CONFIG_DEBLOAT_VENDOR_MODULES=' "$CONFIG_FILE"; then
+          # Update Existing Blacklist Option or Append it if Missing
+          if grep -q '^CONFIG_DEBLOAT_VENDOR_MODULES=' "$DEFCONFIG"; then
             sed -i \
-              "s|^CONFIG_DEBLOAT_VENDOR_MODULES=.*|CONFIG_DEBLOAT_VENDOR_MODULES=${RESULT_LIST}|" \
-              "$CONFIG_FILE"
+              "s|^CONFIG_DEBLOAT_VENDOR_MODULES=.*|CONFIG_DEBLOAT_VENDOR_MODULES=${RESULTLIST}|" \
+              "$DEFCONFIG"
           else
             printf '%s\n' \
-              "CONFIG_DEBLOAT_VENDOR_MODULES=${RESULT_LIST}" \
-              >> "$CONFIG_FILE"
+              "CONFIG_DEBLOAT_VENDOR_MODULES=${RESULTLIST}" \
+              >> "$DEFCONFIG"
           fi
 
-          # Select the vendor module blacklist patch based on kernel version.
+          # Select Vendor Module Blacklist Patch Based on Kernel Version
           MINIMUMVERSION="5.16"
           if [[ "$(printf '%s\n' "$KERNELVERSION" "$MINIMUMVERSION" | sort -V | head -n1)" == "$KERNELVERSION" ]]; then
             VMPATCHFILE="${PATCHDIR}/VendorModule/vendorblacklist-5.15-below.patch"
@@ -3783,23 +3773,22 @@ jobs:
             VMPATCHFILE="${PATCHDIR}/VendorModule/vendorblacklist-6.1-above.patch"
           fi
 
-          echo "└─ 📄 Kernel version: $KERNELVERSION"
-          echo "└─ 📄 Patch: $VMPATCHFILE"
-
-          # Verify that the selected patch exists.
+          echo "└─ 📄 Kernel Version : $KERNELVERSION"
+          echo "└─ 📄 Patch : $VMPATCHFILE"
+          # Verify Selected Patch Exists
           if [[ ! -f "$VMPATCHFILE" ]]; then
-            echo "::error::Vendor Module Patch Not Found: $VMPATCHFILE"
+            echo "⚠️ Vendor Module Patch Not Found : $VMPATCHFILE"
             exit 1
           fi
 
-          # Apply the patch if needed; otherwise verify it is already applied.
-          if patch --dry-run -p1 < "$PATCH_FILE" >/dev/null 2>&1; then
-            patch -p1 --forward < "$PATCH_FILE"
-            echo "└─ ✔️ Vendor module patch applied"
-          elif patch --dry-run -R -p1 < "$PATCH_FILE" >/dev/null 2>&1; then
-            echo "└─ ✔️ Patch is already applied"
+          # Apply Patch if Needed; Otherwise Verify it is Already Applied
+          if patch --dry-run -p1 < "$VMPATCHFILE" >/dev/null 2>&1; then
+            patch -p1 --forward < "$VMPATCHFILE"
+            echo "└─ ✔️ Vendor Module Patch Applied"
+          elif patch --dry-run -R -p1 < "$VMPATCHFILE" >/dev/null 2>&1; then
+            echo "└─ ✔️ Patch is Already Applied"
           else
-            echo "::error::Patch is neither applicable nor already applied"
+            echo "⚠️ Patch is Neither Applicable nor Already Applied"
             exit 1
           fi
 
