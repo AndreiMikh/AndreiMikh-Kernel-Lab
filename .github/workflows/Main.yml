@@ -3660,51 +3660,151 @@ jobs:
 
           echo "└─ 🎉 IPv6 NAT Fix Stage Completed"
 
-      - name: 🚫 Configure and Verify Conditional Vendor Module Blacklist
+      - name: 🚫 Disable Vendor / Kernel Modules
         if: ${{ inputs.DISABLEVENDORMODULE }}
         shell: bash
+        env:
+          OP_BLACKLIST_MODULES: ${{ inputs.DISABLEVENDORMODULE }}        
+          OP_BBR: ${{ contains(inputs.TCPALGORITHM, 'BBRV1') }}
+          OP_BBR3: ${{ contains(inputs.TCPALGORITHM, 'BBRV3') }}
+          KERNEL_VERSION: ${{ steps.kernel-version-setup.outputs.kernelversion }}
         run: |
           set -Eeuo pipefail
-          # Paths
-          BLACKLISTSCRIPT="${SCRIPTSDIR}/ConditionalVendorBlacklist.kts"
-          VERIFYSCRIPT="${SCRIPTSDIR}/VerifyVendorModule.kts"
-          # Kotlin Environment
-          KOTLINHOME="${KOTLINHOME:-$HOME/kotlinc}"
-          KOTLINC="${KOTLINHOME}/bin/kotlinc"
-          # Display Build Configuration
-          echo "└─ 📌 Script   : ${BLACKLISTSCRIPT}"
-          echo "└─ 📌 Work Dir : ${COMMONKERNELFOLDER}"
-          echo "└─ 📌 Kernel   : ${KERNELVERSION}"
-          echo "└─ 📌 Compiler : ${KOTLINC}"
-          # Verify Kotlin Compiler
-          echo "└─ ☕ Kotlin Compiler :"
-          "${KOTLINC}" -version
-          # Select Kernel-Specific Vendor Modules
-          MODULES="oplus_secure_guard_new"
-          # Verify All Selected Vendor Modules
-          # If Any Module Is Missing, Skip the Entire Blacklist Operation
-          echo "└─ 🔎 Verifying Configured Vendor Modules..."
-          echo "└─ 📦 Modules to Verify: ${MODULES}"
-          if ! "${KOTLINC}" -script "${VERIFYSCRIPT}" \
-            "${WORKDIR}" \
-            "${MODULES}"; then
-            echo "└─ ⚠️ One or More Configured Vendor Modules Were Not Found"
-            echo "└─ ⏭️ Skipping Conditional Vendor Module Blacklist"
-            echo "└─ 📦 Requested Modules: ${MODULES}"
-            echo "└─ 🎉 Conditional Vendor Module Blacklist Step Completed"
-            exit 0
+
+          # Switch to the common kernel source directory.
+          cd "$COMMONKERNELFOLDER"
+
+          # Define modules that must not be included in the blacklist.
+          RISKY_MODULES=(
+            coresight
+            rust_binder
+            msm_kgsl
+            camera
+            oplusboot
+            rmnet_wlan
+            rmnet_core
+            msm_drm
+            cnss2
+            oplus_chg_v2
+            reboot_mode
+            rfkill
+            bootloader_log
+          )
+
+          # Initialize module lists and duplicate tracking.
+          declare -a modules=()
+          declare -a validated_modules=()
+          declare -A SEEN_MODULES=()
+
+          # Parse the comma-separated vendor module blacklist input.
+          IFS=',' read -r -a ADDR <<< "${OP_BLACKLIST_MODULES:-}"
+
+          for mod in "${ADDR[@]}"; do
+            # Remove whitespace from module names.
+            mod="${mod//[[:space:]]/}"
+            [[ -z "$mod" ]] && continue
+
+            # Reject invalid module names to prevent malformed configuration.
+            if [[ ! "$mod" =~ ^[a-zA-Z0-9_-]+$ ]]; then
+              echo "::error::Invalid module name: $mod"
+              exit 1
+            fi
+
+            # Add each module only once, preserving the input order.
+            if [[ -z "${SEEN_MODULES[$mod]+x}" ]]; then
+              SEEN_MODULES["$mod"]=1
+              modules+=("$mod")
+            fi
+          done
+
+          # Automatically blacklist OPlus network tuning modules when
+          # either BBRv1 or BBRv3 is enabled.
+          if [[ "$OP_BBR" == "true" || "$OP_BBR3" == "true" ]]; then
+            for mod in oplus_network_tuning oplus_networks_tuning; do
+              if [[ -z "${SEEN_MODULES[$mod]+x}" ]]; then
+                SEEN_MODULES["$mod"]=1
+                modules+=("$mod")
+              fi
+            done
           fi
 
-          echo "└─ ✔️ All Configured Vendor Modules Were Found in Source"
-          # Apply Conditional Vendor Module Blacklist
-          echo "└─ 🛡️ Configuring Conditional Vendor Module Blacklist..."
-          "${KOTLINC}" -script "${BLACKLISTSCRIPT}" \
-            "${WORKDIR}" \
-            "${MODULES}" \
-            "${KERNELVERSION}"
-          echo "└─ ✔️ Blacklisted Modules: ${MODULES}"
-          echo "└─ 🎉 Conditional Vendor Module Blacklist Applied"
+          # Exclude protected modules from the blacklist.
+          for mod in "${modules[@]}"; do
+            is_risky=false
 
+            for risky in "${RISKY_MODULES[@]}"; do
+              if [[ "$mod" == "$risky" ]]; then
+                is_risky=true
+                echo "⚠️ Protected module excluded: $mod"
+                break
+              fi
+            done
+
+            # Keep only modules that passed the protection checks.
+            if [[ "$is_risky" == "false" ]]; then
+              validated_modules+=("$mod")
+            fi
+          done
+
+          # Format the validated module names as a comma-separated
+          # Kconfig string, enclosed in double quotes.
+          RAW_JOINED=$(IFS=,; printf '%s' "${validated_modules[*]}")
+          RESULT_LIST="\"${RAW_JOINED}\""
+
+          # Resolve and validate the target defconfig.
+          CONFIG_FILE="$DEFCONFIG"
+
+          echo "└─ 📂 Defconfig: $CONFIG_FILE"
+          echo "└─ 📦 Module blacklist: $RESULT_LIST"
+          echo "└─ 🌐 BBRv1 enabled: $OP_BBR"
+          echo "└─ 🌐 BBRv3 enabled: $OP_BBR3"
+
+          if [[ ! -f "$CONFIG_FILE" ]]; then
+            echo "::error::Defconfig not found: $CONFIG_FILE"
+            exit 1
+          fi
+
+          # Update existing blacklist option or append it if missing.
+          if grep -q '^CONFIG_DEBLOAT_VENDOR_MODULES=' "$CONFIG_FILE"; then
+            sed -i \
+              "s|^CONFIG_DEBLOAT_VENDOR_MODULES=.*|CONFIG_DEBLOAT_VENDOR_MODULES=${RESULT_LIST}|" \
+              "$CONFIG_FILE"
+          else
+            printf '%s\n' \
+              "CONFIG_DEBLOAT_VENDOR_MODULES=${RESULT_LIST}" \
+              >> "$CONFIG_FILE"
+          fi
+
+          # Select the vendor module blacklist patch based on kernel version.
+          MINIMUMVERSION="5.16"
+          if [[ "$(printf '%s\n' "$KERNELVERSION" "$MINIMUMVERSION" | sort -V | head -n1)" == "$KERNELVERSION" ]]; then
+            VMPATCHFILE="${PATCHDIR}/VendorModule/vendorblacklist-5.15-below.patch"
+          else
+            VMPATCHFILE="${PATCHDIR}/VendorModule/vendorblacklist-6.1-above.patch"
+          fi
+
+          echo "└─ 📄 Kernel version: $KERNELVERSION"
+          echo "└─ 📄 Patch: $VMPATCHFILE"
+
+          # Verify that the selected patch exists.
+          if [[ ! -f "$VMPATCHFILE" ]]; then
+            echo "::error::Vendor Module Patch Not Found: $VMPATCHFILE"
+            exit 1
+          fi
+
+          # Apply the patch if needed; otherwise verify it is already applied.
+          if patch --dry-run -p1 < "$PATCH_FILE" >/dev/null 2>&1; then
+            patch -p1 --forward < "$PATCH_FILE"
+            echo "└─ ✔️ Vendor module patch applied"
+          elif patch --dry-run -R -p1 < "$PATCH_FILE" >/dev/null 2>&1; then
+            echo "└─ ✔️ Patch is already applied"
+          else
+            echo "::error::Patch is neither applicable nor already applied"
+            exit 1
+          fi
+
+          echo "└─ 🎉 Vendor / Kernel Module Configuration Complete"
+  
       - name: 🕒 Setup Custom Build Time
         shell: bash
         run: |
