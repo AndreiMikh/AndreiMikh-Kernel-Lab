@@ -1,0 +1,109 @@
+name: ⚙️ Setup Build Toolchains
+description: Setup Zig and Kotlin Compiler, Clean Previous Zig Caches
+runs:
+  using: composite
+  steps:
+    - name: ⚙️ Setup Zig Toolchain
+      uses: mlugg/setup-zig@v2
+      with:
+        version: 0.16.0
+        use-cache: true
+        cache-size-limit: 2048
+
+    - name: 🧹 Clean Previous Zig Caches
+      uses: actions/github-script@v9
+      with:
+        script: |
+          const currentRunId = String(context.runId);
+          const { owner, repo } = context.repo;
+          const prefix = "setup-zig-cache-v2-kernel_build-zig-x86_64-linux-0.16.0--";
+          const caches = await github.paginate(
+            github.rest.actions.getActionsCacheList,
+            {
+              owner,
+              repo,
+              per_page: 100
+            }
+          );
+          const previousCaches = caches.filter(cache =>
+            cache.key.startsWith(prefix) &&
+            !cache.key.includes(`--${currentRunId}-`)
+          );
+          for (const cache of previousCaches) {
+            console.log(`🧹 Deleting Previous Zig Cache: ${cache.key}`);
+            await github.rest.actions.deleteActionsCacheById({
+              owner,
+              repo,
+              cache_id: cache.id
+            });
+            console.log(`✔️ Deleted: ${cache.key}`);
+          }
+          console.log("🎉 Previous Zig Build Caches Cleaned");
+
+    - name: 🧰 Kotlin Compiler
+      shell: bash
+      env:
+        GH_TOKEN: ${{ github.token }}
+      run: |
+        set -euo pipefail
+        KOTLINHOME="$HOME/kotlinc"
+        KOTLINVER="$(
+          curl \
+            --fail \
+            --location \
+            --silent \
+            --show-error \
+            --retry 8 \
+            --retry-all-errors \
+            --retry-delay 5 \
+            --connect-timeout 30 \
+            --max-time 60 \
+            -H "Accept: application/vnd.github+json" \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "https://api.github.com/repos/JetBrains/kotlin/releases/latest" |
+          jq -er '.tag_name | strings | select(length > 0) | sub("^v"; "")'
+        )" || {
+          echo "└─ ⚠️ Failed to Determine Latest Stable Kotlin Version"
+          exit 1
+        }
+        KOTLINURL="https://github.com/JetBrains/kotlin/releases/download/v${KOTLINVER}/kotlin-compiler-${KOTLINVER}.zip"
+        echo "└─ 📦 Latest Stable Kotlin: ${KOTLINVER}"
+        if [[ -x "$KOTLINHOME/bin/kotlinc" ]] && \
+          "$KOTLINHOME/bin/kotlinc" -version 2>&1 | grep -Fq "$KOTLINVER"; then
+          echo "└─ ✔️ Kotlin ${KOTLINVER} is Already Installed"
+        else
+          echo "⚙️ Installing Kotlin Compiler ${KOTLINVER}..."
+          rm -rf "$KOTLINHOME"
+          rm -f "$RUNNER_TEMP/kotlinc.zip"
+          curl \
+            --fail \
+            --location \
+            --silent \
+            --show-error \
+            --retry 8 \
+            --retry-all-errors \
+            --retry-delay 5 \
+            --connect-timeout 30 \
+            --max-time 600 \
+            -H "Accept: application/octet-stream" \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            "$KOTLINURL" \
+            -o "$RUNNER_TEMP/kotlinc.zip"
+          [[ -s "$RUNNER_TEMP/kotlinc.zip" ]] || {
+            echo "└─ ⛔ Kotlin Compiler Archive Is Empty"
+            exit 1
+          }
+
+          unzip -q "$RUNNER_TEMP/kotlinc.zip" -d "$HOME"
+          rm -f "$RUNNER_TEMP/kotlinc.zip"
+          [[ -x "$KOTLINHOME/bin/kotlinc" ]] || {
+            echo "└─ ⚠️ Kotlin Compiler Installation Failed"
+            exit 1
+          }
+        fi
+
+        echo "$KOTLINHOME/bin" >> "$GITHUB_PATH"
+        echo "KOTLINHOME=$KOTLINHOME" >> "$GITHUB_ENV"
+        echo "🎉 Kotlin Installation Completed Successfully"
+        "$KOTLINHOME/bin/kotlinc" -version
