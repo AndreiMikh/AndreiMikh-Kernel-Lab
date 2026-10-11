@@ -1669,150 +1669,97 @@ jobs:
           echo "└─ 🔢 KSU Version      : $KSUVERSION"
           echo "└─ 🔖 Requested Commit : ${ROOTCOMMITSHORT:-${ROOTCOMMIT:0:7}}"
           echo "└─ 🔖 Full Commit      : $ROOTCOMMIT"
-          echo "------------------------------"        
+          echo "------------------------------"
           # Setup Root Engine From Exact Commit
           setupengine() {
             local repo="${1:?Missing Repository}"
             local branch="${2:?Missing Branch}"
-            local argument="${3:?Missing Setup Argument}"
+            local argument="${3-}"
             local commit="${4:-}"
             local sourcedir="${RUNNER_TEMP:-/tmp}/RootSource-${ROOTENGINE:-Unknown}"
-            local actual=""
+            local setupscript="$sourcedir/setup.sh"
             # Validate Requested Full Commit Hash
             if [[ ! "$commit" =~ ^[a-fA-F0-9]{40}$ ]]; then
               echo "└─ ⚠️ [Error] Invalid Setup Commit: ${commit:-Missing}"
               return 1
             fi
 
-            # Display Setup Metadata
             echo "└─ 🔗 Setup Repository : $repo"
             echo "└─ 🌿 Setup Branch     : $branch"
-            echo "└─ 📌 Setup Argument   : $argument"
+            echo "└─ 📌 Setup Argument   : ${argument:-None}"
             echo "└─ 🔖 Setup Commit     : $commit"
-            # Initialize a Clean Source Directory
-            rm -rf "$sourcedir" || return 1
-            mkdir -p "$sourcedir" || return 1
-            git -C "$sourcedir" init -q || return 1
-            git -C "$sourcedir" remote add origin \
-              "https://github.com/${repo}.git" || return 1
-            # Fetch Exact Requested Commit
-            echo "└─ 📥 Fetching Exact Commit..."
-            if git -C "$sourcedir" fetch --depth=1 --no-tags origin "$commit"; then
-              actual="$(git -C "$sourcedir" rev-parse \
-                --verify 'FETCH_HEAD^{commit}' 2>/dev/null)" || actual=""
-            else
-              echo "└─ ↩️ Direct Fetch Failed; Checking Branch History..."
-              # Fetch Requested Branch
-              git -C "$sourcedir" fetch --no-tags origin \
-                "refs/heads/${branch}:refs/remotes/origin/${branch}" || {
-                echo "└─ ⚠️ [Error] Failed to Fetch Branch: $branch"
-                return 1
-              }
-              # Resolve Requested Commit From Available History
-              actual="$(git -C "$sourcedir" rev-parse \
-                --verify "${commit}^{commit}" 2>/dev/null)" || actual=""
-              # Expand Shallow History if Necessary
-              if [[ -z "$actual" ]] && \
-                 [[ "$(git -C "$sourcedir" rev-parse \
-                   --is-shallow-repository 2>/dev/null)" == "true" ]]; then
-                echo "└─ 📦 Expanding Shallow History..."
-                git -C "$sourcedir" fetch --unshallow --no-tags origin \
-                  "refs/heads/${branch}:refs/remotes/origin/${branch}" \
-                  2>/dev/null || true
-                actual="$(git -C "$sourcedir" rev-parse \
-                  --verify "${commit}^{commit}" 2>/dev/null)" || actual=""
-              fi
-            fi
-
-            # Verify Resolved Commit Matches Requested Commit
-            if [[ -z "$actual" || "${actual,,}" != "${commit,,}" ]]; then
-              echo "└─ ⚠️ [Error] Requested Commit Not Found or Mismatched"
-              echo "└─ Requested : $commit"
-              echo "└─ Resolved  : ${actual:-Not Found}"
+            # Prepare Clean Setup Directory
+            rm -rf "$sourcedir"
+            mkdir -p "$sourcedir"
+            # Download Setup Script From Exact Commit
+            echo "└─ 📥 Downloading Setup Script..."
+            if ! curl -fsSL --retry 3 --retry-all-errors \
+              "https://raw.githubusercontent.com/${repo}/${commit}/kernel/setup.sh" \
+              -o "$setupscript"; then
+              echo "└─ ⚠️ [Error] Failed to Download Setup Script"
+              echo "└─ Repository : $repo"
+              echo "└─ Commit     : $commit"
               return 1
             fi
 
-            # Check Out the Exact Verified Commit
-            git -C "$sourcedir" checkout -q --detach "$actual" || return 1
-            # Verify Setup Script Exists at Selected Commit
-            if [[ ! -f "$sourcedir/kernel/setup.sh" ]]; then
-              echo "└─ ⚠️ [Error] Setup Script Not Found at Selected Commit"
+            if [[ ! -s "$setupscript" ]]; then
+              echo "└─ ⚠️ [Error] Downloaded Setup Script Is Empty"
               return 1
             fi
 
-            # Execute the Setup Script From the Verified Source
-            echo "└─ ✔️ Verified Source Commit: $actual"
-            echo "└─ 📂 Source Tree: $sourcedir"
+            echo "└─ ✔️ Setup Script Retrieved From: $commit"
             echo "└─ 🚀 Executing Setup Script..."
-            bash "$sourcedir/kernel/setup.sh" "$argument" "$commit"
+            # Preserve Original Setup Script Argument Behavior
+            if [[ -n "$argument" ]]; then
+              bash "$setupscript" "$argument"
+            else
+              bash "$setupscript"
+            fi
           }
-          # Checkout and Verify Exact Root Engine Commit
+          # Verify Root Engine Commit Without Git
           checkoutrootcommit() {
             local dir="$1"
             local commit="$2"
             local branch="$3"
             local actual=""
-            [[ -d "$dir/.git" ]] || {
-              echo "└─ ⚠️ [Error] Git Repository Not Found: $dir"
+            if [[ ! -d "$dir" ]]; then
+              echo "└─ ⚠️ [Error] Root Engine Directory Not Found: $dir"
               return 1
-            }
-            echo "└─ 🔎 Resolving Requested Commit..."
-            echo "└─ 📂 Repository : $dir"
+            fi
+
+            if [[ ! "$commit" =~ ^[a-fA-F0-9]{40}$ ]]; then
+              echo "└─ ⚠️ [Error] Invalid Requested Commit: $commit"
+              return 1
+            fi
+
+            echo "└─ 🔎 Verifying Root Engine Commit..."
+            echo "└─ 📂 Directory  : $dir"
+            echo "└─ 📦 Repository : $KSUREPO"
+            echo "└─ 🌿 Branch     : $branch"
             echo "└─ 🔖 Requested  : $commit"
-            actual="$(git -C "$dir" rev-parse --verify "${commit}^{commit}" 2>/dev/null)" || actual=""
-            if [[ -z "$actual" ]]; then
-              echo "└─ 📦 Fetching Requested Commit..."
-              git -C "$dir" fetch --no-tags origin "$commit" 2>/dev/null || true
-              actual="$(git -C "$dir" rev-parse --verify "${commit}^{commit}" 2>/dev/null)" || actual=""
-            fi
-
-            if [[ -z "$actual" ]]; then
-              echo "└─ 📦 Fetching Setup Branch..."
-              git -C "$dir" fetch --no-tags origin "$branch" || {
-                echo "└─ ⚠️ [Error] Failed to Fetch Branch: $branch"
-                return 1
-              }
-              actual="$(git -C "$dir" rev-parse --verify "${commit}^{commit}" 2>/dev/null)" || actual=""
-            fi
-
-            if [[ -z "$actual" ]] && \
-               [[ "$(git -C "$dir" rev-parse --is-shallow-repository)" == "true" ]]; then
-              echo "└─ 📦 Expanding Shallow History..."
-              git -C "$dir" fetch --unshallow --no-tags origin "$branch" 2>/dev/null || true
-              actual="$(git -C "$dir" rev-parse --verify "${commit}^{commit}" 2>/dev/null)" || actual=""
-            fi
-
-            if [[ -z "$actual" ]]; then
-              echo "└─ 📦 Fetching Remote Branch History..."
-              git -C "$dir" fetch --no-tags origin \
-                '+refs/heads/*:refs/remotes/origin/*' || {
-                  echo "└─ ⚠️ [Error] Failed to Fetch Root Engine History"
-                  return 1
-                }
-              actual="$(git -C "$dir" rev-parse --verify "${commit}^{commit}" 2>/dev/null)" || actual=""
-            fi
-
-            if [[ -z "$actual" || "${actual,,}" != "${commit,,}" ]]; then
-              echo "└─ ⚠️ [Error] Requested Commit Not Available or Mismatched"
-              echo "└─ Requested : $commit"
-              echo "└─ Resolved  : ${actual:-Not Found}"
-              return 1
-            fi
-
-            echo "└─ 🔄 Checking Out Exact Commit..."
-            git -C "$dir" checkout --detach "$actual" || return 1
-            actual="$(git -C "$dir" rev-parse HEAD)" || return 1
-            [[ "${actual,,}" == "${commit,,}" ]] || {
-              echo "└─ ⚠️ [Error] Root Engine Checkout Verification Failed"
-              echo "└─ Expected : $commit"
-              echo "└─ Actual   : $actual"
+            actual="$(
+              curl -fsSL --retry 3 --retry-all-errors \
+                -H "Accept: application/vnd.github+json" \
+                -H "Authorization: Bearer $GITHUB_TOKEN" \
+                "https://api.github.com/repos/${KSUREPO}/commits/${commit}" \
+                | jq -r '.sha // empty'
+            )" || {
+              echo "└─ ⚠️ [Error] Failed to Verify Remote Commit"
               return 1
             }
-            echo "└─ ✔️ Verified Full Commit: $actual"
+            if [[ "${actual,,}" != "${commit,,}" ]]; then
+              echo "└─ ⚠️ [Error] Remote Commit Verification Failed"
+              echo "└─ Requested : $commit"
+              echo "└─ Actual    : ${actual:-Not Found}"
+              return 1
+            fi
+
+            echo "└─ ✔️ Remote Commit Verified: $actual"
+            echo "└─ ⚠️ Local Source Must Already Match This Commit"
           }
           # Record Root Engine Version
           recordrootversion() {
-            GITCOMMITHASH="$(git rev-parse --short=7 HEAD)"
+            local GITCOMMITHASH="${ROOTCOMMIT:0:7}"
             echo "└─ 🔖 Current Commit : $GITCOMMITHASH"
             echo "└─ 🏷️ Manager Tag    : $MANAGERTAG"
             echo "└─ 🔢 KSU Version    : $KSUVERSION"
@@ -1828,14 +1775,10 @@ jobs:
               echo "└─ 🚀 Setting Up SukiSU-Ultra..."
               if [[ "$SUSFS" != "-1" && "$BRANCHPATH" == "builtin" ]]; then
                 echo "└─ 🔐 SUSFS Enabled with SukiSU-Ultra Builtin Branch"
-                echo "└─ 🌿 Setup Branch   : $BRANCHPATH"
-                echo "└─ 📌 Setup Argument : $BRANCHPATH"
                 setupengine "$KSUREPO" "$BRANCHPATH" "$BRANCHPATH" "$ROOTCOMMIT"
               else
                 echo "└─ 🌿 Using Default Root Engine Branch"
-                echo "└─ 🔐 SUSFS          : $([[ "$SUSFS" != "-1" ]] && echo Enabled || echo Disabled)"
-                echo "└─ 🌿 Setup Branch   : $MANAGERBRANCH"
-                echo "└─ 📌 Setup Argument : $BRANCHPATH"
+                echo "└─ 🔐 SUSFS : $([[ "$SUSFS" != "-1" ]] && echo Enabled || echo Disabled)"
                 setupengine "$KSUREPO" "$MANAGERBRANCH" "$BRANCHPATH" "$ROOTCOMMIT"
               fi
 
@@ -1847,7 +1790,6 @@ jobs:
               recordrootversion
               grep -nE '^VERSION_BASE|^VERSION_OFFSET|^KSU_VERSION_FULL|^VERSION_TAG' \
                 kernel/Makefile || true
-             
               echo "└─ 🎉 SukiSU-Ultra Setup Complete"
               ;;
             BakaSU)
@@ -1872,24 +1814,20 @@ jobs:
                 sed -i '/^CONFIG_KSU_FULL_NAME_FORMAT=/d' "$DEFCONFIG"
                 printf 'CONFIG_KSU_FULL_NAME_FORMAT="%%TAG_NAME%%"\n' >> "$DEFCONFIG"
               fi
-
+            
               echo "└─ 🎉 ReSukiSU (BakaSU) Setup Complete"
               ;;
             KernelSU-Next)
               echo "└─ 🚀 Setting Up KernelSU-Next..."
               if [[ "$SUSFS" != "-1" && "$BRANCHPATH" == "dev-susfs" ]]; then
                 echo "└─ 🔐 SUSFS Enabled with KernelSU-Next Dev-SUSFS Branch"
-                echo "└─ 🌿 Setup Branch   : $BRANCHPATH"
-                echo "└─ 📌 Setup Argument : $BRANCHPATH"
                 setupengine "$KSUREPO" "$BRANCHPATH" "$BRANCHPATH" "$ROOTCOMMIT"
               else
                 echo "└─ 🌿 Using Default Root Engine Branch"
-                echo "└─ 🔐 SUSFS          : $([[ "$SUSFS" != "-1" ]] && echo Enabled || echo Disabled)"
-                echo "└─ 🌿 Setup Branch   : $MANAGERBRANCH"
-                echo "└─ 📌 Setup Argument : $BRANCHPATH"
+                echo "└─ 🔐 SUSFS : $([[ "$SUSFS" != "-1" ]] && echo Enabled || echo Disabled)"
                 setupengine "$KSUREPO" "$MANAGERBRANCH" "$BRANCHPATH" "$ROOTCOMMIT"
               fi
-         
+
               cd KernelSU-Next || {
                 echo "└─ ⚠️ [Error] KernelSU-Next Directory Not Found"
                 exit 1
@@ -1902,7 +1840,7 @@ jobs:
                 sed -i \
                   "s/^KSU_VERSION_FALLBACK := .*/KSU_VERSION_FALLBACK := $KSUVERSION/" \
                   kernel/Kbuild
-              fi              
+              fi
 
               # SUSFS Inline Hook Mode
               if [[ "$SUSFS" != "-1" ]] &&
@@ -1912,7 +1850,6 @@ jobs:
                   strscpy(cmd.mode, "Inline", sizeof(cmd.mode));
                   /s
                 ' kernel/supercall/dispatch.c
-
                 echo "└─ ✔️ SUSFS Hook Mode Set to Inline"
               fi
 
@@ -1964,9 +1901,9 @@ jobs:
           echo "└─ 🔖 Full Commit SHA   : $ROOTCOMMIT"
           echo "└─ 🏷️ Manager Tag       : $MANAGERTAG"
           echo "└─ 🔢 KSU Version       : $KSUVERSION"
-          echo "└─ 📁 Setup Argument    : $BRANCHPATH"
+          echo "└─ 📁 Setup Argument    : ${BRANCHPATH:-None}"
           echo "------------------------------"
-
+      
       - name: ♻️ Fake Patches (Invert)
         if: ${{ inputs.SUSFSREPOSITORY != '-1' }}
         shell: bash
