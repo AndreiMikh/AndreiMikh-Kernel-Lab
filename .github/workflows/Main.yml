@@ -1670,53 +1670,62 @@ jobs:
           echo "└─ 🔢 KSU Version      : $KSUVERSION"
           echo "└─ 🔖 Requested Commit : ${ROOTCOMMITSHORT:-${ROOTCOMMIT:0:7}}"
           echo "└─ 🔖 Full Commit      : $ROOTCOMMIT"
-          echo "------------------------------"
-          # Setup Root Engine
-          # Setup Root Engine From Exact Commit
+          echo "------------------------------"        
           # Setup Root Engine From Exact Commit
           setupengine() {
-            local repo="$1"
-            local branch="$2"
-            local argument="$3"
+            local repo="${1:?Missing Repository}"
+            local branch="${2:?Missing Branch}"
+            local argument="${3:?Missing Setup Argument}"
             local commit="${4:-}"
-            local sourcedir="${RUNNER_TEMP:-/tmp}/RootSource-${ROOTENGINE}"
+            local sourcedir="${RUNNER_TEMP:-/tmp}/RootSource-${ROOTENGINE:-Unknown}"
             local actual=""
+            # Validate Requested Full Commit Hash
             if [[ ! "$commit" =~ ^[a-fA-F0-9]{40}$ ]]; then
-              echo "└─ ⚠️ [Error] Invalid Setup Commit: $commit"
+              echo "└─ ⚠️ [Error] Invalid Setup Commit: ${commit:-Missing}"
               return 1
             fi
 
+            # Display Setup Metadata
             echo "└─ 🔗 Setup Repository : $repo"
             echo "└─ 🌿 Setup Branch     : $branch"
             echo "└─ 📌 Setup Argument   : $argument"
             echo "└─ 🔖 Setup Commit     : $commit"
+            # Initialize a Clean Source Directory
             rm -rf "$sourcedir" || return 1
             mkdir -p "$sourcedir" || return 1
             git -C "$sourcedir" init -q || return 1
             git -C "$sourcedir" remote add origin \
               "https://github.com/${repo}.git" || return 1
+            # Fetch Exact Requested Commit
             echo "└─ 📥 Fetching Exact Commit..."
-            if ! git -C "$sourcedir" fetch --depth=1 --no-tags origin "$commit"; then
-              echo "└─ ↩️ Direct fetch failed; checking branch history..."
+            if git -C "$sourcedir" fetch --depth=1 --no-tags origin "$commit"; then
+              actual="$(git -C "$sourcedir" rev-parse \
+                --verify 'FETCH_HEAD^{commit}' 2>/dev/null)" || actual=""
+            else
+              echo "└─ ↩️ Direct Fetch Failed; Checking Branch History..."
+              # Fetch Requested Branch
               git -C "$sourcedir" fetch --no-tags origin \
                 "refs/heads/${branch}:refs/remotes/origin/${branch}" || {
                 echo "└─ ⚠️ [Error] Failed to Fetch Branch: $branch"
                 return 1
               }
-
+              # Resolve Requested Commit From Available History
               actual="$(git -C "$sourcedir" rev-parse \
                 --verify "${commit}^{commit}" 2>/dev/null)" || actual=""
-              if [[ -z "$actual" ]]; then
+              # Expand Shallow History if Necessary
+              if [[ -z "$actual" ]] && \
+                 [[ "$(git -C "$sourcedir" rev-parse \
+                   --is-shallow-repository 2>/dev/null)" == "true" ]]; then
+                echo "└─ 📦 Expanding Shallow History..."
                 git -C "$sourcedir" fetch --unshallow --no-tags origin \
-                  "refs/heads/${branch}:refs/remotes/origin/${branch}" 2>/dev/null || true
+                  "refs/heads/${branch}:refs/remotes/origin/${branch}" \
+                  2>/dev/null || true
                 actual="$(git -C "$sourcedir" rev-parse \
                   --verify "${commit}^{commit}" 2>/dev/null)" || actual=""
               fi
-            else
-              actual="$(git -C "$sourcedir" rev-parse \
-                'FETCH_HEAD^{commit}')" || return 1
             fi
 
+            # Verify Resolved Commit Matches Requested Commit
             if [[ -z "$actual" || "${actual,,}" != "${commit,,}" ]]; then
               echo "└─ ⚠️ [Error] Requested Commit Not Found or Mismatched"
               echo "└─ Requested : $commit"
@@ -1724,34 +1733,18 @@ jobs:
               return 1
             fi
 
+            # Check Out the Exact Verified Commit
             git -C "$sourcedir" checkout -q --detach "$actual" || return 1
+            # Verify Setup Script Exists at Selected Commit
             if [[ ! -f "$sourcedir/kernel/setup.sh" ]]; then
-              echo "└─ ⚠️ [Error] Kernel / Setup Script Not Found at Selected Commit"
+              echo "└─ ⚠️ [Error] Setup Script Not Found at Selected Commit"
               return 1
             fi
 
+            # Execute the Setup Script From the Verified Source
             echo "└─ ✔️ Verified Source Commit: $actual"
             echo "└─ 📂 Source Tree: $sourcedir"
             echo "└─ 🚀 Executing Setup Script..."
-            bash "$sourcedir/kernel/setup.sh" "$argument" "$commit"
-          }
-            actual="$(git -C "$sourcedir" rev-parse FETCH_HEAD^{commit})"
-            if [[ "${actual,,}" != "${commit,,}" ]]; then
-              echo "└─ ⚠️ [Error] Source Commit Mismatch"
-              echo "└─ Requested : $commit"
-              echo "└─ Actual    : $actual"
-              return 1
-            fi
-
-            git -C "$sourcedir" checkout -q --detach "$actual" || return 1
-            if [[ ! -f "$sourcedir/kernel/setup.sh" ]]; then
-              echo "└─ ⚠️ [Error] kernel/setup.sh Not Found at Selected Commit"
-              return 1
-            fi
-
-            echo "└─ ✔️ Source Commit Verified: $actual"
-            echo "└─ 📂 Source Tree: $sourcedir"
-            echo "└─ 🚀 Executing setup.sh From Selected Commit..."
             bash "$sourcedir/kernel/setup.sh" "$argument" "$commit"
           }
           # Checkout and Verify Exact Root Engine Commit
