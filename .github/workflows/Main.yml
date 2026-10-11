@@ -1663,12 +1663,12 @@ jobs:
           fi
 
           echo "------------------------------"
-          echo "└─ 🔎 Resolved Root Engine Metadata"
-          echo "└─ 📦 Engine           : $ROOTENGINE"
-          echo "└─ 🏷️ Manager Tag      : $MANAGERTAG"
-          echo "└─ 🔢 KSU Version      : $KSUVERSION"
-          echo "└─ 🔖 Requested Commit : ${ROOTCOMMITSHORT:-${ROOTCOMMIT:0:7}}"
-          echo "└─ 🔖 Full Commit      : $ROOTCOMMIT"
+          echo "└─ 🔎 [Info] Resolved Root Engine Metadata"
+          echo "└─ 📦 [Info] Engine           : $ROOTENGINE"
+          echo "└─ 🏷️ [Info] Manager Tag      : $MANAGERTAG"
+          echo "└─ 🔢 [Info] KSU Version      : $KSUVERSION"
+          echo "└─ 🔖 [Info] Requested Commit : ${ROOTCOMMITSHORT:-${ROOTCOMMIT:0:7}}"
+          echo "└─ 🔖 [Info] Full Commit      : $ROOTCOMMIT"
           echo "------------------------------"
           # Setup Root Engine From Exact Commit
           setupengine() {
@@ -1684,21 +1684,21 @@ jobs:
               return 1
             fi
 
-            echo "└─ 🔗 Setup Repository : $repo"
-            echo "└─ 🌿 Setup Branch     : $branch"
-            echo "└─ 📌 Setup Argument   : ${argument:-None}"
-            echo "└─ 🔖 Setup Commit     : $commit"
+            echo "└─ 🔗 [Info] Setup Repository : $repo"
+            echo "└─ 🌿 [Info] Setup Branch     : $branch"
+            echo "└─ 📌 [Info] Setup Argument   : ${argument:-None}"
+            echo "└─ 🔖 [Info] Setup Commit     : $commit"
             # Prepare Clean Setup Directory
             rm -rf "$sourcedir"
             mkdir -p "$sourcedir"
             # Download Setup Script From Exact Commit
-            echo "└─ 📥 Downloading Setup Script..."
+            echo "└─ 📥 [Info] Downloading Setup Script..."
             if ! curl -fsSL --retry 3 --retry-all-errors \
               "https://raw.githubusercontent.com/${repo}/${commit}/kernel/setup.sh" \
               -o "$setupscript"; then
               echo "└─ ⚠️ [Error] Failed to Download Setup Script"
-              echo "└─ Repository : $repo"
-              echo "└─ Commit     : $commit"
+              echo "└─ [Info] Repository : $repo"
+              echo "└─ [Info] Commit     : $commit"
               return 1
             fi
 
@@ -1715,28 +1715,29 @@ jobs:
             else
               bash "$setupscript"
             fi
-          }
+          }              
           # Verify Root Engine Commit Without Git
           checkoutrootcommit() {
             local dir="$1"
             local commit="$2"
             local branch="$3"
             local actual=""
+            local archive=""
             if [[ ! -d "$dir" ]]; then
               echo "└─ ⚠️ [Error] Root Engine Directory Not Found: $dir"
               return 1
             fi
 
             if [[ ! "$commit" =~ ^[a-fA-F0-9]{40}$ ]]; then
-              echo "└─ ⚠️ [Error] Invalid Requested Commit: $commit"
+              echo "└─ ⚠️ [Error] Invalid Requested Commit : $commit"
               return 1
             fi
 
-            echo "└─ 🔎 Verifying Root Engine Commit..."
-            echo "└─ 📂 Directory  : $dir"
-            echo "└─ 📦 Repository : $KSUREPO"
-            echo "└─ 🌿 Branch     : $branch"
-            echo "└─ 🔖 Requested  : $commit"
+            echo "└─ 🔎 [Info] Verifying Root Engine Commit..."
+            echo "└─ 📂 [Info] Directory  : $dir"
+            echo "└─ 📦 [Info] Repository : $KSUREPO"
+            echo "└─ 🌿 [Info] Branch     : $branch"
+            echo "└─ 🔖 [Info] Requested  : $commit"
             actual="$(
               curl -fsSL --retry 3 --retry-all-errors \
                 -H "Accept: application/vnd.github+json" \
@@ -1749,20 +1750,62 @@ jobs:
             }
             if [[ "${actual,,}" != "${commit,,}" ]]; then
               echo "└─ ⚠️ [Error] Remote Commit Verification Failed"
-              echo "└─ Requested : $commit"
-              echo "└─ Actual    : ${actual:-Not Found}"
+              echo "└─ [Info] Requested : $commit"
+              echo "└─ [Info] Actual    : ${actual:-Not Found}"
               return 1
             fi
 
-            echo "└─ ✔️ Remote Commit Verified: $actual"
-            echo "└─ ⚠️ Local Source Must Already Match This Commit"
-          }
+            archive="https://api.github.com/repos/${KSUREPO}/tarball/${commit}"
+            echo "└─ 📥 [Info] Downloading Exact Root Engine Commit..."
+            local tempdir
+            tempdir="$(mktemp -d)"
+            curl -fsSL --retry 3 --retry-all-errors \
+              -H "Accept: application/vnd.github+json" \
+              -H "Authorization: Bearer $GITHUB_TOKEN" \
+              "$archive" \
+              -o "$tempdir/source.tar.gz" || {
+                echo "└─ ⚠️ [Error] Failed to Download Requested Commit"
+                rm -rf "$tempdir"
+                return 1
+              }
+            echo "└─ 📦 [Info] Extracting Requested Source..."
+            mkdir -p "$tempdir/extracted"
+            tar -xzf "$tempdir/source.tar.gz" \
+              -C "$tempdir/extracted" \
+              --strip-components=1 || {
+                echo "└─ ⚠️ [Error] Failed to Extract Requested Source"
+                rm -rf "$tempdir"
+                return 1
+              }
+            if [[ ! -f "$tempdir/extracted/Kbuild" && \
+                  ! -f "$tempdir/extracted/kernel/Kbuild" ]]; then
+              echo "└─ ⚠️ [Error] Downloaded Source Does Not Match Expected Layout"
+              rm -rf "$tempdir"
+              return 1
+            fi
+
+            echo "└─ 🔄 [Info] Replacing Root Engine Source..."
+            find "$dir" -mindepth 1 -maxdepth 1 \
+              ! -name ".git" -exec rm -rf -- {} + || {
+                echo "└─ ⚠️ [Error] Failed to Clean Existing Source"
+                rm -rf "$tempdir"
+                return 1
+              }
+            cp -a "$tempdir/extracted/." "$dir/" || {
+              echo "└─ ⚠️ [Error] Failed to Install Requested Source"
+              rm -rf "$tempdir"
+              return 1
+            }
+            rm -rf "$tempdir"
+            echo "└─ ✔️ [Info] Remote Commit Verified  : $actual"
+            echo "└─ ✔️ [Info] Exact Source Downloaded : $commit"
+          }                             
           # Record Root Engine Version
           recordrootversion() {
             local GITCOMMITHASH="${ROOTCOMMIT:0:7}"
-            echo "└─ 🔖 Current Commit : $GITCOMMITHASH"
-            echo "└─ 🏷️ Manager Tag    : $MANAGERTAG"
-            echo "└─ 🔢 KSU Version    : $KSUVERSION"
+            echo "└─ 🔖 [Info] Current Commit : $GITCOMMITHASH"
+            echo "└─ 🏷️ [Info] Manager Tag    : $MANAGERTAG"
+            echo "└─ 🔢 [Info] KSU Version    : $KSUVERSION"
             {
               echo "KSUVERSION=$KSUVERSION"
               echo "KSUVER=$KSUVERSION"
