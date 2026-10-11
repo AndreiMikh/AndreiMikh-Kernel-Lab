@@ -80,6 +80,8 @@ runs:
         echo "└─ 🔖 Requested Commit: $ROOTCOMMIT"
         API_URL="https://api.github.com/repos/${RELEASEREPOSITORY}/actions/workflows"
         WORKFLOWJSON="$(curl --fail --silent --show-error \
+          -H "Authorization: Bearer $GITHUB_TOKEN" \
+          -H "Accept: application/vnd.github+json" \
           "${API_URL}?per_page=100")" || {
           echo "└─ ⚠️ [Error] Failed to Fetch Workflows"
           exit 1
@@ -105,31 +107,61 @@ runs:
 
         echo "└─ 🆔 Discovered Workflow ID: $WORKFLOWID"
         echo "└─ 🔎 Fetching Successful Manager Runs..."
-        RUNSJSON="$(curl --fail --silent --show-error --get \
-          --data-urlencode "branch=${BRANCH}" \
-          --data-urlencode "status=success" \
-          --data-urlencode "head_sha=${ROOTCOMMIT}" \
-          --data-urlencode "per_page=100" \
-          "${API_URL}/${WORKFLOWID}/runs")" || {
-          echo "└─ ⚠️ [Error] Failed to Fetch Manager Runs"
-          exit 1
-        }
-        mapfile -t runs < <(
-          jq -r --arg commit "$ROOTCOMMIT" '
-            [
-              .workflow_runs[]?
-              | select(.conclusion == "success")
-              | select((.head_sha | ascii_downcase) == ($commit | ascii_downcase))
-            ]
-            | sort_by(.created_at)
-            | reverse
-            | .[].id
-          ' <<< "$RUNSJSON"
-        )
+        if [[ "$ROOTENGINE" == "KernelSU-Next" ]]; then
+          RUNSJSON="$(curl --fail --silent --show-error --get \
+            -H "Authorization: Bearer $GITHUB_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            --data-urlencode "branch=${BRANCH}" \
+            --data-urlencode "status=success" \
+            --data-urlencode "per_page=100" \
+            "${API_URL}/${WORKFLOWID}/runs")" || {
+            echo "└─ ⚠️ [Error] Failed to Fetch Manager Runs"
+            exit 1
+          }
+          mapfile -t runs < <(
+            jq -r '
+              [
+                .workflow_runs[]?
+                | select(.conclusion == "success")
+              ]
+              | sort_by(.created_at)
+              | reverse
+              | .[].id
+            ' <<< "$RUNSJSON"
+          )
+        else
+          RUNSJSON="$(curl --fail --silent --show-error --get \
+            -H "Authorization: Bearer $GITHUB_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            --data-urlencode "branch=${BRANCH}" \
+            --data-urlencode "status=success" \
+            --data-urlencode "head_sha=${ROOTCOMMIT}" \
+            --data-urlencode "per_page=100" \
+            "${API_URL}/${WORKFLOWID}/runs")" || {
+            echo "└─ ⚠️ [Error] Failed to Fetch Manager Runs"
+            exit 1
+          }
+          mapfile -t runs < <(
+            jq -r --arg commit "$ROOTCOMMIT" '
+              [
+                .workflow_runs[]?
+                | select(.conclusion == "success")
+                | select((.head_sha | ascii_downcase) == ($commit | ascii_downcase))
+              ]
+              | sort_by(.created_at)
+              | reverse
+              | .[].id
+            ' <<< "$RUNSJSON"
+          )
+        fi
         if [[ ${#runs[@]} -eq 0 ]]; then
           echo "└─ ⚠️ [Warn] No Successful Manager Runs Found"
           echo "   ├─ Branch : $BRANCH"
-          echo "   └─ Commit : $ROOTCOMMIT"
+          if [[ "$ROOTENGINE" == "KernelSU-Next" ]]; then
+            echo "   └─ Source : Upstream manager branch"
+          else
+            echo "   └─ Commit : $ROOTCOMMIT"
+          fi
         else
           echo "└─ ✔️ Found ${#runs[@]} Matching Manager Run(s)"
           printf '└─ 🏁 [Info] Matching Run ID: %s\n' "${runs[@]}"
@@ -230,7 +262,6 @@ runs:
         )"
 
         echo "└─ 📦 [Result] Manager Artifact Count: $artifactcount"
-
         # Download and Extract Manager Artifacts
         if [[ "$artifactcount" -gt 0 ]]; then
           i=0
