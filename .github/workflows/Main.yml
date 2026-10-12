@@ -1670,7 +1670,7 @@ jobs:
           echo "└─ 🔖 [Info] Requested Commit : ${ROOTCOMMITSHORT:-${ROOTCOMMIT:0:7}}"
           echo "└─ 🔖 [Info] Full Commit      : $ROOTCOMMIT"
           echo "------------------------------"
-          # Setup Root Engine From Exact Commit
+          # Download and Execute Root Engine Setup Script From Exact Commit
           setupengine() {
             local repo="${1:?Missing Repository}"
             local branch="${2:?Missing Branch}"
@@ -1702,9 +1702,21 @@ jobs:
               return 1
             fi
 
+            # Reject Missing or Empty Setup Scripts
             if [[ ! -s "$setupscript" ]]; then
               echo "└─ ⚠️ [Error] Downloaded Setup Script Is Empty"
               return 1
+            fi
+
+            # Disable BakaSU Git-Based Updates When Using a Pinned Commit
+            if [[ "${ROOTENGINE:-}" == "BakaSU" && -n "${ROOTCOMMIT:-}" ]]; then
+            echo "└─ 🔒 [Info] Disabling BakaSU Git Updates..."
+              sed -i \
+                -e '/git stash && echo/d' \
+                -e '/git pull && echo/d' \
+                -e '/git checkout main && echo/d' \
+                -e '/git checkout "\$1" && echo/d' \
+                "$setupscript"
             fi
 
             echo "└─ ✔️ Setup Script Retrieved From: $commit"
@@ -1716,18 +1728,20 @@ jobs:
               bash "$setupscript"
             fi
           }              
-          # Verify Root Engine Commit Without Git
+          # Verify and Install Exact Root Engine Commit
           checkoutrootcommit() {
             local dir="$1"
             local commit="$2"
             local branch="$3"
             local actual=""
             local archive=""
+            # Validate Root Engine Source Directory
             if [[ ! -d "$dir" ]]; then
               echo "└─ ⚠️ [Error] Root Engine Directory Not Found: $dir"
               return 1
             fi
 
+            # Validate Requested Full Commit Hash
             if [[ ! "$commit" =~ ^[a-fA-F0-9]{40}$ ]]; then
               echo "└─ ⚠️ [Error] Invalid Requested Commit : $commit"
               return 1
@@ -1738,6 +1752,7 @@ jobs:
             echo "└─ 📦 [Info] Repository : $KSUREPO"
             echo "└─ 🌿 [Info] Branch     : $branch"
             echo "└─ 🔖 [Info] Requested  : $commit"
+            # Verify Requested Commit Against the GitHub API
             actual="$(
               curl -fsSL --retry 3 --retry-all-errors \
                 -H "Accept: application/vnd.github+json" \
@@ -1748,6 +1763,7 @@ jobs:
               echo "└─ ⚠️ [Error] Failed to Verify Remote Commit"
               return 1
             }
+            # Reject Any Commit That Does Not Match Requested Hash
             if [[ "${actual,,}" != "${commit,,}" ]]; then
               echo "└─ ⚠️ [Error] Remote Commit Verification Failed"
               echo "└─ [Info] Requested : $commit"
@@ -1755,6 +1771,7 @@ jobs:
               return 1
             fi
 
+            # Download Verified Commit as Source Archive
             archive="https://api.github.com/repos/${KSUREPO}/tarball/${commit}"
             echo "└─ 📥 [Info] Downloading Exact Root Engine Commit..."
             local tempdir
@@ -1768,6 +1785,7 @@ jobs:
                 rm -rf "$tempdir"
                 return 1
               }
+            # Extract Source Archive Without its Top-Level Directory
             echo "└─ 📦 [Info] Extracting Requested Source..."
             mkdir -p "$tempdir/extracted"
             tar -xzf "$tempdir/source.tar.gz" \
@@ -1777,6 +1795,7 @@ jobs:
                 rm -rf "$tempdir"
                 return 1
               }
+            # Validate Extracted Root Engine Source Layout
             if [[ ! -f "$tempdir/extracted/Kbuild" && \
                   ! -f "$tempdir/extracted/kernel/Kbuild" ]]; then
               echo "└─ ⚠️ [Error] Downloaded Source Does Not Match Expected Layout"
@@ -1784,6 +1803,7 @@ jobs:
               return 1
             fi
 
+            # Replace Existing Source While Preserving Git Directory
             echo "└─ 🔄 [Info] Replacing Root Engine Source..."
             find "$dir" -mindepth 1 -maxdepth 1 \
               ! -name ".git" -exec rm -rf -- {} + || {
@@ -1791,21 +1811,30 @@ jobs:
                 rm -rf "$tempdir"
                 return 1
               }
+            # Install Verified Source Into Existing Directory
             cp -a "$tempdir/extracted/." "$dir/" || {
               echo "└─ ⚠️ [Error] Failed to Install Requested Source"
               rm -rf "$tempdir"
               return 1
             }
+            # Validate Installed Root Engine Source
+            if [[ ! -f "$dir/Kbuild" && ! -f "$dir/kernel/Kbuild" ]]; then
+              echo "└─ ⚠️ [Error] Installed Root Engine Source Is Invalid"
+              rm -rf "$tempdir"
+              return 1
+            fi
+
+            # Remove Temporary Download and Extraction Files
             rm -rf "$tempdir"
             echo "└─ ✔️ [Info] Remote Commit Verified  : $actual"
-            echo "└─ ✔️ [Info] Exact Source Downloaded : $commit"
-          }                             
-          # Record Root Engine Version
+            echo "└─ ✔️ [Info] Exact Source Installed  : $commit"                      
+          # Record Root Engine Version and Export Build Metadata
           recordrootversion() {
             local GITCOMMITHASH="${ROOTCOMMIT:0:7}"
             echo "└─ 🔖 [Info] Current Commit : $GITCOMMITHASH"
             echo "└─ 🏷️ [Info] Manager Tag    : $MANAGERTAG"
             echo "└─ 🔢 [Info] KSU Version    : $KSUVERSION"
+            # Export Version Variables to Subsequent GitHub Actions Steps
             {
               echo "KSUVERSION=$KSUVERSION"
               echo "KSUVER=$KSUVERSION"
@@ -1919,7 +1948,7 @@ jobs:
               if [[ -f kernel/Kbuild ]] &&
                  grep -qE '^DKSU_VERSION[[:space:]]*=' kernel/Kbuild; then
                 sed -i -E \
-                  "s/^DKSU_VERSION[[:space:]]*=.*$/DKSU_VERSION := ${KSUVERSION}/" \
+                  "s/^(DKSU_VERSION[[:space:]]*:?=).*/\1 ${KSUVERSION}/" \
                   kernel/Kbuild
               fi
 
