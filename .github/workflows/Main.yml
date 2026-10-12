@@ -389,7 +389,7 @@ jobs:
     steps:    
       - name: 🌿 Checkout
         uses: actions/checkout@v7
-  
+
       - name: 🧹 Optimize Build Storage
         if: ${{ env.CLEANSPACE == 'Disabled' }}
         shell: bash
@@ -397,7 +397,7 @@ jobs:
           MBROOTRESERVE: 8192
           MBTEMPORARYRESERVE: 2048
           BUILDMOUNTPATH: ${{ github.workspace }}
-          MOUNTOWNERSHIP: runner:runner
+          MOUNTOWNERSHIP: runner
           PVLOOPPATH: /pv.img
           TEMPORARYPVLOOPPATH: /mnt/tmp-pv.img
           REMOVEDOTNET: true
@@ -406,170 +406,167 @@ jobs:
           REMOVECODEQL: true
           REMOVEDOCKERIMAGES: true
         run: |
-          set -Eeuo pipefail
-          # Paths
+          set -Eeuo pipefail      
           WORKSPACEDIR="${GITHUB_WORKSPACE}"
-          VGNAME=buildvg  
-          # Display Build Space Configuration
-          echo "└─📌 Build Space Configuration"
+          VGNAME="buildvg"      
+          echo "└─ 📌 Build Space Configuration"
           echo "└─ 📂 Root reserve       : ${MBROOTRESERVE} MiB"
           echo "└─ 📂 Temp reserve       : ${MBTEMPORARYRESERVE} MiB"
           echo "└─ 📂 Mount path         : ${BUILDMOUNTPATH}"
           echo "└─ 📂 Root PV loop path  : ${PVLOOPPATH}"
           echo "└─ 📂 Temp PV loop path  : ${TEMPORARYPVLOOPPATH}"
-          echo "└─ 📂 Removing           : dotnet=${REMOVEDOTNET} android=${REMOVEANDROID} haskell=${REMOVEHASKELL} codeql=${REMOVECODEQL} docker=${REMOVEDOCKERIMAGES}"     
-          # Preserve Original Workspace Ownership
-          WORKSPACEOWNER="$(stat -c '%U:%G' "${WORKSPACEDIR}")"    
+          echo "└─ 📂 Removing           : dotnet=${REMOVEDOTNET} android=${REMOVEANDROID} haskell=${REMOVEHASKELL} codeql=${REMOVECODEQL} docker=${REMOVEDOCKERIMAGES}"    
+          # Validate Required Commands
+          for COMMAND in df findmnt fallocate losetup pvcreate vgcreate lvcreate mkfs.ext4 mount; do
+            if ! command -v "$COMMAND" >/dev/null 2>&1; then
+              echo "└─ ⚠️ [Error] Required Command Not Found: $COMMAND"
+              exit 1
+            fi
+          done
+      
+          # Prepare Build Mount Directory
+          sudo mkdir -p "${BUILDMOUNTPATH}" /mnt
+          WORKSPACEOWNER="$(stat -c '%U:%G' "${WORKSPACEDIR}")"   
           # Display Available Space Before Cleanup
-          echo "└─ 📊 Available Space Before Cleanup:"
-          sudo df -h      
-          # Ensure Build Mount Directory Exists
-          sudo mkdir -p "${BUILDMOUNTPATH}"      
+          echo "└─ 📊 Available Space Before Cleanup :"
+          sudo df -h   
           # Check Available Space Before Software Cleanup
-          echo "└─ 🧹 Checking Pre-Installed Software Cleanup..."         
-          ROOTFREEGIB="$(df -BG --output=avail / | tail -n 1 | tr -dc '0-9')"          
+          echo "└─ 🧹 Checking Pre-Installed Software Cleanup..."
+          ROOTFREEGIB="$(df -BG --output=avail / | awk 'NR == 2 {gsub(/G/, "", $1); print $1}')"    
           if (( ROOTFREEGIB < 30 )); then
-            echo "└─ ⚠️ Low Disk Space : ${ROOTFREEGIB} GiB"
-            echo "└─ 🧹 Removing Unneeded Software..."          
-            CLEANUPJOBS=()          
+            echo "└─ ⚠️ Low Disk Space: ${ROOTFREEGIB} GiB"
+            echo "└─ 🧹 Removing Unneeded Software..."   
+            CLEANUPJOBS=()      
             if [[ "${REMOVEDOTNET:-false}" == "true" && -d /usr/share/dotnet ]]; then
               sudo rm -rf /usr/share/dotnet &
               CLEANUPJOBS+=("$!")
             fi
-          
+      
             if [[ "${REMOVEANDROID:-false}" == "true" && -d /usr/local/lib/android ]]; then
               sudo rm -rf /usr/local/lib/android &
               CLEANUPJOBS+=("$!")
             fi
-          
+      
             if [[ "${REMOVEHASKELL:-false}" == "true" && -d /opt/ghc ]]; then
               sudo rm -rf /opt/ghc &
               CLEANUPJOBS+=("$!")
             fi
-          
+      
             if [[ "${REMOVECODEQL:-false}" == "true" && -d /opt/hostedtoolcache/CodeQL ]]; then
               sudo rm -rf /opt/hostedtoolcache/CodeQL &
               CLEANUPJOBS+=("$!")
             fi
-          
+      
             for CLEANUPJOB in "${CLEANUPJOBS[@]}"; do
               wait "$CLEANUPJOB"
             done
-          
-            if [[ "${REMOVEDOCKERIMAGES:-false}" == "true" ]]; then
+      
+            if [[ "${REMOVEDOCKERIMAGES:-false}" == "true" ]] && command -v docker >/dev/null 2>&1; then
               sudo docker image prune --all --force || true
             fi
-        
           else
             echo "└─ ⚡ Skipping Cleanup: ${ROOTFREEGIB} GiB Available"
           fi
-          
-          echo "└─ ✔️ Software Cleanup Check Complete"
+      
+          echo "└─ ✔️ Software Cleanup Check Complete"     
           # Remove Existing Swap
           echo "└─ 🗑️ Removing Existing Swap..."
           sudo swapoff -a || true
-          sudo rm -f /mnt/swapfile            
-          # Calculate Available Root Filesystem Space
-          echo "└─ 💽 Creating LVM PV From Root Filesystem..."
+          sudo rm -f /mnt/swapfile
+      
+          # Validate LVM Configuration
+          if sudo vgs "${VGNAME}" >/dev/null 2>&1; then
+            echo "└─ ⚠️ [Error] Volume Group Already Exists : ${VGNAME}"
+            exit 1
+          fi
+      
+          # Remove Existing Loop Attachments
+          for IMAGEPATH in "${PVLOOPPATH}" "${TEMPORARYPVLOOPPATH}"; do
+            while IFS= read -r LOOPDEV; do
+              [[ -n "$LOOPDEV" ]] || continue
+              echo "└─ 🔌 Detaching Existing Loop Device : ${LOOPDEV}"
+              sudo losetup -d "$LOOPDEV"
+            done < <(sudo losetup -j "$IMAGEPATH" | awk -F: 'NF > 1 {print $1}')
+      
+            sudo rm -f "$IMAGEPATH"
+          done
+      
+          # Calculate Filesystem Reserves
           KBROOTRESERVE=$((MBROOTRESERVE * 1024))
-          KBROOTFREE="$(df --block-size=1024 --output=avail / | tail -n 1 | tr -d ' ')"
-          KBROOTSAFETY=$((4 * 1024 * 1024))
-          KBROOTALLOCATABLE=$((KBROOTFREE - KBROOTRESERVE - KBROOTSAFETY))       
-          # Validate Root PV Allocation
-          if (( KBROOTALLOCATABLE <= 0 )); then
-            echo "└─ ⚠️ Insufficient Root Filesystem Space"
-            echo "└─ 📂 Available        : ${KBROOTFREE} KiB"
-            echo "└─ 📂 Required Reserve : ${KBROOTRESERVE} KiB"
-            echo "└─ 📂 Safety Margin    : ${KBROOTSAFETY} KiB"
-            exit 1
+          KBTEMPORARYRESERVE=$((MBTEMPORARYRESERVE * 1024))
+          KBROOTSAFETY=$((4 * 1024 * 1024))     
+          # Detect Shared Backing Filesystem
+          ROOTFSID="$(findmnt -n -o MAJ:MIN -T /)"
+          TEMPFSID="$(findmnt -n -o MAJ:MIN -T /mnt)"    
+          # Calculate Available Filesystem Space
+          KBROOTFREE="$(df -Pk / | awk 'NR == 2 {print $4}')"
+          KBTEMPORARYFREE="$(df -Pk /mnt | awk 'NR == 2 {print $4}')"     
+          echo "└─ 📊 Root Available      : $((KBROOTFREE / 1024)) MiB"
+          echo "└─ 📊 Temp Available      : $((KBTEMPORARYFREE / 1024)) MiB"
+          echo "└─ 📂 Root Filesystem ID  : ${ROOTFSID}"
+          echo "└─ 📂 Temp Filesystem ID  : ${TEMPFSID}"     
+          # Calculate PV Sizes Without Double-Counting Shared Space
+          if [[ "$ROOTFSID" == "$TEMPFSID" ]]; then
+            echo "└─ ⚠️ Root and /mnt Share a Filesystem"
+            echo "└─ 📌 Using a Single Shared Space Budget"     
+            KBSHAREDBUDGET=$((KBROOTFREE - KBROOTRESERVE - KBTEMPORARYRESERVE - KBROOTSAFETY))     
+            if (( KBSHAREDBUDGET <= 0 )); then
+              echo "└─ ⚠️ [Error] Insufficient Shared Filesystem Space"
+              exit 1
+            fi
+      
+            KBROOTPV=$((KBSHAREDBUDGET * 3 / 4))
+            KBTEMPORARYPV=$((KBSHAREDBUDGET - KBROOTPV))
+          else
+            echo "└─ ✔️ Root and /mnt Use Separate Filesystems"     
+            KBROOTPV=$((KBROOTFREE - KBROOTRESERVE - KBROOTSAFETY))
+            KBTEMPORARYPV=$((KBTEMPORARYFREE - KBTEMPORARYRESERVE))   
+            if (( KBROOTPV <= 0 || KBTEMPORARYPV <= 0 )); then
+              echo "└─ ⚠️ [Error] Insufficient Filesystem Space"
+              exit 1
+            fi
           fi
-        
-          # Calculate Root PV Size
-          BROOTLVMSIZE=$((KBROOTALLOCATABLE * 1024))         
-          # Create Root-Backed Loop Image
-          sudo rm -f "${PVLOOPPATH}"
-          sudo touch "${PVLOOPPATH}"
-          sudo fallocate -z -l "${BROOTLVMSIZE}" "${PVLOOPPATH}"      
-          # Attach Root Image to Loop Device
-          ROOTLOOPDEV="$(
-            sudo losetup --find --show "${PVLOOPPATH}"
-          )"      
-          # Initialize Root Loop Device as LVM PV
-          sudo pvcreate -f "${ROOTLOOPDEV}"      
+      
+          # Convert PV Sizes to Bytes
+          BROOTLVMSIZE=$((KBROOTPV * 1024))
+          BTEMPORARYLVMSIZE=$((KBTEMPORARYPV * 1024))     
+          echo "└─ 📦 Root PV Size      : $((KBROOTPV / 1024)) MiB"
+          echo "└─ 📦 Temporary PV Size : $((KBTEMPORARYPV / 1024)) MiB"     
+          # Create Root-Backed LVM PV
+          echo "└─ 💽 Creating LVM PV From Root Filesystem..."
+          sudo fallocate -l "$BROOTLVMSIZE" "$PVLOOPPATH"
+          ROOTLOOPDEV="$(sudo losetup --find --show "$PVLOOPPATH")"
+          sudo pvcreate -f "$ROOTLOOPDEV"
           echo "└─ ✔️ Root PV : ${ROOTLOOPDEV}"      
-          # Calculate Available /Mount Filesystem Space
-          echo "└─ 💽 Creating LVM PV From /Mount..."      
-          KBTEMPORARYRESERVE=$((MBTEMPORARYRESERVE * 1024))      
-          KBTEMPORARYFREE="$(
-            df --block-size=1024 --output=avail /mnt |
-              tail -n 1 |
-              tr -d ' '
-          )"
-      
-          # Ensure /Mount Reserve Can Be Preserved
-          if (( KBTEMPORARYFREE <= KBTEMPORARYRESERVE )); then
-            echo "└─ ⚠️ Insufficient /Mount Filesystem Space"
-            echo "└─ 📂 Available        : ${KBTEMPORARYFREE} KiB"
-            echo "└─ 📂 Required Reserve : ${KBTEMPORARYRESERVE} KiB"
-            exit 1
-          fi
-      
-          # Calculate /Mount PV Size
-          BTEMPORARYLVMSIZE=$(( (KBTEMPORARYFREE - KBTEMPORARYRESERVE) * 1024 ))     
-          # Create /Mount-Backed Loop Image
-          sudo rm -f "${TEMPORARYPVLOOPPATH}"
-          sudo touch "${TEMPORARYPVLOOPPATH}"
-          sudo fallocate -z -l "${BTEMPORARYLVMSIZE}" "${TEMPORARYPVLOOPPATH}"      
-          # Attach /Mount Image to Loop Device
-          TEMPORARYLOOPDEV="$(
-            sudo losetup --find --show "${TEMPORARYPVLOOPPATH}"
-          )"     
-          # Initialize /Mount Loop Device as LVM PV
-          sudo pvcreate -f "${TEMPORARYLOOPDEV}"      
-          echo "└─ ✔️ Temp PV : ${TEMPORARYLOOPDEV}"
-          # Combine Root and /Mount PVs Into One Volume Group
-          echo "└─ 🔗 Creating Volume Group : ${VGNAME}"     
-          sudo vgcreate \
-            "${VGNAME}" \
-            "${TEMPORARYLOOPDEV}" \
-            "${ROOTLOOPDEV}"      
-          echo "└─ ✔️ Volume Group Created"      
-          # Allocate All Remaining Space to Build Volume
-          echo "└─ 📦 Creating Build Volume..."      
-          sudo lvcreate \
-            -l 100%FREE \
-            -n buildlv \
-            "${VGNAME}"    
+          # Create Temporary-Backed LVM PV
+          echo "└─ 💽 Creating LVM PV From /mnt..."
+          sudo fallocate -l "$BTEMPORARYLVMSIZE" "$TEMPORARYPVLOOPPATH"
+          TEMPORARYLOOPDEV="$(sudo losetup --find --show "$TEMPORARYPVLOOPPATH")"
+          sudo pvcreate -f "$TEMPORARYLOOPDEV"
+          echo "└─ ✔️ Temp PV : ${TEMPORARYLOOPDEV}"    
+          # Combine PVs Into One Volume Group
+          echo "└─ 🔗 Creating Volume Group: ${VGNAME}"
+          sudo vgcreate "${VGNAME}" "${TEMPORARYLOOPDEV}" "${ROOTLOOPDEV}"
+          echo "└─ ✔️ Volume Group Created"   
+          # Allocate Available Space to Build Volume
+          echo "└─ 📦 Creating Build Volume..."
+          sudo lvcreate -l 100%FREE -n buildlv "${VGNAME}"     
           # Format Build Volume as Ext4
-          sudo mkfs.ext4 \
-            -Enodiscard \
-            -m0 \
-            "/dev/mapper/${VGNAME}-buildlv"     
-          echo "└─ ✔️ Build Filesystem Created"     
-          # Mount Build Volume Over GitHub Workspace
-          echo "└─ 📂 Mounting Build Volume to ${BUILDMOUNTPATH}..."     
-          sudo mount \
-            "/dev/mapper/${VGNAME}-buildlv" \
-            "${BUILDMOUNTPATH}"     
-          # Restore Runner Ownership
-          sudo chown -R \
-            "${MOUNTOWNERSHIP}" \
-            "${BUILDMOUNTPATH}"  
-          # Restore Workspace Ownership if Required
-          if [[ ! -d "${WORKSPACEDIR}" ]]; then
-            sudo mkdir -p "${WORKSPACEDIR}"
-            sudo chown -R \
-              "${WORKSPACEOWNER}" \
-              "${WORKSPACEDIR}"
-          fi
-      
+          sudo mkfs.ext4 -Enodiscard -m0 "/dev/mapper/${VGNAME}-buildlv"
+          echo "└─ ✔️ Build Filesystem Created"      
+          # Mount Build Volume Over Workspace
+          echo "└─ 📂 Mounting Build Volume to ${BUILDMOUNTPATH}..."
+          sudo mount "/dev/mapper/${VGNAME}-buildlv" "${BUILDMOUNTPATH}"      
+          # Restore Workspace Ownership
+          sudo chown -R "${MOUNTOWNERSHIP}" "${BUILDMOUNTPATH}"    
           # Display Available Space After Setup
-          echo "└─ 📊 Available Space After Cleanup :"
-          sudo df -h      
+          echo "└─ 📊 Available Space After Setup:"
+          sudo df -h    
           # Display LVM Configuration
-          echo "└─ 💾 LVM Status :"
+          echo "└─ 💾 LVM Status:"
+          sudo pvs
           sudo vgs
-          sudo lvs
+          sudo lvs     
           echo "└─ 🎉 Build Space Maximization Complete"
 
       - name: 👤 Git Identity
