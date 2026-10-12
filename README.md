@@ -1,6 +1,6 @@
 # 📱 OnePlusOSS Kernel Tracker
 
-> **Last Update:** 2026-10-12 03:49:41 UTC
+> **Last Update:** 2026-10-12 20:45:51 UTC
 
 Automated monitoring report for OnePlusOSS Android kernel repositories.
 
@@ -206,6 +206,31 @@ Automated monitoring report for OnePlusOSS Android kernel repositories.
 ---
 
 ### 🛠 Kernel Trees Report
+<details><summary><b>android_kernel_oneplus_mt6878</b></summary>
+
+#### Branch: `oneplus/mt6878_b_16.0_nord_ce6_lite` ✅
+* **Kernel Version:** `6.1.134`
+* **Commit SHA:** `c1dff55`
+* **Message:** Synchronize code for OnePlus CPH2943_16.0.5.806(EX01) 
+
+---
+
+#### Branch: `oneplus/mt6878_b_16.0_turbo_6x` 🔄 Updated
+* **Kernel Version:** `6.1.157`
+* **Commit SHA:** `46579b2`
+* **Message:** Synchronize code for OnePlus PYR110_16.0.5.1301(CN01) 
+
+---
+
+#### Branch: `oneplus/mt6878_b_16.0.0_pad_go_2` ✅
+* **Kernel Version:** `6.1.134`
+* **Commit SHA:** `cb7a5cb`
+* **Message:** Synchronize code for OnePlus OPD2504_16.0.1.307(EX01) OPD2505_16.0.1.307(EX01) 
+
+---
+
+</details>
+
 <details><summary><b>android_kernel_oneplus_sm8750</b></summary>
 
 #### Branch: `oneplus/sm8750_b_16.0.0_ace_6` ✅
@@ -830,31 +855,6 @@ Automated monitoring report for OnePlusOSS Android kernel repositories.
 * **Kernel Version:** `6.1.115`
 * **Commit SHA:** `f3b53bb`
 * **Message:** Synchronize code for OnePlus CPH2717_15.0.2.601(EX01) 
-
----
-
-</details>
-
-<details><summary><b>android_kernel_oneplus_mt6878</b></summary>
-
-#### Branch: `oneplus/mt6878_b_16.0_nord_ce6_lite` ✅
-* **Kernel Version:** `6.1.134`
-* **Commit SHA:** `c1dff55`
-* **Message:** Synchronize code for OnePlus CPH2943_16.0.5.806(EX01) 
-
----
-
-#### Branch: `oneplus/mt6878_b_16.0_turbo_6x` ✅
-* **Kernel Version:** `6.1.134`
-* **Commit SHA:** `cb8419d`
-* **Message:** Synchronize code for OnePlus PYS110_16.0.5.904(CN01) 
-
----
-
-#### Branch: `oneplus/mt6878_b_16.0.0_pad_go_2` ✅
-* **Kernel Version:** `6.1.134`
-* **Commit SHA:** `cb7a5cb`
-* **Message:** Synchronize code for OnePlus OPD2504_16.0.1.307(EX01) OPD2505_16.0.1.307(EX01) 
 
 ---
 
