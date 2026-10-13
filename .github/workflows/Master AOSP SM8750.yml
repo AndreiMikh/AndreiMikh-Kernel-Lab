@@ -166,7 +166,7 @@ jobs:
       # Compiler Cache Configuration
       CCACHE_BASEDIR: ${{ github.workspace }}
       CCACHE_DIR: ${{ github.workspace }}/.ccache
-      CCACHE_MAXSIZE: 4G
+      CCACHE_MAXSIZE: 8G
       CCACHE_COMPILERCHECK: "content"
       CCACHE_NOHASHDIR: "true"
       CCACHE_NOHARDLINK: "true"
@@ -529,7 +529,7 @@ jobs:
           "$CLANGDIR/bin/clang" --version
    
       - name: 💾 Save Clang Cache
-        if: steps.clang-cache.outputs.cache-hit != 'true'
+        if: steps.clang-cache.outputs.cache-hit != 'true' 
         uses: actions/cache/save@v6
         with:
           path: clang
@@ -575,13 +575,72 @@ jobs:
           echo "/tmp"
           echo "🎉 Clang Configuration and Toolchain Verification Complete"    
 
+      - name: 💾 Restore Compiler Cache
+        id: ccache-restore
+        if: ${{ inputs.BUILDCCACHE }}
+        uses: actions/cache/restore@v6
+        with:
+          path: .ccache
+          # Rolling Exact Key
+          key: CCache-SM8750-${{ inputs.AOSPSOURCE }}-${{ runner.os }}-${{ runner.arch }}-${{ github.ref_name }}
+          # Restore Newest Compatible CCache
+          restore-keys: |
+            CCache-SM8750-${{ inputs.AOSPSOURCE }}-${{ runner.os }}-${{ runner.arch }}-${{ github.ref_name }}
+            CCache-SM8750-${{ inputs.AOSPSOURCE }}-${{ runner.os }}-${{ runner.arch }}-
+            CCache-SM8750-${{ inputs.AOSPSOURCE }}-${{ runner.os }}-
+            CCache-SM8750-${{ inputs.AOSPSOURCE }}-
+
+      - name: 📥 Restore Public Compiler Cache
+        if: ${{ inputs.BUILDCCACHE }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          # Re-Export Compiler Cache Directory
+          CCACHE_DIR="${CCACHE_DIR:-${GITHUB_WORKSPACE}/.ccache}"
+          mkdir -p "$CCACHE_DIR"
+          # Define Public Compiler Cache Release
+          ARCHIVE="CCache-SM8750-${{ inputs.AOSPSOURCE }}.tar.zst"
+          RELEASE="CCache-SM8750-${{ inputs.AOSPSOURCE }}"
+          echo "📦 Looking For Public Compiler Cache Release..."
+          echo "📌 Release         : $RELEASE"
+          echo "📌 Archive         : $ARCHIVE"
+          echo "📂 Cache Directory : $CCACHE_DIR"
+          # Display Existing Compiler Cache
+          echo "📊 Existing Compiler Cache Status"
+          ccache -s
+          # Download Public Compiler Cache
+          if gh release download "$RELEASE" \
+            --repo "$GITHUB_REPOSITORY" \
+            --pattern "$ARCHIVE" \
+            --clobber; then
+            echo "✔️ Public Compiler Cache Found"
+            echo "📦 Merging Public Compiler Cache..."
+            # Extract Public Compiler Cache
+            if tar -I zstd -xf "$ARCHIVE" -C "$CCACHE_DIR"; then
+              rm -f "$ARCHIVE"
+              # Re-Apply Compiler Cache Size Limit
+              ccache -M "${CCACHE_MAXSIZE:-4G}"
+              echo "📊 Merged Compiler Cache Status"
+              ccache -s
+              echo "✔️ Public Compiler Cache Merged"
+            else
+              rm -f "$ARCHIVE"
+              echo "⚠️ Failed To Extract Public Compiler Cache"
+              exit 1
+            fi
+          else
+            echo "ℹ️ Public Compiler Cache Unavailable"
+            echo "📌 Continuing With Existing Compiler Cache"
+          fi
+
       - name: ⚙️ Configure Compiler Cache / ECS
         if: ${{ inputs.BUILDCCACHE }}
         shell: bash
         run: |
           # Configure Compiler Cache Environment
           export CCACHE_DIR="${CCACHE_DIR:-${GITHUB_WORKSPACE}/.ccache}"
-          export CCACHE_MAXSIZE="${CCACHE_MAXSIZE:-4G}"
+          export CCACHE_MAXSIZE="${CCACHE_MAXSIZE:-8G}"
           export CCACHE_COMPILERCHECK="${CCACHE_COMPILERCHECK:-content}"
           export CCACHE_BASEDIR="${CCACHE_BASEDIR:-${GITHUB_WORKSPACE}}"
           export CCACHE_NOHASHDIR="${CCACHE_NOHASHDIR:-true}"
@@ -612,7 +671,6 @@ jobs:
 
           # Configure Compiler Cache
           ccache --set-config=compression=true
-          # Reduce Avoidable Cache Misses
           ccache --set-config=sloppiness=file_stat_matches,include_file_ctime,include_file_mtime,pch_defines,file_macro,time_macros
           # Display Compiler Cache Configuration
           echo "🔧 Compiler Cache Configuration"
@@ -628,75 +686,6 @@ jobs:
           ccache --version
           echo "🔎 Compiler Cache Configuration"
           ccache --show-config
-          echo "🎉 Compiler Cache Configuration Complete"
-
-      - name: 💾 Restore Compiler Cache
-        id: ccache-restore
-        if: ${{ inputs.BUILDCCACHE }}
-        uses: actions/cache/restore@v6
-        with:
-          path: .ccache
-          # Rolling Exact Key
-          key: CCache-SM8750-${{ inputs.AOSPSOURCE }}-${{ steps.clang-meta.outputs.clangversion }}-${{ runner.os }}-${{ runner.arch }}-${{ github.ref_name }}-${{ github.run_id }}
-          # Restore Newest Compatible CCache
-          restore-keys: |
-            CCache-SM8750-${{ inputs.AOSPSOURCE }}-${{ steps.clang-meta.outputs.clangversion }}-${{ runner.os }}-${{ runner.arch }}-${{ github.ref_name }}-
-            CCache-SM8750-${{ inputs.AOSPSOURCE }}-${{ steps.clang-meta.outputs.clangversion }}-${{ runner.os }}-${{ runner.arch }}-
-            CCache-SM8750-${{ inputs.AOSPSOURCE }}-${{ steps.clang-meta.outputs.clangversion }}-
-            CCache-SM8750-${{ inputs.AOSPSOURCE }}-
-
-      - name: 📥 Restore Public Compiler Cache
-        if: ${{ inputs.BUILDCCACHE }}
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        shell: bash
-        run: |
-          # Re-Export Compiler Cache Directory
-          CCACHE_DIR="${CCACHE_DIR:-${GITHUB_WORKSPACE}/.ccache}"
-          # Check Whether Compiler Cache Data Was Actually Restored
-          if [[ -n "$(find "$CCACHE_DIR" -type f -print -quit 2>/dev/null)" ]]; then
-            echo "✔️ Existing Compiler Cache Found"
-            echo "📌 Skipping Public Compiler Cache Download"
-            echo "📊 Restored Compiler Cache Status"
-            ccache -s
-            exit 0
-          fi
-
-          # Define Public Compiler Cache Release
-          ARCHIVE="CCache-SM8750-${{ inputs.AOSPSOURCE }}.tar.zst"
-          RELEASE="CCache-SM8750-${{ inputs.AOSPSOURCE }}"
-          echo "📦 No Local Compiler Cache Found"
-          echo "📦 Looking For Public Compiler Cache Release..."
-          echo "📌 Release : $RELEASE"
-          echo "📌 Archive : $ARCHIVE"
-          # Download Public Compiler Cache
-          if gh release download "$RELEASE" \
-            --repo "$GITHUB_REPOSITORY" \
-            --pattern "$ARCHIVE" \
-            --clobber; then
-            echo "✔️ Public Compiler Cache Found"
-            echo "📦 Merging Public Compiler Cache..."
-            # Extract Public Compiler Cache
-            tar \
-              -I zstd \
-              -xf "$ARCHIVE" \
-              -C "$CCACHE_DIR"
-            # Remove Downloaded Archive
-            rm -f "$ARCHIVE"
-            # Re-Apply Compiler Cache Size Limit
-            ccache -M "$CCACHE_MAXSIZE"
-            echo "📊 Public CCache Status"
-            ccache -s
-            echo "✔️ Public Compiler Cache Merged"
-          else
-            echo "ℹ️ No Public Compiler Cache Release Found"
-            echo "📌 Starting With Empty Compiler Cache"
-          fi
-
-      - name: 📊 Initialize Compiler Cache Stats
-        if: ${{ inputs.BUILDCCACHE }}
-        shell: bash
-        run: |
           # Display Restored Cache Before Statistics Reset
           echo "📊 Compiler Cache Before Build"
           ccache -s
@@ -706,15 +695,6 @@ jobs:
           echo "📊 Compiler Cache Statistics Reset"
           ccache -s
           echo "🎉 Compiler Cache Ready For Kernel Build"
-
-      - name: 💾 Save Compiler Cache
-        if: ${{ inputs.BUILDCCACHE && !inputs.DEBUGKERNELBUILD }}
-        uses: actions/cache/save@v6
-        with:
-          path: .ccache
-          # Unique Rolling Cache Snapshot
-          # A New Cache is Created for Every Successful Build
-          key: CCache-SM8750-${{ inputs.AOSPSOURCE }}-${{ steps.clang-meta.outputs.clangversion }}-${{ runner.os }}-${{ runner.arch }}-${{ github.ref_name }}-${{ github.run_id }}
 
       - name: 🐞 Upload Compiler Cache Debug Log
         if: ${{ inputs.DEBUGBUILDCCACHE }}
