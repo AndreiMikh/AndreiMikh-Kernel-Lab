@@ -1996,90 +1996,93 @@ jobs:
           # Environment Information
           echo "└─ 🧾 Android Version       : ${{ steps.kernel-version-setup.outputs.androidversion }}"
           echo "└─ 🧾 Kernel Version        : ${{ steps.kernel-version-setup.outputs.kernelversion }}"
-          echo "└─ 🔎 Detected Kernel Base  : $GKIVERSION"         
-          echo "└─ 🔎 Detected Kernel Base: $GKIVERSION"              
-          echo "└─ 📁 Kernel Directory: $COMMONKERNELFOLDER"               
+          echo "└─ 🔎 Detected Kernel Base  : $GKIVERSION"                       
+          echo "└─ 📁 Kernel Directory      : $COMMONKERNELFOLDER"                              
           # Clone SUSFS Repository
           echo "└─ 📥 Cloning SUSFS..."
           # Select the SUSFS Repository and Target Branch
           if [[ "$SUSFSVARIANT" == "OGKI" ]]; then
-            # OGKI Repository and Branch
             BRANCH="oki-${{ steps.kernel-version-setup.outputs.androidversion }}-${{ steps.kernel-version-setup.outputs.kernelversion }}"
             REPOURL="https://github.com/cctv18/susfs4oki.git"
+            FALLBACKURL=""
           else
-            # GKI Repository and Branch
             BRANCH="gki-${{ steps.kernel-version-setup.outputs.androidversion }}-${{ steps.kernel-version-setup.outputs.kernelversion }}"
             REPOURL="https://gitlab.com/simonpunk/susfs4ksu.git"
+            FALLBACKURL="https://github.com/AndreiMikh/susfs4ksu.git"
           fi
 
-          # Append Development Suffix When Enabled
+          # Append Development (-Dev) Suffix When Enabled
           if [[ "$SUSFSBRANCHDEV" == "true" ]]; then
             BRANCH="${BRANCH}-dev"
           fi
 
-          # Clone SUSFS with Retry Protection for Temporary Remote Failures
+          # Clone SUSFS with Retries / GitHub Mirror Fallback
+          CLONED=false
           for attempt in {1..5}; do
-            # Remove Any Incomplete Clone From Previous Attempt
             rm -rf susfs4ksu
-            # Clone Selected Branch with Shallow History
             if git clone --depth=1 --single-branch \
               --branch "$BRANCH" \
               "$REPOURL" susfs4ksu; then
               echo "└─ ✔️ SUSFS Clone Successful"
+              CLONED=true
               break
             fi
 
-            # Clean Up the Failed Clone Before Retrying
             rm -rf susfs4ksu
-            # Stop After Final Failed Attempt
-            if [[ "$attempt" -eq 5 ]]; then
-              echo "└─ ⚠️ SUSFS Clone Failed After 5 Attempts"
-              echo "└─ 📦 Repository : $REPOURL"
-              echo "└─ 🌿 Branch     : $BRANCH"
-              exit 1
+            if [[ "$attempt" -lt 5 ]]; then
+              echo "└─ ⚠️ Clone Failed (Attempt $attempt/5)"
+              sleep $((attempt * 10))
             fi
-
-            # Increase Retry Delay After Each Failure (10s, 20s, 30s, 40s)
-            echo "└─ ⚠️ Clone Failed (Attempt $attempt/5)"
-            sleep $((attempt * 10))
           done
-      
-          echo "└─ ✔️ SUSFS Branch: $BRANCH"     
+
+          # Fall Back to GitHub Mirror if GitLab Clone Fails
+          if [[ "$CLONED" != "true" && -n "$FALLBACKURL" ]]; then
+            echo "└─ ⚠️ GitLab Unavailable, Trying GitHub Mirror..."
+            if git clone --depth=1 --single-branch \
+              --branch "$BRANCH" \
+              "$FALLBACKURL" susfs4ksu; then
+              echo "└─ ✔️ SUSFS GitHub Mirror Clone Successful"
+              CLONED=true
+            fi
+          fi
+
+          # Stop if Both Sources Fail
+          if [[ "$CLONED" != "true" ]]; then
+            echo "└─ ⚠️ SUSFS Clone Failed"
+            echo "└─ 📦 Repository : $REPOURL"
+            echo "└─ 🌿 Branch     : $BRANCH"
+            [[ -z "$FALLBACKURL" ]] || echo "└─ 🔄 Fallback   : $FALLBACKURL"
+            exit 1
+          fi
+
+          echo "└─ ✔️ SUSFS Branch: $BRANCH"
           # Optional SUSFS Revision Checkout
-          # - Full Commit Hashes
-          # - Short Commit Hashes          
-          cd susfs4ksu || exit 1          
-          # Skip if SUSFS Revision is Empty or Disabled (-1)
-          if [[ -n "${SUSFSREPOSITORY:-}" && "${SUSFSREPOSITORY}" != "-1" ]]; then          
-            echo "└─ 🔎 SUSFS Revision: $SUSFSREPOSITORY"          
+          cd susfs4ksu || exit 1
+          if [[ -n "${SUSFSREPOSITORY:-}" && "$SUSFSREPOSITORY" != "-1" ]]; then
+            echo "└─ 🔎 SUSFS Revision: $SUSFSREPOSITORY"
             # Numeric Rollback Mode
-            if [[ "$SUSFSREPOSITORY" =~ ^[0-9]+$ ]]; then          
-              echo "└─ 📦 Fetching Additional Git History..."         
-              # Deepen Unshallow Clone History
-              git fetch --unshallow || git fetch --depth=1000 origin "$BRANCH"         
-              # Checkout Older SUSFS Revision
+            if [[ "$SUSFSREPOSITORY" =~ ^[0-9]+$ ]]; then
+              echo "└─ 📦 Fetching Additional Git History..."
+              git fetch --unshallow || git fetch --depth=1000 origin "$BRANCH"
               git checkout "HEAD~$SUSFSREPOSITORY" || {
                 echo "└─ ⚠️ Failed Checkout HEAD~$SUSFSREPOSITORY"
                 exit 1
-              }                
-            else          
-              # SUSFS Commit Hash / Tag / Branch Mode        
-              # Detect SUSFS Commit Hash Format
-              if [[ "$SUSFSREPOSITORY" =~ ^[0-9a-fA-F]{7,40}$ ]]; then              
-                echo "└─ 📦 Expanding Shallow Clone History..."              
-                # Fetch More History So Short Hashes Become Resolvable
+              }
+            else
+              # SUSFS Commit Hash / Tag / Branch Mode
+              if [[ "$SUSFSREPOSITORY" =~ ^[0-9a-fA-F]{7,40}$ ]]; then
+                echo "└─ 📦 Expanding Shallow Clone History..."
                 git fetch --unshallow origin || \
-                git fetch --deepen=200 origin "$BRANCH"              
+                  git fetch --deepen=200 origin "$BRANCH"
               fi
-              
-              # Checkout Requested SUSFS Revision
+
               git checkout "$SUSFSREPOSITORY" || {
                 echo "└─ ⚠️ Invalid SUSFS Revision"
                 exit 1
               }
             fi
           fi
-          
+                       
           # Print Active Checked Out SUSFS Revision
           echo "└─ ✔️ Active SUSFS Commit: $(git rev-parse --short HEAD)" 
           # Detect SUSFS Version
