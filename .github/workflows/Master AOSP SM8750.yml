@@ -596,42 +596,78 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         shell: bash
         run: |
-          # Re-Export Compiler Cache Directory
-          CCACHE_DIR="${CCACHE_DIR:-${GITHUB_WORKSPACE}/.ccache}"
-          mkdir -p "$CCACHE_DIR"
           # Define Public Compiler Cache Release
           ARCHIVE="CCache-SM8750-${{ inputs.AOSPSOURCE }}.tar.zst"
           RELEASE="CCache-SM8750-${{ inputs.AOSPSOURCE }}"
-          echo "📦 Looking For Public Compiler Cache Release..."
-          echo "📌 Release         : $RELEASE"
-          echo "📌 Archive         : $ARCHIVE"
-          echo "📂 Cache Directory : $CCACHE_DIR"
-          # Display Existing Compiler Cache
-          echo "📊 Existing Compiler Cache Status"
-          ccache -s
+          CACHEFILE="${RUNNER_TEMP}/${ARCHIVE}"
+
+          echo "└─ 📥 Public Compiler Cache Restore"
+          echo "└─ Repository : $GITHUB_REPOSITORY"
+          echo "└─ Release    : $RELEASE"
+          echo "└─ Asset      : $ARCHIVE"
+          echo "└─ Cache Dir  : $CCACHE_DIR"
+          echo "└─ Temp File  : $CACHEFILE"
+          # Verify Release Exists
+          echo "└─ 🔎 Checking GitHub Release..."
+          if gh release view "$RELEASE" \
+            --repo "$GITHUB_REPOSITORY" \
+            --json tagName,assets \
+            --jq '"Tag: \(.tagName)\nAssets:\n" + ([.assets[].name] | join("\n"))'; then
+            echo "└─ ✔️ Release Found"
+          else
+            echo "└─ ⚠️ Release Not Found Or Not Accessible"
+            echo "└─ ℹ️ Continuing With Existing Compiler Cache"
+            exit 0
+          fi
+
           # Download Public Compiler Cache
+          echo "└─ ⬇️ Downloading Compiler Cache Asset..."
+          rm -f "$CACHEFILE"
           if gh release download "$RELEASE" \
             --repo "$GITHUB_REPOSITORY" \
             --pattern "$ARCHIVE" \
+            --dir "$RUNNER_TEMP" \
             --clobber; then
-            echo "✔️ Public Compiler Cache Found"
-            echo "📦 Merging Public Compiler Cache..."
-            # Extract Public Compiler Cache
-            if tar -I zstd -xf "$ARCHIVE" -C "$CCACHE_DIR"; then
-              rm -f "$ARCHIVE"
-              # Re-Apply Compiler Cache Size Limit
-              ccache -M "${CCACHE_MAXSIZE:-4G}"
-              echo "📊 Merged Compiler Cache Status"
-              ccache -s
-              echo "✔️ Public Compiler Cache Merged"
-            else
-              rm -f "$ARCHIVE"
-              echo "⚠️ Failed To Extract Public Compiler Cache"
+            echo "└─ ✔️ Download Command Completed"
+            # Validate Downloaded Archive
+            if [[ ! -s "$CACHEFILE" ]]; then
+              echo "└─ ⚠️ Downloaded Archive Missing Or Empty"
               exit 1
             fi
+
+            echo "└─ 📦 Downloaded Archive:"
+            ls -lh "$CACHEFILE"
+            echo "└─ 📊 Archive Size: $(stat -c%s "$CACHEFILE") bytes"
+            # Validate Zstandard Archive
+            echo "└─ 🔎 Validating Zstandard Archive..."
+            if ! zstd -t "$CACHEFILE"; then
+              echo "└─ ⚠️ Archive Validation Failed"
+              rm -f "$CACHEFILE"
+              exit 1
+            fi
+       
+            echo "└─ ✔️ Archive Validation Passed"
+            # Extract Compiler Cache
+            echo "└─ 📂 Extracting Compiler Cache..."
+            if tar -I zstd -xvf "$CACHEFILE" -C "$CCACHE_DIR"; then
+              rm -f "$CACHEFILE"
+              echo "└─ ✔️ Extraction Completed"
+            else
+              rm -f "$CACHEFILE"
+              echo "└─ ⚠️ Failed To Extract Compiler Cache"
+              exit 1
+            fi
+
+            # Apply Compiler Cache Size Limit
+            echo "└─ ⚙️ Applying Cache Size Limit..."
+            ccache -M "${CCACHE_MAXSIZE:-4G}"
+            # Display Restored Compiler Cache
+            echo "└─ 📊 Restored Compiler Cache Status"
+            ccache -s
+            echo "└─ 🎉 Public Compiler Cache Restored Successfully"
           else
-            echo "ℹ️ Public Compiler Cache Unavailable"
-            echo "📌 Continuing With Existing Compiler Cache"
+            echo "└─ ⚠️ Download Failed: Release Asset May Be Missing Or Inaccessible"
+            echo "└─ ℹ️ Continuing With Existing Compiler Cache"
           fi
 
       - name: ⚙️ Configure Compiler Cache / ECS
