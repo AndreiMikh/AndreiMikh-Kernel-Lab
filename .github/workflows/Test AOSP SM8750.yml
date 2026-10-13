@@ -387,7 +387,11 @@ jobs:
           echo "📌 Clang Revision  : $CLANGVERSION"
           echo "📌 Clang Archive   : $CLANGARCHIVE"
           echo "📌 Clang Cache Key : $CLANGKEY"
-          echo "clangkey=$CLANGKEY" >> "$GITHUB_OUTPUT"   
+          # Export Step Outputs
+          {
+            echo "clangversion=$CLANGVERSION"
+            echo "clangkey=$CLANGKEY"
+          } >> "$GITHUB_OUTPUT"
   
       - name: 💾 Restore AOSP Clang Cache
         id: clang-cache
@@ -564,12 +568,12 @@ jobs:
         with:
           path: .ccache
           # Rolling Exact Key
-          key: CCache-SM8750-${{ inputs.AOSPSOURCE }}-${{ env.CLANGVERSION }}-${{ runner.os }}-${{ runner.arch }}-${{ github.ref_name }}-${{ github.run_id }}
+          key: CCache-SM8750-${{ inputs.AOSPSOURCE }}-${{ steps.clang-meta.outputs.clangversion }}-${{ runner.os }}-${{ runner.arch }}-${{ github.ref_name }}-${{ github.run_id }}
           # Restore Newest Compatible CCache
           restore-keys: |
-            CCache-SM8750-${{ inputs.AOSPSOURCE }}-${{ env.CLANGVERSION }}-${{ runner.os }}-${{ runner.arch }}-${{ github.ref_name }}-
-            CCache-SM8750-${{ inputs.AOSPSOURCE }}-${{ env.CLANGVERSION }}-${{ runner.os }}-${{ runner.arch }}-
-            CCache-SM8750-${{ inputs.AOSPSOURCE }}-${{ env.CLANGVERSION }}-
+            CCache-SM8750-${{ inputs.AOSPSOURCE }}-${{ steps.clang-meta.outputs.clangversion }}-${{ runner.os }}-${{ runner.arch }}-${{ github.ref_name }}-
+            CCache-SM8750-${{ inputs.AOSPSOURCE }}-${{ steps.clang-meta.outputs.clangversion }}-${{ runner.os }}-${{ runner.arch }}-
+            CCache-SM8750-${{ inputs.AOSPSOURCE }}-${{ steps.clang-meta.outputs.clangversion }}-
             CCache-SM8750-${{ inputs.AOSPSOURCE }}-
 
       - name: 📦 Pull Public CCache
@@ -641,62 +645,56 @@ jobs:
           path: .ccache
           # Unique Rolling Cache Snapshot
           # A New Cache is Created for Every Successful Build
-          key: CCache-SM8750-${{ inputs.AOSPSOURCE }}-${{ env.CLANGVERSION }}-${{ runner.os }}-${{ runner.arch }}-${{ github.ref_name }}-${{ github.run_id }}
+          key: CCache-SM8750-${{ inputs.AOSPSOURCE }}-${{ steps.clang-meta.outputs.clangversion }}-${{ runner.os }}-${{ runner.arch }}-${{ github.ref_name }}-${{ github.run_id }}
 
       - name: 📦 Upload Public CCache
         if: ${{ inputs.BUILDCCACHE && !inputs.DEBUGKERNELBUILD }}
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: AndreiMikh/AndreiMikh-Kernel-Lab
         shell: bash
         run: |
-          # Define CCache Paths
           CCACHE_DIR="${CCACHE_DIR:-${GITHUB_WORKSPACE}/.ccache}"
           ARCHIVE="CCache-SM8750-${{ inputs.AOSPSOURCE }}.tar.zst"
           RELEASE="CCache-SM8750-${{ inputs.AOSPSOURCE }}"
-          # Validate CCache Directory
           if [[ ! -d "$CCACHE_DIR" ]]; then
-            echo "⚠️ CCache Directory Not Found"
-            echo "📂 Expected : $CCACHE_DIR"
+            echo "⚠️ CCache Directory Not Found : $CCACHE_DIR"
             exit 1
           fi
 
           if [[ -z "$(find "$CCACHE_DIR" -type f -print -quit 2>/dev/null)" ]]; then
-            echo "ℹ️ CCache Directory Is Empty"
+            echo "ℹ️ CCache Directory is Empty"
             echo "📌 Skipping Public CCache Upload"
             exit 0
           fi
 
-          echo "📦 Packaging Public CCache..."
-          echo "📂 CCache Directory : $CCACHE_DIR"
-          # Display Final CCache Statistics
           echo "📊 Final CCache Status"
           ccache -s
-          # Create Compressed Public CCache Archive
-          echo "🗜️ Creating Public CCache Archive..."
-          tar \
-            -I 'zstd -T0 -3' \
-            -cf "$ARCHIVE" \
-            -C "$CCACHE_DIR" .
-          echo "📦 Archive Size : $(du -sh "$ARCHIVE" | cut -f1)"
-          # Create Or Update Public CCache Release
+          echo "📦 Packaging Public CCache..."
+          tar -I 'zstd -T0 -3' -cf "$ARCHIVE" -C "$CCACHE_DIR" .
+          echo "📦 Archive Size: $(du -sh "$ARCHIVE" | cut -f1)"
           echo "🚀 Uploading Public CCache..."
-          if gh release create \
-            "$RELEASE" \
-            "$ARCHIVE" \
+          if gh release create "$RELEASE" "$ARCHIVE" \
+            --repo "$GH_REPO" \
+            --title "$RELEASE" \
             --notes 'Category: CCache | SM8750-O2-FT — Public CCache for OPlus AOSP SM8750 Kernel Builds'; then
             echo "✔️ Public CCache Release Created"
-          elif gh release upload \
-            "$RELEASE" \
-            "$ARCHIVE" \
-            --clobber; then
-            echo "✔️ Public CCache Release Updated"
+          elif gh release view "$RELEASE" --repo "$GH_REPO" >/dev/null 2>&1; then
+            if gh release upload "$RELEASE" "$ARCHIVE" \
+              --repo "$GH_REPO" --clobber; then
+              echo "✔️ Public CCache Release Updated"
+            else
+              echo "⚠️ Failed To Update Public CCache Release"
+              rm -f "$ARCHIVE"
+              exit 1
+            fi
+      
           else
-            echo "⚠️ Failed To Upload Public CCache"
+            echo "⚠️ Failed To Create Public CCache Release"
             rm -f "$ARCHIVE"
             exit 1
           fi
 
-          # Remove Temporary Archive
           rm -f "$ARCHIVE"
           echo "🎉 Public CCache Uploaded Successfully"
 
@@ -2831,7 +2829,7 @@ jobs:
               ;;
             *)
               # Handle Unknown Android Source
-              echo "⚠️ Unknown AOSP Source: ${AOSPSOURCE}"
+              echo "⚠️ Unknown AOSP Source : ${AOSPSOURCE}"
               ;;
           esac
           # Validate Security Patch Level
@@ -2839,8 +2837,8 @@ jobs:
             # Convert Security Patch Level
             AOSPPATCHLEVEL="${AOSPPATCHFULL:0:7}"
             echo "✔️ Android Security Patch Level Detected"
-            echo "📲 Full Patch Level : ${AOSPPATCHFULL}"
-            echo "📲 Boot Patch Level : ${AOSPPATCHLEVEL}"
+            echo "📲 Full Patch Level        : ${AOSPPATCHFULL}"
+            echo "📲 Boot Patch Level        : ${AOSPPATCHLEVEL}"
           else
             # Use Workflow Fallback
             echo "⚠️ Android Security Patch Level Not Found In Source"
@@ -2852,8 +2850,8 @@ jobs:
           echo "AOSPPATCHLEVEL=$AOSPPATCHLEVEL" >> "$GITHUB_ENV"
           echo "📲 Final Boot Patchlevel : ${AOSPPATCHLEVEL}"
           # Generate AnyKernel3 Package Name
-          STAMP="$(date +%Y%m%d)"
-          ZIP="AK3-(${FULLVERSION})-${{ inputs.AOSPSOURCE }}(SM8750)-${{ inputs.ROOTENGINE }}(${KSUVERSION})(${STAMP}).zip"
+          STAMP="$(date +%Y-%m-%d)"
+          ZIP="AK3-(${{ steps.kernelversion.outputs.fullversion }})-${{ inputs.AOSPSOURCE }}(SM8750)-${{ inputs.ROOTENGINE }}(${{ steps.rootengine.outputs.ksuversion }})(${STAMP}).zip"
           echo "📦 Creating AnyKernel3 ZIP..."
           echo "📌 Package : ${ZIP}"
           # Compress AnyKernel3 Package
@@ -2908,7 +2906,7 @@ jobs:
       - name: 📤 Upload Kernel Artifacts
         uses: actions/upload-artifact@v6
         with:
-          name: File-${{ inputs.AOSPSOURCE }}(${{ env.FULLVERSION }})-BakaSU-(${{ env.KSUVERSION }})
+          name: File-${{ inputs.AOSPSOURCE }}(${{ steps.kernelversion.outputs.fullversion }})-BakaSU-(${{ steps.rootengine.outputs.ksuversion }})
           path: out/*
           retention-days: 30
           if-no-files-found: error
