@@ -1168,13 +1168,22 @@ jobs:
           # Define Kernel Configuration Paths
           CONFIGS="$SOURCEDIR/arch/arm64/configs"
           MERGEBASECONFIGS="$SOURCEDIR/scripts/kconfig/merge_config.sh"
+          CONFIGFILE="$OUTDIR/.config"
           echo "📥 Generating SM8750 Base Kernel Configuration..."
           echo "📂 Kernel Source : $SOURCEDIR"
-          echo "📂 Config Path   : $CONFIGS"
-          # Validate Config Merge Script
-          if [ ! -x "$MERGEBASECONFIGS" ]; then
-            echo "⚠️ Base Config Merge Script Not Found"
-            echo "📂 Expected    : $MERGEBASECONFIGS"
+          echo "📂 Kernel Output : $OUTDIR"
+          echo "📂 Config File   : $CONFIGFILE"
+          # Validate Kernel Source
+          if [[ ! -f "$SOURCEDIR/Makefile" ]]; then
+            echo "⚠️ Kernel Source Makefile Not Found"
+            echo "📂 Expected: $SOURCEDIR/Makefile"
+            exit 1
+          fi
+
+          # Validate Configuration Merge Script
+          if [[ ! -f "$MERGEBASECONFIGS" ]]; then
+            echo "⚠️ Configuration Merge Script Not Found"
+            echo "📂 Expected: $MERGEBASECONFIGS"
             exit 1
           fi
 
@@ -1187,59 +1196,68 @@ jobs:
             "$BASECONFIG" \
             "$PERFCONFIG" \
             "$OPLUSCONFIG"; do
-            if [ ! -f "$config" ]; then
-              echo "⚠️ Required Kernel Config Not Found"
-              echo "📂 $config"
+            if [[ ! -f "$config" ]]; then
+              echo "⚠️ Required Kernel Configuration Not Found"
+              echo "📂 Expected: $config"
               exit 1
             fi
-          
-            echo "✔️ Found : $config"
           done
 
-          # Generate Merged Kernel Configuration
-          cd "$SOURCEDIR"
-          rm -f .config
+          # Prepare Kernel Output Directory
+          mkdir -p "$OUTDIR"
+          rm -f "$CONFIGFILE"
+          # Merge Base and Vendor Configurations
           echo "🔧 Merging Base Kernel Configurations..."
-          # Define Kernel Configuration File
-          CONFIGFILE="$SOURCEDIR/.config"
-          # Generate Merged Kernel Configuration
-          KCONFIG_CONFIG="$CONFIGFILE" \
-            "$MERGEBASECONFIGS" \
-            -m \
-            -r \
-            "$BASECONFIG" \
-            "$PERFCONFIG" \
-            "$OPLUSCONFIG"
-          # Validate Generated Configuration
-          if [ ! -f "$SOURCEDIR/.config" ]; then
-            echo "⚠️ Failed to Generate .config"
+          if ! KCONFIG_CONFIG="$CONFIGFILE" \
+            bash "$MERGEBASECONFIGS" \
+              -m \
+              -r \
+              "$BASECONFIG" \
+              "$PERFCONFIG" \
+              "$OPLUSCONFIG"; then
+            echo "⚠️ Failed to Merge Kernel Configurations"
             exit 1
           fi
 
-          echo "🧾 Base Kernel Config Generated"
-          # Configure Kernel Local Version
-          if [ -n "${{ inputs.KERNELSUFFIX }}" ]; then
-            ./scripts/config \
-              --file .config \
-              --set-str CONFIG_LOCALVERSION "-4k-${{ inputs.KERNELSUFFIX }}"
-          else
-            ./scripts/config \
-              --file .config \
-              --set-str CONFIG_LOCALVERSION "-4k-${SRCCOMMIT}"
+          # Validate Generated Configuration
+          if [[ ! -s "$CONFIGFILE" ]]; then
+            echo "⚠️ Kernel Configuration Was Not Generated"
+            echo "📂 Expected: $CONFIGFILE"
+            exit 1
           fi
 
-          # Disable Automatic Local Version Suffix
-          ./scripts/config \
-            --file .config \
-            -d CONFIG_LOCALVERSION_AUTO
-          # Display Kernel Local Version
-          echo "📌 Kernel Local Version :"
-          grep '^CONFIG_LOCALVERSION=' .config || true
-          # Display Configuration Summary
-          echo "📊 Base Configuration :"
-          echo "📌 Total Options : $(grep -c '^CONFIG_' .config || true)"
-          echo "🎉 Base Kernel Configuration Generated Successfully"
+          # Set Kernel Local Version
+          if [[ -n "${{ inputs.KERNELSUFFIX }}" ]]; then
+            LOCALVERSION="-4k-${{ inputs.KERNELSUFFIX }}"
+          else
+            if [[ -z "${SRCCOMMIT:-}" ]]; then
+              echo "⚠️ Source Commit Is Missing"
+              exit 1
+            fi
+            LOCALVERSION="-4k-${SRCCOMMIT}"
+          fi
 
+          "$SOURCEDIR/scripts/config" \
+            --file "$CONFIGFILE" \
+            --set-str CONFIG_LOCALVERSION "$LOCALVERSION"
+
+          "$SOURCEDIR/scripts/config" \
+            --file "$CONFIGFILE" \
+            -d CONFIG_LOCALVERSION_AUTO
+
+          # Validate Final Base Configuration
+          if ! grep -q '^CONFIG_LOCALVERSION=' "$CONFIGFILE"; then
+            echo "⚠️ CONFIG_LOCALVERSION Was Not Set"
+            exit 1
+          fi
+
+          echo "✔️ Base Kernel Configuration Generated"
+          echo "📂 Config File: $CONFIGFILE"
+          echo "📌 Local Version:"
+          grep '^CONFIG_LOCALVERSION=' "$CONFIGFILE" || true
+          echo "📌 Enabled Config Entries:"
+          grep -c '^CONFIG_' "$CONFIGFILE" || true
+    
       - name: 🆘 Solve Root Engine Source
         id: manager
         if: ${{ inputs.ROOTENGINE != 'None' }}
@@ -2152,10 +2170,15 @@ jobs:
         if: ${{ !inputs.DEBUGKERNELBUILD }}
         shell: bash
         run: |
+          # Define Kernel Build Paths
+          OUTDIR="${OUTDIR:-$GITHUB_WORKSPACE/out}"
+          CONFIGFILE="$OUTDIR/.config"
+          IMAGE="$OUTDIR/arch/arm64/boot/Image"
           # Configure Kernel Build Environment
           sudo sysctl -w vm.max_map_count=1048576
           export LLVM=1
           export LLVM_IAS=1
+          export ARCH=arm64
           export KBUILD_BUILD_USER="${{ inputs.GITOWNER }}"
           export KBUILD_BUILD_HOST="${{ inputs.GITHOST }}"
           # Configure Compiler Cache Debug Logging
@@ -2163,7 +2186,7 @@ jobs:
             export CCACHE_LOGFILE="$GITHUB_WORKSPACE/ccache.log"
           fi
 
-          # Validate Kbuild Build Metadata
+          # Validate Kbuild Metadata
           if [[ -z "${KBUILD_BUILD_TIMESTAMP:-}" ]]; then
             echo "⚠️ Kbuild Build Timestamp Not Set"
             exit 1
@@ -2182,62 +2205,57 @@ jobs:
           # Define Fake Time Environment
           export FAKESTAT="2025-05-25 12:00:00"
           export FAKETIME="@2025-05-25 13:00:00"
-          # Define Build Paths
+          # Define Compiler Wrapper Paths
           CCWRAPPER="$GITHUB_WORKSPACE/cc-wrapper"
           LDWRAPPER="$GITHUB_WORKSPACE/ld-wrapper"
           export PRELOAD_LIBS="$LIBDIR/libfakestat.so:$LIBDIR/libfaketimeMT.so"
           # Validate Build Tools
           echo "🔎 Validating Build Tools..."
-          command -v clang >/dev/null || {
-            echo "⚠️ Clang Not Found"
-            exit 1
-          }
-          command -v ld.lld >/dev/null || {
-            echo "⚠️ LD.LLD Not Found"
-            exit 1
-          }
-          command -v ccache >/dev/null || {
-            echo "⚠️ Compiler Cache Not Found"
-            exit 1
-          }
-          # Validate Fake Time Libraries
-          if [[ ! -f "$LIBDIR/libfakestat.so" ||
-                ! -f "$LIBDIR/libfaketimeMT.so" ]]; then
-            echo "⚠️ Fake Time Libraries Not Found"
-            echo "📂 Library Directory : $LIBDIR"
-            exit 1
-          fi
+          for tool in clang ld.lld ccache; do
+            if ! command -v "$tool" >/dev/null 2>&1; then
+              echo "⚠️ Required Build Tool Not Found: $tool"
+              exit 1
+            fi
+          done
 
-          # Prepare Fake Time Libraries
+          # Validate Fake Time Libraries
+          for library in \
+            "$LIBDIR/libfakestat.so" \
+            "$LIBDIR/libfaketimeMT.so"; do
+            if [[ ! -s "$library" ]]; then
+              echo "⚠️ Fake Time Library Not Found"
+              echo "📂 Expected: $library"
+              exit 1
+            fi
+          done
+
           chmod 755 \
             "$LIBDIR/libfakestat.so" \
             "$LIBDIR/libfaketimeMT.so"
           # Create Clang Wrapper
-          cd "$GITHUB_WORKSPACE"
-          cat > "$CCWRAPPER" <<EOF
-          #!/bin/bash
-          export LD_PRELOAD="$PRELOAD_LIBS"
-          export FAKESTAT="$FAKESTAT"
-          export FAKETIME="$FAKETIME"
-          exec ccache clang "\$@"
-          EOF
+          printf '%s\n' \
+            '#!/bin/bash' \
+            'export LD_PRELOAD="$PRELOAD_LIBS"' \
+            'export FAKESTAT="$FAKESTAT"' \
+            'export FAKETIME="$FAKETIME"' \
+            'exec ccache clang "$@"' \
+            > "$CCWRAPPER"
           # Create LLD Wrapper
-          cat > "$LDWRAPPER" <<EOF
-          #!/bin/bash
-          export LD_PRELOAD="$PRELOAD_LIBS"
-          export FAKESTAT="$FAKESTAT"
-          export FAKETIME="$FAKETIME"
-          exec ld.lld "\$@"
-          EOF
+          printf '%s\n' \
+            '#!/bin/bash' \
+            'export LD_PRELOAD="$PRELOAD_LIBS"' \
+            'export FAKESTAT="$FAKESTAT"' \
+            'export FAKETIME="$FAKETIME"' \
+            'exec ld.lld "$@"' \
+            > "$LDWRAPPER"
           chmod +x "$CCWRAPPER" "$LDWRAPPER"
-          # Validate Wrappers
+          # Validate Compiler Wrappers
           "$CCWRAPPER" --version >/dev/null
           "$LDWRAPPER" --version >/dev/null
-          # Display Build Environment
           echo "🔧 Build Environment"
           echo "📌 LLVM           : $LLVM"
           echo "📌 LLVM IAS       : $LLVM_IAS"
-          echo "📌 Architecture   : arm64"
+          echo "📌 Architecture   : $ARCH"
           echo "📌 Build User     : $KBUILD_BUILD_USER"
           echo "📌 Build Host     : $KBUILD_BUILD_HOST"
           echo "📌 Fake Stat      : $FAKESTAT"
@@ -2245,114 +2263,174 @@ jobs:
           echo "📌 Clang          : $(clang --version | sed -n '1p')"
           echo "📌 LLD            : $(ld.lld --version | sed -n '1p')"
           echo "📌 Compiler Cache : $(ccache --version | sed -n '1p')"
-          # Move Into Kernel Source
-          cd "$SOURCEDIR"
           # Validate Kernel Source
-          if [[ ! -f "Makefile" ]]; then
+          if [[ ! -f "$SOURCEDIR/Makefile" ]]; then
             echo "⚠️ Kernel Makefile Not Found"
-            echo "📂 Expected   : $SOURCEDIR/Makefile"
+            echo "📂 Expected: $SOURCEDIR/Makefile"
             exit 1
           fi
 
-          # Validate Kernel Configuration
-          if [[ ! -f ".config" ]]; then
+          if [[ ! -x "$SOURCEDIR/scripts/config" ]]; then
+            echo "⚠️ Kernel Configuration Script Not Found"
+            echo "📂 Expected: $SOURCEDIR/scripts/config"
+            exit 1
+          fi
+
+          # Validate Output Configuration
+          mkdir -p "$OUTDIR"
+          if [[ ! -s "$CONFIGFILE" ]]; then
             echo "⚠️ Kernel Configuration Not Found"
-            echo "📂 Expected   : $SOURCEDIR/.config"
+            echo "📂 Expected: $CONFIGFILE"
             exit 1
           fi
 
+          echo "📂 Kernel Source : $SOURCEDIR"
+          echo "📂 Kernel Output : $OUTDIR"
+          echo "📂 Kernel Config : $CONFIGFILE"
           # Configure Final Kernel Configuration
           echo "🔧 Configuring Final Kernel Configuration..."
           # Root Engine
           if [[ "${{ inputs.ROOTENGINE }}" != "None" ]]; then
-            ./scripts/config --file .config \
+            "$SOURCEDIR/scripts/config" \
+              --file "$CONFIGFILE" \
               -e CONFIG_KSU
             echo "✔️ KSU Configuration Enabled"
             # BakaSU Configuration
             if [[ "${{ inputs.ROOTENGINE }}" == "BakaSU" ]]; then
-              ./scripts/config --file .config \
+              "$SOURCEDIR/scripts/config" \
+                --file "$CONFIGFILE" \
                 --set-str CONFIG_KSU_FULL_NAME_FORMAT "%TAG_NAME%" \
                 -e CONFIG_KSU_MULTI_MANAGER_SUPPORT \
                 -e CONFIG_KSU_TOOLKIT_SUPPORT
               echo "✔️ KSU Full Name Format : %TAG_NAME%"
-              echo "✔️ KSU Multi-Manager Support Configuration Enabled"
-              echo "✔️ KSU Toolkit Support Configuration Enabled"
+              echo "✔️ KSU Multi-Manager Support Enabled"
+              echo "✔️ KSU Toolkit Support Enabled"
             fi
 
             # SUSFS Integration
             if [[ "${{ inputs.SUSFSENGINE }}" == "true" ]]; then
-              ./scripts/config --file .config \
+              "$SOURCEDIR/scripts/config" \
+                --file "$CONFIGFILE" \
                 -e CONFIG_KSU_SUSFS
               echo "✔️ SUSFS Configuration Enabled"
             else
-              ./scripts/config --file .config \
+              "$SOURCEDIR/scripts/config" \
+                --file "$CONFIGFILE" \
                 -d CONFIG_KSU_SUSFS
               echo "🚫 SUSFS Configuration Disabled"
             fi
           else
-            ./scripts/config --file .config \
+            "$SOURCEDIR/scripts/config" \
+              --file "$CONFIGFILE" \
               -d CONFIG_KSU \
               -d CONFIG_KSU_SUSFS
             echo "🚫 KSU Configuration Disabled"
           fi
 
+          # Baseband Guard
+          if [[ "${{ inputs.BBG }}" == "true" ]]; then
+            "$SOURCEDIR/scripts/config" \
+              --file "$CONFIGFILE" \
+              -e CONFIG_BBG
+            echo "✔️ Baseband Guard Enabled"
+          else
+            "$SOURCEDIR/scripts/config" \
+              --file "$CONFIGFILE" \
+              -d CONFIG_BBG
+            echo "🚫 Baseband Guard Disabled"
+          fi
+
           # BetterNetwork / Netfilter
           if [[ "${{ inputs.BETTERNET }}" == "true" ]]; then
-            ./scripts/config --file .config \
+            "$SOURCEDIR/scripts/config" \
+              --file "$CONFIGFILE" \
               -e CONFIG_IP_SET \
               -e CONFIG_BPF_STREAM_PARSER \
               -e CONFIG_IP6_NF_NAT
-            echo "✔️ BetterNetwork / Netfilter Configuration Enabled"
+            echo "✔️ BetterNetwork / Netfilter Enabled"
+          else
+            "$SOURCEDIR/scripts/config" \
+              --file "$CONFIGFILE" \
+              -d CONFIG_IP_SET \
+              -d CONFIG_BPF_STREAM_PARSER \
+              -d CONFIG_IP6_NF_NAT
+            echo "🚫 BetterNetwork / Netfilter Disabled"
           fi
 
           # BBR TCP Congestion Control
           if [[ "${{ inputs.BBR }}" == "true" ]]; then
-            ./scripts/config --file .config \
+            "$SOURCEDIR/scripts/config" \
+              --file "$CONFIGFILE" \
               -e CONFIG_TCP_CONG_BBR
-            echo "✔️ BBR TCP Congestion Control Configuration Enabled"          
+            echo "✔️ BBR TCP Congestion Control Enabled"
+          else
+            "$SOURCEDIR/scripts/config" \
+              --file "$CONFIGFILE" \
+              -d CONFIG_TCP_CONG_BBR
+            echo "🚫 BBR TCP Congestion Control Disabled"
           fi
 
-          # ReKernel Binder Hook
+          # ReKernel Integration
           if [[ "${{ inputs.REKERNEL }}" == "true" ]]; then
-            ./scripts/config --file .config \
+            "$SOURCEDIR/scripts/config" \
+              --file "$CONFIGFILE" \
               -e CONFIG_REKERNEL
-            echo "✔️ ReKernel Binder Hook Configuration Enabled"          
+            echo "✔️ ReKernel Enabled"
+          else
+            "$SOURCEDIR/scripts/config" \
+              --file "$CONFIGFILE" \
+              -d CONFIG_REKERNEL
+            echo "🚫 ReKernel Disabled"
           fi
 
           # NoMount Integration
           if [[ "${{ inputs.NOMOUNT }}" != "None" ]]; then
-            ./scripts/config --file .config \
+            "$SOURCEDIR/scripts/config" \
+              --file "$CONFIGFILE" \
               -e CONFIG_NOMOUNT
-            echo "✔️ NoMount Integration Configuration Enabled"
+            echo "✔️ NoMount Enabled"
+          else
+            "$SOURCEDIR/scripts/config" \
+              --file "$CONFIGFILE" \
+              -d CONFIG_NOMOUNT
+
+            echo "🚫 NoMount Disabled"
           fi
 
           # Synchronize Final Kernel Configuration
           echo "🔄 Running Old DefConfig..."
           make \
+            -C "$SOURCEDIR" \
+            O="$OUTDIR" \
             LLVM=1 \
             LLVM_IAS=1 \
             ARCH=arm64 \
             olddefconfig
-          # Display Final KSU Configuration
+          # Display Final Configuration
           echo "🔎 Final Root Engine and SUSFS Configuration"
           grep -E \
             '^(CONFIG_KSU|CONFIG_KSU_SUSFS|CONFIG_KSU_FULL_NAME_FORMAT)=' \
-            .config || true        
-          # Display Final ReKernel Configuration
-          echo "🔎 Final ReKernel Binder Hook Configuration"
-          grep '^CONFIG_REKERNEL=' .config || true
-          # Display Final NoMount Configuration
+            "$CONFIGFILE" || true
+          echo "🔎 Final Baseband Guard Configuration"
+          grep '^CONFIG_BBG=' "$CONFIGFILE" || true
+          echo "🔎 Final ReKernel Configuration"
+          grep '^CONFIG_REKERNEL=' "$CONFIGFILE" || true
           echo "🔎 Final NoMount Configuration"
-          grep '^CONFIG_NOMOUNT=' .config || true
-          # Display Final Local Version
+          grep '^CONFIG_NOMOUNT=' "$CONFIGFILE" || true
+          echo "🔎 Final Network Configuration"
+          grep -E \
+            '^(CONFIG_IP_SET|CONFIG_BPF_STREAM_PARSER|CONFIG_IP6_NF_NAT|CONFIG_TCP_CONG_BBR)=' \
+            "$CONFIGFILE" || true
           echo "🔎 Final Local Version"
-          grep '^CONFIG_LOCALVERSION=' .config || true
+          grep '^CONFIG_LOCALVERSION=' "$CONFIGFILE" || true
           echo "🎉 Final Kernel Configuration Complete"
           # Start Build Timer
           BUILDSTART="$(date +%s)"
-          # Build Kernel Image
+          # Compile Kernel Image
           echo "🔨 Building Kernel Image..."
           make \
+            -C "$SOURCEDIR" \
+            O="$OUTDIR" \
             LLVM=1 \
             LLVM_IAS=1 \
             ARCH=arm64 \
@@ -2369,7 +2447,6 @@ jobs:
           echo "📊 Compiler Cache Status :"
           ccache -s
           # Validate Kernel Image
-          IMAGE="$SOURCEDIR/arch/arm64/boot/Image"
           if [[ ! -s "$IMAGE" ]]; then
             echo "⚠️ Kernel Image Missing or Empty"
             echo "📂 Expected : $IMAGE"
@@ -2399,13 +2476,13 @@ jobs:
             echo "### ⚡ Build Result"
             echo "**🎉 Build Completed Successfully**"
           } >> "$GITHUB_STEP_SUMMARY"
-      
+   
       - name: 🧪 Generate Dummy Kernel Image
         if: ${{ inputs.DEBUGKERNELBUILD }}
         shell: bash
         run: |
           # Define Kernel Image
-          IMAGE="$SOURCEDIR/arch/arm64/boot/Image"
+          IMAGE="$OUTDIR/arch/arm64/boot/Image"
           # Prepare Kernel Image Directory
           mkdir -p "$(dirname "$IMAGE")"
           # Create Dummy Kernel Image
@@ -2433,8 +2510,8 @@ jobs:
           echo "📌 Expected Kernel Version : $FULLVERSION"
           echo "📌 Expected Build Time     : $KBUILD_BUILD_TIMESTAMP"
           # Define Kernel Image and UTS Header
-          IMAGE="arch/arm64/boot/Image"
-          UTSHEADER="include/generated/utsversion.h"
+          IMAGE="$OUTDIR/arch/arm64/boot/Image"
+          UTSHEADER="$OUTDIR/include/generated/utsversion.h"
           # Validate Kernel Image
           if [[ ! -s "$IMAGE" ]]; then
             echo "⚠️ Kernel Image Missing or Empty"
@@ -2481,7 +2558,7 @@ jobs:
         if: ${{ inputs.KERNELPATCH && !inputs.DEBUGKERNELBUILD }}
         shell: bash
         run: |
-          cd "$SOURCEDIR/arch/arm64/boot"
+          cd "$OUTDIR/arch/arm64/boot"
           wget -q \
             https://github.com/KernelSU-Next/KPatch-Next/releases/latest/download/kptools-linux \
             -O kptools-linux
@@ -2615,8 +2692,7 @@ jobs:
           # Define AnyKernel3 Paths
           AK3DIR="${GITHUB_WORKSPACE}/anykernel3"
           PACKDIR="${GITHUB_WORKSPACE}/pack"
-          OUTDIR="${GITHUB_WORKSPACE}/out"
-          IMAGE="${SOURCEDIR}/arch/arm64/boot/Image"
+          IMAGE="${OUTDIR}/arch/arm64/boot/Image"
           # Define Source Branches and Metadata
           LINEAGEBRANCH=""
           CRDROIDBRANCH=""
