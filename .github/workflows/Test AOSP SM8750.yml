@@ -2573,18 +2573,27 @@ jobs:
       - name: 📦 Clone and Package AnyKernel3
         id: package
         shell: bash
+        env:
+          AOSPSOURCE: ${{ inputs.AOSPSOURCE }}
+          ATTR: ${{ inputs.ATTR }}
+          GITOWNER: ${{ inputs.GITOWNER }}
+          BUILDARTIFACT: ${{ inputs.BUILDARTIFACT }}
+          FULLVERSION: ${{ steps.kernelversion.outputs.fullversion }}
+          ROOTENGINE: ${{ inputs.ROOTENGINE }}
+          KSUVERSION: ${{ steps.rootengine.outputs.ksuversion }}
         run: |
           # Define AnyKernel3 Paths
           AK3DIR="${GITHUB_WORKSPACE}/anykernel3"
           PACKDIR="${GITHUB_WORKSPACE}/pack"
           OUTDIR="${GITHUB_WORKSPACE}/out"
           IMAGE="${SOURCEDIR}/arch/arm64/boot/Image"
-          # Define Android Source
-          AOSPSOURCE="${{ inputs.AOSPSOURCE }}"
-          # Define Source Branches
+          # Define Source Branches and Metadata
           LINEAGEBRANCH=""
           CRDROIDBRANCH=""
           CRDROIDDEVICE=""
+          OSLEVELVERSION="17.0.0"
+          RELEASEPATCH="${RUNNER_TEMP}/RELEASE_PLATFORM_SECURITY_PATCH.textproto"
+          CRDROIDPATCH="${RUNNER_TEMP}/crDroidOTA.json"
           case "$AOSPSOURCE" in
             Lineage)
               LINEAGEBRANCH="lineage-24.0"
@@ -2593,84 +2602,97 @@ jobs:
               CRDROIDBRANCH="17.0"
               CRDROIDDEVICE="dodge"
               ;;
+            *)
+              echo "⚠️ Unsupported Android Source : ${AOSPSOURCE}"
+              exit 1
+              ;;
           esac
-          # Define Security Patch Metadata
-          RELEASEPATCH="${RUNNER_TEMP}/RELEASE_PLATFORM_SECURITY_PATCH.textproto"
-          CRDROIDPATCH="${RUNNER_TEMP}/crDroidOTA.json"
           # Display Package Configuration
           echo "📦 AnyKernel3 Packaging"
-          echo "📂 Kernel Source      : ${SOURCEDIR}"
-          echo "📂 AnyKernel3         : ${AK3DIR}"
-          echo "📂 Package Directory  : ${PACKDIR}"
-          echo "📂 Output Directory   : ${OUTDIR}"
-          echo "📌 Android Source     : ${AOSPSOURCE}"
+          echo "📂 Kernel Source       : ${SOURCEDIR}"
+          echo "📂 AnyKernel3          : ${AK3DIR}"
+          echo "📂 Package Directory   : ${PACKDIR}"
+          echo "📂 Output Directory    : ${OUTDIR}"
+          echo "📌 Android Source      : ${AOSPSOURCE}"
           if [[ -n "$LINEAGEBRANCH" ]]; then
-            echo "📌 LineageOS Branch : ${LINEAGEBRANCH}"
+            echo "📌 LineageOS Branch  : ${LINEAGEBRANCH}"
           fi
 
           if [[ -n "$CRDROIDBRANCH" ]]; then
-            echo "📌 CrDroid Branch   : ${CRDROIDBRANCH}"
-            echo "📌 CrDroid Device   : ${CRDROIDDEVICE}"
+            echo "📌 CrDroid Branch    : ${CRDROIDBRANCH}"
+            echo "📌 CrDroid Device    : ${CRDROIDDEVICE}"
           fi
 
+          # Validate Kernel Image
+          echo "🔎 Validating Kernel Image..."
+          if [[ ! -s "$IMAGE" ]]; then
+            echo "⚠️ Kernel Image Missing or Empty"
+            echo "📂 Expected : ${IMAGE}"
+            exit 1
+          fi
+
+          SIZE="$(stat -c%s "$IMAGE")"
+          echo "✔️ Kernel Image Verified"
+          echo "📌 Kernel Image Size : ${SIZE} Bytes"
+          # Prepare Directories
+          rm -rf "$AK3DIR" "$PACKDIR"
+          mkdir -p "$OUTDIR" "$PACKDIR" "$RUNNER_TEMP"
           # Clone AnyKernel3
           echo "📥 Cloning AnyKernel3..."
-          rm -rf "$AK3DIR"
           git clone \
             --depth=1 \
             --branch master \
             https://github.com/AndreiMikh/AnyKernel3.git \
             "$AK3DIR"
           echo "✔️ AnyKernel3 Cloned Successfully"
-          # Validate Kernel Image
-          echo "🔎 Validating Kernel Image..."
-          if [[ ! -s "$IMAGE" ]]; then
-            echo "⚠️ Kernel Image Missing or Empty"
-            echo "📂 Expected : $IMAGE"
-            exit 1
-          fi
-
-          SIZE="$(stat -c%s "$IMAGE")"
-          echo "✔️ Kernel Image Verified"
-          echo "📌 Kernel Image Size : ${SIZE} bytes"
           # Prepare AnyKernel3 Package
           echo "📥 Preparing AnyKernel3 Package..."
           cp -a "$AK3DIR"/. "$PACKDIR"/
           cp "$IMAGE" "$PACKDIR/Image"
+          if [[ ! -s "$PACKDIR/anykernel.sh" ]]; then
+            echo "⚠️ AnyKernel3 Anykernel Script Missing"
+            exit 1
+          fi
+
           echo "✔️ AnyKernel3 Package Prepared"
           # Configure AnyKernel3 Kernel Name
           echo "🔧 Configuring AnyKernel3 Kernel Name..."
-          if [[ "${{ inputs.ATTR }}" == "true" ]]; then
-            sed -i \
-              "s#kernel.string=.*#kernel.string=AOSP ${AOSPSOURCE} Kernel | Build by ${{ inputs.GITOWNER }}#" \
-              "$PACKDIR/anykernel.sh"
+          if [[ "$ATTR" == "true" ]]; then
+            KERNELNAME="AOSP ${AOSPSOURCE} Kernel | Build by ${GITOWNER}"
           else
-            sed -i \
-              "s#kernel.string=.*#kernel.string=${AOSPSOURCE} OPlus AOSP SM8750 Kernel#" \
-              "$PACKDIR/anykernel.sh"
+            KERNELNAME="${AOSPSOURCE} OPlus AOSP SM8750 Kernel"
           fi
 
-          echo "✔️ AnyKernel3 Kernel Name Configured"  
+          if ! grep -q '^kernel.string=' "$PACKDIR/anykernel.sh"; then
+            echo "⚠️ Kernel.String Setting Not Found"
+            exit 1
+          fi
+         
+          sed -i \
+            "s#^kernel.string=.*#kernel.string=${KERNELNAME}#" \
+            "$PACKDIR/anykernel.sh"
+          echo "✔️ AnyKernel3 Kernel Name Configured"
           # Detect Android Security Patch Level
           echo "🔎 Detecting Android Security Patch Level..."
           AOSPPATCHFULL=""
           case "$AOSPSOURCE" in
             Lineage)
               # Define LineageOS Release Metadata
-              RELEASEURL="https://raw.githubusercontent.com/LineageOS/android_build_release/${LINEAGEBRANCH}/flag_values/bp4a/RELEASE_PLATFORM_SECURITY_PATCH.textproto"
+              RELEASEURL="https://raw.githubusercontent.com/LineageOS/android_vendor_lineage/${LINEAGEBRANCH}/release/flag_values/cp2a/RELEASE_PLATFORM_SECURITY_PATCH.textproto"
               echo "📌 Source   : LineageOS"
               echo "📌 Branch   : ${LINEAGEBRANCH}"
               echo "📂 Metadata : ${RELEASEURL}"
               rm -f "$RELEASEPATCH"
               # Fetch LineageOS Release Metadata
-              if curl -fsSL \
+              if curl -fsSL --retry 3 --retry-delay 2 \
                 "$RELEASEURL" \
-                -o "$RELEASEPATCH"; then
+                -o "$RELEASEPATCH" &&
+                [[ -s "$RELEASEPATCH" ]]; then
                 echo "✔️ LineageOS Release Metadata Downloaded"
                 # Extract Security Patch Level
                 AOSPPATCHFULL="$(
                   awk '
-                    {
+                    /string_value[[:space:]]*:/ {
                       if (match($0, /20[0-9][0-9]-[0-9][0-9]-[0-9][0-9]/)) {
                         print substr($0, RSTART, RLENGTH)
                         exit
@@ -2695,26 +2717,47 @@ jobs:
               echo "📌 Branch   : ${CRDROIDBRANCH}"
               echo "📌 Device   : ${CRDROIDDEVICE}"
               echo "📂 Metadata : ${CRDROIDURL}"
-              rm -f "$CRDROIDPATCH" 
+
+              rm -f "$CRDROIDPATCH"
               # Fetch CrDroid OTA Metadata
-              if curl -fsSL \
+              if curl -fsSL --retry 3 --retry-delay 2 \
                 "$CRDROIDURL" \
-                -o "$CRDROIDPATCH"; then
+                -o "$CRDROIDPATCH" &&
+                [[ -s "$CRDROIDPATCH" ]]; then
                 echo "✔️ CrDroid OTA Metadata Downloaded"
                 # Extract Security Patch Level
                 AOSPPATCHFULL="$(
-                  awk '
-                    /"os_patch_level"[[:space:]]*:/ {
-                      if (match($0, /20[0-9][0-9]-[0-9][0-9]-[0-9][0-9]/)) {
-                        print substr($0, RSTART, RLENGTH)
-                        exit
-                      }
-                    }
-                  ' "$CRDROIDPATCH"
+                  python3 - "$CRDROIDPATCH" <<'PY'
+          import json
+          import re
+          import sys
+          pattern = re.compile(r"20\d{2}-\d{2}-\d{2}")
+          def findpatch(data):
+              if isinstance(data, dict):
+                  value = data.get("os_patch_level")
+                  if isinstance(value, str) and pattern.fullmatch(value):
+                      return value
+                  for child in data.values():
+                      result = findpatch(child)
+                      if result:
+                          return result
+              elif isinstance(data, list):
+                  for child in data:
+                      result = findpatch(child)
+                      if result:
+                          return result
+              return ""
+          try:
+              with open(sys.argv[1], encoding="utf-8") as source:
+                  metadata = json.load(source)
+              print(findpatch(metadata))
+          except (OSError, json.JSONDecodeError):
+              print("")
+          PY
                 )"
                 if [[ -n "$AOSPPATCHFULL" ]]; then
                   echo "✔️ CrDroid Security Patch Level Found"
-                  echo "📲 Detected Patch Level: ${AOSPPATCHFULL}"
+                  echo "📲 Detected Patch Level : ${AOSPPATCHFULL}"
                 else
                   echo "⚠️ CrDroid Security Patch Level Not Found"
                 fi
@@ -2722,80 +2765,94 @@ jobs:
                 echo "⚠️ Failed To Fetch CrDroid OTA Metadata"
               fi
               ;;
-            *)
-              # Handle Unknown Android Source
-              echo "⚠️ Unknown AOSP Source : ${AOSPSOURCE}"
-              ;;
           esac
           # Validate Security Patch Level
-          if [[ "$AOSPPATCHFULL" =~ ^20[0-9]{2}-[0-9]{2}-[0-9]{2}$ ]]; then
-            # Convert Security Patch Level
+          if [[ "$AOSPPATCHFULL" =~ ^20[0-9]{2}-(0[1-9]|1[0-2])-(0[1-9]|[12][0-9]|3[01])$ ]]; then
             AOSPPATCHLEVEL="${AOSPPATCHFULL:0:7}"
             echo "✔️ Android Security Patch Level Detected"
             echo "📲 Full Patch Level        : ${AOSPPATCHFULL}"
             echo "📲 Boot Patch Level        : ${AOSPPATCHLEVEL}"
           else
-            # Use Workflow Fallback
-            echo "⚠️ Android Security Patch Level Not Found In Source"
+            echo "⚠️ Valid Security Patch Level Not Found"
             echo "ℹ️ Using Workflow Fallback : 2026-08"
             AOSPPATCHLEVEL="2026-08"
           fi
 
           # Export Security Patch Level
-          echo "AOSPPATCHLEVEL=$AOSPPATCHLEVEL" >> "$GITHUB_ENV"
-          echo "📲 Final Boot Patchlevel : ${AOSPPATCHLEVEL}"
+          echo "AOSPPATCHLEVEL=${AOSPPATCHLEVEL}" >> "$GITHUB_ENV"
+          echo "📲 Final Boot Patch Level : ${AOSPPATCHLEVEL}"
           # Generate AnyKernel3 Package Name
           STAMP="$(date +%Y-%m-%d)"
-          ZIP="AK3-(${{ steps.kernelversion.outputs.fullversion }})-${{ inputs.AOSPSOURCE }}(SM8750)-${{ inputs.ROOTENGINE }}(${{ steps.rootengine.outputs.ksuversion }})(${STAMP}).zip"
+          ZIP="AK3-(${FULLVERSION})-${AOSPSOURCE}(SM8750)-${ROOTENGINE}(${KSUVERSION})(${STAMP}).zip"
+          ZIPPATH="${OUTDIR}/${ZIP}"
           echo "📦 Creating AnyKernel3 ZIP..."
           echo "📌 Package : ${ZIP}"
           # Compress AnyKernel3 Package
           cd "$PACKDIR"
-          zip -r9 \
-            "${OUTDIR}/${ZIP}" \
-            . \
-            -x "*.git*" \
-            >/dev/null
+          if ! zip -r9 "$ZIPPATH" . -x "*.git*" >/dev/null; then
+            echo "⚠️ Failed To Create AnyKernel3 ZIP"
+            exit 1
+          fi
+
           cd "$GITHUB_WORKSPACE"
+          if [[ ! -s "$ZIPPATH" ]]; then
+            echo "⚠️ AnyKernel3 ZIP Missing or Empty"
+            exit 1
+          fi
+
           # Export Package Name
-          echo "ak3name=$ZIP" >> "$GITHUB_OUTPUT"
+          echo "ak3name=${ZIP}" >> "$GITHUB_OUTPUT"
           echo "✔️ AnyKernel3 Package Created"
-          ls -lh "${OUTDIR}/${ZIP}"
+          ls -lh "$ZIPPATH"
           # Generate Additional Artifacts
-          if [[ "${{ inputs.BUILDARTIFACT }}" == "All" ]]; then
+          if [[ "$BUILDARTIFACT" == "All" ]]; then
             echo "📦 Generating Additional Kernel Artifacts..."
             # Copy Raw Kernel Image
             cp "$IMAGE" "${OUTDIR}/Image"
+            if [[ ! -s "${OUTDIR}/Image" ]]; then
+              echo "⚠️ Failed To Generate Raw Kernel Image"
+              exit 1
+            fi
+
             echo "✔️ Raw Kernel Image Generated"
             echo "📂 ${OUTDIR}/Image"
             # Generate Boot Image
             echo "📦 Generating Boot Image..."
             echo "📲 Android Security Patch Level : ${AOSPPATCHLEVEL}"
-            mkbootimg \
+            if ! command -v mkbootimg >/dev/null 2>&1; then
+              echo "⚠️ MK Boot Img Not Found In PATH"
+              exit 1
+            fi
+
+            rm -f "${OUTDIR}/boot.img"
+            if ! mkbootimg \
               --kernel "$IMAGE" \
               --header_version 4 \
-              --os_version 17.0.0 \
+              --os_version "$OSLEVELVERSION" \
               --os_patch_level "$AOSPPATCHLEVEL" \
               --pagesize 4096 \
               --base 0x80000000 \
-              -o "${OUTDIR}/boot.img"
-            # Validate Boot Image
-            if [[ ! -s "${OUTDIR}/boot.img" ]]; then
+              -o "${OUTDIR}/boot.img"; then
               echo "⚠️ Failed To Generate Boot Image"
+              exit 1
+            fi
+
+            if [[ ! -s "${OUTDIR}/boot.img" ]]; then
+              echo "⚠️ Boot Image Missing or Empty"
               exit 1
             fi
 
             echo "✔️ Boot Image Generated"
             echo "📂 ${OUTDIR}/boot.img"
             # Display Generated Artifacts
-            echo "🚀 All Mode        : Image + Boot Image Generated"
-            echo "📌 Generated Files :"
+            echo "🚀 All Mode               : Image + Boot Image Generated"
+            echo "📌 Generated Files        :"
             ls -lh \
               "${OUTDIR}/Image" \
               "${OUTDIR}/boot.img"
             echo "📲 Boot Image Patch Level : ${AOSPPATCHLEVEL}"
           fi
-  
+
           echo "🎉 AnyKernel3 Packaging Complete"
 
       - name: 📤 Upload Kernel Artifacts
