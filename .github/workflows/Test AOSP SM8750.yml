@@ -166,7 +166,7 @@ jobs:
       # Compiler Cache Configuration
       CCACHE_BASEDIR: ${{ github.workspace }}
       CCACHE_DIR: ${{ github.workspace }}/.ccache
-      CCACHE_MAXSIZE: 8G
+      CCACHE_MAXSIZE: 3G
       CCACHE_COMPILERCHECK: "content"
       CCACHE_NOHASHDIR: "true"
       CCACHE_NOHARDLINK: "true"
@@ -579,7 +579,7 @@ jobs:
         run: |
           # Configure Compiler Cache Environment
           export CCACHE_DIR="${CCACHE_DIR:-${GITHUB_WORKSPACE}/.ccache}"
-          export CCACHE_MAXSIZE="${CCACHE_MAXSIZE:-8G}"
+          export CCACHE_MAXSIZE="${CCACHE_MAXSIZE:-3G}"
           export CCACHE_COMPILERCHECK="${CCACHE_COMPILERCHECK:-content}"
           export CCACHE_BASEDIR="${CCACHE_BASEDIR:-${GITHUB_WORKSPACE}}"
           export CCACHE_NOHASHDIR="${CCACHE_NOHASHDIR:-true}"
@@ -2577,9 +2577,12 @@ jobs:
         shell: bash
         run: |
           ARCHIVE="CCache-SM8750-${{ inputs.AOSPSOURCE }}.tar.zst"
-          RELEASE_TAG="CCache-SM8750-${{ inputs.AOSPSOURCE }}"
+          RELEASETAG="CCache-SM8750-${{ inputs.AOSPSOURCE }}"
+          MAXSIZE=$((2 * 1024 * 1024 * 1024))
+          SELECTEDLEVEL=""
           echo "📦 Packaging Public Compiler Cache..."
           echo "📂 Compiler Cache Directory : $CCACHE_DIR"
+          echo "📏 Maximum Archive Size     : 2 GiB"
           ccache -s || true
           if [[ ! -d "$CCACHE_DIR" ]]; then
             echo "⚠️ Compiler Cache Directory Not Found"
@@ -2587,21 +2590,58 @@ jobs:
             exit 1
           fi
 
-          echo "🗜️ Creating Public Compiler Cache Archive..."
-          tar -I 'zstd -T0 -5' \
-            -cf "$ARCHIVE" \
-            -C "$CCACHE_DIR" .
-          echo "📦 Archive Size : $(du -sh "$ARCHIVE" | cut -f1)"
+          # Remove Any Previous Archive
+          rm -f "$ARCHIVE"
+          # Try Compression Levels Until Archive Fits
+          for LEVEL in 1 2 3 4 5; do
+            echo "🗜️ Creating Archive with Zstandard Level -$LEVEL..."
+            if ! tar -I "zstd -T0 -${LEVEL}" \
+              -cf "$ARCHIVE" \
+              -C "$CCACHE_DIR" .; then
+              echo "⚠️ Archive Creation Failed at Level -$LEVEL"
+              rm -f "$ARCHIVE"
+              exit 1
+            fi
+
+            ARCHIVESIZE="$(stat -c '%s' "$ARCHIVE")"
+            ARCHIVEHUMAN="$(du -h "$ARCHIVE" | cut -f1)"
+            echo "📦 Archive Size : $ARCHIVEHUMAN ($ARCHIVESIZE Bytes)"
+            if (( ARCHIVESIZE <= MAXSIZE )); then
+              SELECTEDLEVEL="$LEVEL"
+              echo "✔️ Archive Fits the 2 GiB Limit"
+              break
+            fi
+
+            echo "⚠️ Archive Exceeds 2 GiB at Level -$LEVEL"
+            rm -f "$ARCHIVE"
+          done
+
+          # Verify the Final Archive
+          if [[ -z "$SELECTEDLEVEL" || ! -f "$ARCHIVE" ]]; then
+            echo "⚠️ No Compression Level Produced an Archive Within 2 GiB"
+            echo "⚠️ Public Compiler Cache Upload Aborted"
+            exit 1
+          fi
+
+          FINALSIZE="$(stat -c '%s' "$ARCHIVE")"
+          if (( FINALSIZE > MAXSIZE )); then
+            echo "⚠️ Final Archive Exceeds the Maximum Size"
+            rm -f "$ARCHIVE"
+            exit 1
+          fi
+
+          echo "✔️ Selected Zstandard Level  : -$SELECTEDLEVEL"
+          echo "📦 Final Archive Size        : $(du -sh "$ARCHIVE" | cut -f1)"
           echo "🚀 Uploading Public Compiler Cache..."
           if gh release create \
-            "$RELEASE_TAG" \
+            "$RELEASETAG" \
             "$ARCHIVE" \
             --repo "$GH_REPO" \
-            --title "$RELEASE_TAG" \
+            --title "$RELEASETAG" \
             --notes 'Category: Compiler Cache | SM8750-O2-FT — Public Compiler Cache for OPlus AOSP SM8750 Kernel Builds'; then
             echo "✔️ Public Compiler Cache Release Created"
           elif gh release upload \
-            "$RELEASE_TAG" \
+            "$RELEASETAG" \
             "$ARCHIVE" \
             --repo "$GH_REPO" \
             --clobber; then
@@ -2725,8 +2765,8 @@ jobs:
             "s#^kernel.string=.*#kernel.string=${KERNELNAME}#" \
             "$PACKDIR/anykernel.sh"
           echo "✔️ AnyKernel3 Kernel Name Configured"
-          # Detect Android Security Patch Level
-          echo "🔎 Detecting Android Security Patch Level..."
+          # Detect Android Security Patchlevel
+          echo "🔎 Detecting Android Security Patchlevel..."
           AOSPPATCHFULL=""
           case "$AOSPSOURCE" in
             Lineage)
@@ -2742,7 +2782,7 @@ jobs:
                 -o "$LINEAGEPATCH" &&
                 [[ -s "$LINEAGEPATCH" ]]; then
                 echo "✔️ LineageOS Release Metadata Downloaded"
-                # Extract Security Patch Level
+                # Extract Security Patchlevel
                 AOSPPATCHFULL="$(
                   awk '
                     /string_value[[:space:]]*:/ {
@@ -2754,10 +2794,10 @@ jobs:
                   ' "$LINEAGEPATCH"
                 )"
                 if [[ -n "$AOSPPATCHFULL" ]]; then
-                  echo "✔️ LineageOS Security Patch Level Found"
-                  echo "📲 Detected Patch Level : ${AOSPPATCHFULL}"
+                  echo "✔️ LineageOS Security Patchlevel Found"
+                  echo "📲 Detected Patchlevel : ${AOSPPATCHFULL}"
                 else
-                  echo "⚠️ LineageOS Security Patch Level Not Found"
+                  echo "⚠️ LineageOS Security Patchlevel Not Found"
                 fi
               else
                 echo "⚠️ Failed To Fetch LineageOS Release Metadata"
@@ -2778,7 +2818,7 @@ jobs:
                 -o "$CRDROIDPATCH" &&
                 [[ -s "$CRDROIDPATCH" ]]; then
                 echo "✔️ CrDroid OTA Metadata Downloaded"
-                # Extract Security Patch Level
+                # Extract Security Patchlevel
                 AOSPPATCHFULL="$(
                   python3 - "$CRDROIDPATCH" <<'PY'
           import json
@@ -2809,31 +2849,31 @@ jobs:
           PY
                 )"
                 if [[ -n "$AOSPPATCHFULL" ]]; then
-                  echo "✔️ CrDroid Security Patch Level Found"
-                  echo "📲 Detected Patch Level : ${AOSPPATCHFULL}"
+                  echo "✔️ CrDroid Security Patchlevel Found"
+                  echo "📲 Detected Patchlevel : ${AOSPPATCHFULL}"
                 else
-                  echo "⚠️ CrDroid Security Patch Level Not Found"
+                  echo "⚠️ CrDroid Security Patchlevel Not Found"
                 fi
               else
                 echo "⚠️ Failed To Fetch CrDroid OTA Metadata"
               fi
               ;;
           esac
-          # Validate Security Patch Level
+          # Validate Security Patchlevel
           if [[ "$AOSPPATCHFULL" =~ ^20[0-9]{2}-(0[1-9]|1[0-2])-(0[1-9]|[12][0-9]|3[01])$ ]]; then
             AOSPPATCHLEVEL="${AOSPPATCHFULL:0:7}"
-            echo "✔️ Android Security Patch Level Detected"
-            echo "📲 Full Patch Level        : ${AOSPPATCHFULL}"
-            echo "📲 Boot Patch Level        : ${AOSPPATCHLEVEL}"
+            echo "✔️ Android Security Patchlevel Detected"
+            echo "📲 Full Patchlevel         : ${AOSPPATCHFULL}"
+            echo "📲 Boot Patchlevel         : ${AOSPPATCHLEVEL}"
           else
-            echo "⚠️ Valid Security Patch Level Not Found"
+            echo "⚠️ Valid Security Patchlevel Not Found"
             echo "ℹ️ Using Workflow Fallback : 2026-08"
             AOSPPATCHLEVEL="2026-08"
           fi
 
-          # Export Security Patch Level
+          # Export Security Patchlevel
           echo "AOSPPATCHLEVEL=${AOSPPATCHLEVEL}" >> "$GITHUB_ENV"
-          echo "📲 Final Boot Patch Level : ${AOSPPATCHLEVEL}"
+          echo "📲 Final Boot Patchlevel     : ${AOSPPATCHLEVEL}"
           # Generate AnyKernel3 Package Name
           STAMP="$(date +%Y-%m-%d)"
           ZIP="AnyKernel3-[Dodge-SM8750]-[${{ steps.kernelversion.outputs.fullversion }}][${{ steps.build-identity.outputs.suffix }}][${{ steps.rootengine.outputs.ksuversion }}][${STAMP}].zip"
@@ -2871,7 +2911,7 @@ jobs:
             echo "📂 ${OUTDIR}/Image"
             # Generate Boot Image
             echo "📦 Generating Boot Image..."
-            echo "📲 Android Security Patch Level : ${AOSPPATCHLEVEL}"
+            echo "📲 Android Security Patchlevel : ${AOSPPATCHLEVEL}"
             if ! command -v mkbootimg >/dev/null 2>&1; then
               echo "⚠️ MK Boot Img Not Found In PATH"
               exit 1
@@ -2903,7 +2943,7 @@ jobs:
             ls -lh \
               "${OUTDIR}/Image" \
               "${OUTDIR}/boot.img"
-            echo "📲 Boot Image Patch Level : ${AOSPPATCHLEVEL}"
+            echo "📲 Boot Image Patchlevel  : ${AOSPPATCHLEVEL}"
           fi
 
           echo "🎉 AnyKernel3 Packaging Complete"
