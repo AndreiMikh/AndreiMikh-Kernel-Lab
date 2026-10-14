@@ -1103,130 +1103,85 @@ jobs:
             echo "kernelversion=$KERNELVERSION"
           } >> "$GITHUB_OUTPUT"
           echo "🎉 Kernel Version Detection Complete" 
-
-      - name: ♻️ Extract-Cert PKCS11 / Loop IOCTL Fix
-        shell: bash
-        run: |
-          # Configure Extract-Cert PKCS11 Compile Guard
-          FILE="$SOURCEDIR/certs/extract-cert.c"
-          # Add Guard Only When PKCS11 PIN Handling Exists
-          if [[ -f "$FILE" ]] &&
-             grep -q 'ENGINE_ctrl_cmd_string(e, "PIN", key_pass, 0)' "$FILE" &&
-             ! grep -B5 -A2 'ENGINE_ctrl_cmd_string(e, "PIN", key_pass, 0)' "$FILE" | grep -q '#ifdef USE_PKCS11_ENGINE'; then
-            perl -0pi -e 's/(\n\t\tif \(key_pass\)\n\t\t\tERR\(!ENGINE_ctrl_cmd_string\(e, "PIN", key_pass, 0\), "Set PKCS#11 PIN"\);)/\n#ifdef USE_PKCS11_ENGINE$1\n#endif/' "$FILE"
-          fi
-
-          # Configure Loop IOCTL Stack Usage
-          FILE="$SOURCEDIR/drivers/block/loop.c"
-          # Validate Loop Driver Source if it Exists
-          if [[ ! -f "$FILE" ]]; then
-            echo "⚠️ Loop Source Not Found"
-            exit 1
-          fi
-
-          # Move Configuration Handling Into a No-Inline Helper
-          if ! grep -qF 'static noinline int lo_ioctl_configure(' "$FILE"; then
-            perl -0pi -e '
-              s{(?=static int lo_ioctl\(struct block_device \*bdev, blk_mode_t mode,)}{static noinline int lo_ioctl_configure(struct loop_device *lo, blk_mode_t mode, struct block_device *bdev, unsigned int cmd, unsigned long arg)\n{\n\tstruct loop_config config;\n\tif (cmd == LOOP_SET_FD) {\n\t\tmemset(\&config, 0, sizeof(config));\n\t\tconfig.fd = arg;\n\t} else if (copy_from_user(\&config, (void __user *)arg, sizeof(config))) {\n\t\treturn -EFAULT;\n\t}\n\treturn loop_configure(lo, mode, bdev, \&config);\n}\n\n} or die "lo_ioctl insertion failed\n";
-              # Replace Original LOOP SETFD and LOOP CONFIGURE Cases
-              s{\tcase LOOP_SET_FD: \{.*?\tcase LOOP_CHANGE_FD:}{\tcase LOOP_SET_FD:\n\tcase LOOP_CONFIGURE:\n\t\treturn lo_ioctl_configure(lo, mode, bdev, cmd, arg);\n\tcase LOOP_CHANGE_FD:}s or die "ioctl replacement failed\n";
-            ' "$FILE"
-          fi
-
-          # Verify Loop IOCTL Helper and Dispatch
-          grep -qF 'static noinline int lo_ioctl_configure(' "$FILE" &&
-          grep -qF 'return lo_ioctl_configure(lo, mode, bdev, cmd, arg);' "$FILE" ||
-          { echo "⚠️ Loop IOCTL Patch Verification Failed"; exit 1; }
-          echo "🎉 PKCS11 / Loop IOCTL Fixes Checked"
    
       - name: 🧾 Generate Base Kernel Configuration
         env:
-          AOSPSOURCE: ${{ inputs.AOSPSOURCE }}
           KERNELSUFFIX: ${{ inputs.KERNELSUFFIX }}
         shell: bash
         run: |
           # Define Kernel Configuration Paths
+          CONFIGS="$SOURCEDIR/arch/arm64/configs"
+          MERGEBASECONFIGS="$SOURCEDIR/scripts/kconfig/merge_config.sh"
           CONFIGFILE="$OUTDIR/.config"
-          CONFIGURL="https://raw.githubusercontent.com/AndreiMikh/AndreiMikh-Kernel-Lab/LiquidAndrei/patches/AOSP"
-          case "$AOSPSOURCE" in
-            Lineage)
-              CONFIGNAME="Lineage-SM8750-KConfig.config"
-              ;;
-            CrDroid)
-              CONFIGNAME="CrDroid-SM8750-KConfig.config"
-              ;;
-            *)
-              echo "⚠️ Unsupported AOSP Source : $AOSPSOURCE"
+          BASECONFIG="$CONFIGS/gki_defconfig"
+          PERFCONFIG="$CONFIGS/vendor/sun_perf.config"
+          OPLUSCONFIG="$CONFIGS/vendor/oplus/sun_perf.config"
+          echo "📥 Generating SM8750 Base Kernel Configuration..."
+          echo "📂 Kernel Source : $SOURCEDIR"
+          echo "📂 Kernel Output : $OUTDIR"
+          echo "📂 Config Path   : $CONFIGS"
+          # Validate Merge Script
+          if [ ! -x "$MERGEBASECONFIGS" ]; then
+            echo "⚠️ Base Config Merge Script Not Found"
+            echo "📂 Expected : $MERGEBASECONFIGS"
+            exit 1
+          fi
+
+          # Validate Required Configuration Files
+          for config in \
+            "$BASECONFIG" \
+            "$PERFCONFIG" \
+            "$OPLUSCONFIG"; do
+            if [ ! -f "$config" ]; then
+              echo "⚠️ Required Kernel Config Not Found"
+              echo "📂 $config"
               exit 1
-              ;;
-          esac
-          echo "📥 Loading Pre-Generated SM8750 Kernel Configuration..."
-          echo "📌 ROM Source                  : $AOSPSOURCE"
-          echo "📌 Config Name                 : $CONFIGNAME"
-          echo "📂 Kernel Source               : $SOURCEDIR"
-          echo "📂 Kernel Output               : $OUTDIR"
-          # Validate Kernel Source and Configuration Utility
-          if [ ! -d "$SOURCEDIR" ]; then
-            echo "⚠️ Kernel Source Directory Not Found: $SOURCEDIR"
-            exit 1
-          fi
+            fi
+            echo "✔️ Found : $config"
+      
+          done
 
-          CONFIGTOOL="$SOURCEDIR/scripts/config"
-          if [ ! -x "$CONFIGTOOL" ]; then
-            echo "⚠️ Kernel Configuration Utility Not Found : $CONFIGTOOL"
-            exit 1
-          fi
-
+          # Prepare Kernel Output Directory
           mkdir -p "$OUTDIR"
-          # Download the Matching Pre-Generated Configuration
-          if ! curl -fLsS --retry 3 --retry-delay 2 \
-            "$CONFIGURL/$CONFIGNAME" \
-            -o "$CONFIGFILE"; then
-            echo "⚠️ Failed to Download Kernel Configuration"
-            rm -f "$CONFIGFILE"
+          rm -f "$CONFIGFILE"
+          # Merge Base, Performance, and OPlus Configurations
+          echo "🔧 Merging Base Kernel Configurations..."
+          KBUILD_OUTPUT="$OUTDIR" \
+          KCONFIG_CONFIG="$CONFIGFILE" \
+            "$MERGEBASECONFIGS" \
+            -m \
+            -r \
+            "$BASECONFIG" \
+            "$PERFCONFIG" \
+            "$OPLUSCONFIG"
+          # Verify Generated Configuration
+          if [ ! -f "$CONFIGFILE" ]; then
+            echo "⚠️ Failed to Generate .config"
             exit 1
           fi
 
-          # Validate Downloaded Configuration
-          if [ ! -s "$CONFIGFILE" ] ||
-             ! grep -q '^CONFIG_' "$CONFIGFILE" ||
-             ! grep -q '^CONFIG_ARM64=y$' "$CONFIGFILE"; then
-            echo "⚠️ Downloaded Kernel Configuration is Invalid"
-            rm -f "$CONFIGFILE"
-            exit 1
-          fi
-
-          # Apply Kernel Local Version
-          echo "🔧 Configuring Kernel Local Version..."
+          echo "🧾 Base Kernel Config Generated"
+          # Set Kernel Local Version Suffix
           if [ -n "$KERNELSUFFIX" ]; then
-            LOCALVERSION="-${KERNELSUFFIX}-4k"
+            "$SOURCEDIR/scripts/config" \
+              --file "$CONFIGFILE" \
+              --set-str CONFIG_LOCALVERSION "-${KERNELSUFFIX}-4k"
           else
-            LOCALVERSION="-${SRCCOMMIT}-4k"
+            "$SOURCEDIR/scripts/config" \
+              --file "$CONFIGFILE" \
+              --set-str CONFIG_LOCALVERSION "-${SRCCOMMIT}-4k"
           fi
 
-          "$CONFIGTOOL" \
-            --file "$CONFIGFILE" \
-            --set-str CONFIG_LOCALVERSION "$LOCALVERSION"
-          "$CONFIGTOOL" \
+          # Disable Automatic Local Version Suffix
+          "$SOURCEDIR/scripts/config" \
             --file "$CONFIGFILE" \
             -d CONFIG_LOCALVERSION_AUTO
-          # Verify Final Kernel Configuration
-          if ! grep -Fxq "CONFIG_LOCALVERSION=\"$LOCALVERSION\"" "$CONFIGFILE"; then
-            echo "⚠️ Failed to Apply Kernel Local Version"
-            exit 1
-          fi
-
-          if grep -q '^CONFIG_LOCALVERSION_AUTO=y$' "$CONFIGFILE"; then
-            echo "⚠️ Failed to Disable Automatic Kernel Local Version"
-            exit 1
-          fi
-
-          echo "📌 Kernel Local Version        :"
-          grep '^CONFIG_LOCALVERSION=' "$CONFIGFILE"
-          echo "📊 Base Configuration          :"
-          echo "📌 Total Options               : $(grep -c '^CONFIG_' "$CONFIGFILE" || true)"
-          echo "📌 Configuration File          : $CONFIGFILE"
-          echo "🎉 Base Kernel Configuration Loaded Successfully"
+          # Display Final Configuration Summary
+          echo "📌 Kernel Local Version:"
+          grep '^CONFIG_LOCALVERSION=' "$CONFIGFILE" || true
+          echo "📊 Base Configuration:"
+          echo "📌 Total Options: $(grep -c '^CONFIG_' "$CONFIGFILE" || true)"
+          echo "🎉 Base Kernel Configuration Generated Successfully"
 
       - name: 🆘 Solve Root Engine Source
         id: manager
