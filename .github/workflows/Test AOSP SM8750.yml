@@ -562,6 +562,7 @@ jobs:
           echo "📌 PYTHONPATH :"
           echo "/tmp"
           echo "🎉 Clang Configuration and Toolchain Verification Complete"    
+  
       - name: 💾 Restore Compiler Cache
         id: ccache-restore
         if: ${{ inputs.BUILDCCACHE }}
@@ -576,6 +577,7 @@ jobs:
             CCache-SM8750-${{ inputs.AOSPSOURCE }}-${{ runner.os }}-${{ runner.arch }}-
             CCache-SM8750-${{ inputs.AOSPSOURCE }}-${{ runner.os }}-
             CCache-SM8750-${{ inputs.AOSPSOURCE }}-
+            
       - name: 📥 Restore Public Compiler Cache
         if: ${{ inputs.BUILDCCACHE }}
         env:
@@ -592,66 +594,70 @@ jobs:
           echo "└─ Asset      : $ARCHIVE"
           echo "└─ Cache Dir  : $CCACHE_DIR"
           echo "└─ Temp File  : $CACHEFILE"
-          # Verify Release Exists
+          # Verify Release And Asset
           echo "└─ 🔎 Checking GitHub Release..."
-          if gh release view "$RELEASE" \
+          if ! gh release view "$RELEASE" \
             --repo "$GITHUB_REPOSITORY" \
-            --json tagName,assets \
-            --jq '"Tag: \(.tagName)\nAssets:\n" + ([.assets[].name] | join("\n"))'; then
-            echo "└─ ✔️ Release Found"
-          else
-            echo "└─ ⚠️ Release Not Found Or Not Accessible"
+            --json assets \
+            --jq ".assets[].name" | grep -Fxq "$ARCHIVE"; then
+            echo "└─ ⚠️ Release Or Asset Not Found"
             echo "└─ ℹ️ Continuing With Existing Compiler Cache"
             exit 0
           fi
+
+          echo "└─ ✔️ Release Asset Found"
           # Download Public Compiler Cache
           echo "└─ ⬇️ Downloading Compiler Cache Asset..."
           rm -f "$CACHEFILE"
-          if gh release download "$RELEASE" \
+          if ! gh release download "$RELEASE" \
             --repo "$GITHUB_REPOSITORY" \
             --pattern "$ARCHIVE" \
             --dir "$RUNNER_TEMP" \
             --clobber; then
-            echo "└─ ✔️ Download Command Completed"
-            # Validate Downloaded Archive
-            if [[ ! -s "$CACHEFILE" ]]; then
-              echo "└─ ⚠️ Downloaded Archive Missing Or Empty"
-              exit 1
-            fi
-            echo "└─ 📦 Downloaded Archive:"
-            ls -lh "$CACHEFILE"
-            echo "└─ 📊 Archive Size: $(stat -c%s "$CACHEFILE") bytes"
-            # Validate Zstandard Archive
-            echo "└─ 🔎 Validating Zstandard Archive..."
-            if ! zstd -t "$CACHEFILE"; then
-              echo "└─ ⚠️ Archive Validation Failed"
-              rm -f "$CACHEFILE"
-              exit 1
-            fi
-       
-            echo "└─ ✔️ Archive Validation Passed"
-            # Extract Compiler Cache
-            echo "└─ 📂 Extracting Compiler Cache..."
-            if tar -I zstd -xvf "$CACHEFILE" -C "$CCACHE_DIR"; then
-              rm -f "$CACHEFILE"
-              echo "└─ ✔️ Extraction Completed"
-            else
-              rm -f "$CACHEFILE"
-              echo "└─ ⚠️ Failed To Extract Compiler Cache"
-              exit 1
-            fi
-
-            # Apply Compiler Cache Size Limit
-            echo "└─ ⚙️ Applying Cache Size Limit..."
-            ccache -M "${CCACHE_MAXSIZE:-8G}"
-            # Display Restored Compiler Cache
-            echo "└─ 📊 Restored Compiler Cache Status"
-            ccache -s
-            echo "└─ 🎉 Public Compiler Cache Restored Successfully"
-          else
-            echo "└─ ⚠️ Download Failed: Release Asset May Be Missing Or Inaccessible"
+            echo "└─ ⚠️ Download Failed"
+            rm -f "$CACHEFILE"
             echo "└─ ℹ️ Continuing With Existing Compiler Cache"
+            exit 0
           fi
+
+          # Validate Downloaded Archive
+          if [[ ! -s "$CACHEFILE" ]]; then
+            echo "└─ ⚠️ Downloaded Archive Missing Or Empty"
+            rm -f "$CACHEFILE"
+            exit 0
+          fi
+
+          echo "└─ ✔️ Download Completed"
+          ls -lh "$CACHEFILE"
+          echo "└─ 📊 Archive Size: $(stat -c%s "$CACHEFILE") Bytes"
+          # Validate Zstandard Archive
+          echo "└─ 🔎 Validating Zstandard Archive..."
+          if ! zstd -t -q "$CACHEFILE"; then
+            echo "└─ ⚠️ Archive Validation Failed"
+            rm -f "$CACHEFILE"
+            exit 0
+          fi
+
+          echo "└─ ✔️ Archive Validation Passed"
+          # Extract Compiler Cache
+          echo "└─ 📂 Extracting Compiler Cache..."
+          mkdir -p "$CCACHE_DIR"
+          if tar -I zstd -xf "$CACHEFILE" -C "$CCACHE_DIR"; then
+            rm -f "$CACHEFILE"
+            echo "└─ ✔️ Extraction Completed"
+          else
+            rm -f "$CACHEFILE"
+            echo "└─ ⚠️ Failed To Extract Compiler Cache"
+            exit 1
+          fi
+
+          # Apply Compiler Cache Size Limit
+          echo "└─ ⚙️ Applying Cache Size Limit..."
+          ccache -M "${CCACHE_MAXSIZE:-8G}"
+          # Display Restored Compiler Cache
+          echo "└─ 📊 Restored Compiler Cache Status"
+          ccache -s
+          echo "└─ 🎉 Public Compiler Cache Restored Successfully"
 
       - name: ⚙️ Configure Compiler Cache / ECS
         if: ${{ inputs.BUILDCCACHE }}
