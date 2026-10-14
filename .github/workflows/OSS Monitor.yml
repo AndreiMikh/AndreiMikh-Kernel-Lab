@@ -1349,3 +1349,63 @@ jobs:
             echo "🧾 Verify that Workflow Permissions Include: Contents: Write"
             exit 1
           fi
+
+      - name: 🧹 Delete Previous Workflow Runs
+        if: success()
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          WORKFLOWNAME: ${{ github.workflow }}
+          CURRENTRUNID: ${{ github.run_id }}
+        run: |
+          echo "🔎 Finding Workflow ID..."
+          WORKFLOWID="$(
+            gh api \
+              "repos/${GITHUB_REPOSITORY}/actions/workflows?per_page=100" \
+              --jq \
+              '.workflows[] | select(.name == env.WORKFLOWNAME) | .id' |
+              head -n1
+          )"
+
+          if [ -z "$WORKFLOWID" ]; then
+            echo "⚠️ Unable to Find Workflow ID"
+            exit 1
+          fi
+
+          echo "🧹 Finding Previous Completed Runs..."
+          RUNS="$(
+            gh api \
+              --paginate \
+              --jq \
+              '.workflow_runs[]
+              | select(
+                  .id != (env.CURRENTRUNID | tonumber)
+                  and .status == "completed"
+                )
+              | .id' \
+              "repos/${GITHUB_REPOSITORY}/actions/workflows/${WORKFLOWID}/runs?per_page=100"
+          )"
+          if [ -z "$RUNS" ]; then
+            echo "ℹ️ No Previous Completed Runs Found"
+            exit 0
+          fi
+
+          DELETED=0
+          FAILED=0
+          while IFS= read -r RUNID; do
+            [ -z "$RUNID" ] && continue
+            echo "🗑️ Deleting Run: $RUN_ID"
+            if gh api \
+              --method DELETE \
+              "repos/${GITHUB_REPOSITORY}/actions/runs/${RUNID}"
+            then
+              DELETED=$((DELETED + 1))
+            else
+              echo "⚠️ Failed to Delete Run : $RUNID"
+              FAILED=$((FAILED + 1))
+            fi
+     
+          done <<< "$RUNS"
+          echo "🏁 Workflow Run Cleanup Complete"
+          echo "🗑️ Deleted Runs     : $DELETED"
+          echo "⚠️ Failed Deletions : $FAILED"
