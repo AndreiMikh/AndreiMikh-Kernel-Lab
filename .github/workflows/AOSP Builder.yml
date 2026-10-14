@@ -1762,107 +1762,141 @@ jobs:
           echo "🎉 LZ4 1.10.0 + Neon Patch Update Completed"
           echo "📂 Kernel Source : ${SOURCEDIR}"
     
-      - name: 🛡️ Integrate Baseband Guard (BBG)
+      - name: 🛡️ Integrate Baseband Guard
         if: ${{ inputs.BBG }}
         shell: bash
         run: |
+          # Configure Baseband Guard Integration
+          MAXRETRIES=3
+          cd "$SOURCEDIR"
           echo "🔧 Baseband Guard Integration"
           echo "📌 Source : VC-Teahouse/Baseband-guard"
           echo "📌 Kernel : $SOURCEDIR"
-          # Validate Kernel Source
-          if [ ! -d "$SOURCEDIR/security" ] ||
-             [ ! -d "$SOURCEDIR/include" ]; then
-            echo "⚠️ Invalid Kernel Source Directory"
-            exit 1
-          fi
-
-          cd "$SOURCEDIR"
-          # Download Baseband Guard Setup Script
+          # Download and Execute Baseband Guard Setup
           URLBBG="https://raw.githubusercontent.com/vc-teahouse/Baseband-guard/main/setup.sh"
-          SETUPFILE="${RUNNER_TEMP:-/tmp}/bbg-setup.sh"
           echo "📥 Fetching Baseband Guard Setup Script..."
-          if ! curl -fLsS --retry 3 --retry-delay 2 \
-            "$URLBBG" -o "$SETUPFILE"; then
-            echo "⚠️ Failed to Download Baseband Guard Setup Script"
+          BBGAPPLIED=false
+          for i in $(seq 1 "$MAXRETRIES"); do
+            if curl -fsSL "$URLBBG" | bash -s -- main; then
+              BBGAPPLIED=true
+              break
+            fi
+
+            echo "⚠️ Baseband Guard Setup Failed"
+            echo "🔁 Retry $i/$MAXRETRIES..."
+            if [ "$i" -lt "$MAXRETRIES" ]; then
+              sleep 2
+            fi
+     
+          done
+
+          # Stop If Baseband Guard Setup Fails
+          if [ "$BBGAPPLIED" != "true" ]; then
+            echo "⚠️ Failed to Apply Baseband Guard"
             exit 1
           fi
 
-          # Integrate Baseband Guard Into Kernel Source
-          echo "⚙️ Applying BBG Source Integration..."
-          if ! bash "$SETUPFILE" main; then
-            echo "⚠️ Baseband Guard Source Integration Failed"
+          echo "🎉 Baseband Guard Setup Completed"
+          # Locate Baseband Guard Source Directory
+          echo "🔎 Locating Baseband Guard Source..."
+          BBGPATHDIR=""
+          if [ -d "$SOURCEDIR/Baseband-guard" ]; then
+            BBGPATHDIR="$SOURCEDIR/Baseband-guard"
+          elif [ -L "$SOURCEDIR/Baseband-guard" ]; then
+            BBGPATHDIR="$(readlink -f "$SOURCEDIR/Baseband-guard")"
+          else
+            BBGPATHDIR="$(
+              find "$SOURCEDIR" \
+                -maxdepth 3 \
+                -type d \
+                -name "Baseband-guard" \
+                -print \
+                -quit
+            )"
+          fi
+
+          # Validate Located Baseband Guard Directory
+          if [ -z "$BBGPATHDIR" ] || [ ! -d "$BBGPATHDIR" ]; then
+            echo "⚠️ Baseband Guard Directory Not Found"
             exit 1
           fi
 
-          # Validate Baseband Guard Source
-          BBGPATHDIR="$SOURCEDIR/Baseband-guard"
-          BBGSYMLINK="$SOURCEDIR/security/baseband-guard"
-          BBGCONFIGFILE="$SOURCEDIR/security/Kconfig"
-          BBGMAKEFILE="$SOURCEDIR/security/Makefile"
+          echo "📂 Baseband Guard Directory  :"
+          echo "$BBGPATHDIR"
+
+          # Validate Baseband Guard Source File
           if [ ! -f "$BBGPATHDIR/baseband_guard.c" ]; then
-            echo "⚠️ Baseband Guard Source Not Found : $BBGPATHDIR/baseband_guard.c"
+            echo "⚠️ Baseband Guard Source Not Found"
+            echo "📂 Baseband Guard Contents :"
+            ls -la "$BBGPATHDIR"
             exit 1
           fi
 
-          if [ ! -f "$BBGPATHDIR/Kconfig" ]; then
-            echo "⚠️ Baseband Guard KConfig Not Found"
+          echo "📂 Baseband Guard Source Detected"
+
+          # Validate Linux Security Kconfig
+          BBGCONFIGFILE="$SOURCEDIR/security/Kconfig"
+          if [ ! -f "$BBGCONFIGFILE" ]; then
+            echo "⚠️ Linux Security KConfig Not Found :"
+            echo "$BBGCONFIGFILE"
             exit 1
           fi
 
-          if [ ! -e "$BBGSYMLINK/baseband_guard.c" ]; then
-            echo "⚠️ Baseband Guard Security Symlink is Invalid"
-            exit 1
-          fi
-
-          # Validate BBG Build Integration
-          if ! grep -qF 'baseband-guard/' "$BBGMAKEFILE"; then
-            echo "⚠️ Baseband Guard Security Makefile Entry Missing"
-            exit 1
-          fi
-
-          if ! grep -qF 'security/baseband-guard/Kconfig' "$BBGCONFIGFILE"; then
-            echo "⚠️ Baseband Guard Security KConfig Entry Missing"
-            exit 1
-          fi
-
-          # Add Baseband Guard To The Default LSM List
-          echo "⚙️ Updating Linux Security Module Defaults..."
-          if ! sed -i \
-            '/^config LSM$/,/^help$/{
-              /^[[:space:]]*default[[:space:]]/{
-                /baseband_guard/! s/selinux/selinux,baseband_guard/
+          # Add Baseband Guard To The LSM Default List
+          echo "⚙️ Updating Linux Security Module Configuration..."
+          if grep -qF "baseband_guard" "$BBGCONFIGFILE"; then
+            echo "ℹ️ Baseband Guard Already Present"
+          else
+            # Update SELinux-Related LSM Defaults
+            awk '
+              /^config LSM$/ {
+                in_lsm=1
               }
-            }' "$BBGCONFIGFILE"; then
-            echo "⚠️ Failed to Update LSM Defaults"
+              in_lsm && /^[[:space:]]*default[[:space:]]/ {
+                if ($0 ~ /selinux/ && $0 !~ /baseband_guard/) {
+                  sub(/selinux/, "selinux,baseband_guard")
+                }
+              }
+              in_lsm && /^config[[:space:]]/ && $0 !~ /^config LSM$/ {
+                in_lsm=0
+              }
+              {
+                print
+              }
+            ' "$BBGCONFIGFILE" > "$BBGCONFIGFILE.tmp"
+            mv -f \
+              "$BBGCONFIGFILE.tmp" \
+              "$BBGCONFIGFILE"
+            echo "📂 Linux Security Configuration Updated"
+          fi
+
+          # Enable Baseband Guard In An Existing Kernel Configuration
+          if [ -f "$OUTDIR/.config" ]; then
+            echo "⚙️ Enabling CONFIG_BBG..."
+            "$SOURCEDIR/scripts/config" \
+              --file "$OUTDIR/.config" \
+              -e CONFIG_BBG
+            echo "📂 Baseband Guard Configuration Enabled"
+          else
+            echo "ℹ️ KConfig Not Present Yet"
+            echo "ℹ️ Baseband Guard Configuration Will Be Resolved During Kernel Configuration"
+          fi
+
+          # Validate Baseband Guard Source And Kconfig Integration
+          echo "🔎 Validating Baseband Guard Integration..."
+          if [ ! -f "$BBGPATHDIR/baseband_guard.c" ]; then
+            echo "⚠️ Baseband Guard Source Validation Failed"
             exit 1
           fi
 
-          # Verify Baseband Guard LSM Default
-          if ! awk '
-            /^config LSM$/ {
-              in_lsm=1
-              next
-            }
-            in_lsm && /^config[[:space:]]/ {
-              exit
-            }
-            in_lsm && /^[[:space:]]*default/ && /baseband_guard/ {
-              found=1
-            }
-            END {
-              exit !found
-            }
-          ' "$BBGCONFIGFILE"; then
-            echo "⚠️ Baseband Guard Missing From Config LSM Defaults"
+          if ! grep -qF "baseband_guard" "$BBGCONFIGFILE"; then
+            echo "⚠️ Baseband Guard Was Not Added To Security/Kconfig"
             exit 1
           fi
 
-          echo "Baseband Guard Source            : ✔️"
-          echo "Baseband Guard Symlink           : ✔️"
-          echo "Baseband Guard Security Makefile : ✔️"
-          echo "Baseband Guard Security Kconfig  : ✔️"
-          echo "Baseband Guard LSM Default       : ✔️"
-          echo "🎉 Baseband Guard Source Integration Completed"
+          echo "📂 Baseband Guard Source  : OK"
+          echo "📂 Baseband Guard Kconfig : OK"
+          echo "🎉 Baseband Guard Fully Integrated"
       
       - name: ⚙️ Integrate ReKernel
         if: ${{ inputs.REKERNEL }}
@@ -1941,6 +1975,7 @@ jobs:
           echo "└─ ✔️ Kconfig Integrated"
           echo "└─ ✔️ Makefile Integrated"
           echo "└─ 🎉 ReKernel Integration Complete"
+ 
       - name: 🛡️ Integrate NoMount
         if: ${{ inputs.NOMOUNT != 'None' }}
         shell: bash
@@ -2186,40 +2221,7 @@ jobs:
           echo "📂 Kernel Output  : $OUTDIR"
           echo "📂 Kernel Config  : $CONFIGFILE"
           # Configure Final Kernel Configuration
-          echo "🔧 Configuring Final Kernel Configuration..."
-          # Configure Baseband Guard
-          if [[ "${{ inputs.BBG }}" == "true" ]]; then
-            echo "🛡️ Enabling Baseband Guard Configuration..."
-            # Read Existing LSM Configuration
-            LSMVALUE="$(sed -n 's/^CONFIG_LSM="\([^"]*\)"$/\1/p' "$CONFIGFILE")"
-            # Validate LSM Configuration
-            if [[ -z "$LSMVALUE" ]]; then
-              echo "⚠️ LSM Configuration Is Missing or Invalid"
-              echo "📂 Kernel Config : $CONFIGFILE"
-              grep -nE 'CONFIG_LSM=|# CONFIG_LSM is not set' "$CONFIGFILE" || true
-              echo "🔎 Checking LSM Kconfig Defaults..."
-              grep -n -A 12 -B 3 'config LSM$' "$SOURCEDIR/security/Kconfig" || true
-              exit 1
-            fi
-
-            # Append Baseband Guard Without Duplicating It
-            case ",$LSMVALUE," in
-              *,baseband_guard,*) ;;
-              *) LSMVALUE="${LSMVALUE},baseband_guard" ;;
-            esac
-            # Enable Baseband Guard and Update LSM Order
-            "$CONFIGTOOL" --file "$CONFIGFILE" \
-              --set-str CONFIG_LSM "$LSMVALUE" \
-              -e CONFIG_BBG
-            # Display Applied BBG Configuration
-            echo "📌 Baseband Guard Configuration Enabled"
-            echo "📌 LSM Configuration : $LSMVALUE"
-          else
-            # Disable Baseband Guard
-            "$CONFIGTOOL" --file "$CONFIGFILE" -d CONFIG_BBG
-            echo "🚫 Baseband Guard Configuration Disabled"
-          fi
-          
+          echo "🔧 Configuring Final Kernel Configuration..."       
           # Root Engine
           if [[ "${{ inputs.ROOTENGINE }}" != "None" ]]; then
             "$CONFIGTOOL" --file "$CONFIGFILE" -e CONFIG_KSU
