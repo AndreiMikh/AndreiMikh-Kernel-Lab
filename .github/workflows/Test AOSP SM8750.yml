@@ -1105,72 +1105,93 @@ jobs:
           echo "🎉 Kernel Version Detection Complete"         
    
       - name: 🧾 Generate Base Kernel Configuration
+        env:
+          AOSPSOURCE: ${{ inputs.AOSPSOURCE }}
+          KERNELSUFFIX: ${{ inputs.KERNELSUFFIX }}
         shell: bash
         run: |
           # Define Kernel Configuration Paths
-          CONFIGS="$SOURCEDIR/arch/arm64/configs"
-          MERGEBASECONFIGS="$SOURCEDIR/scripts/kconfig/merge_config.sh"
           CONFIGFILE="$OUTDIR/.config"
-          echo "📥 Generating SM8750 Base Kernel Configuration..."
-          echo "📂 Kernel Source : $SOURCEDIR"
-          echo "📂 Kernel Output : $OUTDIR"
-          echo "📂 Config Path   : $CONFIGS"
-          if [ ! -x "$MERGEBASECONFIGS" ]; then
-            echo "⚠️ Base Config Merge Script Not Found"
-            echo "📂 Expected : $MERGEBASECONFIGS"
-            exit 1
-          fi
-         
-          BASECONFIG="$CONFIGS/gki_defconfig"
-          PERFCONFIG="$CONFIGS/vendor/sun_perf.config"
-          OPLUSCONFIG="$CONFIGS/vendor/oplus/sun_perf.config"
-          for config in \
-            "$BASECONFIG" \
-            "$PERFCONFIG" \
-            "$OPLUSCONFIG"; do
-            if [ ! -f "$config" ]; then
-              echo "⚠️ Required Kernel Config Not Found"
-              echo "📂 $config"
+          CONFIGURL="https://raw.githubusercontent.com/AndreiMikh/AndreiMikh-Kernel-Lab/LiquidAndrei/patches/AOSP"
+          case "$AOSPSOURCE" in
+            Lineage)
+              CONFIGNAME="Lineage-SM8750-KConfig.config"
+              ;;
+            CrDroid)
+              CONFIGNAME="CrDroid-SM8750-KConfig.config"
+              ;;
+            *)
+              echo "⚠️ Unsupported AOSP Source : $AOSPSOURCE"
               exit 1
-            fi
-            echo "✔️ Found : $config"    
-          done
-        
-          mkdir -p "$OUTDIR"
-          rm -f "$CONFIGFILE"
-          echo "🔧 Merging Base Kernel Configurations..."
-          KBUILD_OUTPUT="$OUTDIR" \
-          KCONFIG_CONFIG="$CONFIGFILE" \
-            "$MERGEBASECONFIGS" \
-            -m \
-            -r \
-            "$BASECONFIG" \
-            "$PERFCONFIG" \
-            "$OPLUSCONFIG"
-          if [ ! -f "$CONFIGFILE" ]; then
-            echo "⚠️ Failed to Generate .config"
+              ;;
+          esac
+          echo "📥 Loading Pre-Generated SM8750 Kernel Configuration..."
+          echo "📌 ROM Source                  : $AOSPSOURCE"
+          echo "📌 Config Name                 : $CONFIGNAME"
+          echo "📂 Kernel Source               : $SOURCEDIR"
+          echo "📂 Kernel Output               : $OUTDIR"
+          # Validate Kernel Source and Configuration Utility
+          if [ ! -d "$SOURCEDIR" ]; then
+            echo "⚠️ Kernel Source Directory Not Found: $SOURCEDIR"
             exit 1
           fi
-       
-          echo "🧾 Base Kernel Config Generated"
-          if [ -n "${{ inputs.KERNELSUFFIX }}" ]; then
-            "$SOURCEDIR/scripts/config" \
-              --file "$CONFIGFILE" \
-              --set-str CONFIG_LOCALVERSION "-${{ inputs.KERNELSUFFIX }}-4k"
-          else
-            "$SOURCEDIR/scripts/config" \
-              --file "$CONFIGFILE" \
-              --set-str CONFIG_LOCALVERSION "-${SRCCOMMIT}-4k"
+
+          CONFIGTOOL="$SOURCEDIR/scripts/config"
+          if [ ! -x "$CONFIGTOOL" ]; then
+            echo "⚠️ Kernel Configuration Utility Not Found : $CONFIGTOOL"
+            exit 1
           fi
-       
-          "$SOURCEDIR/scripts/config" \
+
+          mkdir -p "$OUTDIR"
+          # Download the Matching Pre-Generated Configuration
+          if ! curl -fLsS --retry 3 --retry-delay 2 \
+            "$CONFIGURL/$CONFIGNAME" \
+            -o "$CONFIGFILE"; then
+            echo "⚠️ Failed to Download Kernel Configuration"
+            rm -f "$CONFIGFILE"
+            exit 1
+          fi
+
+          # Validate Downloaded Configuration
+          if [ ! -s "$CONFIGFILE" ] ||
+             ! grep -q '^CONFIG_' "$CONFIGFILE" ||
+             ! grep -q '^CONFIG_ARM64=y$' "$CONFIGFILE"; then
+            echo "⚠️ Downloaded Kernel Configuration is Invalid"
+            rm -f "$CONFIGFILE"
+            exit 1
+          fi
+
+          # Apply Kernel Local Version
+          echo "🔧 Configuring Kernel Local Version..."
+          if [ -n "$KERNELSUFFIX" ]; then
+            LOCALVERSION="-${KERNELSUFFIX}-4k"
+          else
+            LOCALVERSION="-${SRCCOMMIT}-4k"
+          fi
+
+          "$CONFIGTOOL" \
+            --file "$CONFIGFILE" \
+            --set-str CONFIG_LOCALVERSION "$LOCALVERSION"
+          "$CONFIGTOOL" \
             --file "$CONFIGFILE" \
             -d CONFIG_LOCALVERSION_AUTO
-          echo "📌 Kernel Local Version :"
-          grep '^CONFIG_LOCALVERSION=' "$CONFIGFILE" || true
-          echo "📊 Base Configuration :"
-          echo "📌 Total Options : $(grep -c '^CONFIG_' "$CONFIGFILE" || true)"
-          echo "🎉 Base Kernel Configuration Generated Successfully"
+          # Verify Final Kernel Configuration
+          if ! grep -Fxq "CONFIG_LOCALVERSION=\"$LOCALVERSION\"" "$CONFIGFILE"; then
+            echo "⚠️ Failed to Apply Kernel Local Version"
+            exit 1
+          fi
+
+          if grep -q '^CONFIG_LOCALVERSION_AUTO=y$' "$CONFIGFILE"; then
+            echo "⚠️ Failed to Disable Automatic Kernel Local Version"
+            exit 1
+          fi
+
+          echo "📌 Kernel Local Version:"
+          grep '^CONFIG_LOCALVERSION=' "$CONFIGFILE"
+          echo "📊 Base Configuration        :"
+          echo "📌 Total Options             : $(grep -c '^CONFIG_' "$CONFIGFILE" || true)"
+          echo "📌 Configuration File        : $CONFIGFILE"
+          echo "🎉 Base Kernel Configuration Loaded Successfully"
 
       - name: 🆘 Solve Root Engine Source
         id: manager
