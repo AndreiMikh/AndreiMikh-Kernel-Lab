@@ -122,18 +122,6 @@ on:
         description: 'Set Kernel Build Hostname for Build Metadata'
         required: false
         default: 'AOSP-Builder'
-   
-      GITRELEASE:
-        type: boolean
-        description: 'Enable GitHub Release Creation to Publish Build Artifacts'
-        required: true
-        default: true
-
-      GITRELEASETAG:
-        type: string
-        description: 'Custom GitHub Release Tag (Empty = Automatically Generate Date-Based Tag)'
-        required: false
-        default: ''
  
       BUILDARTIFACT:
         type: choice
@@ -230,8 +218,6 @@ jobs:
           ATTR='${{ inputs.ATTR }}'
           GITOWNER='${{ inputs.GITOWNER }}'
           GITHOST='${{ inputs.GITHOST }}'
-          GITRELEASE='${{ inputs.GITRELEASE }}'
-          GITRELEASETAG='${{ inputs.GITRELEASETAG }}'
           BUILDARTIFACT='${{ inputs.BUILDARTIFACT }}'
           BUILDCCACHE='${{ inputs.BUILDCCACHE }}'
           DEBUGBUILDCCACHE='${{ inputs.DEBUGBUILDCCACHE }}'
@@ -256,8 +242,6 @@ jobs:
           printf '%-24s : %s\n' "Attribution"                 "$ATTR"
           printf '%-24s : %s\n' "Build User"                  "$GITOWNER"
           printf '%-24s : %s\n' "Build Host"                  "$GITHOST"
-          printf '%-24s : %s\n' "GitHub Release"              "$GITRELEASE"
-          printf '%-24s : %s\n' "Release Tag"                 "$GITRELEASETAG"
           printf '%-24s : %s\n' "Build Artifact"              "$BUILDARTIFACT"
           printf '%-24s : %s\n' "Build Compiler Cache"        "$BUILDCCACHE"
           printf '%-24s : %s\n' "Compiler Cache Debug"        "$DEBUGBUILDCCACHE"
@@ -3172,6 +3156,67 @@ jobs:
             out/boot.img
           retention-days: 7
           if-no-files-found: error
+
+      - name: 🚀 Upload Kernel Configurations
+        if: ${{ !inputs.DEBUGKERNELBUILD }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          AOSPSOURCE: ${{ inputs.AOSPSOURCE }}
+          ROOTENGINE: ${{ inputs.ROOTENGINE }}
+        shell: bash
+        run: |
+          # Define Kernel Configuration and Release Details
+          CONFIGFILE="${GITHUB_WORKSPACE}/out/.config"
+          TAG="CCache-SM8750-${AOSPSOURCE}"
+          ASSET="Merged-Kernel-Config-${ROOTENGINE}.config"
+          # Validate Generated Kernel Configuration
+          echo "└─ 🔍 Checking Generated Kernel Configuration..."
+          echo "└─ 📂 Expected Path : $CONFIGFILE"
+          if [ ! -s "$CONFIGFILE" ]; then
+            echo "└─ ⚠️ Generated Configuration Not Found or Empty"
+            echo "└─ 📂 Output Directory :"
+            ls -lah "${GITHUB_WORKSPACE}/out" 2>/dev/null || true
+            exit 1
+          fi
+
+          # Display Configuration File Size
+          echo "└─ 📌 Configuration Found"
+          echo "└─ 📊 File Size : $(stat -c '%s bytes' "$CONFIGFILE")"
+          # Validate GitHub CLI Availability
+          echo "└─ 🔍 Checking GitHub CLI..."
+          if ! command -v gh >/dev/null 2>&1; then
+            echo "└─ ⚠️ GitHub CLI Not Found"
+            exit 1
+          fi
+
+          # Validate GitHub Authentication
+          echo "└─ 🔍 Checking GitHub Authentication..."
+          if ! gh auth status; then
+            echo "└─ ⚠️ GitHub Authentication Failed"
+            exit 1
+          fi
+
+          # Create Release or Update Existing Configuration Asset
+          echo "└─ 🔍 Checking GitHub Release..."
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "└─ 📌 Existing Release Found : $TAG"
+            echo "└─ 📦 Replacing Configuration Asset..."
+            gh release upload "$TAG" \
+              "$CONFIGFILE#$ASSET" \
+              --repo "$GITHUB_REPOSITORY" \
+              --clobber
+          else
+            echo "└─ 📌 Release Not Found : Creating $TAG"
+            gh release create "$TAG" \
+              "$CONFIGFILE#$ASSET" \
+              --repo "$GITHUB_REPOSITORY" \
+              --title "AOSP Kernel Configuration" \
+              --notes "Generated AOSP Merged Kernel Configuration"
+          fi
+
+          # Display Release URL
+          echo "└─ 🎉 KConfig Uploaded Successfully"
+          echo "└─ 🔗 https://github.com/${GITHUB_REPOSITORY}/releases/tag/${TAG}"
 
       - name: 🧹 Cleanup Build Outputs on Failure
         if: ${{ failure() }}
