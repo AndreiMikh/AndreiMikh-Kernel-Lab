@@ -166,7 +166,7 @@ jobs:
       # Compiler Cache Configuration
       CCACHE_BASEDIR: ${{ github.workspace }}
       CCACHE_DIR: ${{ github.workspace }}/.ccache
-      CCACHE_MAXSIZE: 4G
+      CCACHE_MAXSIZE: 2G
       CCACHE_COMPILERCHECK: "content"
       CCACHE_NOHASHDIR: "true"
       CCACHE_NOHARDLINK: "true"
@@ -643,7 +643,7 @@ jobs:
 
           # Apply Compiler Cache Size Limit
           echo "└─ ⚙️ Applying Cache Size Limit..."
-          ccache -M "${CCACHE_MAXSIZE:-4G}"
+          ccache -M "${CCACHE_MAXSIZE:-2G}"
           # Display Restored Compiler Cache
           echo "└─ 📊 Restored Compiler Cache Status"
           ccache -s
@@ -654,12 +654,12 @@ jobs:
       - name: 💾 Restore Compiler Cache
         id: ccache-restore
         if: ${{ inputs.BUILDCCACHE && steps.ccache-public.outputs.restored != 'true' }}
-        uses: actions/cache/restore@v6
+        uses: actions/cache@v6
         with:
           path: .ccache
           # Rolling Exact Key
           key: CCache-SM8750-${{ inputs.AOSPSOURCE }}-${{ runner.os }}-${{ runner.arch }}-${{ github.ref_name }}
-          # Restore Newest Compatible CCache
+          # Restore Newest Compatible Cache
           restore-keys: |
             CCache-SM8750-${{ inputs.AOSPSOURCE }}-${{ runner.os }}-${{ runner.arch }}-${{ github.ref_name }}
             CCache-SM8750-${{ inputs.AOSPSOURCE }}-${{ runner.os }}-${{ runner.arch }}-
@@ -672,7 +672,7 @@ jobs:
         run: |
           # Configure Compiler Cache Environment
           export CCACHE_DIR="${CCACHE_DIR:-${GITHUB_WORKSPACE}/.ccache}"
-          export CCACHE_MAXSIZE="${CCACHE_MAXSIZE:-4G}"
+          export CCACHE_MAXSIZE="${CCACHE_MAXSIZE:-2G}"
           export CCACHE_COMPILERCHECK="${CCACHE_COMPILERCHECK:-content}"
           export CCACHE_BASEDIR="${CCACHE_BASEDIR:-${GITHUB_WORKSPACE}}"
           export CCACHE_NOHASHDIR="${CCACHE_NOHASHDIR:-true}"
@@ -2781,108 +2781,6 @@ jobs:
           mv -f oImage Image
           rm -f kptools-linux kpimg-linux
           echo "└─ 🎉 KPM Patched"
-  
-      - name: 💾 Save Compiler Cache
-        if: ${{ inputs.BUILDCCACHE && steps.ccache-public.outputs.restored != 'true' }}
-        uses: actions/cache/save@v6
-        with:
-          path: .ccache
-          key: CCache-SM8750-${{ inputs.AOSPSOURCE }}-${{ runner.os }}-${{ runner.arch }}-${{ github.ref_name }}
-  
-      - name: ☁️ Publish Public Compiler Cache
-        if: ${{ inputs.BUILDCCACHE }}
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          OWNERREPO: AndreiMikh/AndreiMikh-Kernel-Lab
-          CCACHE_DIR: ${{ github.workspace }}/.ccache
-        shell: bash
-        run: |
-          ARCHIVE="CCache-SM8750-${{ inputs.AOSPSOURCE }}.tar.zst"
-          RELEASETAG="CCache-SM8750-${{ inputs.AOSPSOURCE }}"
-          MAXSIZE=$((2 * 1024 * 1024 * 1024))
-          SELECTEDLEVEL=""
-          echo "└─ 📦 Packaging Public Compiler Cache..."
-          echo "└─ 📂 Compiler Cache Directory : $CCACHE_DIR"
-          echo "└─ 📏 Maximum Archive Size     : 2 GiB"
-          ccache -s || true
-          if [[ ! -d "$CCACHE_DIR" ]]; then
-            echo "└─ ⚠️ Compiler Cache Directory Not Found"
-            echo "└─ 📂 Expected : $CCACHE_DIR"
-            exit 1
-          fi
-     
-          # Remove Any Previous Archive
-          rm -f "$ARCHIVE"
-          # Try Compression Levels Until Archive Fits
-          for LEVEL in 1 2 3 4 5 6 7 8 9 10 15 20 25; do
-            echo "└─ 🗜️ Creating Archive with Zstandard Level -$LEVEL..."
-            if ! tar -I "zstd -T0 -${LEVEL}" \
-              -cf "$ARCHIVE" \
-              -C "$CCACHE_DIR" .; then
-              echo "└─ ⚠️ Archive Creation Failed at Level -$LEVEL"
-              rm -f "$ARCHIVE"
-              exit 1
-            fi
-       
-            ARCHIVESIZE="$(stat -c '%s' "$ARCHIVE")"
-            ARCHIVEHUMAN="$(du -h "$ARCHIVE" | cut -f1)"
-            echo "└─ 📦 Archive Size : $ARCHIVEHUMAN ($ARCHIVESIZE Bytes)"
-            if (( ARCHIVESIZE <= MAXSIZE )); then
-              SELECTEDLEVEL="$LEVEL"
-              echo "└─ 📌 Archive Fits the 2 GiB Limit"
-              break
-            fi
-            echo "└─ ⚠️ Archive Exceeds 2 GiB at Level -$LEVEL"
-            rm -f "$ARCHIVE"    
-      
-          done
-    
-          # Verify the Final Archive
-          if [[ -z "$SELECTEDLEVEL" || ! -f "$ARCHIVE" ]]; then
-            echo "└─ ⚠️ No Compression Level Produced an Archive Within 2 GiB"
-            echo "└─ ⚠️ Public Compiler Cache Upload Aborted"
-            exit 1
-          fi
-     
-          FINALSIZE="$(stat -c '%s' "$ARCHIVE")"
-          if (( FINALSIZE > MAXSIZE )); then
-            echo "└─ ⚠️ Final Archive Exceeds the Maximum Size"
-            rm -f "$ARCHIVE"
-            exit 1
-          fi
-    
-          echo "└─ 📌 Selected Zstandard Level  : -$SELECTEDLEVEL"
-          echo "└─ 📦 Final Archive Size        : $(du -sh "$ARCHIVE" | cut -f1)"
-          echo "└─ 🚀 Uploading Public Compiler Cache..."
-          if gh release create \
-            "$RELEASETAG" \
-            "$ARCHIVE" \
-            --repo "$OWNERREPO" \
-            --title "$RELEASETAG" \
-            --notes 'Category: Compiler Cache | SM8750 — Public Compiler Cache for OPlus AOSP SM8750 Kernel Builds'; then
-            echo "└─ 📌 Public Compiler Cache Release Created"
-          elif gh release upload \
-            "$RELEASETAG" \
-            "$ARCHIVE" \
-            --repo "$OWNERREPO" \
-            --clobber; then
-            echo "└─ 📌 Public Compiler Cache Release Updated"
-          else
-            echo "└─ ⚠️ Failed to Upload Public Compiler Cache"
-            rm -f "$ARCHIVE"
-            exit 1
-          fi
-    
-          rm -f "$ARCHIVE"
-          echo "└─ 🎉 Public Compiler Cache Uploaded Successfully"
-   
-      - name: 🐞 Publish Compiler Cache Debug Logs
-        if: ${{ inputs.DEBUGBUILDCCACHE }}
-        uses: actions/upload-artifact@v6
-        with:
-          name: CCache-Debug-Log
-          path: ccache.log
-          if-no-files-found: ignore
    
       - name: 📦 Package AnyKernel3
         id: package
@@ -3238,6 +3136,101 @@ jobs:
           # Display Release URL
           echo "└─ 🎉 KConfig Uploaded Successfully"
           echo "└─ 🔗 https://github.com/${GITHUB_REPOSITORY}/releases/tag/${TAG}"
+
+      - name: ☁️ Upload Public Compiler Cache
+        if: ${{ inputs.BUILDCCACHE }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: AndreiMikh/AndreiMikh-Kernel-Lab
+          CCACHE_DIR: ${{ github.workspace }}/.ccache
+        shell: bash
+        run: |
+          ARCHIVE="CCache-SM8750-${{ inputs.AOSPSOURCE }}.tar.zst"
+          RELEASETAG="CCache-SM8750-${{ inputs.AOSPSOURCE }}"
+          MAXSIZE=$((2 * 1024 * 1024 * 1024))
+          SELECTEDLEVEL=""
+          echo "└─ 📦 Packaging Public Compiler Cache..."
+          echo "└─ 📂 Compiler Cache Directory : $CCACHE_DIR"
+          echo "└─ 📏 Maximum Archive Size     : 2 GiB"
+          ccache -s || true
+          if [[ ! -d "$CCACHE_DIR" ]]; then
+            echo "└─ ⚠️ Compiler Cache Directory Not Found"
+            echo "└─ 📂 Expected : $CCACHE_DIR"
+            exit 1
+          fi
+     
+          # Remove Any Previous Archive
+          rm -f "$ARCHIVE"
+          # Try Compression Levels Until Archive Fits
+          for LEVEL in 1 3 5 7 9 11 13 15 17 19; do
+            echo "└─ 🗜️ Creating Archive with Zstandard Level -$LEVEL..."
+            if ! tar -I "zstd -T0 -${LEVEL}" \
+              -cf "$ARCHIVE" \
+              -C "$CCACHE_DIR" .; then
+              echo "└─ ⚠️ Archive Creation Failed at Level -$LEVEL"
+              rm -f "$ARCHIVE"
+              exit 1
+            fi
+       
+            ARCHIVESIZE="$(stat -c '%s' "$ARCHIVE")"
+            ARCHIVEHUMAN="$(du -h "$ARCHIVE" | cut -f1)"
+            echo "└─ 📦 Archive Size : $ARCHIVEHUMAN ($ARCHIVESIZE Bytes)"
+            if (( ARCHIVESIZE <= MAXSIZE )); then
+              SELECTEDLEVEL="$LEVEL"
+              echo "└─ 📌 Archive Fits the 2 GiB Limit"
+              break
+            fi
+            echo "└─ ⚠️ Archive Exceeds 2 GiB at Level -$LEVEL"
+            rm -f "$ARCHIVE"    
+      
+          done
+    
+          # Verify the Final Archive
+          if [[ -z "$SELECTEDLEVEL" || ! -f "$ARCHIVE" ]]; then
+            echo "└─ ⚠️ No Compression Level Produced an Archive Within 2 GiB"
+            echo "└─ ⚠️ Public Compiler Cache Upload Aborted"
+            exit 1
+          fi
+     
+          FINALSIZE="$(stat -c '%s' "$ARCHIVE")"
+          if (( FINALSIZE > MAXSIZE )); then
+            echo "└─ ⚠️ Final Archive Exceeds the Maximum Size"
+            rm -f "$ARCHIVE"
+            exit 1
+          fi
+    
+          echo "└─ 📌 Selected Zstandard Level  : -$SELECTEDLEVEL"
+          echo "└─ 📦 Final Archive Size        : $(du -sh "$ARCHIVE" | cut -f1)"
+          echo "└─ 🚀 Uploading Public Compiler Cache..."
+          if gh release create \
+            "$RELEASETAG" \
+            "$ARCHIVE" \
+            --repo "$GH_REPO" \
+            --title "$RELEASETAG" \
+            --notes 'Category: Compiler Cache | SM8750 — Public Compiler Cache for OPlus AOSP SM8750 Kernel Builds'; then
+            echo "└─ 📌 Public Compiler Cache Release Created"
+          elif gh release upload \
+            "$RELEASETAG" \
+            "$ARCHIVE" \
+            --repo "$GH_REPO" \
+            --clobber; then
+            echo "└─ 📌 Public Compiler Cache Release Updated"
+          else
+            echo "└─ ⚠️ Failed to Upload Public Compiler Cache"
+            rm -f "$ARCHIVE"
+            exit 1
+          fi
+    
+          rm -f "$ARCHIVE"
+          echo "└─ 🎉 Public Compiler Cache Uploaded Successfully"
+   
+      - name: 🐞 Upload Compiler Cache Debug Logs
+        if: ${{ inputs.DEBUGBUILDCCACHE }}
+        uses: actions/upload-artifact@v6
+        with:
+          name: CCache-Debug-Log
+          path: ccache.log
+          if-no-files-found: ignore
 
       - name: 🧹 Cleanup Build Outputs on Failure
         if: ${{ failure() }}
