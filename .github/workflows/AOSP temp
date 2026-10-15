@@ -1,34 +1,173 @@
-      - name: ♻️ Extract-Cert PKCS11 / Loop IOCTL Fix
+      - name: 🧩 DroidSpaces / NTSynchonization Primitives
+        if: ${{ inputs.LINUXCNTSYNC == 'DroidSpaces+NTSync' }}
         shell: bash
+        env:
+          KERNELMODULE: ${{ env.KERNELMODULE }}
         run: |
-          # Configure Extract-Cert PKCS11 Compile Guard
-          FILE="$SOURCEDIR/certs/extract-cert.c"
-          # Add Guard Only When PKCS11 PIN Handling Exists
-          if [[ -f "$FILE" ]] &&
-             grep -q 'ENGINE_ctrl_cmd_string(e, "PIN", key_pass, 0)' "$FILE" &&
-             ! grep -B5 -A2 'ENGINE_ctrl_cmd_string(e, "PIN", key_pass, 0)' "$FILE" | grep -q '#ifdef USE_PKCS11_ENGINE'; then
-            perl -0pi -e 's/(\n\t\tif \(key_pass\)\n\t\t\tERR\(!ENGINE_ctrl_cmd_string\(e, "PIN", key_pass, 0\), "Set PKCS#11 PIN"\);)/\n#ifdef USE_PKCS11_ENGINE$1\n#endif/' "$FILE"
+          set -euo pipefail
+          # Move to Kernel Common Directory
+          cd "$COMMONKERNELFOLDER"
+          # Function: Patch Apply
+          apply() {
+            local patchfile="$1"
+            if patch -R -p1 --dry-run < "$patchfile" >/dev/null 2>&1; then
+              echo "└─ 🎉 Already Applied: $(basename "$patchfile")"
+              return
+            fi
+
+            if patch -p1 --dry-run < "$patchfile" >/dev/null 2>&1; then
+              patch -p1 --forward < "$patchfile"
+              echo "└─ ✔️ Applied: $(basename "$patchfile")"
+            else
+              echo "└─ ⚠️ Failed Applying: $(basename "$patchfile")"
+              exit 1
+            fi
+          }
+          # Paths
+          SCHEDFILE="include/linux/sched.h"
+          USERFILE="include/linux/sched/user.h"
+          if [[ ! -f "$SCHEDFILE" ]]; then
+            echo "└─ ⚠️ Missing Scheduler Header File: $SCHEDFILE"
+            exit 1
+          fi
+       
+          echo "└─ ⚙️ Disabling Original System V IPC Struct Fields..."
+          sed -i 's/^\(\t\)struct sysv_sem\b.*sysvsem;/\1\/\/ struct sysv_sem\t\t\tsysvsem;/' "$SCHEDFILE"
+          sed -i 's/^\(\t\)struct sysv_shm\b.*sysvshm;/\1\/\/ struct sysv_shm\t\t\tsysvshm;/' "$SCHEDFILE"
+          # Android 12.5.10 Special Handling
+          if [ "${KERNELMODULE:-}" = "android12-5.10" ]; then
+            echo "└─ 🔧 Fixing System V IPC Kernel ABI + POSIX MQUEUE ABI Padding for Android12-5.10..."
+            sed -i '/^\tconst struct sched_class\t\*sched_class;/a \\n#ifndef __GENKSYMS__\n\tstruct sysv_sem\t\t\tsysvsem;\n\tstruct sysv_shm\t\t\tsysvshm;\n#endif\n' "$SCHEDFILE"
+            sed -i 's/^\tunsigned long mq_bytes;/\/\/unsigned long mq_bytes;/' "$USERFILE"
+            sed -i '/struct ratelimit_state ratelimit;/,/ANDROID_OEM_DATA_ARRAY(1, 2);/{/^\tANDROID_KABI_RESERVE(1);/{N;N;s/^\tANDROID_KABI_RESERVE(1);\n\tANDROID_KABI_RESERVE(2);\n\tANDROID_OEM_DATA_ARRAY(1, 2);/#if defined(CONFIG_POSIX_MQUEUE)\n\tANDROID_KABI_USE(1, unsigned long mq_bytes);\n\tANDROID_KABI_RESERVE(2);\n\tANDROID_OEM_DATA_ARRAY(1, 2);\n#else\n\tANDROID_KABI_RESERVE(1);\n\tANDROID_KABI_RESERVE(2);\n\tANDROID_OEM_DATA_ARRAY(1, 2);\n#endif/}}' "$USERFILE"
+          # ABI Layout Detection (Shared Logic)
+          elif grep -q "sched_dl_entity.*\*dl_server" "$SCHEDFILE"; then
+            echo "└─ ♻️ Detected DL Server Pointer — ☘️ Using Packed Union Strategy"
+            sed -i 's|\tstruct sched_entity\t\tse;|#ifdef CONFIG_SYSVIPC\n\tunion {\n\t\tchar __kabi_ignored_0;\n\t\tstruct sysv_sem\t\t\tsysvsem;\n\t}__attribute__((packed));\n\tunion {\n\t\tchar __kabi_ignored_1;\n\t\tstruct sysv_shm\t\t\tsysvshm;\n\t}__attribute__((packed));\n#endif\n\n\tstruct sched_entity\t\tse;|' "$SCHEDFILE"
+          elif grep -q "ANDROID_KABI_USE(1," "$SCHEDFILE"; then
+            echo "└─ ♻️ Detected Kernel ABI USE(1) — ☘️ Using Slots 6, 7 and 8"
+            sed -i -e '/ANDROID_KABI_RESERVE(6);/{N;N;s|\tANDROID_KABI_RESERVE(6);\n\tANDROID_KABI_RESERVE(7);\n\tANDROID_KABI_RESERVE(8);|#ifdef CONFIG_SYSVIPC\n\tANDROID_KABI_USE(6, struct sysv_sem sysvsem);\n\t_ANDROID_KABI_REPLACE(ANDROID_KABI_RESERVE(7); ANDROID_KABI_RESERVE(8), struct sysv_shm sysvshm);\n#else\n\tANDROID_KABI_RESERVE(6);\n\tANDROID_KABI_RESERVE(7);\n\tANDROID_KABI_RESERVE(8);\n#endif|;}' "$SCHEDFILE"
+          elif grep -q "ANDROID_KABI_RESERVE(1);" "$SCHEDFILE"; then
+            echo "└─ ♻️ Detected Legacy Kernel ABI — ☘️ Using Slots 1, 2 and 3"
+            sed -i -e '/ANDROID_KABI_RESERVE(1);/{N;N;N;N;N;N;N;s|\tANDROID_KABI_RESERVE(1);\n\tANDROID_KABI_RESERVE(2);\n\tANDROID_KABI_RESERVE(3);\n\tANDROID_KABI_RESERVE(4);\n\tANDROID_KABI_RESERVE(5);\n\tANDROID_KABI_RESERVE(6);\n\tANDROID_KABI_RESERVE(7);\n\tANDROID_KABI_RESERVE(8);|#ifdef CONFIG_SYSVIPC\n\tANDROID_KABI_USE(1, struct sysv_sem sysvsem);\n\t_ANDROID_KABI_REPLACE(ANDROID_KABI_RESERVE(2); ANDROID_KABI_RESERVE(3), struct sysv_shm sysvshm);\n#else\n\tANDROID_KABI_RESERVE(1);\n\tANDROID_KABI_RESERVE(2);\n\tANDROID_KABI_RESERVE(3);\n#endif\n\tANDROID_KABI_RESERVE(4);\n\tANDROID_KABI_RESERVE(5);\n\tANDROID_KABI_RESERVE(6);\n\tANDROID_KABI_RESERVE(7);\n\tANDROID_KABI_RESERVE(8);|;}' "$SCHEDFILE"
+          elif grep -q "ANDROID_KABI_RESERVE(3);" "$SCHEDFILE"; then
+            echo "└─ ♻️ Fallback Kernel ABI Detected — ☘️ Using Slots 3, 4 and 5"
+            sed -i -e '/ANDROID_KABI_RESERVE(3);/{N;N;N;s|\tANDROID_KABI_RESERVE(3);\n\tANDROID_KABI_RESERVE(4);\n\tANDROID_KABI_RESERVE(5);\n\tANDROID_KABI_RESERVE(6);|#ifdef CONFIG_SYSVIPC\n\tANDROID_KABI_USE(3, struct sysv_sem sysvsem);\n\t_ANDROID_KABI_REPLACE(ANDROID_KABI_RESERVE(4); ANDROID_KABI_RESERVE(5), struct sysv_shm sysvshm);\n#else\n\tANDROID_KABI_RESERVE(3);\n\tANDROID_KABI_RESERVE(4);\n\tANDROID_KABI_RESERVE(5);\n#endif\n\tANDROID_KABI_RESERVE(6);|;}' "$SCHEDFILE"
+          else
+            echo "└─ ⚠️ Unable to Determine Compatible Kernel ABI Layout — Aborting..."
+            exit 9
           fi
 
-          # Configure Loop IOCTL Stack Usage
-          FILE="$SOURCEDIR/drivers/block/loop.c"
-          # Validate Loop Driver Source if it Exists
-          if [[ ! -f "$FILE" ]]; then
-            echo "⚠️ Loop Source Not Found"
+          # Verification
+          echo "└─ 🔎 Verifying Injection..."
+          grep -q "struct sysv_sem" "$SCHEDFILE" || {
+            echo "└─ ⚠️ Missing SYS V SEM Injection"
+            exit 1
+          }
+          grep -q "struct sysv_shm" "$SCHEDFILE" || {
+            echo "└─ ⚠️ Missing SYS V SHM Injection"
+            exit 1
+          }
+          grep -q "CONFIG_SYSVIPC" "$SCHEDFILE" || {
+            echo "└─ ⚠️ Missing Configuration SYS V IPC Guard"
+            exit 1
+          }
+          echo "└─ ✔️ Injection Verification Passed"
+          # Restore MIDAS Fix
+          echo "└─ 🔧 Applying Ghost Task Fix Patch for OPlus BSP Midas..."
+          apply "${PATCHDIR}/001-Ghost-Task-Midas.patch"
+          # Disable Rollback Protection Before Exit
+          RESTORE=0        
+          echo "🎉 DroidSpaces System V IPC Injection Completed Successfully"
+          # NTSynchronization Primitives
+          echo "└─ 🧠 NTSynchronization Enabled via DroidSpaces"
+          # Validate Required Variables Early
+          if [[ -z "${KERNELMODULE:-}" ]]; then
+            echo "└─ ⚠️ Kernel Module Version is Not Set, Aborting..."
             exit 1
           fi
 
-          # Move Configuration Handling Into a No-Inline Helper
-          if ! grep -qF 'static noinline int lo_ioctl_configure(' "$FILE"; then
-            perl -0pi -e '
-              s{(?=static int lo_ioctl\(struct block_device \*bdev, blk_mode_t mode,)}{static noinline int lo_ioctl_configure(struct loop_device *lo, blk_mode_t mode, struct block_device *bdev, unsigned int cmd, unsigned long arg)\n{\n\tstruct loop_config config;\n\tif (cmd == LOOP_SET_FD) {\n\t\tmemset(\&config, 0, sizeof(config));\n\t\tconfig.fd = arg;\n\t} else if (copy_from_user(\&config, (void __user *)arg, sizeof(config))) {\n\t\treturn -EFAULT;\n\t}\n\treturn loop_configure(lo, mode, bdev, \&config);\n}\n\n} or die "lo_ioctl insertion failed\n";
-              # Replace Original LOOP SETFD and LOOP CONFIGURE Cases
-              s{\tcase LOOP_SET_FD: \{.*?\tcase LOOP_CHANGE_FD:}{\tcase LOOP_SET_FD:\n\tcase LOOP_CONFIGURE:\n\t\treturn lo_ioctl_configure(lo, mode, bdev, cmd, arg);\n\tcase LOOP_CHANGE_FD:}s or die "ioctl replacement failed\n";
-            ' "$FILE"
+          echo "└─ 🔄 Target Kernel Module Version: $KERNELMODULE"
+          if [[ "${ENABLERUSTC:-false}" == "true" ]]; then
+            echo "└─ 🔧 Applying Compatibility Fixes..."           
+            # Remove Conflicting NTSynchronization Sources
+            [[ -f include/uapi/linux/ntsync.h ]] && rm -f include/uapi/linux/ntsync.h
+            [[ -f drivers/misc/ntsync.c ]] && rm -f drivers/misc/ntsync.c                        
+            # Export IPC Namespace Symbols for Rust Binder Module
+            if ! grep -qE '^[[:space:]]*EXPORT_SYMBOL_GPL\(put_ipc_ns\);' ipc/namespace.c; then
+              echo "EXPORT_SYMBOL_GPL(put_ipc_ns);" >> ipc/namespace.c
+            fi
+            
+            if ! grep -qE '^[[:space:]]*EXPORT_SYMBOL_GPL\(init_ipc_ns\);' ipc/msgutil.c; then
+              echo "EXPORT_SYMBOL_GPL(init_ipc_ns);" >> ipc/msgutil.c
+            fi
+            
+            # Verify IPC Namespace Symbol Exports
+            echo "└─ 🔎 Verifying IPC Namespace Symbol Exports..."            
+            grep -qE '^[[:space:]]*EXPORT_SYMBOL_GPL\(put_ipc_ns\);' ipc/namespace.c || {
+              echo "└─ ⚠️ IPC Namespace Symbol Export Missing"
+              exit 1
+            }            
+            grep -qE '^[[:space:]]*EXPORT_SYMBOL_GPL\(init_ipc_ns\);' ipc/msgutil.c || {
+              echo "└─ ⚠️ Init IPC Namespace Symbol Export Missing"
+              exit 1
+            }            
+            echo "└─ ✔️ IPC Namespace Symbol Exports Verified"
           fi
 
-          # Verify Loop IOCTL Helper and Dispatch
-          grep -qF 'static noinline int lo_ioctl_configure(' "$FILE" &&
-          grep -qF 'return lo_ioctl_configure(lo, mode, bdev, cmd, arg);' "$FILE" ||
-          { echo "⚠️ Loop IOCTL Patch Verification Failed"; exit 1; }
-          echo "🎉 PKCS11 / Loop IOCTL Fixes Checked"
+          echo "└─ 🛠️ Applying NTSynchronization Patches..."
+          # Define NTSynchronization Paths
+          NTSYNCDIR="${WORKDIR}/WildKernels/common/ntsync"
+          NTSYNCCOMPATPATCH="ntsync_compat_${KERNELMODULE}.patch"
+          NTSYNCBASEPATCH="ntsync_base.patch"
+          echo "└─ 📂 Patch Directory: $NTSYNCDIR"
+          # Ensure Patch Repository Exists
+          if [[ ! -d "$NTSYNCDIR" ]]; then
+            echo "└─ 📥 NTSynchronization Patch Directory Missing, Cloning Repository..."
+            rm -rf "${WORKDIR}/WildKernels"
+            git clone --depth=1 \
+              https://github.com/WildKernels/kernel_patches.git \
+              "${WORKDIR}/WildKernels"
+          fi
+
+          # Verify NTSynchronization Patch Directory
+          if [[ ! -d "$NTSYNCDIR" ]]; then
+            echo "└─ ⚠️ Failed to Locate NTSynchronization Patch Directory After Clone..."
+            exit 1
+          fi
+
+          echo "└─ 📄 Available NTSynchronization Patches:"
+          ls -la "$NTSYNCDIR"            
+          # Function: Apply NTSynchronization Patch
+          applyntsyncpatch() {
+            local ntsyncpatchfile="$1"
+            # Skip Missing NTSynchronization Patch
+            if [[ ! -f "$NTSYNCDIR/$ntsyncpatchfile" ]]; then
+              echo "└─ ⚠️ Missing Patch: $ntsyncpatchfile"
+              return 0
+            fi
+
+            # Copy NTSynchronization Patch to Kernel Source
+            cp "$NTSYNCDIR/$ntsyncpatchfile" ./
+            echo "└─ ➡️ Applying $ntsyncpatchfile"
+            # Apply NTSynchronization Patch Forward 
+            patchstatus=0
+            patch -p1 --forward < "$ntsyncpatchfile" || patchstatus=$?
+            # Remove Temporary NTSynchronization Patch Copy
+            rm -f "$ntsyncpatchfile"
+            echo "└─ 🧹 Cleaned: $ntsyncpatchfile"
+            # Validate NTSynchronization Patch Result
+            if [[ "$patchstatus" -ne 0 ]]; then
+              echo "└─ ⚠️ Patch Failed: $ntsyncpatchfile"
+              return "$patchstatus"
+            fi
+          }
+          # Apply NT Synchronization Patches
+          applyntsyncpatch "$NTSYNCCOMPATPATCH"
+          applyntsyncpatch "$NTSYNCBASEPATCH"
+          echo "└─ ☘️ NT Synchronization Patch Process Completed Successfully"
+
+          # Load Reject Checker and Run Rejection Check
+          source "$REJECTCHECKER"
+          checkrejects .
+          echo "└─ 🎉 NT Synchronization (Primitives) Done!"
