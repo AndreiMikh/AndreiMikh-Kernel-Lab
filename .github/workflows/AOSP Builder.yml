@@ -1867,6 +1867,156 @@ jobs:
           echo "└─ Baseband Guard Security Kconfig  : 📌"
           echo "└─ Baseband Guard LSM Default       : 📌"
           echo "└─ 🎉 Baseband Guard Source Integration Completed"
+
+      - name: 🧩 DroidSpaces / Synchonization Primitives
+        shell: bash
+        env:
+          KERNELMODULE: ${{ steps.kernelversion.outputs.kernelmodule }}
+        run: |
+          # Apply DroidSpaces SYSVIPC Injection Only When Enabled
+          if [[ "${{ inputs.DROIDSPACES }}" == "true" ]]; then
+            # Function : Patch Apply
+            apply() {
+              local patchfile="$1"
+              if patch -R -d "$SOURCEDIR" -p1 --dry-run < "$patchfile" >/dev/null 2>&1; then
+                echo "└─ 🎉 Already Applied             : $(basename "$patchfile")"
+                return
+              fi
+
+              # Verify Patch Could Applied Without Modifying Files
+              if patch -d "$SOURCEDIR" -p1 --dry-run < "$patchfile" >/dev/null 2>&1; then
+                # Apply Patch and Report Success
+                patch -d "$SOURCEDIR" -p1 --forward < "$patchfile"
+                echo "└─ 📌 Applied                     : $(basename "$patchfile")"
+              else
+                # Abort if Patch Cannot Be Applied
+                echo "└─ ⚠️ Failed Applying             : $(basename "$patchfile")"
+                exit 1
+              fi
+            }
+
+            # Paths
+            SCHEDFILE="${SOURCEDIR}/include/linux/sched.h"
+            USERFILE="${SOURCEDIR}/include/linux/sched/user.h"
+            if [[ ! -f "$SCHEDFILE" ]]; then
+              echo "└─ ⚠️ Missing Scheduler Header File : $SCHEDFILE"
+              exit 1
+            fi
+
+            # Comment Out Existing SYSVSEM and SYSVSHM Fields to Prevent Duplicate Definitions
+            echo "└─ ⚙️ Disabling Original System V IPC Struct Fields..."
+            sed -i 's/^\(\t\)struct sysv_sem\b.*sysvsem;/\1\/\/ struct sysv_sem\t\t\tsysvsem;/' "$SCHEDFILE"
+            sed -i 's/^\(\t\)struct sysv_shm\b.*sysvshm;/\1\/\/ struct sysv_shm\t\t\tsysvshm;/' "$SCHEDFILE"
+            # Detect the Scheduler and Kernel ABI Layout Before Injecting SYSVIPC Fields
+            if grep -q "sched_dl_entity.*\*dl_server" "$SCHEDFILE"; then
+              echo "└─ ♻️ Detected DL Server Pointer — ☘️ Using Packed Union Strategy"
+              sed -i 's|\tstruct sched_entity\t\tse;|#ifdef CONFIG_SYSVIPC\n\tunion {\n\t\tchar __kabi_ignored_0;\n\t\tstruct sysv_sem\t\t\tsysvsem;\n\t}__attribute__((packed));\n\tunion {\n\t\tchar __kabi_ignored_1;\n\t\tstruct sysv_shm\t\t\tsysvshm;\n\t}__attribute__((packed));\n#endif\n\n\tstruct sched_entity\t\tse;|' "$SCHEDFILE"
+            elif grep -q "ANDROID_KABI_USE(1," "$SCHEDFILE"; then
+              echo "└─ ♻️ Detected Kernel ABI USE(1) — ☘️ Using Slots 6, 7 and 8"
+              sed -i -e '/ANDROID_KABI_RESERVE(6);/{N;N;s|\tANDROID_KABI_RESERVE(6);\n\tANDROID_KABI_RESERVE(7);\n\tANDROID_KABI_RESERVE(8);|#ifdef CONFIG_SYSVIPC\n\tANDROID_KABI_USE(6, struct sysv_sem sysvsem);\n\t_ANDROID_KABI_REPLACE(ANDROID_KABI_RESERVE(7); ANDROID_KABI_RESERVE(8), struct sysv_shm sysvshm);\n#else\n\tANDROID_KABI_RESERVE(6);\n\tANDROID_KABI_RESERVE(7);\n\tANDROID_KABI_RESERVE(8);\n#endif|;}' "$SCHEDFILE"
+            elif grep -q "ANDROID_KABI_RESERVE(1);" "$SCHEDFILE"; then
+              echo "└─ ♻️ Detected Legacy Kernel ABI — ☘️ Using Slots 1, 2 and 3"
+              sed -i -e '/ANDROID_KABI_RESERVE(1);/{N;N;N;N;N;N;N;s|\tANDROID_KABI_RESERVE(1);\n\tANDROID_KABI_RESERVE(2);\n\tANDROID_KABI_RESERVE(3);\n\tANDROID_KABI_RESERVE(4);\n\tANDROID_KABI_RESERVE(5);\n\tANDROID_KABI_RESERVE(6);\n\tANDROID_KABI_RESERVE(7);\n\tANDROID_KABI_RESERVE(8);|#ifdef CONFIG_SYSVIPC\n\tANDROID_KABI_USE(1, struct sysv_sem sysvsem);\n\t_ANDROID_KABI_REPLACE(ANDROID_KABI_RESERVE(2); ANDROID_KABI_RESERVE(3), struct sysv_shm sysvshm);\n#else\n\tANDROID_KABI_RESERVE(1);\n\tANDROID_KABI_RESERVE(2);\n\tANDROID_KABI_RESERVE(3);\n#endif\n\tANDROID_KABI_RESERVE(4);\n\tANDROID_KABI_RESERVE(5);\n\tANDROID_KABI_RESERVE(6);\n\tANDROID_KABI_RESERVE(7);\n\tANDROID_KABI_RESERVE(8);|;}' "$SCHEDFILE"
+            elif grep -q "ANDROID_KABI_RESERVE(3);" "$SCHEDFILE"; then
+              echo "└─ ♻️ Fallback Kernel ABI Detected — ☘️ Using Slots 3, 4 and 5"
+              sed -i -e '/ANDROID_KABI_RESERVE(3);/{N;N;N;s|\tANDROID_KABI_RESERVE(3);\n\tANDROID_KABI_RESERVE(4);\n\tANDROID_KABI_RESERVE(5);\n\tANDROID_KABI_RESERVE(6);|#ifdef CONFIG_SYSVIPC\n\tANDROID_KABI_USE(3, struct sysv_sem sysvsem);\n\t_ANDROID_KABI_REPLACE(ANDROID_KABI_RESERVE(4); ANDROID_KABI_RESERVE(5), struct sysv_shm sysvshm);\n#else\n\tANDROID_KABI_RESERVE(3);\n\tANDROID_KABI_RESERVE(4);\n\tANDROID_KABI_RESERVE(5);\n#endif\n\tANDROID_KABI_RESERVE(6);|;}' "$SCHEDFILE"
+            else
+              echo "└─ ⚠️ Unable to Determine Compatible Kernel ABI Layout — Aborting..."
+              exit 9
+            fi
+
+            # Verify SYSVSEM, SYSVSHM and SYSVIPC Fields Were Injected Successfully
+            echo "└─ 🔎 Verifying Injection..."
+
+            # Verify SYSVSEM Field Was Injected Successfully
+            grep -q "struct sysv_sem" "$SCHEDFILE" || {
+              echo "└─ ⚠️ Missing SYSVSEM Injection"
+              exit 1
+            }
+
+            # Verify SYSVSHM Field Was Injected Successfully
+            grep -q "struct sysv_shm" "$SCHEDFILE" || {
+              echo "└─ ⚠️ Missing SYSVSHM Injection"
+              exit 1
+            }
+
+            # Verify CONFIG_SYSVIPC Guard Exists
+            grep -q "CONFIG_SYSVIPC" "$SCHEDFILE" || {
+              echo "└─ ⚠️ Missing SYSVIPC Configuration Guard"
+              exit 1
+            }
+            echo "└─ 📌 Injection Verification Passed"
+          fi
+
+          # NT Synchronization Primitives
+          if [[ "${{ inputs.NTSYNC }}" == "true" ]]; then
+            echo "└─ 🧠 NT Synchronization Enabled via DroidSpaces"
+            # Validate Required Variables Early
+            if [[ -z "${KERNELMODULE:-}" ]]; then
+              echo "└─ ⚠️ Kernel Module Version is Not Set, Aborting..."
+              exit 1
+            fi
+
+            echo "└─ 🔄 Target Kernel Module Version : $KERNELMODULE"
+            echo "└─ 🛠️ Applying NT Synchronization Patches..."
+            # Define NT Synchronization Paths
+            NTSYNCDIR="${WORKDIR}/WildKernels/common/ntsync"
+            NTSYNCCOMPATPATCH="ntsync_compat_${KERNELMODULE}.patch"
+            NTSYNCBASEPATCH="ntsync_base.patch"
+            echo "└─ 📂 Patch Directory              : $NTSYNCDIR"
+            # Ensure Patch Repository Exists
+            if [[ ! -d "$NTSYNCDIR" ]]; then
+              echo "└─ 📥 NT Synchronization Patch Directory Missing, Cloning Repository..."
+              rm -rf "${WORKDIR}/WildKernels"
+              git clone --depth=1 \
+                https://github.com/WildKernels/kernel_patches.git \
+                "${WORKDIR}/WildKernels"
+            fi
+
+            # Verify NT Synchronization Patch Directory
+            if [[ ! -d "$NTSYNCDIR" ]]; then
+              echo "└─ ⚠️ Failed to Locate NT Synchronization Patch Directory After Clone..."
+              exit 1
+            fi
+
+            echo "└─ 📄 Available NT Synchronization Patches :"
+            ls -la "$NTSYNCDIR"
+            # Function : Apply NT Synchronization Patch
+            applyntsyncpatch() {
+              local ntsyncpatchfile="$1"
+              local ntsynctemppatch="${SOURCEDIR}/${ntsyncpatchfile}"
+              # Skip Missing NT Synchronization Patch
+              if [[ ! -f "$NTSYNCDIR/$ntsyncpatchfile" ]]; then
+                echo "└─ ⚠️ Missing Patch             : $ntsyncpatchfile"
+                return 0
+              fi
+
+              # Copy NT Synchronization Patch to Kernel Source
+              cp "$NTSYNCDIR/$ntsyncpatchfile" "$ntsynctemppatch"
+              echo "└─ ➡️ Applying $ntsyncpatchfile"
+              # Apply NT Synchronization Patch Forward
+              patchstatus=0
+              patch -d "$SOURCEDIR" -p1 --forward < "$ntsynctemppatch" || patchstatus=$?
+
+              # Remove Temporary NT Synchronization Patch Copy
+              rm -f "$ntsynctemppatch"
+              echo "└─ 🧹 Cleaned                    : $ntsyncpatchfile"
+              # Validate NT Synchronization Patch Result
+              if [[ "$patchstatus" -ne 0 ]]; then
+                echo "└─ ⚠️ Patch Failed             : $ntsyncpatchfile"
+                return "$patchstatus"
+              fi
+            }
+
+            # Apply NT Synchronization Patches
+            applyntsyncpatch "$NTSYNCCOMPATPATCH"
+            applyntsyncpatch "$NTSYNCBASEPATCH"
+            echo "└─ ☘️ NT Synchronization Patch Process Completed Successfully"
+            # Load Reject Checker and Run Rejection Check
+            source "$REJECTCHECKER"
+            checkrejects "$SOURCEDIR"
+            echo "└─ 🎉 NT Synchronization (Primitives) Done!"
+          fi
       
       - name: ⚙️ Integrate ReKernel
         if: ${{ inputs.REKERNEL }}
@@ -2205,30 +2355,7 @@ jobs:
           echo "└─ 📂 Kernel Output  : $OUTDIR"
           echo "└─ 📂 Kernel Config  : $CONFIGFILE"
           # Configure Final Kernel Configuration
-          echo "└─ 🔧 Configuring Final Kernel Configuration..."
-          # Baseband Guard Configuration
-          if [[ "${{ inputs.BBG }}" == "true" ]]; then
-            echo "└─ 🛡️ Enabling Baseband Guard Configuration..."
-            LSMVALUE="$(sed -n 's/^CONFIG_LSM="\([^"]*\)"$/\1/p' "$CONFIGFILE")"
-            if [[ -z "$LSMVALUE" ]]; then
-              echo "└─ ⚠️ LSM Configuration is Missing or Invalid"
-              exit 1
-            fi
-
-            case ",$LSMVALUE," in
-              *,baseband_guard,*) ;;
-              *) LSMVALUE="${LSMVALUE},baseband_guard" ;;
-            esac
-            "$CONFIGTOOL" --file "$CONFIGFILE" \
-              --set-str CONFIG_LSM "$LSMVALUE" \
-              -e CONFIG_BBG
-            echo "└─ 📌 Baseband Guard Configuration Enabled"
-            echo "└─ 📌 LSM Configuration : $LSMVALUE"
-          else
-            "$CONFIGTOOL" --file "$CONFIGFILE" -d CONFIG_BBG
-            echo "└─ 🚫 Baseband Guard Configuration Disabled"
-          fi
-          
+          echo "└─ 🔧 Configuring Final Kernel Configuration..."          
           # Root Engine
           if [[ "${{ inputs.ROOTENGINE }}" != "None" ]]; then
             "$CONFIGTOOL" --file "$CONFIGFILE" -e CONFIG_KSU
@@ -2243,7 +2370,7 @@ jobs:
               echo "└─ 📌 KSU Multi-Manager Support Configuration Enabled"
               echo "└─ 📌 KSU Toolkit Support Configuration Enabled"
             fi
-
+          
             # SUSFS Integration
             if [[ "${{ inputs.SUSFSENGINE }}" == "true" ]]; then
               "$CONFIGTOOL" --file "$CONFIGFILE" \
@@ -2287,6 +2414,41 @@ jobs:
       
           else
             echo "└─ 🚫 KSU Configuration Disabled"
+          fi
+
+          # NoMount Integration
+          if [[ "${{ inputs.NOMOUNT }}" != "None" ]]; then
+            "$CONFIGTOOL" --file "$CONFIGFILE" -e CONFIG_NOMOUNT
+            echo "└─ 📌 NoMount Integration Configuration Enabled"
+          fi
+
+          # Baseband Guard Configuration
+          if [[ "${{ inputs.BBG }}" == "true" ]]; then
+            echo "└─ 🛡️ Enabling Baseband Guard Configuration..."
+            LSMVALUE="$(sed -n 's/^CONFIG_LSM="\([^"]*\)"$/\1/p' "$CONFIGFILE")"
+            if [[ -z "$LSMVALUE" ]]; then
+              echo "└─ ⚠️ LSM Configuration is Missing or Invalid"
+              exit 1
+            fi
+
+            case ",$LSMVALUE," in
+              *,baseband_guard,*) ;;
+              *) LSMVALUE="${LSMVALUE},baseband_guard" ;;
+            esac
+            "$CONFIGTOOL" --file "$CONFIGFILE" \
+              --set-str CONFIG_LSM "$LSMVALUE" \
+              -e CONFIG_BBG
+            echo "└─ 📌 Baseband Guard Configuration Enabled"
+            echo "└─ 📌 LSM Configuration : $LSMVALUE"
+          else
+            "$CONFIGTOOL" --file "$CONFIGFILE" -d CONFIG_BBG
+            echo "└─ 🚫 Baseband Guard Configuration Disabled"
+          fi
+
+          # BBR TCP Congestion Control
+          if [[ "${{ inputs.BBR }}" == "true" ]]; then
+            "$CONFIGTOOL" --file "$CONFIGFILE" -e CONFIG_TCP_CONG_BBR
+            echo "└─ 📌 BBR TCP Congestion Control Configuration Enabled"
           fi
 
           # BetterNetwork / Netfilter
@@ -2360,22 +2522,53 @@ jobs:
             echo "└─ 🚫 BetterNetwork / Netfilter Configuration Disabled"
           fi
 
-          # BBR TCP Congestion Control
-          if [[ "${{ inputs.BBR }}" == "true" ]]; then
-            "$CONFIGTOOL" --file "$CONFIGFILE" -e CONFIG_TCP_CONG_BBR
-            echo "└─ 📌 BBR TCP Congestion Control Configuration Enabled"
+          # DroidSpaces Kernel Configuration
+          if [[ "${{ inputs.DROIDSPACES }}" == "true" ]]; then
+            echo "└─ 🧩 Enabling DroidSpaces Kernel Configuration..."
+            "$CONFIGTOOL" --file "$CONFIGFILE" \
+              -e CONFIG_SYSVIPC \
+              -e CONFIG_POSIX_MQUEUE \
+              -e CONFIG_PID_NS \
+              -e CONFIG_USER_NS \
+              -e CONFIG_CGROUP_DEVICE \
+              -e CONFIG_CGROUP_PIDS \
+              -e CONFIG_DEVTMPFS \
+              -e CONFIG_TMPFS_POSIX_ACL \
+              -e CONFIG_TMPFS_XATTR \
+              -e CONFIG_BRIDGE_NETFILTER \
+              -e CONFIG_NF_TABLES \
+              -e CONFIG_NETFILTER_XT_MATCH_ADDRTYPE
+            echo "└─ 📌 DroidSpaces Kernel Configuration Enabled"
+          else
+            "$CONFIGTOOL" --file "$CONFIGFILE" \
+              -d CONFIG_SYSVIPC \
+              -d CONFIG_POSIX_MQUEUE \
+              -d CONFIG_PID_NS \
+              -d CONFIG_USER_NS \
+              -d CONFIG_CGROUP_DEVICE \
+              -d CONFIG_CGROUP_PIDS \
+              -d CONFIG_DEVTMPFS \
+              -d CONFIG_TMPFS_POSIX_ACL \
+              -d CONFIG_TMPFS_XATTR \
+              -d CONFIG_BRIDGE_NETFILTER \
+              -d CONFIG_NF_TABLES \
+              -d CONFIG_NETFILTER_XT_MATCH_ADDRTYPE
+            echo "└─ 🚫 DroidSpaces Kernel Configuration Disabled"
           fi
 
-          # ReKernel Binder Hook
+          # NTSync Kernel Configuration
+          if [[ "${{ inputs.NTSYNC }}" == "true" ]]; then
+            "$CONFIGTOOL" --file "$CONFIGFILE" -e CONFIG_NTSYNC
+            echo "└─ 📌 NTSync Configuration Enabled"
+          else
+            "$CONFIGTOOL" --file "$CONFIGFILE" -d CONFIG_NTSYNC
+            echo "└─ 🚫 NTSync Configuration Disabled"
+          fi
+
+          # ReKernel Kernel Configuration
           if [[ "${{ inputs.REKERNEL }}" == "true" ]]; then
             "$CONFIGTOOL" --file "$CONFIGFILE" -e CONFIG_REKERNEL
-            echo "└─ 📌 ReKernel Binder Hook Configuration Enabled"
-          fi
-
-          # NoMount Integration
-          if [[ "${{ inputs.NOMOUNT }}" != "None" ]]; then
-            "$CONFIGTOOL" --file "$CONFIGFILE" -e CONFIG_NOMOUNT
-            echo "└─ 📌 NoMount Integration Configuration Enabled"
+            echo "└─ 📌 ReKernel Kernel Configuration Enabled"
           fi
 
           # Synchronize Final Kernel Configuration
@@ -2396,24 +2589,35 @@ jobs:
           grep -E \
             '^(CONFIG_KSU_SUSFS|CONFIG_KSU_SUSFS_HAS_MAGIC_MOUNT|CONFIG_KSU_SUSFS_SUS_PATH|CONFIG_KSU_SUSFS_SUS_MOUNT|CONFIG_KSU_SUSFS_AUTO_ADD_SUS_KSU_DEFAULT_MOUNT|CONFIG_KSU_SUSFS_AUTO_ADD_SUS_BIND_MOUNT|CONFIG_KSU_SUSFS_SUS_KSTAT|CONFIG_KSU_SUSFS_TRY_UMOUNT|CONFIG_KSU_SUSFS_AUTO_ADD_TRY_UMOUNT_FOR_BIND_MOUNT|CONFIG_KSU_SUSFS_SPOOF_UNAME|CONFIG_KSU_SUSFS_ENABLE_LOG|CONFIG_KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS|CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG|CONFIG_KSU_SUSFS_OPEN_REDIRECT|CONFIG_KSU_SUSFS_SUS_MAP|CONFIG_KSU_SUSFS_SUS_SU)=' \
             "$CONFIGFILE" || true
-          # Display Final BetterNetwork and Netfilter Configuration
-          echo "└─ 🔎 Final BetterNetwork / Netfilter Configuration"
-          grep -E \
-            '^(CONFIG_NETFILTER_XT_MATCH_ADDRTYPE|CONFIG_NETFILTER_XT_SET|CONFIG_IP_SET|CONFIG_IP_SET_MAX|CONFIG_IP_SET_BITMAP_IP|CONFIG_IP_SET_BITMAP_IPMAC|CONFIG_IP_SET_BITMAP_PORT|CONFIG_IP_SET_HASH_IP|CONFIG_IP_SET_HASH_IPMARK|CONFIG_IP_SET_HASH_IPPORT|CONFIG_IP_SET_HASH_IPPORTIP|CONFIG_IP_SET_HASH_IPPORTNET|CONFIG_IP_SET_HASH_IPMAC|CONFIG_IP_SET_HASH_MAC|CONFIG_IP_SET_HASH_NETPORTNET|CONFIG_IP_SET_HASH_NET|CONFIG_IP_SET_HASH_NETNET|CONFIG_IP_SET_HASH_NETPORT|CONFIG_IP_SET_HASH_NETIFACE|CONFIG_IP_SET_LIST_SET|CONFIG_IP6_NF_NAT|CONFIG_IP6_NF_TARGET_MASQUERADE|CONFIG_NETFILTER_XT_TARGET_HL|CONFIG_IP_NF_TARGET_TTL|CONFIG_IP6_NF_TARGET_HL|CONFIG_NETFILTER_XT_MATCH_HL|CONFIG_IP_NF_MATCH_TTL|CONFIG_IP6_NF_MATCH_HL|CONFIG_IP_NF_MANGLE|CONFIG_IP6_NF_MANGLE|CONFIG_BPF_STREAM_PARSER)=' \
-            "$CONFIGFILE" || true
+          # Display Final NoMount Configuration
+          echo "└─ 🔎 Final NoMount Configuration"
+          grep '^CONFIG_NOMOUNT=' "$CONFIGFILE" || true
           # Display Final TCP Congestion Control Configuration
           echo "└─ 🔎 Final TCP Congestion Control Configuration"
           grep -E \
             '^(CONFIG_TCP_CONG_ADVANCED|CONFIG_TCP_CONG_BBR)=' \
             "$CONFIGFILE" || true
-          # Display Final ReKernel Binder Hook Configuration
+          # Display Final BetterNetwork and Netfilter Configuration
+          echo "└─ 🔎 Final BetterNetwork / Netfilter Configuration"
+          grep -E \
+            '^(CONFIG_NETFILTER_XT_MATCH_ADDRTYPE|CONFIG_NETFILTER_XT_SET|CONFIG_IP_SET|CONFIG_IP_SET_MAX|CONFIG_IP_SET_BITMAP_IP|CONFIG_IP_SET_BITMAP_IPMAC|CONFIG_IP_SET_BITMAP_PORT|CONFIG_IP_SET_HASH_IP|CONFIG_IP_SET_HASH_IPMARK|CONFIG_IP_SET_HASH_IPPORT|CONFIG_IP_SET_HASH_IPPORTIP|CONFIG_IP_SET_HASH_IPPORTNET|CONFIG_IP_SET_HASH_IPMAC|CONFIG_IP_SET_HASH_MAC|CONFIG_IP_SET_HASH_NETPORTNET|CONFIG_IP_SET_HASH_NET|CONFIG_IP_SET_HASH_NETNET|CONFIG_IP_SET_HASH_NETPORT|CONFIG_IP_SET_HASH_NETIFACE|CONFIG_IP_SET_LIST_SET|CONFIG_IP6_NF_NAT|CONFIG_IP6_NF_TARGET_MASQUERADE|CONFIG_NETFILTER_XT_TARGET_HL|CONFIG_IP_NF_TARGET_TTL|CONFIG_IP6_NF_TARGET_HL|CONFIG_NETFILTER_XT_MATCH_HL|CONFIG_IP_NF_MATCH_TTL|CONFIG_IP6_NF_MATCH_HL|CONFIG_IP_NF_MANGLE|CONFIG_IP6_NF_MANGLE|CONFIG_BPF_STREAM_PARSER)=' \
+            "$CONFIGFILE" || true
+          # Display Final DroidSpaces Configuration
+          echo "└─ 🔎 Final DroidSpaces Configuration"
+          grep -E \
+            '^(CONFIG_SYSVIPC|CONFIG_POSIX_MQUEUE|CONFIG_PID_NS|CONFIG_USER_NS|CONFIG_CGROUP_DEVICE|CONFIG_CGROUP_PIDS|CONFIG_DEVTMPFS|CONFIG_TMPFS_POSIX_ACL|CONFIG_TMPFS_XATTR|CONFIG_BRIDGE_NETFILTER|CONFIG_NF_TABLES|CONFIG_NETFILTER_XT_MATCH_ADDRTYPE)=' \
+            "$CONFIGFILE" || true
+
+          # Display Final NTSync Configuration
+          echo "└─ 🔎 Final NTSync Configuration"
+          grep -E \
+            '^CONFIG_NTSYNC=' \
+            "$CONFIGFILE" || true         
+          # Display Final ReKernel Configuration
           echo "└─ 🔎 Final ReKernel Configuration"
           grep -E \
             '^(CONFIG_REKERNEL|CONFIG_REKERNEL_NETWORK)=' \
-            "$CONFIGFILE" || true
-          # Display Final NoMount Configuration
-          echo "└─ 🔎 Final NoMount Configuration"
-          grep '^CONFIG_NOMOUNT=' "$CONFIGFILE" || true
+            "$CONFIGFILE" || true   
           # Display Final KASAN Stack Configuration
           echo "└─ 🔎 Final KASAN Stack Configuration"
           grep '^CONFIG_KASAN_STACK=' "$CONFIGFILE" || \
