@@ -1,24 +1,22 @@
-      - name: 🧩 DroidSpaces / NTSynchonization Primitives
+      - name: 🧩 DroidSpaces / NT Synchonization Primitives
         shell: bash
         env:
           KERNELMODULE: ${{ steps.kernelversion.outputs.kernelmodule }}
         run: |
-          # Move to Kernel Directory
-          cd "$SOURCEDIR"
           # Apply DroidSpaces SYSVIPC Injection Only When Enabled
           if [[ "${{ inputs.DROIDSPACES }}" == "true" ]]; then
             # Function : Patch Apply
             apply() {
               local patchfile="$1"
-              if patch -R -p1 --dry-run < "$patchfile" >/dev/null 2>&1; then
+              if patch -R -d "$SOURCEDIR" -p1 --dry-run < "$patchfile" >/dev/null 2>&1; then
                 echo "└─ 🎉 Already Applied : $(basename "$patchfile")"
                 return
               fi
-           
+
               # Verify Patch Could Applied Without Modifying Files
-              if patch -p1 --dry-run < "$patchfile" >/dev/null 2>&1; then
+              if patch -d "$SOURCEDIR" -p1 --dry-run < "$patchfile" >/dev/null 2>&1; then
                 # Apply Patch and Report Success
-                patch -p1 --forward < "$patchfile"
+                patch -d "$SOURCEDIR" -p1 --forward < "$patchfile"
                 echo "└─ ✔️ Applied         : $(basename "$patchfile")"
               else
                 # Abort if Patch Cannot Be Applied
@@ -28,8 +26,8 @@
             }
 
             # Paths
-            SCHEDFILE="include/linux/sched.h"
-            USERFILE="include/linux/sched/user.h"
+            SCHEDFILE="${SOURCEDIR}/include/linux/sched.h"
+            USERFILE="${SOURCEDIR}/include/linux/sched/user.h"
             if [[ ! -f "$SCHEDFILE" ]]; then
               echo "└─ ⚠️ Missing Scheduler Header File : $SCHEDFILE"
               exit 1
@@ -39,6 +37,7 @@
             echo "└─ ⚙️ Disabling Original System V IPC Struct Fields..."
             sed -i 's/^\(\t\)struct sysv_sem\b.*sysvsem;/\1\/\/ struct sysv_sem\t\t\tsysvsem;/' "$SCHEDFILE"
             sed -i 's/^\(\t\)struct sysv_shm\b.*sysvshm;/\1\/\/ struct sysv_shm\t\t\tsysvshm;/' "$SCHEDFILE"
+            # Detect the Scheduler and Kernel ABI Layout Before Injecting SYSVIPC Fields
             if grep -q "sched_dl_entity.*\*dl_server" "$SCHEDFILE"; then
               echo "└─ ♻️ Detected DL Server Pointer — ☘️ Using Packed Union Strategy"
               sed -i 's|\tstruct sched_entity\t\tse;|#ifdef CONFIG_SYSVIPC\n\tunion {\n\t\tchar __kabi_ignored_0;\n\t\tstruct sysv_sem\t\t\tsysvsem;\n\t}__attribute__((packed));\n\tunion {\n\t\tchar __kabi_ignored_1;\n\t\tstruct sysv_shm\t\t\tsysvshm;\n\t}__attribute__((packed));\n#endif\n\n\tstruct sched_entity\t\tse;|' "$SCHEDFILE"
@@ -58,17 +57,20 @@
 
             # Verify SYSVSEM, SYSVSHM and SYSVIPC Fields Were Injected Successfully
             echo "└─ 🔎 Verifying Injection..."
-            # Verify SYSVSHM Field Was Injected Successfully
+
+            # Verify SYSVSEM Field Was Injected Successfully
             grep -q "struct sysv_sem" "$SCHEDFILE" || {
-              echo "└─ ⚠️ Missing SYSVSHM Injection"
+              echo "└─ ⚠️ Missing SYSVSEM Injection"
               exit 1
             }
+
             # Verify SYSVSHM Field Was Injected Successfully
             grep -q "struct sysv_shm" "$SCHEDFILE" || {
               echo "└─ ⚠️ Missing SYSVSHM Injection"
               exit 1
             }
-            # Verify CONFIG SYSVIPC Guard Exists
+
+            # Verify CONFIG_SYSVIPC Guard Exists
             grep -q "CONFIG_SYSVIPC" "$SCHEDFILE" || {
               echo "└─ ⚠️ Missing Configuration SYSVIPC Guard"
               exit 1
@@ -118,6 +120,7 @@
             # Function : Apply NT Synchronization Patch
             applyntsyncpatch() {
               local ntsyncpatchfile="$1"
+              local ntsynctemppatch="${SOURCEDIR}/${ntsyncpatchfile}"
               # Skip Missing NT Synchronization Patch
               if [[ ! -f "$NTSYNCDIR/$ntsyncpatchfile" ]]; then
                 echo "└─ ⚠️ Missing Patch : $ntsyncpatchfile"
@@ -125,13 +128,14 @@
               fi
 
               # Copy NT Synchronization Patch to Kernel Source
-              cp "$NTSYNCDIR/$ntsyncpatchfile" ./
+              cp "$NTSYNCDIR/$ntsyncpatchfile" "$ntsynctemppatch"
               echo "└─ ➡️ Applying $ntsyncpatchfile"
               # Apply NT Synchronization Patch Forward
               patchstatus=0
-              patch -p1 --forward < "$ntsyncpatchfile" || patchstatus=$?
+              patch -d "$SOURCEDIR" -p1 --forward < "$ntsynctemppatch" || patchstatus=$?
+
               # Remove Temporary NT Synchronization Patch Copy
-              rm -f "$ntsyncpatchfile"
+              rm -f "$ntsynctemppatch"
               echo "└─ 🧹 Cleaned        : $ntsyncpatchfile"
               # Validate NT Synchronization Patch Result
               if [[ "$patchstatus" -ne 0 ]]; then
@@ -146,6 +150,6 @@
             echo "└─ ☘️ NT Synchronization Patch Process Completed Successfully"
             # Load Reject Checker and Run Rejection Check
             source "$REJECTCHECKER"
-            checkrejects .
+            checkrejects "$SOURCEDIR"
             echo "└─ 🎉 NT Synchronization (Primitives) Done!"
           fi
