@@ -1103,41 +1103,6 @@ jobs:
             echo "kernelversion=$KERNELVERSION"
           } >> "$GITHUB_OUTPUT"
           echo "🎉 Kernel Version Detection Complete" 
-
-      - name: ♻️ Extract-Cert PKCS11 / Loop IOCTL Fix
-        shell: bash
-        run: |
-          # Configure Extract-Cert PKCS11 Compile Guard
-          FILE="$SOURCEDIR/certs/extract-cert.c"
-          # Add Guard Only When PKCS11 PIN Handling Exists
-          if [[ -f "$FILE" ]] &&
-             grep -q 'ENGINE_ctrl_cmd_string(e, "PIN", key_pass, 0)' "$FILE" &&
-             ! grep -B5 -A2 'ENGINE_ctrl_cmd_string(e, "PIN", key_pass, 0)' "$FILE" | grep -q '#ifdef USE_PKCS11_ENGINE'; then
-            perl -0pi -e 's/(\n\t\tif \(key_pass\)\n\t\t\tERR\(!ENGINE_ctrl_cmd_string\(e, "PIN", key_pass, 0\), "Set PKCS#11 PIN"\);)/\n#ifdef USE_PKCS11_ENGINE$1\n#endif/' "$FILE"
-          fi
-
-          # Configure Loop IOCTL Stack Usage
-          FILE="$SOURCEDIR/drivers/block/loop.c"
-          # Validate Loop Driver Source if it Exists
-          if [[ ! -f "$FILE" ]]; then
-            echo "⚠️ Loop Source Not Found"
-            exit 1
-          fi
-
-          # Move Configuration Handling Into a No-Inline Helper
-          if ! grep -qF 'static noinline int lo_ioctl_configure(' "$FILE"; then
-            perl -0pi -e '
-              s{(?=static int lo_ioctl\(struct block_device \*bdev, blk_mode_t mode,)}{static noinline int lo_ioctl_configure(struct loop_device *lo, blk_mode_t mode, struct block_device *bdev, unsigned int cmd, unsigned long arg)\n{\n\tstruct loop_config config;\n\tif (cmd == LOOP_SET_FD) {\n\t\tmemset(\&config, 0, sizeof(config));\n\t\tconfig.fd = arg;\n\t} else if (copy_from_user(\&config, (void __user *)arg, sizeof(config))) {\n\t\treturn -EFAULT;\n\t}\n\treturn loop_configure(lo, mode, bdev, \&config);\n}\n\n} or die "lo_ioctl insertion failed\n";
-              # Replace Original LOOP SETFD and LOOP CONFIGURE Cases
-              s{\tcase LOOP_SET_FD: \{.*?\tcase LOOP_CHANGE_FD:}{\tcase LOOP_SET_FD:\n\tcase LOOP_CONFIGURE:\n\t\treturn lo_ioctl_configure(lo, mode, bdev, cmd, arg);\n\tcase LOOP_CHANGE_FD:}s or die "ioctl replacement failed\n";
-            ' "$FILE"
-          fi
-
-          # Verify Loop IOCTL Helper and Dispatch
-          grep -qF 'static noinline int lo_ioctl_configure(' "$FILE" &&
-          grep -qF 'return lo_ioctl_configure(lo, mode, bdev, cmd, arg);' "$FILE" ||
-          { echo "⚠️ Loop IOCTL Patch Verification Failed"; exit 1; }
-          echo "🎉 PKCS11 / Loop IOCTL Fixes Checked"
    
       - name: 🧾 Generate Base Kernel Configuration
         env:
@@ -1196,6 +1161,19 @@ jobs:
             exit 1
           fi
 
+          # Disable KASAN Stack Instrumentation
+          echo "🔧 Disabling KASAN Stack Instrumentation..."
+          "$CONFIGTOOL" \
+            --file "$CONFIGFILE" \
+            -d CONFIG_KASAN_STACK
+          # Verify KASAN Stack Instrumentation Is Disabled
+          if grep -q '^CONFIG_KASAN_STACK=y$' "$CONFIGFILE"; then
+            echo "⚠️ CONFIG_KASAN_STACK Is Still Enabled"
+            exit 1
+          fi
+
+          echo "📌 KASAN Stack Instrumentation Disabled"
+
           # Apply Kernel Local Version
           echo "🔧 Configuring Kernel Local Version..."
           if [ -n "$KERNELSUFFIX" ]; then
@@ -1223,6 +1201,8 @@ jobs:
 
           echo "📌 Kernel Local Version        :"
           grep '^CONFIG_LOCALVERSION=' "$CONFIGFILE"
+          echo "📌 KASAN Stack Instrumentation :"
+          grep -E '^CONFIG_KASAN_STACK=' "$CONFIGFILE" || echo "# CONFIG_KASAN_STACK is not set"
           echo "📊 Base Configuration          :"
           echo "📌 Total Options               : $(grep -c '^CONFIG_' "$CONFIGFILE" || true)"
           echo "📌 Configuration File          : $CONFIGFILE"
