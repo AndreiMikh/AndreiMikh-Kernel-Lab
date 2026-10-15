@@ -166,7 +166,7 @@ jobs:
       # Compiler Cache Configuration
       CCACHE_BASEDIR: ${{ github.workspace }}
       CCACHE_DIR: ${{ github.workspace }}/.ccache
-      CCACHE_MAXSIZE: 8G
+      CCACHE_MAXSIZE: 4G
       CCACHE_COMPILERCHECK: "content"
       CCACHE_NOHASHDIR: "true"
       CCACHE_NOHARDLINK: "true"
@@ -418,97 +418,90 @@ jobs:
           sudo rm -rf /var/lib/apt/lists/*
           echo "└─ 🎉 Build Dependencies Ready"
  
-      - name: 🔐 Resolve Clang Toolchain
-        id: clang-meta
+      - name: 📦 Restore / Publish AOSP Clang 21
+        id: clang-release
         shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          OWNERREPO: ${{ github.repository }}
         run: |
-          # Define Clang Revision
+          # Define Clang Release Metadata
           CLANGVERSION="r563880c"
           CLANGARCHIVE="clang-${CLANGVERSION}.tar.gz"
-          # Export Clang Metadata
-          {
-            echo "CLANGVERSION=$CLANGVERSION"
-            echo "CLANGARCHIVE=$CLANGARCHIVE"
-          } >> "$GITHUB_ENV"
-          # Define Clang Cache Key
-          CLANGKEY="aosp-clang-21-${CLANGVERSION}-${{ runner.os }}-${{ runner.arch }}"
-          echo "└─ 📌 Clang Revision  : $CLANGVERSION"
-          echo "└─ 📌 Clang Archive   : $CLANGARCHIVE"
-          echo "└─ 📌 Clang Cache Key : $CLANGKEY"
-          # Export Step Outputs
-          {
-            echo "clangversion=$CLANGVERSION"
-            echo "clangkey=$CLANGKEY"
-          } >> "$GITHUB_OUTPUT"
-  
-      - name: 💾 Restore AOSP Clang Cache
-        id: clang-cache
-        uses: actions/cache/restore@v6
-        with:
-          path: clang
-          key: ${{ steps.clang-meta.outputs.clangkey }}
-       
-      - name: 📥 Download AOSP Clang
-        if: steps.clang-cache.outputs.cache-hit != 'true'
-        shell: bash
-        run: |
-          # Display Clang Download Information
-          echo "└─ 📥 Downloading AOSP Clang 21..."
-          echo "└─ 📌 Revision : $CLANGVERSION"
-          # Define Clang Paths
+          CLANGRELEASE="AOSP-Clang-Cache"
           CLANGDIR="$GITHUB_WORKSPACE/clang"
           CLANGFILE="$GITHUB_WORKSPACE/$CLANGARCHIVE"
-          # Define AOSP Clang Archive URL
           CLANGURL="https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/b5f16aee7b8af4c339972027e91e7e793c2e55d9/${CLANGARCHIVE}"
-          echo "└─ 📌 Clang URL : $CLANGURL"          
-          # Prepare Clang Directory
+          # Display Clang Release Information
+          echo "└─ 📌 Clang Revision : $CLANGVERSION"
+          echo "└─ 📌 Clang Archive  : $CLANGARCHIVE"
+          echo "└─ 📌 Release Tag    : $CLANGRELEASE"
+          # Prepare Clang Workspace
           rm -rf "$CLANGDIR"
+          rm -f "$CLANGFILE"
           mkdir -p "$CLANGDIR"
-          # Remove Previous Clang Archive
-          rm -f "$CLANGFILE"
-          # Download AOSP Clang Archive
-          curl \
-            -fL \
-            --retry 10 \
-            --retry-delay 5 \
-            --retry-all-errors \
-            --connect-timeout 30 \
-            --max-time 1800 \
-            "$CLANGURL" \
-            -o "$CLANGFILE"
-          # Validate Downloaded Clang Archive
-          if [[ ! -s "$CLANGFILE" ]]; then
-            echo "└─ ⚠️ Clang Archive Was Not Downloaded"
-            exit 1
+          # Restore Clang Archive From GitHub Release
+          if gh release view "$CLANGRELEASE" --repo "$OWNERREPO" >/dev/null 2>&1 &&
+             gh release download "$CLANGRELEASE" \
+               --repo "$OWNERREPO" \
+               --pattern "$CLANGARCHIVE" \
+               --dir "$GITHUB_WORKSPACE" >/dev/null 2>&1 &&
+             tar -tzf "$CLANGFILE" >/dev/null 2>&1; then
+            echo "└─ 📥 Clang Archive Restored From GitHub Release"
+            echo "source=release" >> "$GITHUB_OUTPUT"
+          else
+            # Download Clang Archive From AOSP
+            echo "└─ 📥 Downloading Clang From AOSP..."
+            rm -f "$CLANGFILE"
+            curl \
+              -fL \
+              --retry 10 \
+              --retry-delay 5 \
+              --retry-all-errors \
+              --connect-timeout 30 \
+              --max-time 1800 \
+              "$CLANGURL" \
+              -o "$CLANGFILE"
+            # Validate Downloaded Clang Archive
+            if [[ ! -s "$CLANGFILE" ]] || ! tar -tzf "$CLANGFILE" >/dev/null 2>&1; then
+              echo "└─ ⚠️ Clang archive download or validation failed"
+              exit 1
+            fi
+
+            # Create Clang Release When Missing
+            if ! gh release view "$CLANGRELEASE" --repo "$OWNERREPO" >/dev/null 2>&1; then
+              gh release create "$CLANGRELEASE" \
+                --repo "$OWNERREPO" \
+                --title "AOSP Clang Cache" \
+                --notes "Cached AOSP Clang toolchains for AndreiMikh Kernel Lab"
+            fi
+
+            # Publish Clang Archive To GitHub Release
+            gh release upload "$CLANGRELEASE" "$CLANGFILE" \
+              --repo "$OWNERREPO" \
+              --clobber
+            echo "└─ 📤 Clang Archive Published to GitHub Release"
+            echo "source=aosp" >> "$GITHUB_OUTPUT"
           fi
-          # Extract AOSP Clang Toolchain
-          echo "└─ 📦 Extracting AOSP Clang..."
-          tar \
-            -xzf "$CLANGFILE" \
-            -C "$CLANGDIR"
-          # Remove Clang Archive After Extraction
-          rm -f "$CLANGFILE"
+
+          # Extract Clang Toolchain
+          echo "└─ 📦 Extracting Clang..."
+          tar -xzf "$CLANGFILE" -C "$CLANGDIR"
           # Validate Clang Installation
           if [[ ! -x "$CLANGDIR/bin/clang" ]]; then
-            echo "└─ ⚠️ Clang Executable Was Not Found After Extraction"
-            echo "└─ 📂 Clang Directory :"
+            echo "└─ ⚠️ Clang executable not found after extraction"
+            echo "└─ 📂 Clang Directory:"
             ls -la "$CLANGDIR" || true
-            echo "└─ 📂 Clang/Bin       :"
+            echo "└─ 📂 Clang/Bin:"
             ls -la "$CLANGDIR/bin" || true
             exit 1
           fi
-          # Display Successful Installation
-          echo "└─ 🎉 AOSP Clang Installed Successfully"
-          # Display Installed Clang Version
-          echo "└─ 🔎 Clang Version     :"
+
+          # Remove Temporary Clang Archive
+          rm -f "$CLANGFILE"
+          # Display Successful Clang Installation
+          echo "└─ 🎉 AOSP Clang Ready"
           "$CLANGDIR/bin/clang" --version
-     
-      - name: 💾 Save Clang Cache
-        if: steps.clang-cache.outputs.cache-hit != 'true' 
-        uses: actions/cache/save@v6
-        with:
-          path: clang
-          key: ${{ steps.clang-meta.outputs.clangkey }}
    
       - name: 🪛 Configure Clang / LLVM Prebuilts
         shell: bash
@@ -548,28 +541,16 @@ jobs:
           echo "└─ 📌 PYTHONPATH     :"
           echo "└─ /tmp"
           echo "└─ 🎉 Clang Configuration and Toolchain Verification Complete"    
-  
-      - name: 💾 Restore Compiler Cache
-        id: ccache-restore
-        if: ${{ inputs.BUILDCCACHE }}
-        uses: actions/cache/restore@v6
-        with:
-          path: .ccache
-          # Rolling Exact Key
-          key: CCache-SM8750-${{ inputs.AOSPSOURCE }}-${{ runner.os }}-${{ runner.arch }}-${{ github.ref_name }}
-          # Restore Newest Compatible CCache
-          restore-keys: |
-            CCache-SM8750-${{ inputs.AOSPSOURCE }}-${{ runner.os }}-${{ runner.arch }}-${{ github.ref_name }}
-            CCache-SM8750-${{ inputs.AOSPSOURCE }}-${{ runner.os }}-${{ runner.arch }}-
-            CCache-SM8750-${{ inputs.AOSPSOURCE }}-${{ runner.os }}-
-            CCache-SM8750-${{ inputs.AOSPSOURCE }}-
             
       - name: 📥 Restore Public Compiler Cache
+        id: ccache-public
         if: ${{ inputs.BUILDCCACHE }}
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         shell: bash
         run: |
+          # Initialize Restore Status
+          echo "restored=false" >> "$GITHUB_OUTPUT"
           # Define Public Compiler Cache Release
           ARCHIVE="CCache-SM8750-${{ inputs.AOSPSOURCE }}.tar.zst"
           RELEASE="CCache-SM8750-${{ inputs.AOSPSOURCE }}"
@@ -639,11 +620,28 @@ jobs:
 
           # Apply Compiler Cache Size Limit
           echo "└─ ⚙️ Applying Cache Size Limit..."
-          ccache -M "${CCACHE_MAXSIZE:-8G}"
+          ccache -M "${CCACHE_MAXSIZE:-4G}"
           # Display Restored Compiler Cache
           echo "└─ 📊 Restored Compiler Cache Status"
           ccache -s
+          # Mark Restore as Successful
+          echo "restored=true" >> "$GITHUB_OUTPUT"
           echo "└─ 🎉 Public Compiler Cache Restored Successfully"
+
+      - name: 💾 Restore Compiler Cache
+        id: ccache-restore
+        if: ${{ inputs.BUILDCCACHE && steps.ccache-public.outputs.restored != 'true' }}
+        uses: actions/cache/restore@v6
+        with:
+          path: .ccache
+          # Rolling Exact Key
+          key: CCache-SM8750-${{ inputs.AOSPSOURCE }}-${{ runner.os }}-${{ runner.arch }}-${{ github.ref_name }}
+          # Restore Newest Compatible CCache
+          restore-keys: |
+            CCache-SM8750-${{ inputs.AOSPSOURCE }}-${{ runner.os }}-${{ runner.arch }}-${{ github.ref_name }}
+            CCache-SM8750-${{ inputs.AOSPSOURCE }}-${{ runner.os }}-${{ runner.arch }}-
+            CCache-SM8750-${{ inputs.AOSPSOURCE }}-${{ runner.os }}-
+            CCache-SM8750-${{ inputs.AOSPSOURCE }}-
 
       - name: ⚙️ Configure Compiler Cache / ECS
         if: ${{ inputs.BUILDCCACHE }}
@@ -651,7 +649,7 @@ jobs:
         run: |
           # Configure Compiler Cache Environment
           export CCACHE_DIR="${CCACHE_DIR:-${GITHUB_WORKSPACE}/.ccache}"
-          export CCACHE_MAXSIZE="${CCACHE_MAXSIZE:-8G}"
+          export CCACHE_MAXSIZE="${CCACHE_MAXSIZE:-4G}"
           export CCACHE_COMPILERCHECK="${CCACHE_COMPILERCHECK:-content}"
           export CCACHE_BASEDIR="${CCACHE_BASEDIR:-${GITHUB_WORKSPACE}}"
           export CCACHE_NOHASHDIR="${CCACHE_NOHASHDIR:-true}"
@@ -2762,7 +2760,7 @@ jobs:
           echo "└─ 🎉 KPM Patched"
   
       - name: 💾 Save Compiler Cache
-        if: ${{ inputs.BUILDCCACHE }}
+        if: ${{ inputs.BUILDCCACHE && steps.ccache-public.outputs.restored != 'true' }}
         uses: actions/cache/save@v6
         with:
           path: .ccache
@@ -2772,7 +2770,7 @@ jobs:
         if: ${{ inputs.BUILDCCACHE }}
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          GH_REPO: AndreiMikh/AndreiMikh-Kernel-Lab
+          OWNERREPO: AndreiMikh/AndreiMikh-Kernel-Lab
           CCACHE_DIR: ${{ github.workspace }}/.ccache
         shell: bash
         run: |
@@ -2793,7 +2791,7 @@ jobs:
           # Remove Any Previous Archive
           rm -f "$ARCHIVE"
           # Try Compression Levels Until Archive Fits
-          for LEVEL in 1 2 3 4 5; do
+          for LEVEL in 1 2 3 4 5 6 7 8 9 10 15 20 25; do
             echo "└─ 🗜️ Creating Archive with Zstandard Level -$LEVEL..."
             if ! tar -I "zstd -T0 -${LEVEL}" \
               -cf "$ARCHIVE" \
@@ -2836,14 +2834,14 @@ jobs:
           if gh release create \
             "$RELEASETAG" \
             "$ARCHIVE" \
-            --repo "$GH_REPO" \
+            --repo "$OWNERREPO" \
             --title "$RELEASETAG" \
             --notes 'Category: Compiler Cache | SM8750 — Public Compiler Cache for OPlus AOSP SM8750 Kernel Builds'; then
             echo "└─ 📌 Public Compiler Cache Release Created"
           elif gh release upload \
             "$RELEASETAG" \
             "$ARCHIVE" \
-            --repo "$GH_REPO" \
+            --repo "$OWNERREPO" \
             --clobber; then
             echo "└─ 📌 Public Compiler Cache Release Updated"
           else
