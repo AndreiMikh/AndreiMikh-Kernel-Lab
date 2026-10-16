@@ -1,4 +1,4 @@
-      - name: 🧾 Generate Base Kernel Configuration
+- name: 🧾 Generate Base Kernel Configuration
         env:
           KERNELSUFFIX: ${{ inputs.KERNELSUFFIX }}
         shell: bash
@@ -6,6 +6,7 @@
           # Define Kernel Configuration Paths
           CONFIGS="$SOURCEDIR/arch/arm64/configs"
           MERGEBASECONFIGS="$SOURCEDIR/scripts/kconfig/merge_config.sh"
+          CONFIGTOOL="$SOURCEDIR/scripts/config"
           CONFIGFILE="$OUTDIR/.config"
           BASECONFIG="$CONFIGS/gki_defconfig"
           PERFCONFIG="$CONFIGS/vendor/sun_perf.config"
@@ -14,12 +15,15 @@
           echo "📂 Kernel Source : $SOURCEDIR"
           echo "📂 Kernel Output : $OUTDIR"
           echo "📂 Config Path   : $CONFIGS"
-          # Validate Merge Script
-          if [ ! -x "$MERGEBASECONFIGS" ]; then
-            echo "⚠️ Base Config Merge Script Not Found"
-            echo "📂 Expected : $MERGEBASECONFIGS"
-            exit 1
-          fi
+          # Validate Kernel Configuration Tools
+          for tool in "$MERGEBASECONFIGS" "$CONFIGTOOL"; do
+            if [ ! -x "$tool" ]; then
+              echo "⚠️ Kernel Configuration Tool Not Found"
+              echo "📂 $tool"
+              exit 1
+            fi
+
+          done
 
           # Validate Required Configuration Files
           for config in \
@@ -32,7 +36,7 @@
               exit 1
             fi
             echo "✔️ Found : $config"
-      
+    
           done
 
           # Prepare Kernel Output Directory
@@ -49,30 +53,33 @@
             "$PERFCONFIG" \
             "$OPLUSCONFIG"
           # Verify Generated Configuration
-          if [ ! -f "$CONFIGFILE" ]; then
+          if [ ! -s "$CONFIGFILE" ]; then
             echo "⚠️ Failed to Generate .config"
             exit 1
           fi
 
-          echo "🧾 Base Kernel Config Generated"
           # Set Kernel Local Version Suffix
           if [ -n "$KERNELSUFFIX" ]; then
-            "$SOURCEDIR/scripts/config" \
-              --file "$CONFIGFILE" \
-              --set-str CONFIG_LOCALVERSION "-${KERNELSUFFIX}-4k"
+            LOCALVERSION="-${KERNELSUFFIX}-4k"
           else
-            "$SOURCEDIR/scripts/config" \
-              --file "$CONFIGFILE" \
-              --set-str CONFIG_LOCALVERSION "-${SRCCOMMIT}-4k"
+            LOCALVERSION="-${SRCCOMMIT}-4k"
           fi
 
-          # Disable Automatic Local Version Suffix
-          "$SOURCEDIR/scripts/config" \
+          "$CONFIGTOOL" \
             --file "$CONFIGFILE" \
-            -d CONFIG_LOCALVERSION_AUTO   
+            --set-str CONFIG_LOCALVERSION "$LOCALVERSION" \
+            -d CONFIG_LOCALVERSION_AUTO
+          # Verify Local Version Configuration
+          if ! grep -Fxq "CONFIG_LOCALVERSION=\"$LOCALVERSION\"" "$CONFIGFILE"; then
+            echo "⚠️ Failed to Set Kernel Local Version"
+            grep '^CONFIG_LOCALVERSION=' "$CONFIGFILE" || true
+            exit 1
+          fi
+
           # Display Final Configuration Summary
           echo "📌 Kernel Local Version:"
-          grep '^CONFIG_LOCALVERSION=' "$CONFIGFILE" || true
+          grep '^CONFIG_LOCALVERSION=' "$CONFIGFILE"
+          grep '^# CONFIG_LOCALVERSION_AUTO is not set$' "$CONFIGFILE"
           echo "📊 Configuration Summary:"
           echo "├─ Assigned Options : $(grep -c '^CONFIG_.*=' "$CONFIGFILE" || true)"
           echo "├─ Disabled Options : $(grep -c '^# CONFIG_.* is not set$' "$CONFIGFILE" || true)"
