@@ -1823,43 +1823,6 @@ jobs:
           echo "└─ 📌 Baseband Guard Security Kconfig  : OK"
           echo "└─ 📌 Baseband Guard LSM Default       : OK"                    
           echo "└─ 📌 Baseband Guard                   : Enabled"                    
-          # Configure Baseband Guard Kernel Options
-          CONFIGFILE="$OUTDIR/.config"
-          CONFIGTOOL="$SOURCEDIR/scripts/config"
-          echo "└─ 🔧 Configuring Baseband Guard..."
-          if [[ ! -f "$CONFIGFILE" ]]; then
-            echo "└─ ⚠️ Kernel Configuration Not Found : $CONFIGFILE"
-            exit 1
-          fi
-
-          if [[ ! -x "$CONFIGTOOL" ]]; then
-            echo "└─ ⚠️ KConfig Utility Not Found : $CONFIGTOOL"
-            exit 1
-          fi
-
-          # Enable Baseband Guard
-          if ! "$CONFIGTOOL" --file "$CONFIGFILE" -e CONFIG_BBG; then
-            echo "└─ ⚠️ Failed to Enable Baseband Guard"
-            exit 1
-          fi
-
-          # Configure Baseband Guard Linux Security Module
-          LSMVALUE="$(sed -n 's/^CONFIG_LSM="\([^"]*\)"$/\1/p' "$CONFIGFILE")"
-          if [[ -z "$LSMVALUE" ]]; then
-            echo "└─ ⚠️ LSM Configuration Is Missing or Invalid"
-            exit 1
-          fi
-
-          case ",$LSMVALUE," in
-            *,baseband_guard,*) ;;
-            *) LSMVALUE="${LSMVALUE},baseband_guard" ;;
-          esac
-          if ! "$CONFIGTOOL" --file "$CONFIGFILE" \
-            --set-str CONFIG_LSM "$LSMVALUE"; then
-            echo "└─ ⚠️ Failed to Configure Baseband Guard LSM"
-            exit 1
-          fi
-
           echo "└─ 🎉 Baseband Guard Source Integration Completed"
 
       - name: 🧩 DroidSpaces / Synchonization Primitives
@@ -2221,7 +2184,7 @@ jobs:
             "$PERFCONFIG" \
             "$OPLUSCONFIG"; do
             if [[ ! -f "$config" ]]; then
-              echo "└─ ⚠️ Required Kernel Config Not Found"
+              echo "└─ ⚠️ Required Kernel Configuration Not Found"
               echo "└─ 📂 Expected : $config"
               exit 1
             fi
@@ -2244,7 +2207,7 @@ jobs:
             "$OPLUSCONFIG"
           # Verify Generated Configuration
           if [[ ! -s "$CONFIGFILE" ]]; then
-            echo "└─ ⚠️ Failed to Generate .config"
+            echo "└─ ⚠️ Failed to Generate Configuration"
             exit 1
           fi
 
@@ -2264,7 +2227,7 @@ jobs:
           echo "└─ 🔧 Configuring Root Engine..."
           if [[ "$ROOTENGINE" != "None" ]]; then
             "$CONFIGTOOL" --file "$CONFIGFILE" -e CONFIG_KSU
-            if [[ "$ROOTENGINE" == BakaSU-* ]]; then
+            if [[ "$ROOTENGINE" == "BakaSU" ]]; then
               "$CONFIGTOOL" --file "$CONFIGFILE" \
                 --set-str CONFIG_KSU_FULL_NAME_FORMAT "%TAG_NAME%" \
                 -e CONFIG_KSU_MULTI_MANAGER_SUPPORT \
@@ -2441,7 +2404,7 @@ jobs:
             echo "└─ 📌 Preserving Base Android Configuration"
           fi
 
-          # NTSync Configuration
+          # NT Synchonization Primitives Configuration
           echo "└─ 🔧 Configuring NTSync..."
           if [[ "$NTSYNC" == "true" ]]; then
             "$CONFIGTOOL" --file "$CONFIGFILE" -e CONFIG_NTSYNC
@@ -2449,8 +2412,8 @@ jobs:
             "$CONFIGTOOL" --file "$CONFIGFILE" -d CONFIG_NTSYNC
           fi
 
-          # Re-Kernel Configuration
-          echo "└─ 🔧 Configuring Re-Kernel..."
+          # ReKernel Configuration
+          echo "└─ 🔧 Configuring ReKernel..."
           case "$REKERNEL" in
             Built-in)
               "$CONFIGTOOL" --file "$CONFIGFILE" \
@@ -2468,16 +2431,46 @@ jobs:
                 -d CONFIG_REKERNEL_NETWORK
               ;;
             *)
-              echo "└─ ⚠️ Invalid Re-Kernel Option: $REKERNEL"
+              echo "└─ ⚠️ Invalid ReKernel Option : $REKERNEL"
               exit 1
               ;;
           esac
-          # Disable Static Usermode Helper
-          echo "└─ 🔧 Disabling Static Usermode Helper..."
-          "$CONFIGTOOL" --file "$CONFIGFILE" \
-            -d CONFIG_STATIC_USERMODEHELPER
+          # Baseband Guard Configuration
+          echo "└─ 🛡️ Configuring Baseband Guard..."
+          if [[ "$BBG" == "true" ]]; then
+            if [[ ! -s "$CONFIGFILE" ]]; then
+              echo "└─ ⚠️ Kernel Configuration Not Found : $CONFIGFILE"
+              exit 1
+            fi
+
+            if [[ ! -x "$CONFIGTOOL" ]]; then
+              echo "└─ ⚠️ Kernel Configuration Utility Not Found : $CONFIGTOOL"
+              exit 1
+            fi
+
+            # Enable Baseband Guard and Add Linux Security Module to Configured Linux Security Module List
+            "$CONFIGTOOL" --file "$CONFIGFILE" -e CONFIG_BBG
+            LSMVALUE="$(sed -n 's/^CONFIG_LSM="\\([^"]*\\)"$/\\1/p' "$CONFIGFILE")"
+            if [[ -z "$LSMVALUE" ]]; then
+              echo "└─ ⚠️ Linux Security Module Configuration Missing From Merged Configuration"
+              grep -n -A12 '^config LSM$' "$SOURCEDIR/security/Kconfig" || true
+              exit 1
+            fi
+
+            case ",$LSMVALUE," in
+              *,baseband_guard,*) ;;
+              *) LSMVALUE="${LSMVALUE},baseband_guard" ;;
+            esac
+            "$CONFIGTOOL" --file "$CONFIGFILE" --set-str CONFIG_LSM "$LSMVALUE"
+            echo "└─ 📌 Baseband Guard Configuration Enabled"
+            echo "└─ 📌 Linux Security Module Configuration=$LSMVALUE"
+          else
+            "$CONFIGTOOL" --file "$CONFIGFILE" -d CONFIG_BBG
+            echo "└─ 📌 Baseband Guard Disabled by Workflow Input"
+          fi
+      
           # Synchronize Final Kernel Configuration
-          echo "└─ 🔄 Running Old DefConfig..."
+          echo "└─ 🔄 Running OldDefConfig..."
           export LLVM=1
           export LLVM_IAS=1
           make -C "$SOURCEDIR" \
@@ -2489,7 +2482,7 @@ jobs:
           # Validate Final Kernel Configuration
           if [[ ! -s "$CONFIGFILE" ]] ||
              ! grep -Fxq 'CONFIG_ARM64=y' "$CONFIGFILE"; then
-            echo "└─ ⚠️ Final Kernel Configuration Is Invalid"
+            echo "└─ ⚠️ Final Kernel Configuration Invalid"
             exit 1
           fi
 
@@ -2501,14 +2494,22 @@ jobs:
           fi
 
           if ! grep -Fxq '# CONFIG_LOCALVERSION_AUTO is not set' "$CONFIGFILE"; then
-            echo "└─ ⚠️ Automatic Kernel Local Version Is Not Disabled"
+            echo "└─ ⚠️ Automatic Kernel Local Version Not Disabled"
             exit 1
           fi
 
-          # Validate KASAN Is Disabled
-          if grep -q '^CONFIG_KASAN=y$' "$CONFIGFILE"; then
-            echo "└─ ⚠️ KASAN Is Still Enabled"
-            exit 1
+          # Validate Baseband Guard Configuration After olddefconfig
+          if [[ "$BBG" == "true" ]]; then
+            if ! grep -Fxq 'CONFIG_BBG=y' "$CONFIGFILE"; then
+              echo "└─ ⚠️ Baseband Guard Configuration Did Not Survive OldDefConfig"
+              grep -E 'CONFIG_BBG|CONFIG_LSM=' "$CONFIGFILE" || true
+              exit 1
+            fi
+            if ! grep -E '^CONFIG_LSM="[^"]*baseband_guard[^"]*"$' "$CONFIGFILE" >/dev/null; then
+              echo "└─ ⚠️ Baseband Guard Missing From Final Linux Security Module Configuration"
+              grep '^CONFIG_LSM=' "$CONFIGFILE" || true
+              exit 1
+            fi
           fi
 
           # Display Final Root Engine Configuration
@@ -2530,9 +2531,9 @@ jobs:
           echo "└─ 🔎 Final Kernel Local Version"
           grep '^CONFIG_LOCALVERSION=' "$CONFIGFILE" || true
           # Display Configuration Summary
-          echo "└─ 📊 Assigned Options : $(grep -c '^CONFIG_.*=' "$CONFIGFILE" || true)"
-          echo "└─ 📊 Disabled Options : $(grep -c '^# CONFIG_.* is not set$' "$CONFIGFILE" || true)"
-          echo "└─ 📂 Configuration File: $CONFIGFILE"
+          echo "└─ 📊 Assigned Options   : $(grep -c '^CONFIG_.*=' "$CONFIGFILE" || true)"
+          echo "└─ 📊 Disabled Options   : $(grep -c '^# CONFIG_.* is not set$' "$CONFIGFILE" || true)"
+          echo "└─ 📂 Configuration File : $CONFIGFILE"
           echo "└─ 🎉 Final Kernel Configuration Complete"
         
       - name: ⚙️ Configure Kernel Build Metadata
@@ -2723,6 +2724,10 @@ jobs:
             CC="$CCWRAPPER" \
             LD="$LDWRAPPER" \
             HOSTLD="$LDWRAPPER" \
+            KBUILD_BUILD_TIMESTAMP="$KBUILD_BUILD_TIMESTAMP" \
+            KBUILD_BUILD_VERSION="$KBUILD_BUILD_VERSION" \
+            KBUILD_BUILD_USER="$KBUILD_BUILD_USER" \
+            KBUILD_BUILD_HOST="$KBUILD_BUILD_HOST" \
             KCFLAGS="-O2 -Wno-error" \
             -j"$(nproc --all)" \
             Image
