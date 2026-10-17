@@ -2336,21 +2336,33 @@ jobs:
         if: ${{ !inputs.DEBUGKERNELBUILD }}
         shell: bash
         run: |
-          # Configure Kernel Build Environment
-          sudo sysctl -w vm.max_map_count=1048576
+          # Configure Build Environment
+          WORKDIR="$GITHUB_WORKSPACE"
+          export PATH="/usr/lib/ccache:$PATH"
+          export PATH="$WORKDIR/clang/bin:$PATH"
+          export ARCH=arm64
           export LLVM=1
           export LLVM_IAS=1
           export KBUILD_BUILD_USER="${{ inputs.GITOWNER }}"
           export KBUILD_BUILD_HOST="${{ inputs.GITHOST }}"
-          # Configure Compiler Cache Debug Logging
+          # Configure Cache
           if [[ "${{ inputs.DEBUGBUILDCCACHE }}" == "true" ]]; then
             export CCACHE_LOGFILE="$GITHUB_WORKSPACE/ccache.log"
           fi
 
-          # Validate Build Paths
+          export CCACHE_COMPILERCHECK="none"
+          export CCACHE_BASEDIR="$GITHUB_WORKSPACE"
+          export CCACHE_NOHASHDIR="true"
+          export CCACHE_NOHARDLINK="true"
+          export CCACHE_DIR="${CCACHE_DIR:-$HOME/.cache/ccache}"
+          export CCACHE_MAXSIZE="3G"
+          export CCACHE_IS_KERNEL_COMPILING="true"
+          touch "$CCACHE_DIR/ccache.conf"
+          echo "sloppiness = file_stat_matches,include_file_ctime,include_file_mtime,pch_defines,file_macro,time_macros" >> "$CCACHE_DIR/ccache.conf"
+          # Validate Kernel Paths
           if [[ -z "${SOURCEDIR:-}" || ! -f "$SOURCEDIR/Makefile" ]]; then
             echo "└─ ⚠️ Kernel Makefile Not Found"
-            echo "└─ 📂 Expected: ${SOURCEDIR:-<unset>}/Makefile"
+            echo "└─ 📂 Expected : ${SOURCEDIR:-<Unset>}/Makefile"
             exit 1
           fi
 
@@ -2359,24 +2371,85 @@ jobs:
             exit 1
           fi
 
-          mkdir -p "$OUTDIR"
-          CONFIGFILE="$OUTDIR/.config"
+          if [[ -z "${LIBDIR:-}" ]]; then
+            echo "└─ ⚠️ Fake Time Library Directory Not Set"
+            exit 1
+          fi
+
+          if [[ -z "${DEFCONFIG:-}" || ! -s "$DEFCONFIG" ]]; then
+            echo "└─ ⚠️ GKI Default Configuration Not Found or Empty"
+            echo "└─ 📂 Expected : ${DEFCONFIG:-<Unset>}"
+            exit 1
+          fi
+
           IMAGE="$OUTDIR/arch/arm64/boot/Image"
-          # Validate Finalized Kernel Configuration
-          echo "└─ 🔍 Validating Finalized Kernel Configuration..."
-          if [[ ! -s "$CONFIGFILE" ]]; then
-            echo "└─ ⚠️ Kernel Configuration Not Found or Empty"
-            echo "└─ 📂 Expected: $CONFIGFILE"
+          CCWRAPPER="$GITHUB_WORKSPACE/cc-wrapper"
+          LDWRAPPER="$GITHUB_WORKSPACE/ld-wrapper"
+          TESTWRAPPER="$GITHUB_WORKSPACE/test-wrapper.sh"
+          # Validate Build Tools
+          echo "└─ 🔎 Validating Build Tools..."
+          for TOOL in make clang ld.lld ccache; do
+            if ! command -v "$TOOL" >/dev/null 2>&1; then
+              echo "└─ ⚠️ Required Build Tool Not Found : $TOOL"
+              exit 1
+            fi
+            
+          done
+
+          # Display Compiler Versions
+          PAHOLEVERSION="$(pahole --version 2>/dev/null | head -n 1 || true)"
+          if [[ -z "$PAHOLEVERSION" ]]; then
+            echo "└─ 📌 Pahole : Not Installed"
+          else
+            echo "└─ 📌 Pahole : $PAHOLEVERSION"
+          fi
+
+          echo "└─ 📌 Clang : $(clang --version | head -n 1)"
+          echo "└─ 📌 LLD   : $(ld.lld --version | head -n 1)"
+          # Validate Fake Time Libraries
+          if [[ ! -s "$LIBDIR/libfakestat.so" || ! -s "$LIBDIR/libfaketimeMT.so" ]]; then
+            echo "└─ ⚠️ Fake Time Libraries Not Found"
+            echo "└─ 📂 Library Directory : $LIBDIR"
             exit 1
           fi
 
-          if ! grep -Fxq 'CONFIG_ARM64=y' "$CONFIGFILE"; then
-            echo "└─ ⚠️ Kernel Configuration Is Not Valid for ARM64"
-            exit 1
-          fi
-
-          echo "└─ 📌 Kernel Configuration: $CONFIGFILE"
-          echo "└─ 📊 Configuration Options: $(grep -c '^CONFIG_' "$CONFIGFILE" || true)"
+          chmod 755 "$LIBDIR/libfakestat.so" "$LIBDIR/libfaketimeMT.so"
+          # Configure Fake Time
+          export FAKESTAT="2025-05-25 12:00:00"
+          export FAKETIME="@2025-05-25 13:00:00"
+          export PRELOAD_LIBS="$LIBDIR/libfakestat.so:$LIBDIR/libfaketimeMT.so"
+          # Create Compiler Wrapper
+          printf '%s\n' \
+            '#!/bin/bash' \
+            'export LD_PRELOAD="$PRELOAD_LIBS"' \
+            'export FAKESTAT="$FAKESTAT"' \
+            'export FAKETIME="$FAKETIME"' \
+            'exec ccache clang "$@"' \
+            > "$CCWRAPPER"
+          # Create Linker Wrapper
+          printf '%s\n' \
+            '#!/bin/bash' \
+            'export LD_PRELOAD="$PRELOAD_LIBS"' \
+            'export FAKESTAT="$FAKESTAT"' \
+            'export FAKETIME="$FAKETIME"' \
+            'exec ld.lld "$@"' \
+            > "$LDWRAPPER"
+          # Create Fake Time Test Wrapper
+          printf '%s\n' \
+            '#!/bin/bash' \
+            'export LD_PRELOAD="$PRELOAD_LIBS"' \
+            'export FAKESTAT="$FAKESTAT"' \
+            'export FAKETIME="$FAKETIME"' \
+            'echo "Wrapper environment check complete."' \
+            'exec "$@"' \
+            > "$TESTWRAPPER"
+          chmod 755 "$CCWRAPPER" "$LDWRAPPER" "$TESTWRAPPER"
+          # Test Fake Time Environment
+          echo "└─ 🧪 Testing Fake Time Wrappers..."
+          "$TESTWRAPPER" date
+          "$TESTWRAPPER" stat "$SOURCEDIR/Makefile"
+          echo "└─ 🕒 Build Time: $(LD_PRELOAD="$PRELOAD_LIBS" date)"
+          LD_PRELOAD="$PRELOAD_LIBS" stat "$SOURCEDIR/Makefile"
           # Validate Kbuild Metadata
           if [[ -z "${KBUILD_BUILD_TIMESTAMP:-}" ]]; then
             echo "└─ ⚠️ Kbuild Build Timestamp Not Set"
@@ -2388,112 +2461,61 @@ jobs:
             exit 1
           fi
 
-          echo "└─ 🔍 Kbuild Build Metadata"
-          echo "└─ 📌 Build Time    : $KBUILD_BUILD_TIMESTAMP"
-          echo "└─ 📌 Build Version : $KBUILD_BUILD_VERSION"
-          echo "└─ 📌 Build User    : $KBUILD_BUILD_USER"
-          echo "└─ 📌 Build Host    : $KBUILD_BUILD_HOST"
-          # Configure Fake Time Environment
-          export FAKESTAT="2025-05-25 12:00:00"
-          export FAKETIME="@2025-05-25 13:00:00"
-          CCWRAPPER="$GITHUB_WORKSPACE/cc-wrapper"
-          LDWRAPPER="$GITHUB_WORKSPACE/ld-wrapper"
-          export PRELOAD_LIBS="$LIBDIR/libfakestat.so:$LIBDIR/libfaketimeMT.so"
-          # Validate Build Tools
-          echo "└─ 🔎 Validating Build Tools..."
-          command -v clang >/dev/null || {
-            echo "└─ ⚠️ Clang Not Found"
-            exit 1
-          }
-          command -v ld.lld >/dev/null || {
-            echo "└─ ⚠️ LD.LLD Not Found"
-            exit 1
-          }
-          command -v ccache >/dev/null || {
-            echo "└─ ⚠️ Compiler Cache Not Found"
-            exit 1
-          }
-          # Validate Fake Time Libraries
-          if [[ ! -f "$LIBDIR/libfakestat.so" ||
-                ! -f "$LIBDIR/libfaketimeMT.so" ]]; then
-            echo "└─ ⚠️ Fake Time Libraries Not Found"
-            echo "└─ 📂 Library Directory : $LIBDIR"
-            exit 1
-          fi
-
-          # Prepare Fake Time Libraries
-          chmod 755 \
-            "$LIBDIR/libfakestat.so" \
-            "$LIBDIR/libfaketimeMT.so"
-          # Create Clang Wrapper
-          cat > "$CCWRAPPER" <<EOF
-          #!/bin/bash
-          export LD_PRELOAD="$PRELOAD_LIBS"
-          export FAKESTAT="$FAKESTAT"
-          export FAKETIME="$FAKETIME"
-          exec ccache clang "\$@"
-          EOF
-          # Create LLD Wrapper
-          cat > "$LDWRAPPER" <<EOF
-          #!/bin/bash
-          export LD_PRELOAD="$PRELOAD_LIBS"
-          export FAKESTAT="$FAKESTAT"
-          export FAKETIME="$FAKETIME"
-          exec ld.lld "\$@"
-          EOF
-          chmod +x "$CCWRAPPER" "$LDWRAPPER"
-          # Validate Compiler Wrappers
-          "$CCWRAPPER" --version >/dev/null
-          "$LDWRAPPER" --version >/dev/null
-          # Display Build Environment
-          echo "└─ 🔧 Build Environment"
-          echo "└─ 📌 LLVM           : $LLVM"
-          echo "└─ 📌 LLVM IAS       : $LLVM_IAS"
-          echo "└─ 📌 Architecture   : arm64"
-          echo "└─ 📌 Build User     : $KBUILD_BUILD_USER"
-          echo "└─ 📌 Build Host     : $KBUILD_BUILD_HOST"
-          echo "└─ 📌 Fake Stat      : $FAKESTAT"
-          echo "└─ 📌 Fake Time      : $FAKETIME"
-          echo "└─ 📌 Clang          : $(clang --version | sed -n '1p')"
-          echo "└─ 📌 LLD            : $(ld.lld --version | sed -n '1p')"
-          echo "└─ 📌 Compiler Cache : $(ccache --version | sed -n '1p')"
-          echo "└─ 📂 Kernel Source  : $SOURCEDIR"
-          echo "└─ 📂 Kernel Output  : $OUTDIR"
-          echo "└─ 📂 Kernel Config  : $CONFIGFILE"
-          # Start Build Timer
+          echo "└─ 📌 Build Timestamp: $KBUILD_BUILD_TIMESTAMP"
+          echo "└─ 📌 Build Version: $KBUILD_BUILD_VERSION"
+          # Generate GKI Kernel Configuration
+          echo "└─ ⚙️ Generating GKI Kernel Configuration..."
+          make -C "$SOURCEDIR" \
+            ARCH="$ARCH" \
+            O="$OUTDIR" \
+            gki_defconfig
+          # Resolve Configuration Dependencies
+          echo "└─ ⚙️ Resolving Kernel Configuration..."
+          make -C "$SOURCEDIR" \
+            ARCH="$ARCH" \
+            O="$OUTDIR" \
+            olddefconfig
+          # Start Build Timer and Remove Old Image
           BUILDSTART="$(date +%s)"
+          rm -f "$IMAGE"
           # Build Kernel Image
           echo "└─ 🔨 Building Kernel Image..."
           make -C "$SOURCEDIR" \
-            O="$OUTDIR" \
-            LLVM=1 \
-            LLVM_IAS=1 \
-            ARCH=arm64 \
+            -j"$(nproc --all)" \
+            LLVM="$LLVM" \
+            ARCH="$ARCH" \
             CC="$CCWRAPPER" \
             LD="$LDWRAPPER" \
-            HOSTLD="$LDWRAPPER" \
-            KCFLAGS="-O2 -Wno-error" \
-            -j"$(nproc --all)" \
+            HOSTLD="ld.lld" \
+            O="$OUTDIR" \
+            KCFLAGS+=-O2 \
+            KCFLAGS+=-Wno-error \
             Image
           # Calculate Build Duration
           BUILDEND="$(date +%s)"
           BUILDTIME="$((BUILDEND - BUILDSTART))"
-          # Display Compiler Cache Status
-          echo "└─ 📊 Compiler Cache Status :"
+          # Verify Fake Time After Build
+          echo "└─ 🕒 Post-Build Fake Time: $(LD_PRELOAD="$PRELOAD_LIBS" date)"
+          LD_PRELOAD="$PRELOAD_LIBS" stat "$SOURCEDIR/Makefile"
+          # Display Compiler Cache Statistics
+          echo "└─ 📊 Compiler Cache Status"
           ccache -s
           # Validate Kernel Image
           if [[ ! -s "$IMAGE" ]]; then
             echo "└─ ⚠️ Kernel Image Missing or Empty"
-            echo "└─ 📂 Expected : $IMAGE"
+            echo "└─ 📂 Expected: $IMAGE"
             exit 1
           fi
 
           # Display Build Result
-          echo "└─ 📦 Kernel Image :"
+          echo "└─ 📦 Kernel Image"
           ls -lh "$IMAGE"
-          echo "└─ ⏱️ Build Duration : ${BUILDTIME}s"
+          echo "└─ ⏱️ Build Duration : ${BUILDTIME}Second(s)"
           echo "└─ 🎉 Kernel Build Complete"
-          # Generate GitHub Actions Build Summary
+          # Display Available Disk Space
+          echo "└─ 💾 Disk Space"
+          df -h
+          # Generate Compiler Cache Summary
           CCACHESUMMARY="$(ccache -s 2>&1)"
           {
             echo "## 🧠 Compiler Cache Performance Summary"
@@ -2501,13 +2523,13 @@ jobs:
             echo "|---|---:|"
             echo "| Build Status | 🚀 Success |"
             echo "| Build Time | **${BUILDTIME}s** |"
-            echo "| Cacheable Calls | $(echo "$CCACHESUMMARY" | grep "Cacheable calls:" | sed 's/.*Cacheable calls:[[:space:]]*//' || true) |"
-            echo "| Cache Hits | $(echo "$CCACHESUMMARY" | grep -E "^[[:space:]]*Hits:" | head -n1 | sed 's/.*Hits:[[:space:]]*//' || true) |"
-            echo "| Direct Hits | $(echo "$CCACHESUMMARY" | grep "Direct:" | sed 's/.*Direct:[[:space:]]*//' || true) |"
-            echo "| Preprocessed Hits | $(echo "$CCACHESUMMARY" | grep "Preprocessed:" | sed 's/.*Preprocessed:[[:space:]]*//' || true) |"
-            echo "| Cache Misses | $(echo "$CCACHESUMMARY" | grep -E "^[[:space:]]*Misses:" | head -n1 | sed 's/.*Misses:[[:space:]]*//' || true) |"
-            echo "| Uncacheable Calls | $(echo "$CCACHESUMMARY" | grep "Uncacheable calls:" | sed 's/.*Uncacheable calls:[[:space:]]*//' || true) |"
-            echo "| Cache Size | $(echo "$CCACHESUMMARY" | grep "Cache size" | sed 's/.*Cache size (GB):[[:space:]]*//' || true) |"
+            echo "| Cacheable Calls | $(echo "$CCACHESUMMARY" | grep 'Cacheable calls:' | sed 's/.*Cacheable calls:[[:space:]]*//' || true) |"
+            echo "| Cache Hits | $(echo "$CCACHESUMMARY" | grep -E '^[[:space:]]*Hits:' | head -n 1 | sed 's/.*Hits:[[:space:]]*//' || true) |"
+            echo "| Direct Hits | $(echo "$CCACHESUMMARY" | grep 'Direct:' | sed 's/.*Direct:[[:space:]]*//' || true) |"
+            echo "| Preprocessed Hits | $(echo "$CCACHESUMMARY" | grep 'Preprocessed:' | sed 's/.*Preprocessed:[[:space:]]*//' || true) |"
+            echo "| Cache Misses | $(echo "$CCACHESUMMARY" | grep -E '^[[:space:]]*Misses:' | head -n 1 | sed 's/.*Misses:[[:space:]]*//' || true) |"
+            echo "| Uncacheable Calls | $(echo "$CCACHESUMMARY" | grep 'Uncacheable calls:' | sed 's/.*Uncacheable calls:[[:space:]]*//' || true) |"
+            echo "| Cache Size | $(echo "$CCACHESUMMARY" | grep 'Cache size' | sed 's/.*Cache size (GB):[[:space:]]*//' || true) |"
             echo "### ⚡ Build Result"
             echo "**🎉 Build Completed Successfully**"
           } >> "$GITHUB_STEP_SUMMARY"
