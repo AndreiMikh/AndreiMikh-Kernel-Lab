@@ -1762,72 +1762,111 @@ jobs:
         if: ${{ inputs.BBG }}
         shell: bash
         run: |
+          # Configure Baseband Guard Integration
+          MAXRETRIES=3
+          URLBBG="https://raw.githubusercontent.com/vc-teahouse/Baseband-guard/main/setup.sh"
+          BBGCONFIGFILE="$SOURCEDIR/security/Kconfig"
+          # Validate Kernel Source
           echo "└─ 🔧 Baseband Guard Integration"
           echo "└─ 📌 Source : VC-Teahouse/Baseband-guard"
           echo "└─ 📌 Kernel : $SOURCEDIR"
-          # Validate Kernel Source
-          if [ ! -d "$SOURCEDIR/security" ] ||
-             [ ! -d "$SOURCEDIR/include" ]; then
+          if [[ ! -d "$SOURCEDIR/security" ||
+                ! -d "$SOURCEDIR/include" ]]; then
             echo "└─ ⚠️ Invalid Kernel Source Directory"
             exit 1
           fi
 
+          # Navigate To Kernel Source Directory
           cd "$SOURCEDIR"
-          # Download Baseband Guard Setup Script
-          URLBBG="https://raw.githubusercontent.com/vc-teahouse/Baseband-guard/main/setup.sh"
-          SETUPFILE="${RUNNER_TEMP:-/tmp}/bbg-setup.sh"
-          echo "└─ 📥 Fetching Baseband Guard Setup Script..."
-          if ! curl -fLsS --retry 3 --retry-delay 2 \
-            "$URLBBG" -o "$SETUPFILE"; then
-            echo "└─ ⚠️ Failed to Download Baseband Guard Setup Script"
+          echo "└─ ➡️ Working Directory : $(pwd)"
+          # Download And Execute Setup Script With Retries
+          echo "└─ 🌐 Fetching Baseband Guard Setup Script..."
+          for i in $(seq 1 "$MAXRETRIES"); do
+            if curl -fsSL --retry 2 --retry-delay 2 "$URLBBG" |
+              bash -s -- main; then
+              echo "└─ 📌 Baseband Guard Setup Script Applied"
+              break
+            fi
+
+            echo "└─ ⚠️ Download / Setup Failed, Retry $i/$MAXRETRIES..."
+            if [[ "$i" -eq "$MAXRETRIES" ]]; then
+              echo "└─ ⚠️ Baseband Guard Setup Failed After $MAXRETRIES Attempts"
+              exit 1
+            fi
+            sleep 2
+            
+          done
+
+          # Validate Linux Security Configuration
+          if [[ ! -f "$BBGCONFIGFILE" ]]; then
+            echo "└─ ⚠️ Linux Security Kconfig Not Found : $BBGCONFIGFILE"
             exit 1
           fi
 
-          # Integrate Baseband Guard Into Kernel Source
-          echo "└─ ⚙️ Applying BBG Source Integration..."
-          if ! bash "$SETUPFILE" main; then
-            echo "└─ ⚠️ Baseband Guard Source Integration Failed"
-            exit 1
+          # Add Baseband Guard To Linux Security Defaults
+          echo "└─ ⚙️ Updating Linux Security Configuration..."
+          awk '
+            BEGIN { in_block=0 }
+            /^config LSM$/ { in_block=1 }
+            in_block && /^[[:space:]]*default/ {
+              if ($0 !~ /baseband_guard/) {
+                sub(/selinux/, "selinux,baseband_guard")
+              }
+            }
+            /^config / && !/^config LSM$/ { in_block=0 }
+            { print }
+          ' "$BBGCONFIGFILE" > "${BBGCONFIGFILE}.tmp"
+          mv "${BBGCONFIGFILE}.tmp" "$BBGCONFIGFILE"
+          echo "└─ 📌 Linux Security Configuration Updated"
+          # Enable Baseband Guard Kernel Configuration Option
+          echo "CONFIG_BBG=y" >> "$DEFCONFIG"
+          echo "└─ 📌 Baseband Guard Kernel Option Enabled"
+          # Detect Baseband Guard Source Directory
+          BBGPATHDIR=""
+          if [[ -d "$SOURCEDIR/Baseband-guard" ]]; then
+            BBGPATHDIR="$SOURCEDIR/Baseband-guard"
+          else
+            BBGPATHDIR="$(find "$SOURCEDIR" -maxdepth 3 \
+              -type d -name "Baseband-guard" -print -quit)"
+          fi
+
+          # Resolve Baseband Guard Symlink
+          if [[ -L "$SOURCEDIR/Baseband-guard" ]]; then
+            BBGPATHDIR="$(readlink -f "$SOURCEDIR/Baseband-guard")"
           fi
 
           # Validate Baseband Guard Source
-          BBGPATHDIR="$SOURCEDIR/Baseband-guard"
-          BBGSYMLINK="$SOURCEDIR/security/baseband-guard"
-          BBGCONFIGFILE="$SOURCEDIR/security/Kconfig"
-          BBGMAKEFILE="$SOURCEDIR/security/Makefile"
-          if [ ! -f "$BBGPATHDIR/baseband_guard.c" ]; then
-            echo "└─ ⚠️ Baseband Guard Source Not Found : $BBGPATHDIR/baseband_guard.c"
+          echo "└─ 🔎 Checking Baseband Guard Source..."
+          if [[ -z "$BBGPATHDIR" || ! -d "$BBGPATHDIR" ]]; then
+            echo "└─ ⚠️ Baseband Guard Directory Not Found"
             exit 1
           fi
 
-          if [ ! -f "$BBGPATHDIR/Kconfig" ]; then
-            echo "└─ ⚠️ Baseband Guard KConfig Not Found"
+          echo "└─ 📂 Baseband Guard Directory : $BBGPATHDIR"
+
+          if [[ ! -f "$BBGPATHDIR/baseband_guard.c" ]]; then
+            echo "└─ ⚠️ Baseband Guard Source File Not Found"
+            ls -la "$BBGPATHDIR" || true
             exit 1
           fi
 
-          if [ ! -e "$BBGSYMLINK/baseband_guard.c" ]; then
-            echo "└─ ⚠️ Baseband Guard Security Symlink is Invalid"
-            exit 1
-          fi
-
-          # Validate Baseband Guard Build Integration
-          if ! grep -qF 'baseband-guard/' "$BBGMAKEFILE"; then
-            echo "└─ ⚠️ Baseband Guard Security Makefile Entry Missing"
+          # Validate Security Build Integration
+          if ! grep -qF 'baseband-guard/' "$SOURCEDIR/security/Makefile"; then
+            echo "└─ ⚠️ Baseband Guard Makefile Entry Missing"
             exit 1
           fi
 
           if ! grep -qF 'security/baseband-guard/Kconfig' "$BBGCONFIGFILE"; then
-            echo "└─ ⚠️ Baseband Guard Security KConfig Entry Missing"
+            echo "└─ ⚠️ Baseband Guard Kernel Option Entry Missing"
             exit 1
           fi
 
           echo "└─ 📌 Baseband Guard Source            : OK"
-          echo "└─ 📌 Baseband Guard Symlink           : OK"
-          echo "└─ 📌 Baseband Guard Security Makefile : OK"
-          echo "└─ 📌 Baseband Guard Security KConfig  : OK"
-          echo "└─ 📌 Baseband Guard                   : Enabled"                    
-          echo "└─ 🎉 Baseband Guard Source Integration Completed"
-
+          echo "└─ 📌 Linux Security Configuration     : OK"
+          echo "└─ 📌 Security Makefile Integration    : OK"
+          echo "└─ 📌 Security Kconfig Integration     : OK"
+          echo "└─ 🎉 Baseband Guard Fully Integrated"
+      
       - name: 🧩 DroidSpaces / Synchonization Primitives
         shell: bash
         env:
