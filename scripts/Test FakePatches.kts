@@ -6,7 +6,7 @@ import kotlin.system.exitProcess
 // ============================================================
 fun File.requireExists() {
     check(exists()) {
-        "Required File does Not Exist: $path"
+        "Required File Does Not Exist: $path"
     }
 }
 fun File.lines(): MutableList<String> =
