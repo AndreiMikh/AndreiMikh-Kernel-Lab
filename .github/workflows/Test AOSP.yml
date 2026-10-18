@@ -443,46 +443,44 @@ jobs:
           sudo rm -rf /var/lib/apt/lists/*
           echo "└─ 🎉 Build Dependencies Ready"
  
-      - name: 📦 Restore / Publish LLVM 21.1.8
+      - name: 📦 Restore / Publish Clang Version 21.0.0
         id: clang-release
         shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           OWNERREPO: ${{ github.repository }}
         run: |
-          # Define LLVM Toolchain and Cache
-          CLANGVERSION="21.1.8"
-          CLANGARCHIVE="LLVM-${CLANGVERSION}-Linux-X64.tar.xz"
-          CLANGRELEASE="LLVM-Toolchain-Cache"
+          # Define Clang Release Metadata
+          CLANGVERSION="r563880c"
+          CLANGARCHIVE="clang-${CLANGVERSION}.tar.gz"
+          CLANGRELEASE="AOSP-Clang-Cache"
           CLANGDIR="$GITHUB_WORKSPACE/clang"
           CLANGFILE="$GITHUB_WORKSPACE/$CLANGARCHIVE"
-          CACHEFILE="$RUNNER_TEMP/$CLANGARCHIVE"
-          CLANGURL="https://github.com/llvm/llvm-project/releases/download/llvmorg-${CLANGVERSION}/${CLANGARCHIVE}"
-          echo "└─ 📂 LLVM Version : $CLANGVERSION"
-          echo "└─ 📂 Archive      : $CLANGARCHIVE"
-          echo "└─ 📂 Cache        : $CLANGRELEASE"
-          # Prepare LLVM Extraction and Cache Directories
+          CLANGURL="https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/b5f16aee7b8af4c339972027e91e7e793c2e55d9/${CLANGARCHIVE}"
+          # Display Clang Release Information
+          echo "└─ 📌 Clang Revision : $CLANGVERSION"
+          echo "└─ 📌 Clang Archive  : $CLANGARCHIVE"
+          echo "└─ 📌 Release Tag    : $CLANGRELEASE"
+          # Prepare Clang Workspace
           rm -rf "$CLANGDIR"
-          rm -f "$CLANGFILE" "$CACHEFILE"
-          mkdir -p "$CLANGDIR" "$RUNNER_TEMP"
-          # Restore LLVM Archive From GitHub Release Cache
-          if gh release view "$CLANGRELEASE" \
-            --repo "$OWNERREPO" >/dev/null 2>&1 &&
-            gh release download "$CLANGRELEASE" \
-              --repo "$OWNERREPO" \
-              --pattern "$CLANGARCHIVE" \
-              --dir "$RUNNER_TEMP" \
-              --clobber >/dev/null 2>&1 &&
-            [[ -s "$CACHEFILE" ]] &&
-            tar -tJf "$CACHEFILE" >/dev/null 2>&1; then
-            echo "└─ ♻️ LLVM Archive Restored From GitHub Release"
-            mv "$CACHEFILE" "$CLANGFILE"
+          rm -f "$CLANGFILE"
+          mkdir -p "$CLANGDIR"
+          # Restore Existing Clang Archive From GitHub Release
+          if gh release view "$CLANGRELEASE" --repo "$OWNERREPO" >/dev/null 2>&1 &&
+             gh release download "$CLANGRELEASE" \
+               --repo "$OWNERREPO" \
+               --pattern "$CLANGARCHIVE" \
+               --dir "$GITHUB_WORKSPACE" >/dev/null 2>&1 &&
+             [[ -s "$CLANGFILE" ]] &&
+             tar -tzf "$CLANGFILE" >/dev/null 2>&1; then
+            echo "└─ 📥 Clang Archive Restored From GitHub Release"
             echo "source=release" >> "$GITHUB_OUTPUT"
           else
-            # Download and Validate LLVM Archive From Upstream
-            echo "└─ 📥 Downloading LLVM 21.1.8..."
-            rm -f "$CLANGFILE" "$CACHEFILE"
-            curl -fL \
+            # Download Clang Archive From AOSP
+            echo "└─ 📥 Downloading Clang From AOSP..."
+            rm -f "$CLANGFILE"
+            curl \
+              -fL \
               --retry 10 \
               --retry-delay 5 \
               --retry-all-errors \
@@ -490,91 +488,108 @@ jobs:
               --max-time 1800 \
               "$CLANGURL" \
               -o "$CLANGFILE"
-            if [[ ! -s "$CLANGFILE" ]] ||
-              ! tar -tJf "$CLANGFILE" >/dev/null 2>&1; then
-              echo "└─ ⚠️ LLVM Archive Download or Validation Failed"
+            # Validate Downloaded Clang Archive
+            if [[ ! -s "$CLANGFILE" ]] || ! tar -tzf "$CLANGFILE" >/dev/null 2>&1; then
+              echo "└─ ⚠️ Clang Archive Download or Validation Failed"
               exit 1
             fi
 
-            # Create GitHub Release Cache When Missing
-            if ! gh release view "$CLANGRELEASE" \
-              --repo "$OWNERREPO" >/dev/null 2>&1; then
+            # Create Clang Release When Missing
+            if ! gh release view "$CLANGRELEASE" --repo "$OWNERREPO" >/dev/null 2>&1; then
               gh release create "$CLANGRELEASE" \
                 --repo "$OWNERREPO" \
-                --title "LLVM 21.1.8 Toolchain Cache" \
-                --notes "Cached LLVM 21.1.8 Linux X86 Toolchain"
+                --title "AOSP Clang Cache" \
+                --notes "Cached AOSP Clang Toolchains for AndreiMikh Kernel Lab"
             fi
 
-            # Publish LLVM Archive to GitHub Release Cache
-            if gh release upload "$CLANGRELEASE" "$CLANGFILE" \
-              --repo "$OWNERREPO" --clobber; then
-              echo "└─ 🚀 LLVM Archive Published to GitHub Release"
+            # Check Whether Release Asset Already Exists
+            EXISTINGFILE="$GITHUB_WORKSPACE/existing-${CLANGARCHIVE}"
+            rm -f "$EXISTINGFILE"
+            if gh release download "$CLANGRELEASE" \
+                 --repo "$OWNERREPO" \
+                 --pattern "$CLANGARCHIVE" \
+                 --dir "$GITHUB_WORKSPACE" >/dev/null 2>&1; then
+              if [[ -s "$CLANGFILE" ]] && [[ -s "$EXISTINGFILE" ]] &&
+                 cmp -s "$CLANGFILE" "$EXISTINGFILE"; then
+                echo "└─ 📤 Clang Archive is Unchanged; Skipping Upload"
+              else
+                # Publish New Or Updated Clang Archive
+                gh release upload "$CLANGRELEASE" "$CLANGFILE" \
+                  --repo "$OWNERREPO" \
+                  --clobber
+                echo "└─ 📤 Clang Archive Published or Updated"
+              fi
+        
             else
-              echo "└─ ⚠️ LLVM Cache Upload Failed; ♻️ Continuing With Download"
+              # Publish Missing Clang Archive
+              gh release upload "$CLANGRELEASE" "$CLANGFILE" \
+                --repo "$OWNERREPO"
+              echo "└─ 📤 Clang Archive Published to GitHub Release"
             fi
 
-            echo "source=upstream" >> "$GITHUB_OUTPUT"
+            # Cleanup Comparison Archive
+            rm -f "$EXISTINGFILE"
+            echo "source=aosp" >> "$GITHUB_OUTPUT"
           fi
 
-          # Extract LLVM Toolchain Into Workspace
-          echo "└─ ⚙️ Extracting LLVM Toolchain..."
-          tar -xJf "$CLANGFILE" \
-            -C "$CLANGDIR" \
-            --strip-components=1
-          # Validate Required LLVM Compiler and Linker
-          if [[ ! -x "$CLANGDIR/bin/clang" ]] ||
-            [[ ! -x "$CLANGDIR/bin/ld.lld" ]]; then
-            echo "└─ ⚠️ LLVM Installation Validation Failed"
-            ls -la "$CLANGDIR"
+          # Extract Clang Toolchain
+          echo "└─ 📦 Extracting Clang..."
+          tar -xzf "$CLANGFILE" -C "$CLANGDIR"
+          # Validate Clang Installation
+          if [[ ! -x "$CLANGDIR/bin/clang" ]]; then
+            echo "└─ ⚠️ Clang Executable Not Found After Extraction"
+            echo "└─ 📂 Clang Directory :"
+            ls -la "$CLANGDIR" || true
+            echo "└─ 📂 Clang/Bin       :"
             ls -la "$CLANGDIR/bin" || true
             exit 1
           fi
 
-          # Display Installed LLVM Versions
-          echo "└─ LLVM Clang Version:"
-          "$CLANGDIR/bin/clang" --version
-          echo "└─ 📌 LLVM LLD Version :"
-          "$CLANGDIR/bin/ld.lld" --version
-          # Remove Downloaded Archive After Successful Installation
+          # Remove Temporary Clang Archive
           rm -f "$CLANGFILE"
-          echo "└─ 🎉 LLVM 21.1.8 Ready"
-
-
-      - name: 🪛 Configure LLVM 21.1.8
+          # Display Successful Clang Installation
+          echo "└─ 🎉 AOSP Clang Ready"
+          "$CLANGDIR/bin/clang" --version
+   
+      - name: 🪛 Configure Clang Version 21.0.0
         shell: bash
         run: |
-          # Define LLVM Binary Directory
+          # Define Clang Toolchain Path
           CLANGBIN="$GITHUB_WORKSPACE/clang/bin"
-          # Add LLVM Tools to Subsequent GitHub Actions Steps
+          # Add Clang To GitHub Actions Path
           echo "$CLANGBIN" >> "$GITHUB_PATH"
           export PATH="$CLANGBIN:$PATH"
-          # Validate Required LLVM Compiler and Linker
-          if [[ ! -x "$CLANGBIN/clang" ]] ||
-            [[ ! -x "$CLANGBIN/ld.lld" ]]; then
-            echo "└─ ⚠️ LLVM Toolchain Not Found"
+          echo "└─ 🔧 Configuring LLVM Clang..."
+          echo "└─ 📂 Clang Path     : $CLANGBIN"
+          # Validate Clang Binary
+          if [ ! -x "$CLANGBIN/clang" ]; then
+            echo "└─ ⚠️ Clang Binary Not Found"
+            echo "└─ 📂 Expected     : $CLANGBIN/clang"
             exit 1
           fi
-
-          # Display LLVM Clang Version
-          echo "└─ 📂 LLVM Clang  :"
+          # Verify LLVM Clang
+          echo "└─ 🔎 Verifying LLVM Toolchain..."
+          echo "└─ 📌 Clang          :"
           clang --version
-          # Display LLVM Linker Version
-          echo "└─ 📂 LLVM Linker :"
+          # Verify LLVM LLD
+          echo "└─ 📌 LLD            :"
           ld.lld --version
-          # Verify Required LLVM Utility Versions
-          echo "└─ 📂 LLVM Tools  :"
-          llvm-ar --version
-          llvm-nm --version
-          llvm-objcopy --version
-          # Create GKI Certificate Generation Stub
+          # Verify Clang LLD Resolution
+          echo "└─ 📌 Clang LLD Path :"
+          clang -print-prog-name=ld.lld
+          # Create GKI Certificate Stub
           printf '%s\n' \
             'def generate_gki_certificate(*args, **kwargs):' \
             '    raise SystemExit("GKI SIGNING NOT SUPPORTED (STUB)")' \
             > /tmp/gki/generate_gki_certificate.py
-          # Configure Python Module Search Path
+          # Export Python Module Search Path
           echo "PYTHONPATH=/tmp" >> "$GITHUB_ENV"
-          echo "└─ 🎉 LLVM 21.1.8 Configuration Complete"       
-    
+          echo "└─ 📌 GKI Certificate Stub  :"
+          echo "/tmp/gki/generate_gki_certificate.py"
+          echo "└─ 📌 PYTHONPATH     :"
+          echo "└─ /tmp"
+          echo "└─ 🎉 Clang Configuration and Toolchain Verification Complete"    
+            
       - name: 📥 Restore Public Compiler Cache
         id: ccache-public
         if: ${{ inputs.BUILDCCACHE }}
