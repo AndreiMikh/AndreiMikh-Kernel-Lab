@@ -1,19 +1,15 @@
-#!/bin/bash 
- 
+#!/bin/bash  
 SCRIPTSOURCE="${BASH_SOURCE[0]}"
-SELF="$(cd "$(dirname "$SCRIPTSOURCE")" >/dev/null 2>&1 && pwd)/$(basename "$SCRIPTSOURCE")"
- 
+SELF="$(cd "$(dirname "$SCRIPTSOURCE")" >/dev/null 2>&1 && pwd)/$(basename "$SCRIPTSOURCE")" 
 checkrejects() { 
   local searchdirectories="${1:-.}" 
   local rejectsfiles 
   rejectsfiles=$(find "$searchdirectories" -name "*.rej" 2>/dev/null) 
-  [ -z "$rejectsfiles" ] && return 0 
- 
+  [ -z "$rejectsfiles" ] && return 0  
   while IFS= read -r REJFILE; do 
     local mark="/tmp/.rej_printed_$(echo "$REJFILE" | md5sum | cut -d' ' -f1)" 
     [ -f "$mark" ] && continue 
-    touch "$mark" 2>/dev/null 
- 
+    touch "$mark" 2>/dev/null  
     local originalfile="${REJFILE%.rej}" 
     originalfile="${originalfile#./}" 
     local failcount 
@@ -23,8 +19,7 @@ checkrejects() {
     echo "::endgroup::" 
   done <<< "$rejectsfiles" 
   return 0 
-} 
- 
+}  
 errorrejecttrap() { 
   local ec=$? 
   trap - ERR 
@@ -35,9 +30,7 @@ errorrejecttrap() {
     exit "$ec" 
   fi 
   trap 'errorrejecttrap' ERR 
-} 
- 
- 
+}  
 if [[ -n "${GITHUB_ENV:-}" && "${BASH_ENV:-}" != "$SELF" ]]; then 
   echo "BASH_ENV=$SELF" >> "$GITHUB_ENV" 
 fi 
