@@ -1,29 +1,20 @@
 #!/bin/bash
-
-# ================================================================
 # LZ4-Upgrade.sh
-# ================================================================
-
 set -euo pipefail
-
 # Script And Repository Paths
 SCRIPTDIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPODIR="$(cd "${SCRIPTDIR}/.." && pwd)"
 LZ4DIR="${REPODIR}/lib/lz4"
-
 PATCHED=0
 SKIPPED=0
 FAILED=0
-
 info()  { echo "ℹ️ [Info] $*"; }
 pass()  { echo "✔️ [Pass] $*"; ((PATCHED++)) || true; }
 skip()  { echo "⏭️ [Skip] $*"; ((SKIPPED++)) || true; }
 fail()  { echo "⚠️ [Fail] $*"; ((FAILED++)) || true; }
-
 contains() {
   grep -q "$1" "$2" 2>/dev/null
 }
-
 filedescription() {
   case "$1" in
     lib/lz4/lz4.c)
@@ -85,9 +76,7 @@ filedescription() {
       ;;
   esac
 }
-
-echo "=== LZ4-Upgrade.sh: Starting LZ4 Script ==="
-
+echo "=== LZ4-Upgrade: Starting LZ4 Script ==="
 # Validate LZ4 Source Directory
 if [[ ! -d "$LZ4DIR" ]]; then
   fail "LZ4 Source Directory Not Found: $LZ4DIR"
@@ -117,7 +106,6 @@ fi
 
 # Create the New LZ4 ARMv8 Directory
 mkdir -p lib/lz4/lz4armv8
-
 # Copy the New LZ4 Files
 for F in \
   lz4.c \
@@ -128,11 +116,9 @@ for F in \
   lz4armv8/lz4accel.c \
   lz4armv8/lz4accel.h \
   lz4armv8/lz4armv8.S; do
-
   SRC="${LZ4DIR}/${F}"
   DST="lib/lz4/${F}"
   DESC="lib/lz4/${F}"
-
   if [[ ! -f "$SRC" ]]; then
     fail "LZ4 Source File Not Found: $SRC"
     continue
@@ -145,34 +131,25 @@ if [[ "$FAILED" -gt 0 ]]; then
   exit 1
 fi
 
-pass "Lib/LZ4 Replacement Completed"
-
+pass "Lib / LZ4 Replacement Completed"
 # Generate Include/Linux/LZ4 H Compatibility Wrapper
 echo ""
 echo "[2/5] Generating Include/Linux/LZ4 H"
-
 mkdir -p include/linux
-
 cat > include/linux/lz4.h <<'EOF'
 /* SPDX-License-Identifier: BSD-2-Clause */
 // LZ4 Compatibility Wrapper for Linux Kernel
-
 #ifndef __LINUX_LZ4_H__
 #define __LINUX_LZ4_H__
-
 #include "../../lib/lz4/lz4.h"
 #include "../../lib/lz4/lz4hc.h"
-
 #define LZ4_MEM_COMPRESS       LZ4_STREAM_MINSIZE
 #define LZ4HC_MEM_COMPRESS     LZ4_STREAMHC_MINSIZE
-
 #define LZ4HC_MIN_CLEVEL       LZ4HC_CLEVEL_MIN
 #define LZ4HC_DEFAULT_CLEVEL   LZ4HC_CLEVEL_DEFAULT
 #define LZ4HC_MAX_CLEVEL       LZ4HC_CLEVEL_MAX
-
 #endif
 EOF
-
 if contains 'lib/lz4/lz4.h' include/linux/lz4.h &&
    contains 'lib/lz4/lz4hc.h' include/linux/lz4.h; then
   pass "$(filedescription "include/linux/lz4.h") Generated Successfully"
@@ -203,20 +180,19 @@ for FILE in crypto/lz4.c crypto/lz4hc.c; do
          . "\tout_len = LZ4_decompress_safe(src, dst, slen, *dlen);\n"
          . "#endif\n";
     }
-  ' "$FILE"
- 
+  ' "$FILE" 
   if contains 'LZ4_arm64_decompress_safe' "$FILE"; then
     pass "$(filedescription "$FILE") Neon Branch Added Successfully"
   else
     fail "$(filedescription "$FILE") Failed To Add Neon Branch"
   fi
+  
 done
 
 # Modify FS/F2FS/Makefile and FS/F2FS/CompressC
 # Remove the Old LZ4Armv8 Build Entry and Include
 echo ""
 echo "[4/5] Modifying FS/F2FS/"
-
 # 4a. Remove the LZ4Armv8 Build Entry from FS/F2FS/Makefile
 F2FSMK="fs/f2fs/Makefile"
 if [[ -f "$F2FSMK" ]]; then
@@ -233,6 +209,7 @@ if [[ -f "$F2FSMK" ]]; then
     else
       pass "$(filedescription "$F2FSMK") LZ4ARMv8 Removal Completed"
     fi
+    
   else
     skip "$(filedescription "$F2FSMK") Has No LZ4ARMv8 Entry (Already Removed Or Not Present)"
   fi
@@ -292,7 +269,7 @@ else
 fi
 
 echo ""
-echo "=== LZ4-Neon Completed: ${PATCHED} Successful, ${SKIPPED} Skipped, ${FAILED} Failed ==="
+echo "=== LZ4-Upgrade Completed: ${PATCHED} Successful, ${SKIPPED} Skipped, ${FAILED} Failed ==="
 if [[ "$FAILED" -gt 0 ]]; then
   exit 1
 fi
