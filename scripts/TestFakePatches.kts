@@ -1,10 +1,13 @@
 #!/usr/bin/env kotlin
 import java.io.File
 import kotlin.system.exitProcess
+
+// ==========================
 // Basic File Helpers
+// ==========================
 fun File.requireExists() {
     check(exists()) {
-        "Required File Does Not Exist: $path"
+        "Required file does not exist: $path"
     }
 }
 fun File.lines(): MutableList<String> =
@@ -14,7 +17,10 @@ fun File.writeLines(lines: List<String>) {
 }
 fun File.rel(): String =
     path.removePrefix("$workDir/").removePrefix("$workDir\\")
+
+// ==========================
 // Safe Insert Helpers
+// ==========================
 fun File.insertAfterFirst(
     anchor: Regex,
     vararg newLines: String
@@ -30,7 +36,6 @@ fun File.insertAfterFirst(
     }
     lines.addAll(index + 1, newLines.toList())
     writeLines(lines)
-
     return true
 }
 fun File.insertAfter(
@@ -75,7 +80,10 @@ fun File.insertBeforeFirst(
     writeLines(lines)
     return true
 }
+
+// ==========================
 // Safe Delete Helpers
+// ==========================
 fun File.deleteLine(pattern: Regex): Boolean {
     requireExists()
     val lines = lines()
@@ -137,14 +145,17 @@ fun File.deleteBlock(
         out.add(line)
     }
     check(!inBlock) {
-        "Unterminated Delete Block in $path: ${start.pattern}"
+        "Unterminated Delete Block In $path: ${start.pattern}"
     }
     if (changed) {
         writeLines(out)
     }
     return changed
 }
+
+// ==========================
 // Replace Helpers
+// ==========================
 fun File.replaceEachLine(
     pattern: Regex,
     replacement: String
@@ -184,7 +195,10 @@ fun File.replaceWholeLine(
     }
     return changed
 }
+
+// ==========================
 // Logging
+// ==========================
 fun logApply(file: File, detail: String) =
     println("[APPLY]   ${file.rel()} | $detail")
 fun logPostfix(file: File, detail: String) =
@@ -193,7 +207,10 @@ fun logRevert(file: File, detail: String) =
     println("[REVERT]  ${file.rel()} | $detail")
 fun logSkip(file: File, detail: String) =
     println("[SKIP]    ${file.rel()} | $detail")
-// Environment Variables
+
+// ==========================
+// Environment
+// ==========================
 val kernelModule =
     System.getenv("KERNELMODULE") ?: ""
 val sublevel =
@@ -206,7 +223,10 @@ val workDir =
         ?: "kernel_workspace/kernel_platform/common"
 fun f(relPath: String) =
     File(workDir, relPath)
+
+// ==========================
 // Common Anchors
+// ==========================
 val fdinfoCommentStart =
     Regex("""^[ \t]*/\*$""")
 val fdinfoCommentEnd =
@@ -223,10 +243,13 @@ val inotifyHelper =
         "}",
         ""
     )
+
+// ==========================
 // Inotify FDInfo
+// ==========================
 fun addInotifyMarkUserMaskFunction(file: File) {
     if (file.readText().contains("inotify_mark_user_mask(")) {
-        logSkip(file, "INOTIFY MARK USER MASK() Already Present")
+        logSkip(file, "INOTIFY-MARK-USER-MASK() Already Present")
         return
     }
     file.insertBeforeFirst(
@@ -235,20 +258,20 @@ fun addInotifyMarkUserMaskFunction(file: File) {
     )
     logApply(
         file,
-        "Inserted Inotify Mark User Mask() Helper Before Inotify FDInfo()"
+        "Inserted INOTIFY-MARK-USER-MASK() Helper Before INOTIFY-FDINFO()"
     )
 }
 fun applyFdinfo(file: File) {
     file.requireExists()
     val content = file.readText()
     if (content.contains("inotify_mark_user_mask(")) {
-        logSkip(file, "FDInfo Patch Already Applied")
+        logSkip(file, "FDINFO Patch Already Applied")
         return
     }
     check(
         content.contains("mask, mark.ignored_mask")
     ) {
-        "Expected FDInfo Mask Expression Not Found in ${file.path}"
+        "Expected FDINFO Mask Expression Not Found in ${file.path}"
     }
     file.deleteBlock(
         fdinfoCommentStart,
@@ -264,7 +287,7 @@ fun applyFdinfo(file: File) {
     )
     logApply(
         file,
-        "Replaced Mask Argument With INOTIFY MARK USER MASK(MARK)"
+        "Replaced Mask Argument With INOTIFY-MARK-USER-MASK(MARK)"
     )
     file.replaceEachLine(
         Regex("""ignored_mask:%x"""),
@@ -272,13 +295,13 @@ fun applyFdinfo(file: File) {
     )
     logApply(
         file,
-        "Replaced Ignored Mask:%X With Ignored Mask:0"
+        "Replaced IGNORED-MASK:%X With IGNORED-MASK:0"
     )
     addInotifyMarkUserMaskFunction(file)
 }
 fun revertFdinfo(file: File) {
     if (!file.exists()) {
-        logSkip(file, "FDInfo File Does Not Exist")
+        logSkip(file, "FDINFO File Does Not Exist")
         return
     }
     val content = file.readText()
@@ -286,7 +309,7 @@ fun revertFdinfo(file: File) {
         !content.contains("inotify_mark_user_mask(") &&
         !content.contains("ignored_mask:0")
     ) {
-        logSkip(file, "FDInfo Patch Not Present")
+        logSkip(file, "FDINFO Patch Not Present")
         return
     }
     file.replaceEachLine(
@@ -305,10 +328,13 @@ fun revertFdinfo(file: File) {
     )
     logRevert(
         file,
-        "Restored Original FDInfo Mask Handling"
+        "Restored Original FDINFO Mask Handling"
     )
 }
+
+// ==========================
 // Android 15 VMA Compatibility
+// ==========================
 fun applyAndroid15VmaBlock(
     taskMmu: File,
     namespace: File
@@ -329,7 +355,7 @@ fun applyAndroid15VmaBlock(
     )
     logApply(
         taskMmu,
-        "Inserted Last VMA End Update After SMAP Gather Stats()"
+        "Inserted LAST-VMA-END Update After SMAPGATHERSTATS()"
     )
     val lines = taskMmu.lines()
     val updateIndex =
@@ -337,7 +363,7 @@ fun applyAndroid15VmaBlock(
             it.contains("last_vma_end = vma->vm_end;")
         }
     check(updateIndex >= 0) {
-        "Unable to Locate Inserted Last VMA End Assignment"
+        "Unable to Locate Inserted LAST-VMA-END Assignment"
     }
     val ifIndex =
         (updateIndex - 1 downTo 0)
@@ -346,7 +372,7 @@ fun applyAndroid15VmaBlock(
                     .containsMatchIn(lines[it])
             }
     check(ifIndex != null) {
-        "Unable to Locate VMA END Comparison"
+        "Unable to Locate VMA-END Comparison"
     }
     lines[ifIndex!!] =
         lines[ifIndex].replace(
@@ -362,7 +388,7 @@ fun applyAndroid15VmaBlock(
     taskMmu.writeLines(lines)
     logApply(
         taskMmu,
-        "Wrapped Last VMA End Update in Conditional Block"
+        "Wrapped LAST-VMA-END Update in Conditional Block"
     )
     namespace.insertAfterFirst(
         Regex("""#include <trace/hooks/blk\.h>"""),
@@ -370,7 +396,7 @@ fun applyAndroid15VmaBlock(
     )
     logApply(
         namespace,
-        "Added Trace/Hooks/Filesystem Header Include"
+        "Added TRACE/HOOKS/FS.H Include"
     )
     taskMmu.insertAfterFirst(
         Regex("""int ret = 0, copied = 0;"""),
@@ -379,7 +405,7 @@ fun applyAndroid15VmaBlock(
     )
     logApply(
         taskMmu,
-        "Added NR Subpages And Pagemap Entry-T Declarations"
+        "Added NR-SUBPAGES and PAGEMAP-ENTRY-T Declarations"
     )
 }
 fun revertAndroid15VmaBlock(
@@ -388,6 +414,7 @@ fun revertAndroid15VmaBlock(
 ) {
     if (!taskMmu.exists()) return
     if (!namespace.exists()) return
+
     namespace.deleteLine(
         Regex("""^#include <trace/hooks/fs\.h>$""")
     )
@@ -401,18 +428,20 @@ fun revertAndroid15VmaBlock(
             """^\s*pagemap_entry_t \*res = NULL;$"""
         )
     )
-    // Restore Inserted Assignment
+
+    // Restore Inserted Assignment Safely
     taskMmu.deleteLine(
         Regex("""^\s*last_vma_end = vma->vm_end;$""")
     )
-    // Restore Conditional Form If Our Added Brace Remains
+
+    // Restore Conditional Form if Added Brace Remains
     taskMmu.replaceEachLine(
         Regex(
             """if\s*\(vma->vm_end > last_vma_end\)\s*\{$"""
         ),
         "if (vma->vm_end > last_vma_end)"
     )
-    // Remove Extra Brace Generated By Patch
+    // Remove Extra Brace Generated by Patch
     val lines = taskMmu.lines()
     var removed = false
     val out = mutableListOf<String>()
@@ -436,16 +465,20 @@ fun revertAndroid15VmaBlock(
     )
     logRevert(
         namespace,
-        "Removed Trace/Hooks/Filesystem Header Include"
+        "Removed TRACE/HOOKS/FS.H Include"
     )
 }
+
+// ==========================
 // Postfix Fixups
+// ==========================
 fun applyPostPatchFixups() {
     val taskMmu =
         f("fs/proc/task_mmu.c")
     if (taskMmu.exists()) {
         var content = taskMmu.readText()
-        // VMA Pad Start() Fallback
+     
+        // VMA-PAD-START Fallback
         if (
             content.contains("VMA_PAD_START(") &&
             !Regex(
@@ -467,10 +500,11 @@ fun applyPostPatchFixups() {
             taskMmu.writeLines(lines)
             logPostfix(
                 taskMmu,
-                "Inserted VMA Pad Start() Fallback"
+                "Inserted VMA-PAD-START() Fallback"
             )
         }
-        // Fold Filemap Fixup Entry() Compatibility
+
+        // FOLD-FILEMAP-FIXUP-ENTRY Compatibility
         content = taskMmu.readText()
         if (
             content.contains("__fold_filemap_fixup_entry(") &&
@@ -496,7 +530,7 @@ fun applyPostPatchFixups() {
                     )
                     logPostfix(
                         taskMmu,
-                        "Added Page Size Compat Header Include"
+                        "Added PAGE-SIZE-COMPAT.H Include"
                     )
                 }
             } else {
@@ -521,11 +555,12 @@ fun applyPostPatchFixups() {
                 taskMmu.writeLines(lines)
                 logPostfix(
                     taskMmu,
-                    "Inserted Fold Filemap Fixup Entry() Stub"
+                    "Inserted FOLD-FILEMAP-FIXUP-ENTRY() Stub"
                 )
             }
         }
     }
+
     // Android 12 / 13 Nameidata Compatibility
     if (
         kernelModule == "android12-5.10" ||
@@ -545,14 +580,14 @@ fun applyPostPatchFixups() {
                 ),
                 "set_nameidata(nd, old_dfd, fake_filename)"
             )
-
             logPostfix(
                 namei,
-                "Rewrote 4-Arg Set Nameidata() to 3-Arg Form"
+                "Rewrote 4-Arg SET-NAMEIDATA() to 3-Arg Form"
             )
         }
     }
-    // Android 16 Getname Flags() Compatibility
+
+    // Android 16 Getname-Flags Compatibility
     if (kernelModule == "android16-6.12") {
         val openC = f("fs/open.c")
         if (
@@ -570,14 +605,17 @@ fun applyPostPatchFixups() {
             )
             logPostfix(
                 openC,
-                "Rewrote 3-Arg Getname Flags() to 2-Arg Form"
+                "Rewrote 3-Arg GETNAME-FLAGS() to 2-Arg Form"
             )
         }
     }
 }
-// Apply
+
+// ==========================
+// Apply Compatibility Patches
+// ==========================
 fun apply() {
-    // Android 12 / 5.10
+    // Android 12 / 5.10 Apply Compatibility Patches
     if (kernelModule == "android12-5.10") {
         if (sublevel <= 43) {
             val file = f("fs/proc/base.c")
@@ -589,7 +627,7 @@ fun apply() {
             )
             logApply(
                 file,
-                "Normalized This Len/Min-T() to Size-T"
+                "Normalized THIS-LEN/MIN-T() to SIZE-T"
             )
         }
         if (sublevel <= 117) {
@@ -598,7 +636,8 @@ fun apply() {
             )
         }
     }
-    // Android 13 / 5.10
+
+    // Android 13 / 5.10 Apply Compatibility Patches
     if (kernelModule == "android13-5.10") {
         if (sublevel <= 107) {
             applyFdinfo(
@@ -606,7 +645,8 @@ fun apply() {
             )
         }
     }
-    // Android 13 / 5.15
+
+    // Android 13 / 5.15 Apply Compatibility Patches
     if (kernelModule == "android13-5.15") {
         if (sublevel <= 41) {
             val namespace =
@@ -617,7 +657,7 @@ fun apply() {
             )
             logApply(
                 namespace,
-                "Added Linux/Mnt IDMapping Header Include"
+                "Added LINUX/MNT-IDMAPPING.H Include"
             )
             val openC =
                 f("fs/open.c")
@@ -627,7 +667,7 @@ fun apply() {
             )
             logApply(
                 openC,
-                "Added Linux/Mnt IDMapping Header Include"
+                "Added LINUX/MNT-IDMAPPING.H Include"
             )
             applyFdinfo(
                 f("fs/notify/fdinfo.c")
@@ -643,7 +683,7 @@ fun apply() {
             ) {
                 logApply(
                     memory,
-                    "Removed Linux/Swap Slots Header"
+                    "Removed LINUX/SWAP-SLOTS.H"
                 )
             }
         }
@@ -657,7 +697,7 @@ fun apply() {
             ) {
                 logApply(
                     namespace,
-                    "Removed Trace/Hooks/Blk Header"
+                    "Removed TRACE/HOOKS/BLK.H"
                 )
             }
         }
@@ -671,12 +711,13 @@ fun apply() {
             ) {
                 logApply(
                     taskMmu,
-                    "Removed Trace/Hooks/MM Header"
+                    "Removed TRACE/HOOKS/MM.H"
                 )
             }
         }
     }
-    // Android 14 / 6.1
+
+    // Android 14 / 6.1 Apply Compatibility Patches
     if (kernelModule == "android14-6.1") {
         if (sublevel <= 25) {
             val base =
@@ -687,7 +728,7 @@ fun apply() {
             )
             logApply(
                 base,
-                "Added Trace/Hooks/Sched Header"
+                "Added TRACE/HOOKS/SCHED.H"
             )
         }
         if (sublevel <= 141) {
@@ -699,7 +740,7 @@ fun apply() {
             )
             logApply(
                 base,
-                "Added Linux/DMA-BUF Header"
+                "Added LINUX/DMA-BUF.H"
             )
         }
         if (sublevel >= 157) {
@@ -712,7 +753,7 @@ fun apply() {
             ) {
                 logApply(
                     namespace,
-                    "Removed Trace/Hooks/Blk Header"
+                    "Removed TRACE/HOOKS/BLK.H"
                 )
             }
             val superC =
@@ -725,12 +766,13 @@ fun apply() {
             ) {
                 logApply(
                     superC,
-                    "Removed Trace/Hooks/Filesystem Header and Following Line"
+                    "Removed TRACE/HOOKS/FS.H And Following Line"
                 )
             }
         }
     }
-    // Android 15 / 6.6
+
+    // Android 15 / 6.6 Apply Compatibility Patches
     if (kernelModule == "android15-6.6") {
         if (sublevel <= 30) {
             applyAndroid15VmaBlock(
@@ -747,7 +789,7 @@ fun apply() {
             )
             logApply(
                 memory,
-                "Added Linux/ZSwap Header"
+                "Added LINUX/ZSWAP.H"
             )
         }
         if (sublevel <= 92) {
@@ -759,72 +801,57 @@ fun apply() {
             )
             logApply(
                 base,
-                "Added Linux/DMA-BUF Header"
+                "Added LINUX/DMA-BUF.H"
             )
         }
     }
-    // Android 16 / 6.12
+
+    // Android 16 / 6.12 Apply Compatibility Patches
     if (kernelModule == "android16-6.12") {
         if (sublevel >= 58) {
-            val exec = f("fs/exec.c")
-            exec.requireExists()
-            val content = exec.readText()
-            if (Regex("""(?m)^#include <linux/dma-buf\.h>$""").containsMatchIn(content)) {
-                check(
-                    exec.deleteLine(
-                        Regex("""^#include <linux/dma-buf\.h>$""")
-                    )
-                ) {
-                    "Failed to Remove Linux/DMA-BUF Header from ${exec.path}"
-                }
+            val exec =
+                f("fs/exec.c")
+            if (
+                exec.deleteLine(
+                    Regex("""^#include <linux/dma-buf\.h>$""")
+                )
+            ) {
                 logApply(
                     exec,
-                    "Removed Linux/DMA-BUF Header"
-                )
-            } else {
-                logSkip(
-                    exec,
-                    "Linux/DMA-BUF Header Already Removed"
+                    "Removed LINUX/DMA-BUF.H"
                 )
             }
         }
         if (sublevel >= 69) {
-            val taskMmu = f("fs/proc/task_mmu.c")
-            taskMmu.requireExists()
-            val content = taskMmu.readText()
-            if (Regex("""\bvma_data_pages\b""").containsMatchIn(content)) {
-                check(
-                    taskMmu.replaceEachLine(
-                        Regex("""\bvma_data_pages\b"""),
-                        "vma_pages"
-                    )
-                ) {
-                    "Failed to Rename VMA Data Pages in ${taskMmu.path}"
-                }
+            val taskMmu =
+                f("fs/proc/task_mmu.c")
+            if (
+                taskMmu.replaceEachLine(
+                    Regex("""vma_data_pages"""),
+                    "vma_pages"
+                )
+            ) {
                 logApply(
                     taskMmu,
-                    "Renamed VMA Data Pages to VMA Pages"
-                )
-            } else if (Regex("""\bvma_pages\b""").containsMatchIn(content)) {
-                logSkip(
-                    taskMmu,
-                    "VMA Pages Compatibility Already Applied"
-                )
-            } else {
-                error(
-                    "Neither VMA Data Pages Nor VMA Pages Found in ${taskMmu.path}"
+                    "Renamed VMA-DATA-PAGES To VMA-PAGES"
                 )
             }
         }
     }
 }
-// Postfix
+
+// ==========================
+// PostFix Compatibility Patches
+// ==========================
 fun postfix() {
     applyPostPatchFixups()
 }
-// Revert
+
+// ==========================
+// Revert Compatibility Patches
+// ==========================
 fun revert() {
-    // Android 12 / 5.10
+    // Android 12 / 5.10 Revert Compatibility Patches
     if (kernelModule == "android12-5.10") {
         if (sublevel <= 43) {
             val file =
@@ -837,7 +864,7 @@ fun revert() {
             ) {
                 logRevert(
                     file,
-                    "Restored Int This Len/Min-T(Int)"
+                    "Restored INT THIS-LEN/MIN-T(INT)"
                 )
             }
         }
@@ -847,7 +874,8 @@ fun revert() {
             )
         }
     }
-    // Android 13 / 5.10
+
+    // Android 13 / 5.10 Revert Compatibility Patches
     if (kernelModule == "android13-5.10") {
         if (sublevel <= 107) {
             revertFdinfo(
@@ -855,7 +883,8 @@ fun revert() {
             )
         }
     }
-    // Android 13 / 5.15
+
+    // Android 13 / 5.15 Revert Compatibility Patches
     if (kernelModule == "android13-5.15") {
         if (sublevel <= 41) {
             val namespace =
@@ -865,7 +894,7 @@ fun revert() {
             )
             logRevert(
                 namespace,
-                "Removed Linux/Mnt IDMapping Header"
+                "Removed LINUX/MNT-ID-MAPPING.H"
             )
             val openC =
                 f("fs/open.c")
@@ -874,7 +903,7 @@ fun revert() {
             )
             logRevert(
                 openC,
-                "Removed Linux/Mnt IDMapping Header"
+                "Removed LINUX/MNT-ID-MAPPING.H"
             )
             val susfs =
                 f("fs/susfs.c")
@@ -893,7 +922,7 @@ fun revert() {
                 )
                 logRevert(
                     susfs,
-                    "Restored SUSFS IUID Into Mnt() Form"
+                    "Restored SUSFS IUID-INTO-MNT() Form"
                 )
             }
             revertFdinfo(
@@ -913,7 +942,7 @@ fun revert() {
                 )
                 logRevert(
                     memory,
-                    "Restored Linux/Swap Slots Header"
+                    "Restored LINUX/SWAP-SLOTS.H"
                 )
             }
         }
@@ -930,7 +959,7 @@ fun revert() {
                 )
                 logRevert(
                     namespace,
-                    "Restored Trace/Hooks/Blk Header"
+                    "Restored TRACE/HOOKS/BLK.H"
                 )
             }
         }
@@ -947,12 +976,13 @@ fun revert() {
                 )
                 logRevert(
                     taskMmu,
-                    "Restored Trace/Hooks/MM Header"
+                    "Restored TRACE/HOOKS/MM.H"
                 )
             }
         }
     }
-    // Android 14 / 6.1
+
+    // Android 14 / 6.1 Revert Compatibility Patches
     if (kernelModule == "android14-6.1") {
         if (sublevel <= 25) {
             val base =
@@ -962,7 +992,7 @@ fun revert() {
             )
             logRevert(
                 base,
-                "Removed Trace/Hooks/Sched Header"
+                "Removed TRACE/HOOKS/SCHED.H"
             )
         }
         if (sublevel <= 141) {
@@ -973,7 +1003,7 @@ fun revert() {
             )
             logRevert(
                 base,
-                "Removed Linux/DMA-BUF Header"
+                "Removed LINUX/DMA-BUF.H"
             )
         }
         if (sublevel >= 157) {
@@ -1001,15 +1031,16 @@ fun revert() {
             }
             logRevert(
                 namespace,
-                "Restored Trace/Hooks/Blk Header"
+                "Restored TRACE/HOOKS/BLK.H"
             )
             logRevert(
                 superC,
-                "Restored Trace/Hooks/Filesystem Header"
+                "Restored TRACE/HOOKS/FS.H"
             )
         }
     }
-    // Android 15 / 6.6
+
+    // Android 15 / 6.6 Revert Compatibility Patches
     if (kernelModule == "android15-6.6") {
         if (sublevel <= 30) {
             revertAndroid15VmaBlock(
@@ -1025,7 +1056,7 @@ fun revert() {
             )
             logRevert(
                 memory,
-                "Removed Linux/ZSwap Header"
+                "Removed LINUX/ZSWAP.H"
             )
         }
         if (sublevel <= 92) {
@@ -1036,71 +1067,53 @@ fun revert() {
             )
             logRevert(
                 base,
-                "Removed Linux/DMA-BUF Header"
+                "Removed LINUX/DMABUF.H"
             )
         }
     }
-    // Android 16 / 6.12
+
+    // Android 16 / 6.12 Revert Compatibility Patches
     if (kernelModule == "android16-6.12") {
         if (sublevel >= 58) {
-            val exec = f("fs/exec.c")
-            exec.requireExists()
+            val exec =
+                f("fs/exec.c")
             if (
-                !Regex("""(?m)^#include <linux/dma-buf\.h>$""")
-                    .containsMatchIn(exec.readText())
+                !exec.readText()
+                    .contains("#include <linux/dma-buf.h>")
             ) {
-                check(
-                    exec.insertAfterFirst(
-                        Regex("""^#include """),
-                        "#include <linux/dma-buf.h>"
-                    )
-                ) {
-                    "Failed to Restore Linux/DMA-BUF Header in ${exec.path}"
-                }
+                exec.insertAfterFirst(
+                    Regex("""^#include """),
+                    "#include <linux/dma-buf.h>"
+                )
                 logRevert(
                     exec,
-                    "Restored Linux/DMA-BUF Header"
-                )
-            } else {
-                logSkip(
-                    exec,
-                    "Linux/DMA-BUF Header Already Restored"
+                    "Restored LINUX/DMABUF.H"
                 )
             }
         }
         if (sublevel >= 69) {
-            val taskMmu = f("fs/proc/task_mmu.c")
-            taskMmu.requireExists()
-            val content = taskMmu.readText()
-            if (Regex("""\bvma_pages\b""").containsMatchIn(content)) {
-                check(
-                    taskMmu.replaceEachLine(
-                        Regex("""\bvma_pages\b"""),
-                        "vma_data_pages"
-                    )
-                ) {
-                    "Failed to Restore VMA Data Pages in ${taskMmu.path}"
-                }
+            val taskMmu =
+                f("fs/proc/task_mmu.c")
+            if (
+                taskMmu.readText()
+                    .contains("vma_pages")
+            ) {
+                taskMmu.replaceEachLine(
+                    Regex("""vma_pages"""),
+                    "vma_data_pages"
+                )
                 logRevert(
                     taskMmu,
-                    "Restored VMA Data Pages"
-                )
-            } else if (
-                Regex("""\bvma_data_pages\b""").containsMatchIn(content)
-            ) {
-                logSkip(
-                    taskMmu,
-                    "VMA Data Pages Already Restored"
-                )
-            } else {
-                error(
-                    "Neither VMA Pages Nor VMA Data Pages Found in ${taskMmu.path}"
+                    "Restored VMADATAPAGES"
                 )
             }
         }
     }
 }
+
+// ==========================
 // Main
+// ==========================
 try {
     when (mode) {
         "Apply" -> apply()
@@ -1114,8 +1127,8 @@ try {
         }
     }
     println(
-        "🚀 Fake Patches : $mode Completed " +
-        "( Kernel Version = $kernelModule - Sublevel = $sublevel )"
+        "🚀 Fake Patches: $mode Completed " +
+        "(Android and Kernel Version = $kernelModule, Sublevel = $sublevel)"
     )
 } catch (e: Exception) {
     System.err.println(
