@@ -1744,7 +1744,7 @@ jobs:
           echo "└─ 🔢 KSU Version : $KSUVERSION"
           echo "------------------------------"
     
-      - name: 🩹 SUSFS Patches (Auto Official / Fallback) and Kernel Compatibility Patches
+      - name: 🩹 SUSFS Integration
         if: ${{ inputs.SUSFSREPOSITORY != '-1' }}
         shell: bash
         env:
@@ -1753,27 +1753,25 @@ jobs:
           SUSFSVARIANT: ${{ inputs.SUSFSVARIANT }}
           SUSFSBRANCHDEV: ${{ inputs.SUSFSBRANCHDEV }}
         run: |
-          # Define Kernel Version, Patch Target, and SUSFS Repository Paths
+          # Define Kernel Version and SUSFS Repository Paths
           GKIVERSION="${ANDROIDVERSION}-${KERNELVERSION}"
           SUSFSKERNEL="${WORKDIR}/susfs4ksu"
           SUSFSMIRROR="https://github.com/AndreiMikh/susfs4ksu.git"
-          # Display Kernel and SUSFS Configuration
           echo "└─ 🩹 SUSFS and Kernel Compatibility Patches"
           echo "└─ 📌 Android Version  : ${ANDROIDVERSION}"
           echo "└─ 📌 Kernel Version   : ${KERNELVERSION}"
           echo "└─ 📌 Kernel Base      : ${GKIVERSION}"
           echo "└─ 📌 Kernel Source    : ${SOURCEDIR}"
-          echo "└─ 📌 Patch Target     : ${SOURCEDIR}"
           echo "└─ 📌 Root Engine      : ${ROOTENGINE}"
           echo "└─ 📌 SUSFS Variant    : ${SUSFSVARIANT}"
           echo "└─ 📌 SUSFS Revision   : ${SUSFSREPOSITORY}"
           # Validate Kernel Source Directory
           if [[ ! -f "${SOURCEDIR}/Makefile" ]]; then
-            echo "└─ 📌 Kernel Source Makefile Not Found"
+            echo "└─ ⚠️ Kernel Source Makefile Not Found"
             exit 1
           fi
 
-          # Select Official SUSFS Repository and Kernel Branch
+          # Select Official Repository and Compatible Branch
           case "${SUSFSVARIANT}" in
             GKI)
               SUSFSBRANCH="gki-${GKIVERSION}"
@@ -1786,154 +1784,241 @@ jobs:
               SUSFSFALLBACKURL=""
               ;;
             *)
-              echo "└─ 📌 Invalid SUSFS Variant : ${SUSFSVARIANT}"
+              echo "└─ ⚠️ Invalid SUSFS Variant: ${SUSFSVARIANT}"
               exit 1
               ;;
           esac
-          # Append Development Branch Suffix When Enabled
           if [[ "${SUSFSBRANCHDEV}" == "true" ]]; then
             SUSFSBRANCH="${SUSFSBRANCH}-dev"
           fi
 
-          # Display Selected Repository and Branch
           echo "└─ 📌 SUSFS Repository : ${SUSFSREPOURL}"
           echo "└─ 📌 SUSFS Branch     : ${SUSFSBRANCH}"
           # Clone Official SUSFS Repository With Retries
-          echo "└─ 📥 Cloning SUSFS..."
+          echo "└─ 📥 Cloning SUSFS Repository..."
           rm -rf "${SUSFSKERNEL}"
           CLONED=false
-          # Retry Official Repository Clone up to Five Times
           for attempt in {1..5}; do
             if git clone --depth=1 --single-branch \
               --branch "${SUSFSBRANCH}" \
               "${SUSFSREPOURL}" "${SUSFSKERNEL}"; then
-              echo "└─ 📌 SUSFS Clone Successful"
               CLONED=true
+              echo "└─ 📌 Official SUSFS Clone Successful"
               break
             fi
 
-            # Remove Incomplete Clone Before Retrying
             rm -rf "${SUSFSKERNEL}"
             if [[ "${attempt}" -lt 5 ]]; then
-              echo "└─ ⚠️ Clone Failed (${attempt}/5)"
+              echo "└─ ⚠️ Official Clone Failed (${attempt}/5)"
               sleep $((attempt * 10))
             fi
+            
           done
 
-          # Use GitHub Mirror if Official SUSFS Repository Fails
+          # Try GitHub Mirror When Official GKI Repository Fails
           if [[ "${CLONED}" != "true" && -n "${SUSFSFALLBACKURL}" ]]; then
-            echo "└─ ⚠️ Official Repository Unavailable; Trying GitHub Mirror"
+            echo "└─ ⚠️ Trying GitHub SUSFS Mirror..."
             if git clone --depth=1 --single-branch \
               --branch "${SUSFSBRANCH}" \
               "${SUSFSFALLBACKURL}" "${SUSFSKERNEL}"; then
-              echo "└─ 📌 GitHub Mirror Clone Successful"
               CLONED=true
+              echo "└─ ✅ GitHub SUSFS Mirror Clone Successful"
+            else
+              rm -rf "${SUSFSKERNEL}"
             fi
           fi
 
-          # Stop Workflow if Neither Repository Can Be Cloned
           if [[ "${CLONED}" != "true" ]]; then
             echo "└─ ⚠️ Unable to Clone SUSFS"
             echo "└─ 📌 Branch     : ${SUSFSBRANCH}"
             echo "└─ 📌 Repository : ${SUSFSREPOURL}"
-            [[ -z "${SUSFSFALLBACKURL}" ]] || \
-              echo "└─ 📌 Fallback : ${SUSFSFALLBACKURL}"
+            if [[ -n "${SUSFSFALLBACKURL}" ]]; then
+              echo "└─ 📌 Fallback   : ${SUSFSFALLBACKURL}"
+            fi
+
             exit 1
           fi
-      
-          # Normalize SUSFS Revision Input
-          SUSFSREPOSITORY="$(printf '%s' "${SUSFSREPOSITORY:-}" | xargs)"        
-          # Enter SUSFS Repository to Resolve Requested Revision
-          cd "${SUSFSKERNEL}"       
-          # Support Numeric Rollback Values Such as 1 for HEAD~1
+
+          # Normalize Requested SUSFS Revision
+          SUSFSREPOSITORY="$(printf '%s' "${SUSFSREPOSITORY:-}" | xargs)"
+          if [[ -z "${SUSFSREPOSITORY}" || "${SUSFSREPOSITORY}" == "-1" ]]; then
+            echo "└─ ⚠️ Invalid SUSFS Revision"
+            exit 1
+          fi
+
+          cd "${SUSFSKERNEL}"
+          # Resolve Numeric Rollback Values
           if [[ "${SUSFSREPOSITORY}" =~ ^[0-9]+$ ]]; then
             if [[ "${SUSFSREPOSITORY}" -gt 0 ]]; then
-              echo "└─ 📦 Resolving Rollback : HEAD~${SUSFSREPOSITORY}"
-              git fetch --unshallow origin ||
-                git fetch --deepen="$((SUSFSREPOSITORY + 1))" origin "${SUSFSBRANCH}"
-              git checkout "HEAD~${SUSFSREPOSITORY}"
-            fi
-        
-          # Support Explicit Commit Hashes, Tags, and Branch Names
-          elif [[ -n "${SUSFSREPOSITORY}" && "${SUSFSREPOSITORY}" != "-1" ]]; then
-            echo "└─ 🔎 Resolving SUSFS Revision : ${SUSFSREPOSITORY}"
-            # Fetch the Requested Commit When a Hash Is Supplied
-            if [[ "${SUSFSREPOSITORY}" =~ ^[0-9a-fA-F]{7,40}$ ]]; then
+              echo "└─ 📦 Resolving Rollback: HEAD~${SUSFSREPOSITORY}"
+              if [[ "${SUSFSREPOSITORY}" -gt 1000 ]]; then
+                echo "└─ ⚠️ Rollback Value Exceeds Safety Limit"
+                exit 1
+              fi
+
               if ! git fetch --unshallow origin 2>/dev/null; then
-                git fetch --deepen=200 origin "${SUSFSBRANCH}" || {
-                  echo "└─ ⚠️ Failed to Fetch SUSFS History"
+                git fetch --deepen="$((SUSFSREPOSITORY + 1))" \
+                  origin "${SUSFSBRANCH}" || {
+                  echo "└─ ⚠️ Unable to Fetch Rollback History"
                   exit 1
                 }
               fi
 
-              git fetch origin "${SUSFSREPOSITORY}" || {
-                echo "└─ ⚠️ Failed to Fetch SUSFS Commit : ${SUSFSREPOSITORY}"
+              if ! git rev-parse --verify \
+                "HEAD~${SUSFSREPOSITORY}^{commit}" >/dev/null 2>&1; then
+                echo "└─ ⚠️ Requested Rollback Is Outside Available History"
+                exit 1
+              fi
+
+              git checkout --detach "HEAD~${SUSFSREPOSITORY}" || {
+                echo "└─ ⚠️ Failed to Checkout Rollback Revision"
                 exit 1
               }
             fi
 
-            # Checkout the Requested Revision
-            git checkout "${SUSFSREPOSITORY}" || {
-              echo "└─ ⚠️ Failed to Checkout SUSFS Revision : ${SUSFSREPOSITORY}"
+          else
+            # Resolve Explicit Commit Hashes, Tags, and Branch Names
+            echo "└─ 🔎 Resolving SUSFS Revision: ${SUSFSREPOSITORY}"
+            SUSFSRESOLVED=""
+            # Check Existing Local Git Objects
+            if git rev-parse --verify \
+              "${SUSFSREPOSITORY}^{commit}" >/dev/null 2>&1; then
+              SUSFSRESOLVED="$(git rev-parse \
+                "${SUSFSREPOSITORY}^{commit}")"
+            fi
+
+            # Fetch Branch History if the Revision Is Missing
+            if [[ -z "${SUSFSRESOLVED}" ]]; then
+              if ! git fetch --unshallow origin 2>/dev/null; then
+                git fetch --deepen=200 origin "${SUSFSBRANCH}" || {
+                  echo "└─ ⚠️ Failed to Fetch SUSFS Branch History"
+                  exit 1
+                }
+              fi
+
+              if git rev-parse --verify \
+                "${SUSFSREPOSITORY}^{commit}" >/dev/null 2>&1; then
+                SUSFSRESOLVED="$(git rev-parse \
+                  "${SUSFSREPOSITORY}^{commit}")"
+              fi
+            fi
+
+            # Try Fetching a Full Commit Hash
+            if [[ -z "${SUSFSRESOLVED}" &&
+                  "${SUSFSREPOSITORY}" =~ ^[0-9a-fA-F]{40}$ ]]; then
+              if git fetch origin "${SUSFSREPOSITORY}"; then
+                if git rev-parse --verify \
+                  "${SUSFSREPOSITORY}^{commit}" >/dev/null 2>&1; then
+                  SUSFSRESOLVED="$(git rev-parse \
+                    "${SUSFSREPOSITORY}^{commit}")"
+                fi
+              fi
+            fi
+
+            # Fetch Tags and Resolve Named Revisions
+            if [[ -z "${SUSFSRESOLVED}" ]]; then
+              git fetch --tags origin || {
+                echo "└─ ⚠️ Unable to Fetch SUSFS Tags"
+              }
+
+              if git rev-parse --verify \
+                "refs/tags/${SUSFSREPOSITORY}^{commit}" >/dev/null 2>&1; then
+                SUSFSRESOLVED="$(git rev-parse \
+                  "refs/tags/${SUSFSREPOSITORY}^{commit}")"
+              elif git rev-parse --verify \
+                "refs/remotes/origin/${SUSFSREPOSITORY}^{commit}" >/dev/null 2>&1; then
+                SUSFSRESOLVED="$(git rev-parse \
+                  "refs/remotes/origin/${SUSFSREPOSITORY}^{commit}")"
+              elif git rev-parse --verify \
+                "${SUSFSREPOSITORY}^{commit}" >/dev/null 2>&1; then
+                SUSFSRESOLVED="$(git rev-parse \
+                  "${SUSFSREPOSITORY}^{commit}")"
+              fi
+            fi
+
+            # Validate Requested Revision
+            if [[ -z "${SUSFSRESOLVED}" ]]; then
+              echo "└─ ⚠️ Unable to Resolve SUSFS Revision"
+              echo "└─ 📌 Requested  : ${SUSFSREPOSITORY}"
+              echo "└─ 📌 Branch     : ${SUSFSBRANCH}"
+              echo "└─ 📌 Repository : ${SUSFSREPOURL}"
+              echo "└─ 💡 Use a valid full commit hash, branch, or tag"
+              echo "└─ 💡 Ensure the commit is reachable or fetchable"
+              exit 1
+            fi
+
+            # Checkout Exact Resolved Commit
+            git checkout --detach "${SUSFSRESOLVED}" || {
+              echo "└─ ⚠️ Failed to Checkout SUSFS Revision"
               exit 1
             }
           fi
-     
-          # Record Active SUSFS Commit
+
+          # Record Active SUSFS Revision
           SUSFSCOMMIT="$(git rev-parse HEAD)"
           SUSFSCOMMITSHORT="$(git rev-parse --short HEAD)"
           echo "└─ 📌 Active SUSFS Commit : ${SUSFSCOMMITSHORT}"
-          # Detect SUSFS Version from its Header
+          # Detect SUSFS Version
           SUSFSHEADER="${SUSFSKERNEL}/kernel_patches/include/linux/susfs.h"
           SUSFSVERSION="Unknown"
           if [[ -f "${SUSFSHEADER}" ]]; then
-            SUSFSVERSION="$(awk -F'"' '/SUSFS_VERSION/ {print $2; exit}' "${SUSFSHEADER}")"
+            SUSFSVERSION="$(awk -F'"' \
+              '/SUSFS_VERSION/ {print $2; exit}' "${SUSFSHEADER}")"
             SUSFSVERSION="${SUSFSVERSION:-Unknown}"
           fi
 
-          # Export Detected SUSFS Version For Subsequent Workflow Steps
           echo "SUSFSVERSION=${SUSFSVERSION}" >> "${GITHUB_ENV}"
           echo "└─ 📦 SUSFS Version : ${SUSFSVERSION}"
-          # Define SUSFS Patch, Filesystem, and Header Paths
+          # Define SUSFS Patch Paths
           SUSFSDIR="${SUSFSKERNEL}/kernel_patches"
           SUSFSFS="${SUSFSDIR}/fs"
           SUSFSINCLUDE="${SUSFSDIR}/include/linux"
-          # Validate Required SUSFS Source Directories
           if [[ ! -d "${SUSFSFS}" || ! -d "${SUSFSINCLUDE}" ]]; then
             echo "└─ ⚠️ Required SUSFS Source Directories Missing"
+            echo "└─ 📌 Filesystem : ${SUSFSFS}"
+            echo "└─ 📌 Headers    : ${SUSFSINCLUDE}"
             exit 1
           fi
 
-          # Find Available SUSFS 50 Core Patches For Selected Kernel Base
+          # Find Compatible SUSFS Core Patches
           shopt -s nullglob
           SUSFSPATCHLIST=(
             "${SUSFSDIR}/50_add_susfs_in_${GKIVERSION}"*.patch
           )
-          # Stop if No Matching SUSFS Core Patch Exists
           if [[ "${#SUSFSPATCHLIST[@]}" -eq 0 ]]; then
-            echo "└─ ⚠️ No SUSFS 50 Patch Found for ${GKIVERSION}"
+            echo "└─ ⚠️ No SUSFS Core Patch Found"
+            echo "└─ 📌 Kernel Base: ${GKIVERSION}"
             ls -la "${SUSFSDIR}" || true
             exit 1
           fi
 
-          # Select Last Matching Patch From Sorted File List
+          # Sort Patch Filenames and Select the Last Match
+          mapfile -t SUSFSPATCHLIST < <(
+            printf '%s\n' "${SUSFSPATCHLIST[@]}" | sort -V
+          )
           SUSFSPATCH="${SUSFSPATCHLIST[-1]}"
-          echo "└─ 📌 SUSFS Patch : ${SUSFSPATCH}"
-          # Enter Target Kernel Source Directory
+          echo "└─ 📌 SUSFS Patch: $(basename "${SUSFSPATCH}")"
+          # Enter Kernel Source Directory
           cd "${SOURCEDIR}"
-          # Check Whether SUSFS Core Patch Has Already Been Applied
-          echo "└─ 🔎 Checking SUSFS Patch Status..."
-          if patch -R -p1 --dry-run < "${SUSFSPATCH}" >/dev/null 2>&1; then
-            echo "└─ ⚠️ SUSFS Core Patch Already Applied"
+          # Check Whether the Core Patch Is Already Applied
+          echo "└─ 🔎 Checking SUSFS Core Patch Status..."
+          if patch -R -p1 --dry-run \
+            < "${SUSFSPATCH}" >/dev/null 2>&1; then
+            echo "└─ ♻️ SUSFS Core Patch Already Applied"
           else
-            # Copy SUSFS Files into Kernel Source Tree
+            # Copy SUSFS Files Into Kernel Source
             echo "└─ 📥 Copying SUSFS Files..."
-            cp -a "${SUSFSFS}/." "${SOURCEDIR}/fs/"
-            cp -a "${SUSFSINCLUDE}/." "${SOURCEDIR}/include/linux/"
-            # Copy SUSFS Core Patch Into Kernel Source Directory
-            cp "${SUSFSPATCH}" "${SOURCEDIR}/"
+            cp -a "${SUSFSFS}/." "${SOURCEDIR}/fs/" || {
+              echo "└─ ⚠️ Failed to Copy SUSFS Filesystem Sources"
+              exit 1
+            }
+            cp -a "${SUSFSINCLUDE}/." "${SOURCEDIR}/include/linux/" || {
+              echo "└─ ⚠️ Failed to Copy SUSFS Headers"
+              exit 1
+            }
+            # Apply Core Patch
             PATCHCOPY="${SOURCEDIR}/$(basename "${SUSFSPATCH}")"
-            # Apply SUSFS Core Patch
+            cp "${SUSFSPATCH}" "${PATCHCOPY}" || exit 1
             echo "└─ ⚙️ Applying SUSFS Core Patch..."
             if patch -p1 < "${PATCHCOPY}"; then
               echo "└─ 📌 SUSFS Core Patch Applied"
@@ -1943,10 +2028,9 @@ jobs:
             fi
           fi
 
-          # Apply SUSFS 10 Enable Patch Only for KernelSU
+          # Apply KernelSU-Specific Enable Patch
           if [[ "${ROOTENGINE}" == "KernelSU" ]]; then
-            echo "└─ ⚙️ Preparing KernelSU SUSFS 10 Enable Patch"
-            # Select Enable Patch URL For Current SUSFS Variant
+            echo "└─ ⚙️ Preparing KernelSU SUSFS Enable Patch"
             case "${SUSFSVARIANT}" in
               GKI)
                 SUSFS10URL="https://gitlab.com/simonpunk/susfs4ksu/-/raw/${SUSFSBRANCH}/kernel_patches/${ROOTENGINE}/10_enable_susfs_for_ksu.patch"
@@ -1955,56 +2039,61 @@ jobs:
                 SUSFS10URL="https://raw.githubusercontent.com/cctv18/susfs4oki/${SUSFSBRANCH}/kernel_patches/${ROOTENGINE}/10_enable_susfs_for_ksu.patch"
                 ;;
             esac
-            # Locate KernelSU Source Directory
+            # Locate KernelSU Source
             KSUDIR="${WORKDIR}/KernelSU"
             if [[ ! -d "${KSUDIR}" ]]; then
               KSUDIR="$(dirname "${SOURCEDIR}")/KernelSU"
             fi
 
-            # Validate KernelSU Source Directory
             if [[ ! -d "${KSUDIR}" ]]; then
-              echo "└─ ⚠️ KernelSU Source Directory Not Found : ${KSUDIR}"
+              echo "└─ ⚠️ KernelSU Source Directory Not Found"
+              echo "└─ 📌 Path : ${KSUDIR}"
               exit 1
             fi
 
-            # Download KernelSU SUSFS 10 Enable Patch
+            # Download Enable Patch
             ENABLEPATCH="${WORKDIR}/enable-susfs-ksu.patch"
+            rm -f "${ENABLEPATCH}"
             if ! wget -q -O "${ENABLEPATCH}" "${SUSFS10URL}"; then
-              echo "└─ ⚠️ Failed to Download KernelSU SUSFS 10 Enable Patch"
-              echo "└─ 📌 URL : ${SUSFS10URL}"
-              exit 1
-            fi
-
-            # Apply Enable Patch Only if it Has Not Already Been Applied
-            if patch -d "${KSUDIR}" -p1 --dry-run < "${ENABLEPATCH}" >/dev/null 2>&1; then
-              patch -d "${KSUDIR}" -p1 < "${ENABLEPATCH}"
-              echo "└─ 📌 KernelSU SUSFS 10 Enable Patch Applied"
-            # Skip Patch When Reverse Dry Run Confirms it is Already Applied
-            elif patch -d "${KSUDIR}" -R -p1 --dry-run < "${ENABLEPATCH}" >/dev/null 2>&1; then
-              echo "└─ ⚠️ KernelSU SUSFS 10 Enable Patch Already Applied"
-            else
-              # Stop When Enable Patch is Incompatible
-              echo "└─ ⚠️ KernelSU SUSFS 10 Enable Patch is Incompatible"
+              echo "└─ ⚠️ Failed to Download KernelSU SUSFS Enable Patch"
+              echo "└─ 📌 URL: ${SUSFS10URL}"
               rm -f "${ENABLEPATCH}"
               exit 1
             fi
 
-            # Remove Temporary Enable Patch
+            # Apply Patch or Detect Existing Application
+            if patch -d "${KSUDIR}" -p1 --dry-run \
+              < "${ENABLEPATCH}" >/dev/null 2>&1; then
+              if patch -d "${KSUDIR}" -p1 < "${ENABLEPATCH}"; then
+                echo "└─ 📌 KernelSU SUSFS Enable Patch Applied"
+              else
+                echo "└─ ⚠️ KernelSU SUSFS Enable Patch Failed"
+                rm -f "${ENABLEPATCH}"
+                exit 1
+              fi
+            elif patch -d "${KSUDIR}" -R -p1 --dry-run \
+              < "${ENABLEPATCH}" >/dev/null 2>&1; then
+              echo "└─ ♻️ KernelSU SUSFS Enable Patch Already Applied"
+            else
+              echo "└─ ⚠️ KernelSU SUSFS Enable Patch is Incompatible"
+              rm -f "${ENABLEPATCH}"
+              exit 1
+            fi
+
             rm -f "${ENABLEPATCH}"
           else
-            # Skip KernelSU-Specific Patch for Other Root Engines
             echo "└─ ♻️ Skipping KernelSU Enable Patch : ${ROOTENGINE}"
           fi
 
-          # Update SUSFS Options in Default Configuration When a Valid Path is Supplied
+          # Update SUSFS Options in Default Configuration
           if [[ -n "${DEFCONFIG:-}" ]]; then
             if [[ ! -f "${DEFCONFIG}" ]]; then
-              echo "└─ ⚠️ Default Configuration Not Found : ${DEFCONFIG}"
+              echo "└─ ⚠️ Default Configuration Not Found"
+              echo "└─ 📌 Path : ${DEFCONFIG}"
               exit 1
             fi
 
             echo "└─ ⚙️ Enabling SUSFS Kernel Configuration"
-            # Enable Each SUSFS Configuration Option
             for config in \
               CONFIG_KSU_SUSFS \
               CONFIG_KSU_SUSFS_SUS_PATH \
@@ -2016,22 +2105,27 @@ jobs:
               CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG \
               CONFIG_KSU_SUSFS_SUS_MAP \
               CONFIG_KSU_SUSFS_OPEN_REDIRECT; do
-              # Replace Existing Values or Append Missing Options
               if grep -q "^${config}=" "${DEFCONFIG}"; then
                 sed -i "s|^${config}=.*|${config}=y|" "${DEFCONFIG}"
-              else
+              elif ! grep -q "^# ${config} is not set$" "${DEFCONFIG}"; then
                 echo "${config}=y" >> "${DEFCONFIG}"
+              else
+                sed -i "s|^# ${config} is not set$|${config}=y|" "${DEFCONFIG}"
               fi
             done
           else
-            # Report Default Configuration Modification Was Skipped
-            echo "└─ ⚠️ Default Configuration is Not Set; Skipping Default Configuration Updates"
+            echo "└─ ⚠️ Default Configuration is Not Set; Skipping Configuration Updates"
           fi
 
           # Run Patch Reject Checker
           if [[ -n "${REJECTCHECKER:-}" && -f "${REJECTCHECKER}" ]]; then
             echo "└─ 🔎 Checking Patch Rejects..."
             source "${REJECTCHECKER}"
+            if ! declare -F checkrejects >/dev/null; then
+              echo "└─ ⚠️ CheckRejects Function Not Found"
+              exit 1
+            fi
+
             checkrejects "${SOURCEDIR}"
           fi
 
@@ -2042,7 +2136,7 @@ jobs:
           echo "└─ 📌 SUSFS Branch  : ${SUSFSBRANCH}"
           echo "└─ 📌 Patch Target  : ${SOURCEDIR}"
           echo "└─ 🎉 SUSFS and Kernel Compatibility Patches Complete"
-
+      
       - name: 🛡️ NoMount Integration
         if: ${{ inputs.NOMOUNT != 'None' }}
         shell: bash
