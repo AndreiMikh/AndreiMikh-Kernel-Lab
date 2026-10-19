@@ -766,16 +766,25 @@ fun apply() {
     // Android 16 / 6.12
     if (kernelModule == "android16-6.12") {
         if (sublevel >= 58) {
-            val exec =
-                f("fs/exec.c")
-            if (
-                exec.deleteLine(
-                    Regex("""^#include <linux/dma-buf\.h>$""")
-                )
-            ) {
+            val exec = f("fs/exec.c")
+            exec.requireExists()
+            val content = exec.readText()
+            if (Regex("""(?m)^#include <linux/dma-buf\.h>$""").containsMatchIn(content)) {
+                check(
+                    exec.deleteLine(
+                        Regex("""^#include <linux/dma-buf\.h>$""")
+                    )
+                ) {
+                    "Failed to Remove Linux/DMA-BUF Header from ${exec.path}"
+                }
                 logApply(
                     exec,
                     "Removed Linux/DMA-BUF Header"
+                )
+            } else {
+                logSkip(
+                    exec,
+                    "Linux/DMA-BUF Header Already Removed"
                 )
             }
         }
@@ -783,7 +792,7 @@ fun apply() {
             val taskMmu = f("fs/proc/task_mmu.c")
             taskMmu.requireExists()
             val content = taskMmu.readText()
-            if (content.contains("vma_data_pages")) {
+            if (Regex("""\bvma_data_pages\b""").containsMatchIn(content)) {
                 check(
                     taskMmu.replaceEachLine(
                         Regex("""\bvma_data_pages\b"""),
@@ -794,16 +803,16 @@ fun apply() {
                 }
                 logApply(
                     taskMmu,
-                    "Renamed VMA Data Pages To VMA Pages"
+                    "Renamed VMA Data Pages to VMA Pages"
                 )
-            } else if (content.contains("vma_pages")) {
+            } else if (Regex("""\bvma_pages\b""").containsMatchIn(content)) {
                 logSkip(
                     taskMmu,
                     "VMA Pages Compatibility Already Applied"
                 )
             } else {
                 error(
-                    "Neither VMA Data Pages Nor VMA Pages Found In ${taskMmu.path}"
+                    "Neither VMA Data Pages Nor VMA Pages Found in ${taskMmu.path}"
                 )
             }
         }
@@ -1034,27 +1043,36 @@ fun revert() {
     // Android 16 / 6.12
     if (kernelModule == "android16-6.12") {
         if (sublevel >= 58) {
-            val exec =
-                f("fs/exec.c")
+            val exec = f("fs/exec.c")
+            exec.requireExists()
             if (
-                !exec.readText()
-                    .contains("#include <linux/dma-buf.h>")
+                !Regex("""(?m)^#include <linux/dma-buf\.h>$""")
+                    .containsMatchIn(exec.readText())
             ) {
-                exec.insertAfterFirst(
-                    Regex("""^#include """),
-                    "#include <linux/dma-buf.h>"
-                )
+                check(
+                    exec.insertAfterFirst(
+                        Regex("""^#include """),
+                        "#include <linux/dma-buf.h>"
+                    )
+                ) {
+                    "Failed to Restore Linux/DMA-BUF Header in ${exec.path}"
+                }
                 logRevert(
                     exec,
                     "Restored Linux/DMA-BUF Header"
                 )
+            } else {
+                logSkip(
+                    exec,
+                    "Linux/DMA-BUF Header Already Restored"
+                )
             }
-        }        
+        }
         if (sublevel >= 69) {
             val taskMmu = f("fs/proc/task_mmu.c")
             taskMmu.requireExists()
             val content = taskMmu.readText()
-            if (content.contains("vma_pages")) {
+            if (Regex("""\bvma_pages\b""").containsMatchIn(content)) {
                 check(
                     taskMmu.replaceEachLine(
                         Regex("""\bvma_pages\b"""),
@@ -1067,7 +1085,9 @@ fun revert() {
                     taskMmu,
                     "Restored VMA Data Pages"
                 )
-            } else if (content.contains("vma_data_pages")) {
+            } else if (
+                Regex("""\bvma_data_pages\b""").containsMatchIn(content)
+            ) {
                 logSkip(
                     taskMmu,
                     "VMA Data Pages Already Restored"
