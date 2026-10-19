@@ -1,0 +1,3247 @@
+name: ☘️ AOSP
+run-name: "🟢 ${{ inputs.ROOTENGINE }} | ${{ inputs.AOSPSOURCE }}"
+on:
+  workflow_dispatch:
+    inputs:
+      AOSPSOURCE:
+        type: choice
+        description: 'Select Android Open Source Project (AOSP) ROM Source'
+        required: true       
+        default: Lineage-24.0
+        options:
+          - Lineage-24.0
+          - Lineage-23.2
+          - CrDroid-17.0
+          - CrDroid-16.0
+
+      ROOTENGINE:
+        type: choice
+        description: 'Select Kernel Root Engine (BakaSU, SukiSU-Ultra, or KernelSU-Next; None = Disable Root Integration)'
+        required: true      
+        default: BakaSU
+        options:
+          - BakaSU
+          - SukiSU-Ultra
+          - KernelSU-Next
+          - None
+ 
+      ROOTCOMMIT:
+        type: string
+        description: 'Custom Root Engine Source Commit SHA (7–40 Characters; Optional, Empty = Use Default Branch)'
+        required: false
+        default: ''    
+
+      NOMOUNT:
+        type: choice
+        description: 'Enable NoMount Built-in Kernel Integration (Master = Stable, Dev = Development, None = Disabled)'
+        required: true        
+        default: Master
+        options:
+          - Master
+          - Dev
+          - None
+  
+      SUSFSENGINE:
+        type: boolean
+        description: 'Enable SUSFS Support for Mount and Root Hiding'
+        required: true
+        default: true
+
+      NEONLZ4UPDATE:
+        type: boolean
+        description: 'Enable LZ4 1.10.0 Compression Update with ARM64 NEON Optimizations (Improved Compression Performance and Ratio); Replaces In-Tree LZ4'
+        required: true
+        default: true
+
+      BBG:
+        type: boolean
+        description: 'Enable Baseband Guard (Kernel-Level Protection Against Unauthorized Baseband Formatting)'
+        required: true
+        default: true
+  
+      BETTERNET:
+        type: boolean
+        description: 'Enable Netfilter Support (IPSet / IPTables) for Firewall Rules and Network Traffic Filtering'
+        required: true
+        default: true
+
+      BBR:
+        type: boolean
+        description: 'Enable BBR TCP Congestion Control for Improved Network Throughput and Latency'
+        required: true
+        default: true
+  
+      KERNELPATCH:
+        type: boolean
+        description: 'Enable KernelPatch Support'
+        required: true
+        default: true
+
+      DROIDSPACES:
+        type: boolean
+        description: 'DroidSpaces'
+        required: true
+        default: true
+
+      NTSYNC:
+        type: boolean
+        description: 'Windows-Compatible Synchonization Primitives'
+        required: true
+        default: true
+ 
+      REKERNEL:
+        type: choice
+        description: 'ReKernel Support (Freezer / NoActive Binder Hooks)'
+        required: true
+        default: None
+        options:
+          - Built-in
+          - Module
+          - None
+
+      KERNELSUFFIX:
+        type: string
+        description: 'Custom Kernel Version Suffix (Empty = Use Git Commit)'
+        required: false
+        default: flamingsakura
+
+      KERNELBUILDTIME:
+        type: string
+        description: 'Custom Build Time String (Wed Dec 31 08:00:00 UTC+08 2025); Empty = Current Southeast Asia Time (UTC+8)'
+        required: false
+        default: 'Mon Aug 3 07:07:07 UTC 2026'
+
+      ATTR:
+        type: boolean
+        description: 'Attribution (Build Tags / Root Source Version)'
+        required: true
+        default: true
+ 
+      GITOWNER:
+        type: string
+        description: 'Set Kernel Build User Identity (Git Author / Builder Name)'
+        required: false
+        default: 'AndreiMikh'
+ 
+      GITHOST:
+        type: string
+        description: 'Set Kernel Build Hostname for Build Metadata'
+        required: false
+        default: 'AOSP-Builder'
+ 
+      BUILDARTIFACT:
+        type: choice
+        description: 'Select Build Artifacts to Upload (AnyKernel3 = Flashable ZIP; All = ZIP + Kernel Image + Boot Image)'
+        required: true
+        default: AnyKernel3
+        options:
+          - AnyKernel3
+          - All
+
+      BUILDCCACHE:
+        type: boolean
+        description: 'Enable Public Compiler Cache Upload to a GitHub Release for Reuse in Future Builds'
+        required: true
+        default: true
+  
+      DEBUGBUILDCCACHE:
+        type: boolean
+        description: 'Enable Compiler Cache Debug Logs and Upload Them as Diagnostic Artifacts'
+        required: true
+        default: false
+ 
+      DEBUGKERNELBUILD:
+        type: boolean
+        description: 'Enable Packaging and Upload Debug Mode (Skip Kernel Compilation and Generate a Dummy Kernel Image)'
+        required: true
+        default: false
+
+permissions:
+  contents: write
+  actions: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+
+    outputs:
+      ak3name: ${{ steps.package.outputs.ak3name }}
+
+    env:
+      # Compiler Cache Configuration
+      CCACHE_BASEDIR: ${{ github.workspace }}
+      CCACHE_DIR: ${{ github.workspace }}/.ccache
+      CCACHE_MAXSIZE: 2G
+      CCACHE_COMPILERCHECK: "content"
+      CCACHE_NOHASHDIR: "true"
+      CCACHE_NOHARDLINK: "true"
+      CCACHE_IS_KERNEL_COMPILING: "true"
+
+    steps:
+      - name: 🧹 Clean Runner Environment
+        shell: bash
+        run: |
+          echo "└─ 🧹 Cleaning Unused Runner Components..."
+          sudo rm -rf /usr/share/dotnet
+          sudo rm -rf /usr/local/lib/android
+          sudo rm -rf /opt/ghc
+          sudo rm -rf /opt/hostedtoolcache/CodeQL
+          echo "└─ 📊 Runner Storage After Cleanup :"
+          df -h "$GITHUB_WORKSPACE"
+          echo "└─ 📊 Workspace Storage :"
+          du -sh "$GITHUB_WORKSPACE" 2>/dev/null || true
+          echo "└─ 🎉 Runner Cleanup Complete"
+   
+      - name: 📥 Checkout
+        uses: actions/checkout@v7
+        with:
+          repository: AndreiMikh/AndreiMikh-Kernel-Lab
+          ref: LiquidAndrei
+          path: work/AndreiMikh-Kernel-Lab
+          fetch-depth: 1
+
+      - name: 🔍 Debug Selected Workflow Inputs
+        id: build-identity
+        shell: bash
+        run: |
+          # Resolve Workflow Dispatch Inputs
+          AOSPSOURCE='${{ inputs.AOSPSOURCE }}'
+          ROOTENGINE='${{ inputs.ROOTENGINE }}'
+          ROOTCOMMIT='${{ inputs.ROOTCOMMIT }}'
+          NOMOUNT='${{ inputs.NOMOUNT }}'
+          SUSFSENGINE='${{ inputs.SUSFSENGINE }}'
+          NEONLZ4UPDATE='${{ inputs.NEONLZ4UPDATE }}'
+          BBG='${{ inputs.BBG }}'
+          BETTERNET='${{ inputs.BETTERNET }}'
+          BBR='${{ inputs.BBR }}'
+          KERNELPATCH='${{ inputs.KERNELPATCH }}'
+          DROIDSPACES='${{ inputs.DROIDSPACES }}'
+          NTSYNC='${{ inputs.NTSYNC }}'
+          REKERNEL='${{ inputs.REKERNEL }}'
+          KERNELSUFFIX='${{ inputs.KERNELSUFFIX }}'
+          KERNELBUILDTIME='${{ inputs.KERNELBUILDTIME }}'
+          ATTR='${{ inputs.ATTR }}'
+          GITOWNER='${{ inputs.GITOWNER }}'
+          GITHOST='${{ inputs.GITHOST }}'
+          BUILDARTIFACT='${{ inputs.BUILDARTIFACT }}'
+          BUILDCCACHE='${{ inputs.BUILDCCACHE }}'
+          DEBUGBUILDCCACHE='${{ inputs.DEBUGBUILDCCACHE }}'
+          DEBUGKERNELBUILD='${{ inputs.DEBUGKERNELBUILD }}'
+          # Display Selected Inputs
+          echo "└─ 🔍 Selected Workflow Inputs"
+          printf '%-24s : %s\n' "AOSP Source"                 "$AOSPSOURCE"
+          printf '%-24s : %s\n' "Root Engine"                 "$ROOTENGINE"
+          printf '%-24s : %s\n' "Root Commit"                 "$ROOTCOMMIT"
+          printf '%-24s : %s\n' "NoMount"                     "$NOMOUNT"
+          printf '%-24s : %s\n' "SUSFS Engine"                "$SUSFSENGINE"
+          printf '%-24s : %s\n' "LZ4 / ZSTD Update"           "$NEONLZ4UPDATE"
+          printf '%-24s : %s\n' "Baseband Guard"              "$BBG"
+          printf '%-24s : %s\n' "Netfilter"                   "$BETTERNET"
+          printf '%-24s : %s\n' "BBR"                         "$BBR"
+          printf '%-24s : %s\n' "Kernel Patch"                "$KERNELPATCH"
+          printf '%-24s : %s\n' "DroidSpaces"                 "$DROIDSPACES"
+          printf '%-24s : %s\n' "Synchonization Primitives"   "$NTSYNC"
+          printf '%-24s : %s\n' "Re-Kernel"                   "$REKERNEL"
+          printf '%-24s : %s\n' "Kernel Suffix"               "$KERNELSUFFIX"
+          printf '%-24s : %s\n' "Kernel Build Time"           "$KERNELBUILDTIME"
+          printf '%-24s : %s\n' "Attribution"                 "$ATTR"
+          printf '%-24s : %s\n' "Build User"                  "$GITOWNER"
+          printf '%-24s : %s\n' "Build Host"                  "$GITHOST"
+          printf '%-24s : %s\n' "Build Artifact"              "$BUILDARTIFACT"
+          printf '%-24s : %s\n' "Build Compiler Cache"        "$BUILDCCACHE"
+          printf '%-24s : %s\n' "Compiler Cache Debug"        "$DEBUGBUILDCCACHE"
+          printf '%-24s : %s\n' "Debug Kernel Build"          "$DEBUGKERNELBUILD"
+          # Print Unicode Codepoints for Strings Where Hidden Characters Matter
+          # Whitespace and Unicode Formatting Characters (Category Cf) are Highlighted
+          printunicode() {
+            local LABEL="$1"
+            local VALUE="$2"
+            VALUE="$VALUE" LABEL="$LABEL" python3 <<'PY'
+          import os
+          import unicodedata
+          label = os.environ["LABEL"]
+          value = os.environ.get("VALUE", "")
+          print(f"{label}: ", end="")
+          for char in value:
+            code = f"U+{ord(char):04X}"
+            if char.isspace() or unicodedata.category(char) == "Cf":
+              print(f"\033[31m{code}\033[0m", end=" ")
+            else:
+              print(code, end=" ")
+          print()
+          PY
+          }
+          # Unicode Diagnostics
+          echo "└─ 🔤 Unicode Diagnostics"
+          printunicode "KERNELBUILDTIME" "$KERNELBUILDTIME"
+          printunicode "KERNELSUFFIX" "$KERNELSUFFIX"
+          # Display Raw Hexadecimal Bytes to Expose Invisible Characters
+          echo "└─ 🧬 Raw Byte Diagnostics"
+          printf 'Kbuild Time : '
+          printf '%s' "$KERNELBUILDTIME" | od -An -tx1 | tr -d '\n'
+          printf 'KERNELSUFFIX : '
+          printf '%s' "$KERNELSUFFIX" | od -An -tx1 | tr -d '\n'
+          # Display Bash string lengths.
+          echo "└─ 📏 Length Diagnostics"
+          printf '%-18s : %d\n' \
+            "KERNELBUILDTIME" \
+            "${#KERNELBUILDTIME}"
+          printf '%-18s : %d\n' \
+            "KERNELSUFFIX" \
+            "${#KERNELSUFFIX}"
+          # Check Whether Important Inputs are Populated
+          echo "└─ 🔎 Value State"
+          if [[ -n "$KERNELBUILDTIME" ]]; then
+            echo "└─ Kbuild Time : Set"
+          else
+            echo "└─ Kbuild Time : Empty"
+          fi
+        
+          if [[ -n "$KERNELSUFFIX" ]]; then
+            echo "└─ Kbuild Suffix : Set"
+          else
+            echo "└─ Kbuild Suffix : Empty"
+          fi
+       
+          # AOSP / Custom ROM Source
+          declare -A AOSPSOURCEMAP=(
+            ["Lineage-24.0"]="Lineage(24.0)"
+            ["Lineage-23.2"]="Lineage(23.2)"
+            ["CrDroid-17.0"]="CrDroid(17.0)"
+            ["CrDroid-16.0"]="CrDroid(16.0)"
+          )
+          SUFFIX+="${AOSPSOURCEMAP[$AOSPSOURCE]:-}"
+          # Root Engine Source
+          declare -A ROOTENGINEMAP=(
+            ["BakaSU"]="-BakaSU"
+            ["KernelSU-Next"]="-KernelSU-Next"
+            ["SukiSU-Ultra"]="-SukiSU-Ultra"
+          )
+          SUFFIX+="${ROOTENGINEMAP[$ROOTENGINE]:-}"                         
+          # NoMount Kernel Integration
+          declare -A NOMOUNTVARMAP=(
+            ["Master"]="-NoMountMaster"
+            ["Dev"]="-NoMountDev"
+          )
+          SUFFIX+="${NOMOUNTVARMAP[$NOMOUNT]:-}"    
+          # ReKernel Integration
+          declare -A REKERNELVARMAP=(
+            ["Built-in"]="-ReKernel"
+            ["Module"]="-ReKernelModule"
+          )
+          SUFFIX+="${REKERNELVARMAP[$REKERNEL]:-}"                
+          # Boolean Features
+          [[ "$SUSFSENGINE" == "true" ]] && SUFFIX+="-SuSFS"
+          [[ "$NEONLZ4UPDATE" == "true" ]] && SUFFIX+="-LZ4(Neon)"
+          [[ "$BBG" == "true" ]] && SUFFIX+="-BBG"  
+          [[ "$BETTERNET" == "true" ]] && SUFFIX+="-BetterNet"
+          [[ "$BBR" == "true" ]] && SUFFIX+="-BBR"          
+          [[ "$KERNELPATCH" == "true" ]] && SUFFIX+="-KPNext"          
+          [[ "$DROIDSPACES" == "true" ]] && SUFFIX+="-DroidSpaces"
+          [[ "$NTSYNC" == "true" ]] && SUFFIX+="-NTSync"  
+          # Final Branding
+          SUFFIX+="-Andrei"
+          # Normalize Suffix
+          SUFFIX="$(printf '%s' "$SUFFIX" | sed 's/--*/-/g')"
+          # Export Generated Build Identity
+          echo "suffix=$SUFFIX" >> "$GITHUB_OUTPUT"
+          # Display Final Build Identity
+          echo "└─ 🎉 Final Build Identity :"
+          echo "└─ $SUFFIX"
+          echo "└─ 🎉 Input Diagnostics Complete"
+ 
+      - name: 💼 Prepare Build Workspace
+        shell: bash
+        run: |
+          # Configure Git Identity
+          if ! git config --global user.name >/dev/null; then
+            git config --global user.name "AndreiMikh"
+          fi
+      
+          if ! git config --global user.email >/dev/null; then
+            git config --global user.email "andreimikhail0088@gmail.com"
+          fi
+
+          # Define Build Workspace Paths
+          WORKDIR="$GITHUB_WORKSPACE/work"
+          SOURCEDIR="$WORKDIR/src"
+          DEFCONFIG="$SOURCEDIR/arch/arm64/configs/gki_defconfig"
+          LABDIR="$WORKDIR/AndreiMikh-Kernel-Lab"
+          PATCHDIR="$LABDIR/patches"
+          LIBDIR="$LABDIR/lib"
+          OUTDIR="$GITHUB_WORKSPACE/out"
+          # Export Workspace Paths to Following Workflow Steps
+          {
+            echo "WORKDIR=$WORKDIR"
+            echo "SOURCEDIR=$SOURCEDIR"
+            echo "DEFCONFIG=$DEFCONFIG"
+            echo "LABDIR=$LABDIR"
+            echo "PATCHDIR=$PATCHDIR"
+            echo "LIBDIR=$LIBDIR"
+            echo "OUTDIR=$OUTDIR"
+          } >> "$GITHUB_ENV"
+          # Create Required Build Directories
+          echo "📁 Preparing Build Workspace..."
+          mkdir -p \
+            "$WORKDIR" \
+            "$GITHUB_WORKSPACE/.ccache" \
+            "$OUTDIR" \
+            "$GITHUB_WORKSPACE/pack"
+          # Prepare Compiler / GKI Directories
+          mkdir -p \
+            "$GITHUB_WORKSPACE/clang" \
+            "/tmp/gki"
+          # Prepare SUSFS and Additional Files Directories
+          mkdir -p \
+            "$GITHUB_WORKSPACE/susfs" \
+            "$GITHUB_WORKSPACE/extra-files"
+          # Display Kernel Lab Repository
+          echo "└─ 📂 Repository : $LABDIR"
+          ls -la "$LABDIR"
+          # Display Prepared Build Directories
+          echo "└─ 📂 Prepared Directories :"
+          printf '  ✔ %s\n' \
+            "$WORKDIR" \
+            "$SOURCEDIR" \
+            "$DEFCONFIG" \
+            "$LABDIR" \
+            "$GITHUB_WORKSPACE/.ccache" \
+            "$GITHUB_WORKSPACE/clang" \
+            "$OUTDIR" \
+            "$GITHUB_WORKSPACE/pack" \
+            "$GITHUB_WORKSPACE/susfs" \
+            "$GITHUB_WORKSPACE/extra-files" \
+            "/tmp/gki"
+          # Display Git Identity Configuration
+          echo "└─ 🔧 Git Identity :"
+          echo "└─ 📌 Name         : $(git config --global user.name)"
+          echo "└─ 📌 Email        : $(git config --global user.email)"
+          echo "└─ 🎉 Git Identity and Build Workspace Prepared Successfully"
+ 
+      - name: 📦 Install Build Dependencies
+        shell: bash
+        run: |
+          # Define Required APT Packages
+          export APTPACKAGES="zip zstd patch bc flex bison libssl-dev libncurses-dev libelf-dev libdw-dev dwarves python3 ccache mkbootimg"
+          # Define APT Packages Script
+          SCRIPT="${WORKDIR}/AndreiMikh-Kernel-Lab/scripts/APT-Packages.sh"
+          # Verify APT Packages Script
+          if [[ ! -f "$SCRIPT" ]]; then
+            echo "└─ ⚠️ APT Packages Script Not Found"
+            echo "└─ 📁 Expected Path : $SCRIPT"
+            exit 1
+          fi
+          # Make APT Packages Script Executable
+          chmod +x "$SCRIPT"
+          # Install Build Dependencies
+          echo "└─ 🚀 Running APT Packages Script..."
+          bash "$SCRIPT" "$HOME/.apt-pkg-cache"
+          # Clean APT Package Cache
+          echo "└─ 🧹 Cleaning APT Package Cache..."
+          sudo apt-get clean
+          sudo rm -rf /var/lib/apt/lists/*
+          echo "└─ 🎉 Build Dependencies Ready"
+ 
+      - name: 📦 Restore / Publish Clang Version 21.0.0
+        id: clang-release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          OWNERREPO: ${{ github.repository }}
+        run: |
+          # Define Clang Release Metadata
+          CLANGVERSION="r563880c"
+          CLANGARCHIVE="clang-${CLANGVERSION}.tar.gz"
+          CLANGRELEASE="AOSP-Clang-Cache"
+          CLANGDIR="$GITHUB_WORKSPACE/clang"
+          CLANGFILE="$GITHUB_WORKSPACE/$CLANGARCHIVE"
+          CLANGURL="https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/b5f16aee7b8af4c339972027e91e7e793c2e55d9/${CLANGARCHIVE}"
+          # Display Clang Release Information
+          echo "└─ 📌 Clang Revision : $CLANGVERSION"
+          echo "└─ 📌 Clang Archive  : $CLANGARCHIVE"
+          echo "└─ 📌 Release Tag    : $CLANGRELEASE"
+          # Prepare Clang Workspace
+          rm -rf "$CLANGDIR"
+          rm -f "$CLANGFILE"
+          mkdir -p "$CLANGDIR"
+          # Restore Existing Clang Archive From GitHub Release
+          if gh release view "$CLANGRELEASE" --repo "$OWNERREPO" >/dev/null 2>&1 &&
+             gh release download "$CLANGRELEASE" \
+               --repo "$OWNERREPO" \
+               --pattern "$CLANGARCHIVE" \
+               --dir "$GITHUB_WORKSPACE" >/dev/null 2>&1 &&
+             [[ -s "$CLANGFILE" ]] &&
+             tar -tzf "$CLANGFILE" >/dev/null 2>&1; then
+            echo "└─ 📥 Clang Archive Restored From GitHub Release"
+            echo "source=release" >> "$GITHUB_OUTPUT"
+          else
+            # Download Clang Archive From AOSP
+            echo "└─ 📥 Downloading Clang From AOSP..."
+            rm -f "$CLANGFILE"
+            curl \
+              -fL \
+              --retry 10 \
+              --retry-delay 5 \
+              --retry-all-errors \
+              --connect-timeout 30 \
+              --max-time 1800 \
+              "$CLANGURL" \
+              -o "$CLANGFILE"
+            # Validate Downloaded Clang Archive
+            if [[ ! -s "$CLANGFILE" ]] || ! tar -tzf "$CLANGFILE" >/dev/null 2>&1; then
+              echo "└─ ⚠️ Clang Archive Download or Validation Failed"
+              exit 1
+            fi
+
+            # Create Clang Release When Missing
+            if ! gh release view "$CLANGRELEASE" --repo "$OWNERREPO" >/dev/null 2>&1; then
+              gh release create "$CLANGRELEASE" \
+                --repo "$OWNERREPO" \
+                --title "AOSP Clang Cache" \
+                --notes "Cached AOSP Clang Toolchains for AndreiMikh Kernel Lab"
+            fi
+
+            # Check Whether Release Asset Already Exists
+            EXISTINGFILE="$GITHUB_WORKSPACE/existing-${CLANGARCHIVE}"
+            rm -f "$EXISTINGFILE"
+            if gh release download "$CLANGRELEASE" \
+                 --repo "$OWNERREPO" \
+                 --pattern "$CLANGARCHIVE" \
+                 --dir "$GITHUB_WORKSPACE" >/dev/null 2>&1; then
+              if [[ -s "$CLANGFILE" ]] && [[ -s "$EXISTINGFILE" ]] &&
+                 cmp -s "$CLANGFILE" "$EXISTINGFILE"; then
+                echo "└─ 📤 Clang Archive is Unchanged; Skipping Upload"
+              else
+                # Publish New Or Updated Clang Archive
+                gh release upload "$CLANGRELEASE" "$CLANGFILE" \
+                  --repo "$OWNERREPO" \
+                  --clobber
+                echo "└─ 📤 Clang Archive Published or Updated"
+              fi
+        
+            else
+              # Publish Missing Clang Archive
+              gh release upload "$CLANGRELEASE" "$CLANGFILE" \
+                --repo "$OWNERREPO"
+              echo "└─ 📤 Clang Archive Published to GitHub Release"
+            fi
+
+            # Cleanup Comparison Archive
+            rm -f "$EXISTINGFILE"
+            echo "source=aosp" >> "$GITHUB_OUTPUT"
+          fi
+
+          # Extract Clang Toolchain
+          echo "└─ 📦 Extracting Clang..."
+          tar -xzf "$CLANGFILE" -C "$CLANGDIR"
+          # Validate Clang Installation
+          if [[ ! -x "$CLANGDIR/bin/clang" ]]; then
+            echo "└─ ⚠️ Clang Executable Not Found After Extraction"
+            echo "└─ 📂 Clang Directory :"
+            ls -la "$CLANGDIR" || true
+            echo "└─ 📂 Clang/Bin       :"
+            ls -la "$CLANGDIR/bin" || true
+            exit 1
+          fi
+
+          # Remove Temporary Clang Archive
+          rm -f "$CLANGFILE"
+          # Display Successful Clang Installation
+          echo "└─ 🎉 AOSP Clang Ready"
+          "$CLANGDIR/bin/clang" --version
+   
+      - name: 🪛 Configure Clang Version 21.0.0
+        shell: bash
+        run: |
+          # Define Clang Toolchain Path
+          CLANGBIN="$GITHUB_WORKSPACE/clang/bin"
+          # Add Clang To GitHub Actions Path
+          echo "$CLANGBIN" >> "$GITHUB_PATH"
+          export PATH="$CLANGBIN:$PATH"
+          echo "└─ 🔧 Configuring LLVM Clang..."
+          echo "└─ 📂 Clang Path     : $CLANGBIN"
+          # Validate Clang Binary
+          if [ ! -x "$CLANGBIN/clang" ]; then
+            echo "└─ ⚠️ Clang Binary Not Found"
+            echo "└─ 📂 Expected     : $CLANGBIN/clang"
+            exit 1
+          fi
+          # Verify LLVM Clang
+          echo "└─ 🔎 Verifying LLVM Toolchain..."
+          echo "└─ 📌 Clang          :"
+          clang --version
+          # Verify LLVM LLD
+          echo "└─ 📌 LLD            :"
+          ld.lld --version
+          # Verify Clang LLD Resolution
+          echo "└─ 📌 Clang LLD Path :"
+          clang -print-prog-name=ld.lld
+          # Create GKI Certificate Stub
+          printf '%s\n' \
+            'def generate_gki_certificate(*args, **kwargs):' \
+            '    raise SystemExit("GKI SIGNING NOT SUPPORTED (STUB)")' \
+            > /tmp/gki/generate_gki_certificate.py
+          # Export Python Module Search Path
+          echo "PYTHONPATH=/tmp" >> "$GITHUB_ENV"
+          echo "└─ 📌 GKI Certificate Stub  :"
+          echo "/tmp/gki/generate_gki_certificate.py"
+          echo "└─ 📌 PYTHONPATH     :"
+          echo "└─ /tmp"
+          echo "└─ 🎉 Clang Configuration and Toolchain Verification Complete"    
+            
+      - name: 📥 Restore Public Compiler Cache
+        id: ccache-public
+        if: ${{ inputs.BUILDCCACHE }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          AOSPSOURCE: ${{ inputs.AOSPSOURCE }}
+        shell: bash
+        run: |
+          # Initialize Restore Status
+          echo "restored=false" >> "$GITHUB_OUTPUT"
+          case "$AOSPSOURCE" in
+            Lineage-24.0|Lineage-23.2)
+              AOSPSOURCEREPO="Lineage"
+              ;;
+            CrDroid-17.0|CrDroid-16.0)
+              AOSPSOURCEREPO="CrDroid"
+              ;;
+            *)
+              echo "└─ ⚠️ Unsupported AOSP Source : $AOSPSOURCE"
+              exit 1
+              ;;
+          esac
+          # Define Public Compiler Cache Release
+          ARCHIVE="CCache-SM8750-${AOSPSOURCE}.tar.zst"
+          RELEASE="CCache-SM8750-${AOSPSOURCEREPO}"
+          CACHEFILE="${RUNNER_TEMP}/${ARCHIVE}"
+          echo "└─ 📥 Public Compiler Cache Restore"
+          echo "└─ Repository : $GITHUB_REPOSITORY"
+          echo "└─ Release    : $RELEASE"
+          echo "└─ Asset      : $ARCHIVE"
+          echo "└─ Cache Dir  : $CCACHE_DIR"
+          echo "└─ Temp File  : $CACHEFILE"
+          # Verify Release And Asset
+          echo "└─ 🔎 Checking GitHub Release..."
+          if ! gh release view "$RELEASE" \
+            --repo "$GITHUB_REPOSITORY" \
+            --json assets \
+            --jq ".assets[].name" | grep -Fxq "$ARCHIVE"; then
+            echo "└─ ⚠️ Release Or Asset Not Found"
+            echo "└─ ℹ️ Continuing With Existing Compiler Cache"
+            exit 0
+          fi
+
+          echo "└─ 📌 Release Asset Found"
+          # Download Public Compiler Cache
+          echo "└─ ⬇️ Downloading Compiler Cache Asset..."
+          rm -f "$CACHEFILE"
+          if ! gh release download "$RELEASE" \
+            --repo "$GITHUB_REPOSITORY" \
+            --pattern "$ARCHIVE" \
+            --dir "$RUNNER_TEMP" \
+            --clobber; then
+            echo "└─ ⚠️ Download Failed"
+            rm -f "$CACHEFILE"
+            echo "└─ ℹ️ Continuing With Existing Compiler Cache"
+            exit 0
+          fi
+
+          # Validate Downloaded Archive
+          if [[ ! -s "$CACHEFILE" ]]; then
+            echo "└─ ⚠️ Downloaded Archive Missing Or Empty"
+            rm -f "$CACHEFILE"
+            exit 0
+          fi
+
+          echo "└─ 📌 Download Completed"
+          ls -lh "$CACHEFILE"
+          echo "└─ 📊 Archive Size: $(stat -c%s "$CACHEFILE") Bytes"
+          # Validate Zstandard Archive
+          echo "└─ 🔎 Validating Zstandard Archive..."
+          if ! zstd -t -q "$CACHEFILE"; then
+            echo "└─ ⚠️ Archive Validation Failed"
+            rm -f "$CACHEFILE"
+            exit 0
+          fi
+
+          echo "└─ 📌 Archive Validation Passed"
+          # Extract Compiler Cache
+          echo "└─ 📂 Extracting Compiler Cache..."
+          mkdir -p "$CCACHE_DIR"
+          if tar -I zstd -xf "$CACHEFILE" -C "$CCACHE_DIR"; then
+            rm -f "$CACHEFILE"
+            echo "└─ 📌 Extraction Completed"
+          else
+            rm -f "$CACHEFILE"
+            echo "└─ ⚠️ Failed To Extract Compiler Cache"
+            exit 1
+          fi
+
+          # Apply Compiler Cache Size Limit
+          echo "└─ ⚙️ Applying Cache Size Limit..."
+          ccache -M "${CCACHE_MAXSIZE:-2G}"
+          # Display Restored Compiler Cache
+          echo "└─ 📊 Restored Compiler Cache Status"
+          ccache -s
+          # Mark Restore as Successful
+          echo "restored=true" >> "$GITHUB_OUTPUT"
+          echo "└─ 🎉 Public Compiler Cache Restored Successfully"
+
+      - name: 💾 Restore Compiler Cache
+        id: ccache-restore
+        if: ${{ inputs.BUILDCCACHE && steps.ccache-public.outputs.restored != 'true' }}
+        uses: actions/cache@v6
+        with:
+          path: .ccache
+          # Rolling Exact Key
+          key: CCache-SM8750-${{ inputs.AOSPSOURCE }}-${{ runner.os }}-${{ runner.arch }}-${{ github.ref_name }}
+          # Restore Newest Compatible Cache
+          restore-keys: |
+            CCache-SM8750-${{ inputs.AOSPSOURCE }}-${{ runner.os }}-${{ runner.arch }}-${{ github.ref_name }}
+            CCache-SM8750-${{ inputs.AOSPSOURCE }}-${{ runner.os }}-${{ runner.arch }}-
+            CCache-SM8750-${{ inputs.AOSPSOURCE }}-${{ runner.os }}-
+            CCache-SM8750-${{ inputs.AOSPSOURCE }}-
+
+      - name: ⚙️ Configure Compiler Cache / ECS
+        if: ${{ inputs.BUILDCCACHE }}
+        shell: bash
+        run: |
+          # Configure Compiler Cache Environment
+          export CCACHE_DIR="${CCACHE_DIR:-${GITHUB_WORKSPACE}/.ccache}"
+          export CCACHE_MAXSIZE="${CCACHE_MAXSIZE:-2G}"
+          export CCACHE_COMPILERCHECK="${CCACHE_COMPILERCHECK:-content}"
+          export CCACHE_BASEDIR="${CCACHE_BASEDIR:-${GITHUB_WORKSPACE}}"
+          export CCACHE_NOHASHDIR="${CCACHE_NOHASHDIR:-true}"
+          export CCACHE_NOHARDLINK="${CCACHE_NOHARDLINK:-true}"
+          export CCACHE_IS_KERNEL_COMPILING="${CCACHE_IS_KERNEL_COMPILING:-1}"
+          # Install Custom Compiler Cache Binary When Available
+          if [[ -f "$LIBDIR/ccache-x86-64" ]]; then
+            echo "└─ 📦 Installing Custom Compiler Cache Binary..."
+            sudo install \
+              -m 0755 \
+              "$LIBDIR/ccache-x86-64" \
+              /usr/local/bin/ccache
+            echo "└─ 📌 Custom Compiler Cache Installed"
+          else
+            echo "└─ ℹ️ Custom Compiler Cache Binary Not Found"
+            echo "└─ 📌 Using System Compiler Cache"
+          fi
+       
+          # Configure Compiler Cache
+          ccache --set-config=compression=true
+          ccache --set-config=sloppiness=file_stat_matches,include_file_ctime,include_file_mtime,pch_defines,file_macro,time_macros
+          # Display Compiler Cache Configuration
+          echo "└─ 🔧 Compiler Cache Configuration"
+          echo "└─ 📂 Cache Directory  : $CCACHE_DIR"
+          echo "└─ 📦 Maximum Size     : $CCACHE_MAXSIZE"
+          echo "└─ 🗜️ Compression      : Enabled"
+          echo "└─ 🔍 Compiler Check   : $CCACHE_COMPILERCHECK"
+          echo "└─ 📍 Base Directory   : $CCACHE_BASEDIR"
+          echo "└─ 📁 Hash Directory   : Disabled"
+          echo "└─ 🔗 Hard Links       : Disabled"
+          echo "└─ ⚙️ Kernel Compiling : $CCACHE_IS_KERNEL_COMPILING"
+          echo "└─ 🔎 Compiler Cache Version"
+          ccache --version
+          echo "└─ 🔎 Compiler Cache Configuration"
+          ccache --show-config
+          # Display Restored Cache Before Statistics Reset
+          echo "└─ 📊 Compiler Cache Before Build"
+          ccache -s
+          # Reset Statistics Only
+          # Does Not Delete Cached Compiler Objects
+          ccache -z
+          echo "└─ 📊 Compiler Cache Statistics Reset"
+          ccache -s
+          echo "└─ 🎉 Compiler Cache Ready For Kernel Build"
+    
+      - name: 🐞 Upload Compiler Cache Debug Log
+        if: ${{ inputs.DEBUGBUILDCCACHE }}
+        uses: actions/upload-artifact@v6
+        with:
+          name: CCache-Debug-Log
+          path: ccache.log
+          if-no-files-found: ignore
+
+      - name: 🗂️ Setup Reject Checker
+        shell: bash
+        run: |
+          # Define Reject Checker
+          REJECTCHECKER="${WORKDIR}/AndreiMikh-Kernel-Lab/scripts/RejectChecker.sh"
+          # Validate Reject Checker
+          if [[ ! -f "$REJECTCHECKER" ]]; then
+            echo "└─ ⚠️ Reject Checker Not Found :"
+            echo "$REJECTCHECKER"
+            exit 1
+          fi
+       
+          # Make Reject Checker Executable
+          chmod +x "$REJECTCHECKER"
+          # Export Reject Checker Path
+          echo "REJECTCHECKER=$REJECTCHECKER" >> "$GITHUB_ENV"
+          # Display Reject Checker Information
+          echo "└─ 🔎 Reject Checker             : $REJECTCHECKER"
+          echo "└─ 🎉 Reject Checker Ready"
+ 
+      - name: 📂 Download AOSP Kernel Sources
+        if: ${{ inputs.AOSPSOURCE != '' }}
+        shell: bash
+        run: |
+          # Define Kernel Source
+          cd "$WORKDIR"
+          # Define Kernel Repository Base
+          KERNELBASE="${{ vars.KERNELSOURCE || 'https://github.com' }}"       
+          # AOSP Kernel Source
+          case "${{ inputs.AOSPSOURCE }}" in
+            Lineage-24.0)
+              KERNELORG="LineageOS"
+              KERNELBRANCH="lineage-24.0"
+              ;;
+            Lineage-23.2)
+              KERNELORG="LineageOS"
+              KERNELBRANCH="lineage-23.2"
+              ;;
+            CrDroid-17.0)
+              KERNELORG="crdroidandroid"
+              KERNELBRANCH="17.0"
+              ;;
+            CrDroid-16.0)
+              KERNELORG="crdroidandroid"
+              KERNELBRANCH="16.0"
+              ;;
+            *)
+              echo "└─ ⚠️ Unsupported AOSP Source : ${{ inputs.AOSPSOURCE }}"
+              exit 1
+              ;;
+          esac
+          # Kernel Repositories
+          KERNELMAINSRCREPO="android_kernel_oneplus_sm8750"
+          KERNELMODULESREPO="android_kernel_oneplus_sm8750-modules"
+          KERNELDEVICETREESREPO="android_kernel_oneplus_sm8750-devicetrees"          
+          # Display Kernel Source Information
+          echo "└─ 📥 Preparing Kernel Sources..."
+          echo "└─ 📂 Working Directory : $(pwd)"
+          echo "└─ 📦 Repository        : ${KERNELORG}/${KERNELMAINSRCREPO}"
+          echo "└─ 🌿 Branch            : ${KERNELBRANCH}"
+          # Source Commit
+          echo "🔎 Detecting Source Commit..."
+          FULLSRCCOMMIT="$(
+            git ls-remote \
+              "${KERNELBASE}/${KERNELORG}/${KERNELMAINSRCREPO}.git" \
+              "refs/heads/${KERNELBRANCH}" |
+            awk 'NR==1 {print $1}'
+          )"
+          # Validate Source Commit
+          if [ -z "$FULLSRCCOMMIT" ]; then
+            echo "└─ ⚠️ Failed to Detect Source Commit"
+            echo "└─ 📦 Repository      : ${KERNELORG}/${KERNELMAINSRCREPO}"
+            echo "└─ 🌿 Branch          : ${KERNELBRANCH}"
+            exit 1
+          fi
+        
+          # Define Short Source Commit
+          SRCCOMMIT="${FULLSRCCOMMIT:0:7}"          
+          echo "└─ 📌 Source Commit Detected"
+          echo "└─ 📌 Full Commit       : $FULLSRCCOMMIT"
+          echo "└─ 📌 Short Commit      : $SRCCOMMIT"
+          # Define Source Extraction Paths
+          KERNELMODULES="$WORKDIR/sm8750-modules"
+          KERNELDEVICETREES="$WORKDIR/sm8750-devicetrees"
+          # Clean Previous Source Directories
+          echo "└─ 🧹 Cleaning Previous Kernel Sources..."
+          rm -rf \
+            "$SOURCEDIR" \
+            "$KERNELMODULES" \
+            "$KERNELDEVICETREES"
+          # Remove Previous Download Archives
+          rm -f \
+            "$WORKDIR/kernelsrc.zip" \
+            "$WORKDIR/kernelmodules.zip" \
+            "$WORKDIR/kerneldevicetrees.zip"
+          # Download Kernel Source
+          echo "└─ 📥 Downloading Kernel Source..."
+          echo "└─ 📦 ${KERNELMAINSRCREPO}-${KERNELBRANCH}.zip"
+          curl \
+            -fL \
+            --retry 5 \
+            --retry-delay 3 \
+            --retry-all-errors \
+            --connect-timeout 30 \
+            --max-time 1800 \
+            "${KERNELBASE}/${KERNELORG}/${KERNELMAINSRCREPO}/archive/refs/heads/${KERNELBRANCH}.zip" \
+            -o "$WORKDIR/kernelsrc.zip"
+          # Download Kernel Modules
+          echo "└─ 📥 Downloading Kernel Modules..."
+          echo "└─ 📦 ${KERNELMODULESREPO}-${KERNELBRANCH}.zip"
+          curl \
+            -fL \
+            --retry 5 \
+            --retry-delay 3 \
+            --retry-all-errors \
+            --connect-timeout 30 \
+            --max-time 1800 \
+            "${KERNELBASE}/${KERNELORG}/${KERNELMODULESREPO}/archive/refs/heads/${KERNELBRANCH}.zip" \
+            -o "$WORKDIR/kernelmodules.zip"
+          # Download Device Trees
+          echo "└─ 📥 Downloading Device Trees..."
+          echo "└─ 📦 ${KERNELDEVICETREESREPO}-${KERNELBRANCH}.zip"
+          curl \
+            -fL \
+            --retry 5 \
+            --retry-delay 3 \
+            --retry-all-errors \
+            --connect-timeout 30 \
+            --max-time 1800 \
+            "${KERNELBASE}/${KERNELORG}/${KERNELDEVICETREESREPO}/archive/refs/heads/${KERNELBRANCH}.zip" \
+            -o "$WORKDIR/kerneldevicetrees.zip"
+          # Validate Downloaded Archives
+          echo "└─ 📦 Downloaded Archives :"
+          for archive in \
+            "$WORKDIR/kernelsrc.zip" \
+            "$WORKDIR/kernelmodules.zip" \
+            "$WORKDIR/kerneldevicetrees.zip"; do
+            if [[ ! -s "$archive" ]]; then
+              echo "└─ ⚠️ Invalid or Empty Archive :"
+              echo "└─ $archive"
+              exit 1
+            fi
+      
+            ls -lh "$archive"
+    
+          done
+       
+          # Extract Kernel Source
+          echo "└─ 📦 Extracting Kernel Source..."
+          unzip -q "$WORKDIR/kernelsrc.zip"
+          mv \
+            "${KERNELMAINSRCREPO}-${KERNELBRANCH}" \
+            "$SOURCEDIR"
+          # Extract Kernel Modules
+          echo "└─ 📦 Extracting Kernel Modules..."
+          unzip -q "$WORKDIR/kernelmodules.zip"
+          mv \
+            "${KERNELMODULESREPO}-${KERNELBRANCH}" \
+            "$KERNELMODULES"
+          # Extract Device Trees
+          echo "└─ 📦 Extracting Device Trees..."
+          unzip -q "$WORKDIR/kerneldevicetrees.zip"
+          mv \
+            "${KERNELDEVICETREESREPO}-${KERNELBRANCH}" \
+            "$KERNELDEVICETREES"
+          # Remove Download Archives
+          rm -f \
+            "$WORKDIR/kernelsrc.zip" \
+            "$WORKDIR/kernelmodules.zip" \
+            "$WORKDIR/kerneldevicetrees.zip"
+          # Display External Kernel Sources Paths
+          echo "└─ 📂 Kernel Source  : $SOURCEDIR"
+          echo "└─ 📂 Kernel Modules : $KERNELMODULES"
+          echo "└─ 📂 Device Trees   : $KERNELDEVICETREES"
+          # Export Kernel Source Variables
+          {
+            echo "SRCCOMMIT=$SRCCOMMIT"
+            echo "KERNELSRC=$SOURCEDIR"
+            echo "KERNELMODULES=$KERNELMODULES"
+            echo "KERNELDEVICETREES=$KERNELDEVICETREES"
+          } >> "$GITHUB_ENV"
+          # Validate Kernel Source
+          echo "└─ 🔍 Validating Kernel Source..."
+          if [[ ! -d "$SOURCEDIR" ]]; then
+            echo "└─ ⚠️ Kernel Source Directory Not Found"
+            echo "└─ 📂 $SOURCEDIR"
+            exit 1
+          fi
+        
+          if [[ ! -f "$SOURCEDIR/Makefile" ]]; then
+            echo "└─ ⚠️ Kernel Makefile Not Found"
+            echo "└─ 📌 $SOURCEDIR/Makefile"
+            exit 1
+          fi
+      
+          if [[ ! -d "$SOURCEDIR/arch/arm64" ]]; then
+            echo "└─ ⚠️ ARM64 Architecture Directory Not Found"
+            echo "└─ 📌 $SOURCEDIR/arch/arm64"
+            exit 1
+          fi
+         
+          if [[ ! -d "$SOURCEDIR/arch/arm64/boot/dts/vendor" ]]; then
+            echo "└─ ⚠️ Vendor Device Tree Directory Not Found"
+            echo "└─ 📌 $SOURCEDIR/arch/arm64/boot/dts/vendor"
+            exit 1
+          fi
+          
+          # Define KernelFwUpdate Kconfig Path
+          KERNELFWUPDATE="$SOURCEDIR/drivers/base/kernelFwUpdate/Kconfig"
+          if [[ ! -e "$KERNELFWUPDATE" ]]; then
+            echo "└─ ⚠️ KernelFwUpdate Kconfig Not Found"
+            echo "└─ 📌 $KERNELFWUPDATE"
+            exit 1
+          fi
+      
+          # Display Kernel Source Validation Results
+          echo "└─ 📌 Kernel Source Directory : Found"
+          echo "└─ 📌 Kernel Makefile         : Found"
+          echo "└─ 📌 ARM64 Architecture      : Found"
+          echo "└─ 📌 Vendor Device Trees     : Found"
+          echo "└─ 📌 KernelFwUpdate Kconfig  : Found"
+          echo "└─ 🚀 Kernel Source Validation Complete"
+          # Inspect Kernel Source Layout
+          echo "└─ 🔍 Inspecting Kernel Source..."
+          echo "└─ 📂 Kernel Source :"
+          find "$SOURCEDIR" \
+            -maxdepth 2 \
+            -type d |
+            sort
+          echo "└─ 📄 KernelFwUpdate Files :"
+          find "$SOURCEDIR" \
+            \( \
+              -iname 'Kconfig' \
+              -o -iname '*kernelFwUpdate*' \
+            \) \
+            -print
+          # Define SetLocalVersion Script
+          SETLOCALVERSION="$SOURCEDIR/scripts/setlocalversion"
+          # Remove Dirty Kernel Suffix
+          if [[ -f "$SETLOCALVERSION" ]]; then
+            echo "└─ 🧹 Removing -Dirty Kernel Suffix from Kernel Release..."
+            sed -i \
+              "s/printf '%s' -dirty/printf '%s' ''/g" \
+              "$SETLOCALVERSION"
+            echo "└─ 📌 Dirty Kernel Suffix Removal Applied"
+            echo "└─ 📂 $SETLOCALVERSION"
+          else
+            echo "└─ ⚠️ SetLocalVersion Not Found : $SETLOCALVERSION"
+          fi
+         
+          echo "└─ 🎉 Kernel Sources Prepared Successfully"
+   
+      - name: 🤖 Detect Kernel Version
+        id: kernelversion
+        shell: bash
+        run: |
+          # Define Kernel Makefile
+          KERNELMAKEFILE="$SOURCEDIR/Makefile"
+          echo "└─ 🔎 Detecting Kernel Version..."
+          echo "└─ 📂 Kernel Source : $SOURCEDIR"
+          # Validate Kernel Makefile
+          if [[ ! -f "$KERNELMAKEFILE" ]]; then
+            echo "└─ ⚠️ Kernel Makefile Not Found"
+            echo "└─ 📂 Expected : $KERNELMAKEFILE"
+            exit 1
+          fi
+          # Detect Kernel Module Branch
+          echo "└─ 🔍 Detecting Kernel Module Branch..."
+          KERNELMODULE=""
+          for cfg in \
+            "$SOURCEDIR/build.config.constants" \
+            "$SOURCEDIR/build.config.common"; do
+            if [[ -f "$cfg" ]]; then
+              echo "└─ 📄 Checking : $cfg"
+              TMPBRANCH=$(grep -m1 '^BRANCH=' "$cfg" | cut -d= -f2 || true)
+              if [[ -n "${TMPBRANCH:-}" ]]; then
+                KERNELMODULE="$TMPBRANCH"
+                break
+              fi
+            fi
+      
+          done
+      
+          # Validate Kernel Module Branch
+          if [[ -z "$KERNELMODULE" ]]; then
+            echo "└─ ⚠️ Kernel Module Branch Not Found"
+            echo "└─ 📂 Kernel Source : $SOURCEDIR"
+            echo "└─ 📌 Checked       :"
+            echo "└─    $SOURCEDIR/build.config.constants"
+            echo "└─    $SOURCEDIR/build.config.common"
+            exit 1
+          fi
+      
+          # Parse Kernel Module Information
+          ANDROIDVERSION="${KERNELMODULE%-*}"
+          KERNELVERSION="${KERNELMODULE#*-}"
+          echo "└─ 🚀 Kernel Module Detected"
+          echo "└─ 📌 Kernel Module   : $KERNELMODULE"
+          echo "└─ 📌 Android Version : $ANDROIDVERSION"
+          echo "└─ 📌 Kernel Branch   : $KERNELVERSION"
+          # Extract Kernel Version Components
+          VERSION=$(awk '
+            /^VERSION[[:space:]]*=/ {
+              print $3
+              exit
+            }
+          ' "$KERNELMAKEFILE")
+          PATCHLEVEL=$(awk '
+            /^PATCHLEVEL[[:space:]]*=/ {
+              print $3
+              exit
+            }
+          ' "$KERNELMAKEFILE")
+          SUBLEVEL=$(awk '
+            /^SUBLEVEL[[:space:]]*=/ {
+              print $3
+              exit
+            }
+          ' "$KERNELMAKEFILE")
+          EXTRAVERSION=$(awk '
+            /^EXTRAVERSION[[:space:]]*=/ {
+              print $3
+              exit
+            }
+          ' "$KERNELMAKEFILE")
+          # Apply Version Defaults
+          VERSION="${VERSION:-0}"
+          PATCHLEVEL="${PATCHLEVEL:-0}"
+          SUBLEVEL="${SUBLEVEL:-0}"
+          EXTRAVERSION="${EXTRAVERSION:-}"
+          # Validate Version Components
+          if ! [[ "$VERSION" =~ ^[0-9]+$ ]]; then
+            echo "└─ ⚠️ Invalid Version : $VERSION"
+            exit 1
+          fi
+         
+          if ! [[ "$PATCHLEVEL" =~ ^[0-9]+$ ]]; then
+            echo "└─ ⚠️ Invalid Patchlevel : $PATCHLEVEL"
+            exit 1
+          fi
+   
+          if ! [[ "$SUBLEVEL" =~ ^[0-9]+$ ]]; then
+            echo "└─ ⚠️ Invalid Sublevel : $SUBLEVEL"
+            exit 1
+          fi
+       
+          # Build Kernel Version Identifiers
+          FULLVERSION="${VERSION}.${PATCHLEVEL}.${SUBLEVEL}${EXTRAVERSION}"
+          KSHORTVERSION="${VERSION}.${PATCHLEVEL}"
+          KSHORTPATCHVERSION="${VERSION}_${PATCHLEVEL}"
+          KV1="$VERSION"
+          KV2="${VERSION}${PATCHLEVEL}"
+          KV3="${VERSION}${PATCHLEVEL}${SUBLEVEL}"
+          # Display Detected Kernel Version
+          echo "└─ 🚀 Kernel Version Detected"
+          echo "└─ 📌 Version       : $VERSION"
+          echo "└─ 📌 Patchlevel    : $PATCHLEVEL"
+          echo "└─ 📌 Sublevel      : $SUBLEVEL"
+          echo "└─ 📌 Extra Version : ${EXTRAVERSION:-None}"
+          echo "└─ 📌 Full Version  : $FULLVERSION"          
+          echo "└─ 📌 KV1           : $KV1"
+          echo "└─ 📌 KV2           : $KV2"
+          echo "└─ 📌 KV3           : $KV3"         
+          echo "└─ 📌 Short Version : $KSHORTVERSION"
+          echo "└─ 📌 Patch Version : $KSHORTPATCHVERSION"     
+          echo "└─ 📌 Android Base  : $ANDROIDVERSION"
+          echo "└─ 📌 Kernel Base   : $KERNELVERSION"
+          echo "└─ 📌 Kernel Module : $KERNELMODULE"
+          # Export Kernel Version Variables
+          {
+            echo "VERSION=$VERSION"
+            echo "PATCHLEVEL=$PATCHLEVEL"
+            echo "SUBLEVEL=$SUBLEVEL"
+            echo "EXTRAVERSION=$EXTRAVERSION"
+            echo "FULLVERSION=$FULLVERSION"
+            echo "KV1=$KV1"
+            echo "KV2=$KV2"
+            echo "KV3=$KV3"
+            echo "KSHORTVERSION=$KSHORTVERSION"
+            echo "KSHORTPATCHVERSION=$KSHORTPATCHVERSION"
+            echo "KERNELMODULE=$KERNELMODULE"
+            echo "ANDROIDVERSION=$ANDROIDVERSION"
+            echo "KERNELVERSION=$KERNELVERSION"
+          } >> "$GITHUB_ENV"
+          # Export Kernel Version Outputs
+          {
+            echo "version=$VERSION"
+            echo "patchlevel=$PATCHLEVEL"
+            echo "sublevel=$SUBLEVEL"
+            echo "extraversion=$EXTRAVERSION"
+            echo "fullversion=$FULLVERSION"
+            echo "kv1=$KV1"
+            echo "kv2=$KV2"
+            echo "kv3=$KV3"
+            echo "shortversion=$KSHORTVERSION"
+            echo "shortpatchversion=$KSHORTPATCHVERSION"
+            echo "kernelmodule=$KERNELMODULE"
+            echo "androidversion=$ANDROIDVERSION"
+            echo "kernelversion=$KERNELVERSION"
+          } >> "$GITHUB_OUTPUT"
+          echo "└─ 🎉 Kernel Version Detection Complete" 
+   
+      - name: 🆘 Solve Root Engine Source
+        id: manager
+        if: ${{ inputs.ROOTENGINE != 'None' }}
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ROOTENGINE: ${{ inputs.ROOTENGINE }}
+          ROOTCOMMIT: ${{ inputs.ROOTCOMMIT }}
+        run: |
+          MANAGERBRANCH=""
+          BRANCHPATH=""
+          MANAGERARTIFACT=""
+          KSUREPO=""
+          VERSIONREPO=""
+          VERSIONBRANCH=""
+          VERSIONOFFSET=""
+          # Resolve Root Engine
+          case "$ROOTENGINE" in
+            BakaSU)
+              KSUREPO="Baka-SU/BakaSU"
+              MANAGERBRANCH="main"
+              MANAGERARTIFACT="Manager-release"
+              VERSIONOFFSET=30700
+              VERSIONREPO="$KSUREPO"
+              VERSIONBRANCH="$MANAGERBRANCH"
+              ;;
+            SukiSU-Ultra)
+              KSUREPO="SukiSU-Ultra/SukiSU-Ultra"
+              MANAGERBRANCH="main"
+              BRANCHPATH="builtin"
+              MANAGERARTIFACT="manager"
+              VERSIONOFFSET=37185
+              VERSIONREPO="$KSUREPO"
+              VERSIONBRANCH="$MANAGERBRANCH"
+              ;;
+            KernelSU-Next)
+              KSUREPO="pershoot/KernelSU-Next"
+              MANAGERBRANCH="dev"
+              BRANCHPATH="dev-susfs"
+              MANAGERARTIFACT="manager"
+              VERSIONOFFSET=30000
+              VERSIONREPO="KernelSU-Next/KernelSU-Next"
+              VERSIONBRANCH="$MANAGERBRANCH"
+              ;;
+            *)
+              echo "└─ ⚠️ Unsupported Root Engine: $ROOTENGINE"
+              exit 1
+              ;;
+          esac
+          # Resolve Setup Branch
+          ROOTSOURCEBRANCH="${BRANCHPATH:-$MANAGERBRANCH}"
+          # Resolve Exact Root Engine Commit
+          if [[ -n "$ROOTCOMMIT" ]]; then
+            if [[ ! "$ROOTCOMMIT" =~ ^[a-fA-F0-9]{7,40}$ ]]; then
+              echo "└─ ⚠️ Invalid Root Engine Commit: $ROOTCOMMIT"
+              exit 1
+            fi
+   
+            ROOTCOMMITFULL="$(
+              gh api "repos/${KSUREPO}/commits/${ROOTCOMMIT}" --jq '.sha'
+            )" || {
+              echo "└─ ⚠️ Failed to Resolve Root Engine Commit"
+              exit 1
+            }
+            BRANCHSTATUS="$(
+              gh api \
+                "repos/${KSUREPO}/compare/${ROOTSOURCEBRANCH}...${ROOTCOMMITFULL}" \
+                --jq '.status'
+            )" || {
+              echo "└─ ⚠️ Failed to Validate Commit Against Setup Branch"
+              exit 1
+            }      
+            if [[ "$BRANCHSTATUS" != "identical" &&
+                  "$BRANCHSTATUS" != "behind" &&
+                  "$BRANCHSTATUS" != "ahead" ]]; then
+              echo "└─ ⚠️ Commit Does Not Belong to the Selected Setup Branch"
+              exit 1
+            fi
+         
+            if [[ "${ROOTCOMMITFULL:0:7}" != "${ROOTCOMMIT:0:7}" ]]; then
+              echo "└─ ⚠️ Resolved Commit Does Not Match Requested Commit"
+              exit 1
+            fi
+        
+          else
+            ROOTCOMMITFULL="$(
+              gh api \
+                "repos/${KSUREPO}/commits/${ROOTSOURCEBRANCH}" \
+                --jq '.sha'
+            )" || {
+              echo "└─ ⚠️ Failed to Resolve Latest Root Engine Commit"
+              exit 1
+            }
+          fi
+      
+          [[ "$ROOTCOMMITFULL" =~ ^[a-fA-F0-9]{40}$ ]] || {
+            echo "└─ ⚠️ Invalid Resolved Commit : $ROOTCOMMITFULL"
+            exit 1
+          }
+          ROOTCOMMITSHORT="${ROOTCOMMITFULL:0:7}"
+          # Resolve Version Commit Count
+          if [[ "$ROOTENGINE" == "KernelSU-Next" ]]; then
+            VERSIONREF="$VERSIONBRANCH"
+          else
+            VERSIONREF="$ROOTCOMMITFULL"
+          fi
+
+          VERSIONDATA="$(
+            gh api graphql \
+              -f query='
+                query($owner: String!, $repo: String!, $expression: String!) {
+                  repository(owner: $owner, name: $repo) {
+                    object(expression: $expression) {
+                      ... on Commit {
+                        oid
+                        history(first: 1) {
+                          totalCount
+                        }
+                      }
+                    }
+                  }
+                }
+              ' \
+              -F owner="${VERSIONREPO%%/*}" \
+              -F repo="${VERSIONREPO#*/}" \
+              -F expression="$VERSIONREF"
+          )" || {
+            echo "└─ ⚠️ Failed to Resolve Root Engine Version"
+            exit 1
+          }
+          jq -e '
+            (.errors == null) and
+            (.data.repository.object.oid | type == "string") and
+            (.data.repository.object.history.totalCount | type == "number")
+          ' >/dev/null <<< "$VERSIONDATA" || {
+            echo "└─ ⚠️ Invalid Root Engine Version Response"
+            jq -r '.errors[]?.message' <<< "$VERSIONDATA" || true
+            exit 1
+          }
+          VERSIONCOMMIT="$(
+            jq -r '.data.repository.object.oid' <<< "$VERSIONDATA"
+          )"
+          COMMITCOUNT="$(
+            jq -r '.data.repository.object.history.totalCount' <<< "$VERSIONDATA"
+          )"
+          if [[ "$ROOTENGINE" != "KernelSU-Next" &&
+                "${VERSIONCOMMIT,,}" != "${ROOTCOMMITFULL,,}" ]]; then
+            echo "└─ ⚠️ Version Commit Does Not Match Selected Commit"
+            exit 1
+          fi
+
+          KSUVERSION=$((COMMITCOUNT + VERSIONOFFSET))
+          # Resolve Latest Manager Tag
+          MANAGERTAG="$(
+            gh api "repos/${KSUREPO}/git/matching-refs/tags/" \
+              --paginate \
+              --jq '.[].ref | sub("^refs/tags/"; "")' |
+              sort -V |
+              tail -n 1
+          )" || true
+          # Export Root Engine Metadata
+          {
+            echo "managerbranch=$MANAGERBRANCH"
+            echo "branchpath=$BRANCHPATH"
+            echo "managerartifact=$MANAGERARTIFACT"
+            echo "ksurepo=$KSUREPO"
+            echo "rootcommitfull=$ROOTCOMMITFULL"
+            echo "rootcommit=$ROOTCOMMITSHORT"
+            echo "ksuversion=$KSUVERSION"
+            echo "managertag=$MANAGERTAG"
+          } >> "$GITHUB_OUTPUT"
+          echo "------------------------------"
+          echo "└─ 📌 Root Engine Source Resolved"
+          echo "└─ 📦 Engine        : $ROOTENGINE"
+          echo "└─ 📂 Repository    : $KSUREPO"
+          echo "└─ 🌿 Branch        : $MANAGERBRANCH"
+          echo "└─ 📁 Setup Path    : ${BRANCHPATH:-None}"
+          echo "└─ 📦 Artifact      : $MANAGERARTIFACT"
+          echo "└─ 🔖 Commit        : $ROOTCOMMITSHORT"
+          echo "└─ 🔢 KSU Version   : $KSUVERSION"
+          echo "└─ 🏷️ Manager Tag   : ${MANAGERTAG:-None}"
+          echo "------------------------------"
+
+      - name: 🏍️ Configure Root Engine
+        id: rootengine
+        if: ${{ inputs.ROOTENGINE != 'None' }}
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          SOURCEDIR: ${{ env.SOURCEDIR }}
+          ROOTENGINE: ${{ inputs.ROOTENGINE }}
+          ROOTCOMMIT: ${{ steps.manager.outputs.rootcommitfull }}
+          ROOTCOMMITSHORT: ${{ steps.manager.outputs.rootcommit }}
+          KSUREPO: ${{ steps.manager.outputs.ksurepo }}
+          MANAGERBRANCH: ${{ steps.manager.outputs.managerbranch }}
+          BRANCHPATH: ${{ steps.manager.outputs.branchpath }}
+          KSUVERSION: ${{ steps.manager.outputs.ksuversion }}
+          MANAGERTAG: ${{ steps.manager.outputs.managertag }}
+          SUSFS: ${{ inputs.SUSFSENGINE }}
+        run: |
+          cd "$SOURCEDIR"
+          # Validate Resolved Metadata
+          [[ "$ROOTCOMMIT" =~ ^[a-fA-F0-9]{40}$ ]] || {
+            echo "└─ ⚠️ Invalid Root Engine Commit"
+            exit 1
+          }
+          [[ "$KSUVERSION" =~ ^[0-9]+$ ]] || {
+            echo "└─ ⚠️ Invalid Root Engine Version"
+            exit 1
+          }
+          # Resolve Engine Setup Parameters
+          case "$ROOTENGINE" in
+            BakaSU)
+              ROOTDIR="$SOURCEDIR/KernelSU"
+              SETUPBRANCH="$MANAGERBRANCH"
+              SETUPARGUMENT="$MANAGERBRANCH"
+              ;;
+            SukiSU-Ultra)
+              ROOTDIR="$SOURCEDIR/KernelSU"
+              SETUPBRANCH="$MANAGERBRANCH"
+              SETUPARGUMENT="$BRANCHPATH"
+              ;;
+            KernelSU-Next)
+              ROOTDIR="$SOURCEDIR/KernelSU-Next"
+              SETUPBRANCH="$BRANCHPATH"
+              SETUPARGUMENT="$BRANCHPATH"
+              ;;
+            *)
+              echo "└─ ⚠️ Unsupported Root Engine : $ROOTENGINE"
+              exit 1
+              ;;
+          esac
+          # Download and Execute Setup Script From Exact Commit
+          setupengine() {
+            local repo="$1"
+            local branch="$2"
+            local argument="$3"
+            local commit="$4"
+            local tempdir
+            local setupscript
+            tempdir="$(mktemp -d)"
+            setupscript="$tempdir/setup.sh"
+            echo "└─ 🔗 Setup Repository : $repo"
+            echo "└─ 🌿 Setup Branch     : $branch"
+            echo "└─ 📌 Setup Argument   : ${argument:-None}"
+            echo "└─ 🔖 Setup Commit     : $commit"
+            curl -fsSL --retry 3 --retry-all-errors \
+              "https://raw.githubusercontent.com/${repo}/${commit}/kernel/setup.sh" \
+              -o "$setupscript" || {
+                rm -rf "$tempdir"
+                echo "└─ ⚠️ Failed to Download Setup Script"
+                return 1
+              }
+            [[ -s "$setupscript" ]] || {
+              rm -rf "$tempdir"
+              echo "└─ ⚠️ Setup Script is Empty"
+              return 1
+            }
+            if [[ -n "$argument" ]]; then
+              bash "$setupscript" "$argument" || {
+                rm -rf "$tempdir"
+                return 1
+              }
+            else
+              bash "$setupscript" || {
+                rm -rf "$tempdir"
+                return 1
+              }
+            fi
+      
+            rm -rf "$tempdir"
+          }
+          # Install Exact Source While Preserving Git Metadata
+          checkoutrootcommit() {
+            local dir="$1"
+            local commit="$2"
+            local actual=""
+            local tempdir=""
+            [[ -d "$dir" ]] || {
+              echo "└─ ⚠️ Root Engine Directory Not Found : $dir"
+              return 1
+            }
+            actual="$(
+              curl -fsSL --retry 3 --retry-all-errors \
+                -H "Accept: application/vnd.github+json" \
+                -H "Authorization: Bearer $GITHUB_TOKEN" \
+                "https://api.github.com/repos/${KSUREPO}/commits/${commit}" |
+                jq -er '.sha'
+            )" || {
+              echo "└─ ⚠️ Failed to Verify Remote Commit"
+              return 1
+            }
+            [[ "${actual,,}" == "${commit,,}" ]] || {
+              echo "└─ ⚠️ Remote Commit Verification Failed"
+              return 1
+            }
+            tempdir="$(mktemp -d)"
+            curl -fsSL --retry 3 --retry-all-errors \
+              -H "Accept: application/vnd.github+json" \
+              -H "Authorization: Bearer $GITHUB_TOKEN" \
+              "https://api.github.com/repos/${KSUREPO}/tarball/${commit}" \
+              -o "$tempdir/source.tar.gz" || {
+                rm -rf "$tempdir"
+                echo "└─ ⚠️ Failed to Download Exact Source"
+                return 1
+              }
+            mkdir -p "$tempdir/extracted"
+            tar -xzf "$tempdir/source.tar.gz" \
+              -C "$tempdir/extracted" \
+              --strip-components=1 || {
+                rm -rf "$tempdir"
+                echo "└─ ⚠️ Failed to Extract Source"
+                return 1
+              }
+            [[ -f "$tempdir/extracted/Kbuild" ||
+               -f "$tempdir/extracted/kernel/Kbuild" ]] || {
+              rm -rf "$tempdir"
+              echo "└─ ⚠️ Unexpected Root Engine Source Layout"
+              return 1
+            }
+            find "$dir" -mindepth 1 -maxdepth 1 \
+              ! -name ".git" -exec rm -rf -- {} + || {
+                rm -rf "$tempdir"
+                echo "└─ ⚠️ Failed to Clean Existing Source"
+                return 1
+              }
+            cp -a "$tempdir/extracted/." "$dir/" || {
+              rm -rf "$tempdir"
+              echo "└─ ⚠️ Failed to Install Exact Source"
+              return 1
+            }
+            rm -rf "$tempdir"
+            [[ -f "$dir/Kbuild" || -f "$dir/kernel/Kbuild" ]] || {
+              echo "└─ ⚠️ Installed Root Engine Source Is Invalid"
+              return 1
+            }
+            echo "└─ 📌 Exact Source Installed : $commit"
+          }
+          # Configure Root Engine Version Metadata
+          recordrootversion() {
+            {
+              echo "KSUVERSION=$KSUVERSION"
+              echo "KSUVER=$KSUVERSION"
+              echo "GITCOMMITHASH=$ROOTCOMMITSHORT"
+            } >> "$GITHUB_ENV"
+            echo "└─ 🔖 Commit      : $ROOTCOMMITSHORT"
+            echo "└─ 🏷️ Manager Tag : ${MANAGERTAG:-None}"
+            echo "└─ 🔢 KSU Version : $KSUVERSION"
+          }
+          # Configure Version Fallback When Supported
+          configureksuversionfallback() {
+            if [[ -f kernel/Kbuild ]] &&
+               grep -q '^KSU_VERSION_FALLBACK := ' kernel/Kbuild; then
+              sed -i \
+                "s/^KSU_VERSION_FALLBACK := .*/KSU_VERSION_FALLBACK := $KSUVERSION/" \
+                kernel/Kbuild
+              echo "└─ 📌 KSU Version Fallback : $KSUVERSION"
+            fi    
+          }
+          # Install Selected Root Engine
+          echo "└─ 🚀 Setting Up $ROOTENGINE..."
+          setupengine \
+            "$KSUREPO" "$SETUPBRANCH" \
+            "$SETUPARGUMENT" "$ROOTCOMMIT"
+          checkoutrootcommit "$ROOTDIR" "$ROOTCOMMIT"
+          cd "$ROOTDIR"
+          recordrootversion
+          configureksuversionfallback
+          # Configure Engine-Specific Configuration Options
+          echo "CONFIG_KSU=y" >> "$DEFCONFIG"
+          echo "└─ 📌 KernelSU Configuration Enabled"
+          case "$ROOTENGINE" in
+            KernelSU-Next)
+              if [[ "$SUSFS" != "-1" &&
+                    -f kernel/supercall/dispatch.c ]]; then
+                perl -0777 -i -pe '
+                  s/#ifdef CONFIG_HAVE_SYSCALL_TRACEPOINTS.*?#endif/
+                  strscpy(cmd.mode, "Inline", sizeof(cmd.mode));
+                  /s
+                ' kernel/supercall/dispatch.c
+                echo "└─ 📌 SUSFS Hook Mode Set to Inline"
+              fi
+              ;;
+            BakaSU)
+              if [[ -n "${DEFCONFIG:-}" && -f "$DEFCONFIG" ]]; then
+                sed -i '/^CONFIG_KSU_FULL_NAME_FORMAT=/d' "$DEFCONFIG"
+                printf 'CONFIG_KSU_FULL_NAME_FORMAT="%%TAG_NAME%%"\n' \
+                  >> "$DEFCONFIG"
+                {
+                  echo "CONFIG_KSU_MULTI_MANAGER_SUPPORT=y"
+                  echo "CONFIG_KSU_TOOLKIT_SUPPORT=y"
+                } >> "$DEFCONFIG"
+                echo "└─ 📌 BakaSU Multi-Manager Support Configuration Enabled"
+                echo "└─ 📌 BakaSU Toolkit Support Configuration Enabled"
+              else
+                echo "⚠️ BakaSU: Default Configuration is Missing or Does Not Exist"
+              fi
+              ;;
+          esac      
+          # Export Root Engine Outputs
+          {
+            echo "ksuversion=$KSUVERSION"
+            echo "managertag=$MANAGERTAG"
+            echo "rootcommit=$ROOTCOMMITSHORT"
+            echo "rootcommitfull=$ROOTCOMMIT"
+          } >> "$GITHUB_OUTPUT"
+          echo "------------------------------"
+          echo "└─ 🎉 Root Engine Configuration Complete"
+          echo "└─ 📦 Engine      : $ROOTENGINE"
+          echo "└─ 📂 Repository  : $KSUREPO"
+          echo "└─ 🔖 Commit      : $ROOTCOMMITSHORT"
+          echo "└─ 🔢 KSU Version : $KSUVERSION"
+          echo "------------------------------"
+    
+      - name: 📲 SUSFS Integration
+        if: ${{ inputs.ROOTENGINE != 'None' && inputs.SUSFSENGINE }}
+        shell: bash
+        run: |
+          # Define SUSFS Paths
+          SUSFSKERNEL="${WORKDIR}/susfs"
+          SUSFSREPO="https://gitlab.com/simonpunk/susfs4ksu.git"
+          SUSFSMIRROR="https://github.com/AndreiMikh/susfs4ksu.git"
+          # Resolve SUSFS Branch
+          SUSFSBRANCH="gki-${ANDROIDVERSION}-${KERNELVERSION}"
+          SUSFS50PATCH="${SUSFSKERNEL}/kernel_patches/50_add_susfs_in_${SUSFSBRANCH}.patch"
+          # Display SUSFS Configuration
+          echo "└─ 🔧 SUSFS Integration"
+          echo "└─ 📌 Kernel Module    : ${KERNELMODULE}"
+          echo "└─ 📌 Android Version  : ${ANDROIDVERSION}"
+          echo "└─ 📌 Kernel Version   : ${KERNELVERSION}"
+          echo "└─ 📌 SUSFS Repository : ${SUSFSREPO}"
+          echo "└─ 📌 SUSFS Branch     : ${SUSFSBRANCH}"
+          echo "└─ 📌 Kernel Source    : ${SOURCEDIR}"
+          # Clone SUSFS with Retry and GitHub Mirror Fallback
+          echo "└─ 📥 Cloning SUSFS..."
+          rm -rf "${SUSFSKERNEL}"
+          SUSFSCLONED=false
+          for attempt in {1..5}; do
+            if git clone \
+              --depth 1 \
+              --branch "${SUSFSBRANCH}" \
+              "${SUSFSREPO}" \
+              "${SUSFSKERNEL}"; then
+              echo "└─ 📌 SUSFS Cloned Successfully From GitLab"
+              SUSFSCLONED=true
+              break
+            fi
+      
+            rm -rf "${SUSFSKERNEL}"
+            if [[ "$attempt" -lt 5 ]]; then
+              echo "└─ ⚠️ GitLab Clone Failed (Attempt ${attempt}/5)"
+              sleep $((attempt * 10))
+            fi
+     
+          done
+    
+          if [[ "${SUSFSCLONED}" != "true" ]]; then
+            echo "└─ ⚠️ GitLab Unavailable, Trying GitHub Mirror..."
+            if git clone \
+              --depth 1 \
+              --branch "${SUSFSBRANCH}" \
+              "${SUSFSMIRROR}" \
+              "${SUSFSKERNEL}"; then
+              echo "└─ 📌 SUSFS Cloned Successfully From GitHub Mirror"
+              SUSFSCLONED=true
+            fi
+          fi
+     
+          if [[ "${SUSFSCLONED}" != "true" ]]; then
+            echo "└─ ⚠️ Failed to Clone SUSFS From GitLab and GitHub"
+            echo "└─ 📌 Branch        : ${SUSFSBRANCH}"
+            echo "└─ 📌 GitLab        : ${SUSFSREPO}"
+            echo "└─ 📌 GitHub Mirror : ${SUSFSMIRROR}"
+            exit 1
+          fi
+      
+          # Resolve SUSFS Commit
+          SUSFSCOMMIT="$(git -C "${SUSFSKERNEL}" rev-parse HEAD 2>/dev/null || echo Unknown)"
+          SUSFSSHORT="$(git -C "${SUSFSKERNEL}" rev-parse --short HEAD 2>/dev/null || echo Unknown)"
+          echo "└─ 📌 SUSFS Commit   : ${SUSFSSHORT}"
+          echo "└─ 📌 SUSFS Revision : ${SUSFSCOMMIT}"
+          # Define SUSFS Source Paths
+          SUSFSDIR="${SUSFSKERNEL}/kernel_patches"
+          SUSFSFS="${SUSFSDIR}/fs"
+          SUSFSINCLUDE="${SUSFSDIR}/include/linux"
+          # Validate SUSFS Source Layout and Patch
+          echo "└─ 🔎 Checking SUSFS Source Layout..."
+          if [[ ! -d "${SUSFSFS}" ]]; then
+            echo "└─ ⚠️ SUSFS FS Directory Was Not Found"
+            echo "└─ 📂 Creating : ${SUSFSFS}"
+            mkdir -p "${SUSFSFS}"
+          fi
+   
+          if [[ ! -d "${SUSFSINCLUDE}" ]]; then
+            echo "└─ ⚠️ SUSFS Include/Linux Directory Was Not Found"
+            echo "└─ 📂 Creating : ${SUSFSINCLUDE}"
+            mkdir -p "${SUSFSINCLUDE}"
+          fi
+    
+          echo "└─ 📌 SUSFS Source Layout Verified"
+          if [[ ! -f "${SUSFS50PATCH}" ]]; then
+            echo "└─ ⚠️ SUSFS 50 Patch Was Not Found :"
+            echo "${SUSFS50PATCH}"
+            exit 1
+          fi
+     
+          echo "└─ 📌 SUSFS Source Patch Found"
+          echo "└─ 📌 SUSFS FS      : ${SUSFSFS}"
+          echo "└─ 📌 SUSFS Headers : ${SUSFSINCLUDE}"
+          echo "└─ 📌 SUSFS Patch   : ${SUSFS50PATCH}"
+          # Copy SUSFS Files
+          echo "└─ 📥 Copying SUSFS Files..."
+          cp -r "${SUSFSFS}/"* "${SOURCEDIR}/fs/" || {
+            echo "└─ ⚠️ Failed to Copy SUSFS FS Files"
+            exit 1
+          }
+          cp -r "${SUSFSINCLUDE}/"* "${SOURCEDIR}/include/linux/" || {
+            echo "└─ ⚠️ Failed to Copy SUSFS Linux Headers"
+            exit 1
+          }
+          echo "└─ 📌 SUSFS Files Copied"
+          # Copy SUSFS Patch
+          echo "└─ 📥 Copying SUSFS 50 Patch..."
+          cp "${SUSFS50PATCH}" "${SOURCEDIR}/" || {
+            echo "└─ ⚠️ Failed to Copy SUSFS 50 Patch"
+            exit 1
+          }
+          echo "└─ 📌 SUSFS 50 Patch Copied"
+          # Apply SUSFS 50 Patch
+          echo "└─ 🔧 Applying SUSFS 50 Patch..."
+          cd "$SOURCEDIR"
+          if patch \
+            -p1 \
+            -F3 \
+            --batch \
+            -f \
+            < "${SUSFS50PATCH}"; then
+            echo "└─ 📌 SUSFS 50 Patch Applied Successfully"
+          else
+            echo "└─ ⚠️ SUSFS 50 Patch Failed"
+            echo "└─ 📌 SUSFS Commit : ${SUSFSSHORT}"
+            echo "└─ 📌 Patch        : ${SUSFS50PATCH}"
+            exit 1
+          fi
+       
+          # Load Reject Checker
+          source "$REJECTCHECKER"
+          checkrejects .
+          # Configure SUSFS Kernel Configuration Options
+          {
+            echo "CONFIG_KSU_SUSFS=y"
+            echo "CONFIG_KSU_SUSFS_SUS_PATH=y"
+            echo "CONFIG_KSU_SUSFS_SUS_MOUNT=y"
+            echo "CONFIG_KSU_SUSFS_SUS_KSTAT=y"
+            echo "CONFIG_KSU_SUSFS_SPOOF_UNAME=y"
+            echo "CONFIG_KSU_SUSFS_ENABLE_LOG=y"
+            echo "CONFIG_KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS=y"
+            echo "CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG=y"
+            echo "CONFIG_KSU_SUSFS_SUS_MAP=y"
+            echo "CONFIG_KSU_SUSFS_OPEN_REDIRECT=y"
+          } >> "$DEFCONFIG"
+          echo "└─ 📌 SUSFS Kernel Configuration Enabled"
+          # Display SUSFS Result
+          echo "└─ 🎉 SUSFS Integration Complete"
+          echo "└─ 📌 Kernel Module : ${KERNELMODULE}"
+          echo "└─ 📌 SUSFS Branch  : ${SUSFSBRANCH}"
+          echo "└─ 📌 SUSFS Commit  : ${SUSFSSHORT}"
+          echo "└─ 📌 SUSFS Source  : ${SUSFSKERNEL}"
+          echo "└─ 📌 SUSFS Patch   : ${SUSFS50PATCH}"
+   
+      - name: ⚡ Optimize LZ4 with ARM64 NEON
+        if: ${{ inputs.NEONLZ4UPDATE }}
+        shell: bash
+        run: |
+          # Define LZ4 Patch Type and Paths
+          PDIR="${WORKDIR}/AndreiMikh-Kernel-Lab/scripts"
+          SCRIPT="${PDIR}/LZ4-Upgrade.sh"
+          echo "└─ 🚀 LZ4 1.10.0 + Neon Patch Update"
+          echo "└─ 📂 Kernel Source : ${SOURCEDIR}"
+          # Validate LZ4 Update Script
+          if [[ ! -f "$SCRIPT" ]]; then
+            echo "└─ ⚠️ LZ4 Update Script Not Found :"
+            echo "└─ $SCRIPT"
+            exit 1
+          fi
+      
+          # Move Into Kernel Source Directory
+          cd "$SOURCEDIR"
+          # Execute LZ4 Update Script
+          echo "└─ 🚀 Running LZ4 Patch Update Script..."
+          bash "$SCRIPT"
+          echo "└─ 📌 LZ4 Update Script Completed"
+          # Load Reject Checker
+          source "$REJECTCHECKER"
+          checkrejects .
+          # Display LZ4 Result
+          echo "└─ 🎉 LZ4 1.10.0 + Neon Patch Update Completed"
+          echo "└─ 📂 Kernel Source : ${SOURCEDIR}"
+    
+      - name: 🛡️ Integrate Baseband Guard (BBG)
+        if: ${{ inputs.BBG }}
+        shell: bash
+        run: |
+          # Configure Baseband Guard Integration
+          MAXRETRIES=3
+          URLBBG="https://raw.githubusercontent.com/vc-teahouse/Baseband-guard/main/setup.sh"
+          BBGCONFIGFILE="$SOURCEDIR/security/Kconfig"
+          # Validate Kernel Source
+          echo "└─ 🔧 Baseband Guard Integration"
+          echo "└─ 📌 Source : VC-Teahouse/Baseband-guard"
+          echo "└─ 📌 Kernel : $SOURCEDIR"
+          if [[ ! -d "$SOURCEDIR/security" ||
+                ! -d "$SOURCEDIR/include" ]]; then
+            echo "└─ ⚠️ Invalid Kernel Source Directory"
+            exit 1
+          fi
+
+          # Navigate To Kernel Source Directory
+          cd "$SOURCEDIR"
+          echo "└─ ➡️ Working Directory : $(pwd)"
+          # Download And Execute Setup Script With Retries
+          echo "└─ 🌐 Fetching Baseband Guard Setup Script..."
+          for i in $(seq 1 "$MAXRETRIES"); do
+            if curl -fsSL --retry 2 --retry-delay 2 "$URLBBG" |
+              bash -s -- main; then
+              echo "└─ 📌 Baseband Guard Setup Script Applied"
+              break
+            fi
+
+            echo "└─ ⚠️ Download / Setup Failed, Retry $i/$MAXRETRIES..."
+            if [[ "$i" -eq "$MAXRETRIES" ]]; then
+              echo "└─ ⚠️ Baseband Guard Setup Failed After $MAXRETRIES Attempts"
+              exit 1
+            fi
+            sleep 2
+            
+          done
+
+          # Validate Linux Security Configuration
+          if [[ ! -f "$BBGCONFIGFILE" ]]; then
+            echo "└─ ⚠️ Linux Security Kconfig Not Found : $BBGCONFIGFILE"
+            exit 1
+          fi
+
+          # Add Baseband Guard To Linux Security Defaults
+          echo "└─ ⚙️ Updating Linux Security Configuration..."
+          awk '
+            BEGIN { in_block=0 }
+            /^config LSM$/ { in_block=1 }
+            in_block && /^[[:space:]]*default/ {
+              if ($0 !~ /baseband_guard/) {
+                sub(/selinux/, "selinux,baseband_guard")
+              }
+            }
+            /^config / && !/^config LSM$/ { in_block=0 }
+            { print }
+          ' "$BBGCONFIGFILE" > "${BBGCONFIGFILE}.tmp"
+          mv "${BBGCONFIGFILE}.tmp" "$BBGCONFIGFILE"
+          echo "└─ 📌 Linux Security Configuration Updated"
+          # Enable Baseband Guard Kernel Configuration Option
+          echo "CONFIG_BBG=y" >> "$DEFCONFIG"
+          echo "└─ 📌 Baseband Guard Kernel Option Enabled"
+          # Detect Baseband Guard Source Directory
+          BBGPATHDIR=""
+          if [[ -d "$SOURCEDIR/Baseband-guard" ]]; then
+            BBGPATHDIR="$SOURCEDIR/Baseband-guard"
+          else
+            BBGPATHDIR="$(find "$SOURCEDIR" -maxdepth 3 \
+              -type d -name "Baseband-guard" -print -quit)"
+          fi
+
+          # Resolve Baseband Guard Symlink
+          if [[ -L "$SOURCEDIR/Baseband-guard" ]]; then
+            BBGPATHDIR="$(readlink -f "$SOURCEDIR/Baseband-guard")"
+          fi
+
+          # Validate Baseband Guard Source
+          echo "└─ 🔎 Checking Baseband Guard Source..."
+          if [[ -z "$BBGPATHDIR" || ! -d "$BBGPATHDIR" ]]; then
+            echo "└─ ⚠️ Baseband Guard Directory Not Found"
+            exit 1
+          fi
+
+          echo "└─ 📂 Baseband Guard Directory : $BBGPATHDIR"
+
+          if [[ ! -f "$BBGPATHDIR/baseband_guard.c" ]]; then
+            echo "└─ ⚠️ Baseband Guard Source File Not Found"
+            ls -la "$BBGPATHDIR" || true
+            exit 1
+          fi
+
+          # Validate Security Build Integration
+          if ! grep -qF 'baseband-guard/' "$SOURCEDIR/security/Makefile"; then
+            echo "└─ ⚠️ Baseband Guard Makefile Entry Missing"
+            exit 1
+          fi
+
+          if ! grep -qF 'security/baseband-guard/Kconfig' "$BBGCONFIGFILE"; then
+            echo "└─ ⚠️ Baseband Guard Kernel Option Entry Missing"
+            exit 1
+          fi
+
+          echo "└─ 📌 Baseband Guard Source            : OK"
+          echo "└─ 📌 Linux Security Configuration     : OK"
+          echo "└─ 📌 Security Makefile Integration    : OK"
+          echo "└─ 📌 Security Kconfig Integration     : OK"
+          echo "└─ 🎉 Baseband Guard Fully Integrated"
+
+      - name: 🌐 Enable BetterNetwork Configuration
+        if: ${{ inputs.BETTERNET }}
+        shell: bash
+        run: |
+          # Enable BetterNetwork And Netfilter Options
+          echo "└─ 🌐 Configuring BetterNetwork..."
+          # Append Required Network Configuration Options to Default Configuration
+          cat <<'EOF' >> "$DEFCONFIG"
+          CONFIG_IP_SET=y
+          CONFIG_IP_SET_MAX=65534
+          CONFIG_IP_SET_BITMAP_IP=y
+          CONFIG_IP_SET_BITMAP_IPMAC=y
+          CONFIG_IP_SET_BITMAP_PORT=y
+          CONFIG_IP_SET_HASH_IP=y
+          CONFIG_IP_SET_HASH_IPMARK=y
+          CONFIG_IP_SET_HASH_IPPORT=y
+          CONFIG_IP_SET_HASH_IPPORTIP=y
+          CONFIG_IP_SET_HASH_IPPORTNET=y
+          CONFIG_IP_SET_HASH_IPMAC=y
+          CONFIG_IP_SET_HASH_MAC=y
+          CONFIG_IP_SET_HASH_NETPORTNET=y
+          CONFIG_IP_SET_HASH_NET=y
+          CONFIG_IP_SET_HASH_NETNET=y
+          CONFIG_IP_SET_HASH_NETPORT=y
+          CONFIG_IP_SET_HASH_NETIFACE=y
+          CONFIG_IP_SET_LIST_SET=y
+          CONFIG_NETFILTER_XT_MATCH_ADDRTYPE=y
+          CONFIG_NETFILTER_XT_SET=y
+          CONFIG_NETFILTER_XT_TARGET_LOG=y
+          CONFIG_NETFILTER_XT_MATCH_RECENT=y
+          CONFIG_IP6_NF_NAT=y
+          CONFIG_IP6_NF_TARGET_MASQUERADE=y
+          EOF
+
+          # Confirm BetterNetwork Options Were Added
+          echo "└─ 📌 BetterNetwork Configuration Enabled"
+          echo "└─ 📌 IP Set, Netfilter, And IPv6 NAT Options Added"
+
+      - name: 🌐 TCP Congestion Control
+        if: ${{ inputs.BBR }}
+        shell: bash
+        run: |
+          # Enable Advanced TCP Congestion Control Algorithms
+          echo "└─ 🌐 Configuring TCP Congestion Control..."
+          # Append TCP Congestion Control Options to Default Configuration
+          cat <<'EOF' >> "$DEFCONFIG"
+          CONFIG_TCP_CONG_ADVANCED=y
+          CONFIG_TCP_CONG_BBR=y
+          CONFIG_TCP_CONG_CUBIC=y
+          CONFIG_TCP_CONG_BIC=y
+          CONFIG_TCP_CONG_WESTWOOD=y
+          CONFIG_TCP_CONG_HTCP=y
+          EOF
+          # Confirm TCP Congestion Control Configuration
+          echo "└─ 📌 TCP Congestion Control Options Added"
+      
+      - name: 🧩 DroidSpaces / Synchonization Primitives
+        shell: bash
+        env:
+          KERNELMODULE: ${{ steps.kernelversion.outputs.kernelmodule }}
+        run: |
+          # Apply DroidSpaces SYSVIPC Injection Only When Enabled
+          if [[ "${{ inputs.DROIDSPACES }}" == "true" ]]; then
+            # Function : Patch Apply
+            apply() {
+              local patchfile="$1"
+              if patch -R -d "$SOURCEDIR" -p1 --dry-run < "$patchfile" >/dev/null 2>&1; then
+                echo "└─ 🎉 Already Applied             : $(basename "$patchfile")"
+                return
+              fi
+
+              # Verify Patch Could Applied Without Modifying Files
+              if patch -d "$SOURCEDIR" -p1 --dry-run < "$patchfile" >/dev/null 2>&1; then
+                # Apply Patch and Report Success
+                patch -d "$SOURCEDIR" -p1 --forward < "$patchfile"
+                echo "└─ 📌 Applied                     : $(basename "$patchfile")"
+              else
+                # Abort if Patch Cannot Be Applied
+                echo "└─ ⚠️ Failed Applying             : $(basename "$patchfile")"
+                exit 1
+              fi
+            }
+
+            # Paths
+            SCHEDFILE="${SOURCEDIR}/include/linux/sched.h"
+            USERFILE="${SOURCEDIR}/include/linux/sched/user.h"
+            if [[ ! -f "$SCHEDFILE" ]]; then
+              echo "└─ ⚠️ Missing Scheduler Header File : $SCHEDFILE"
+              exit 1
+            fi
+
+            # Comment Out Existing SYSVSEM and SYSVSHM Fields to Prevent Duplicate Definitions
+            echo "└─ ⚙️ Disabling Original SYSVIPC Struct Fields to Prevent Duplicate Definitions..."
+            sed -i 's/^\(\t\)struct sysv_sem\b.*sysvsem;/\1\/\/ struct sysv_sem\t\t\tsysvsem;/' "$SCHEDFILE"
+            sed -i 's/^\(\t\)struct sysv_shm\b.*sysvshm;/\1\/\/ struct sysv_shm\t\t\tsysvshm;/' "$SCHEDFILE"
+            # Detect the Scheduler and Kernel ABI Layout Before Injecting SYSVIPC Fields
+            if grep -q "sched_dl_entity.*\*dl_server" "$SCHEDFILE"; then
+              echo "└─ ♻️ Detected DL Server Pointer — ☘️ Using Packed Union Strategy"
+              sed -i 's|\tstruct sched_entity\t\tse;|#ifdef CONFIG_SYSVIPC\n\tunion {\n\t\tchar __kabi_ignored_0;\n\t\tstruct sysv_sem\t\t\tsysvsem;\n\t}__attribute__((packed));\n\tunion {\n\t\tchar __kabi_ignored_1;\n\t\tstruct sysv_shm\t\t\tsysvshm;\n\t}__attribute__((packed));\n#endif\n\n\tstruct sched_entity\t\tse;|' "$SCHEDFILE"
+            elif grep -q "ANDROID_KABI_USE(1," "$SCHEDFILE"; then
+              echo "└─ ♻️ Detected Kernel ABI USE(1) — ☘️ Using Slots 6, 7 and 8"
+              sed -i -e '/ANDROID_KABI_RESERVE(6);/{N;N;s|\tANDROID_KABI_RESERVE(6);\n\tANDROID_KABI_RESERVE(7);\n\tANDROID_KABI_RESERVE(8);|#ifdef CONFIG_SYSVIPC\n\tANDROID_KABI_USE(6, struct sysv_sem sysvsem);\n\t_ANDROID_KABI_REPLACE(ANDROID_KABI_RESERVE(7); ANDROID_KABI_RESERVE(8), struct sysv_shm sysvshm);\n#else\n\tANDROID_KABI_RESERVE(6);\n\tANDROID_KABI_RESERVE(7);\n\tANDROID_KABI_RESERVE(8);\n#endif|;}' "$SCHEDFILE"
+            elif grep -q "ANDROID_KABI_RESERVE(1);" "$SCHEDFILE"; then
+              echo "└─ ♻️ Detected Legacy Kernel ABI — ☘️ Using Slots 1, 2 and 3"
+              sed -i -e '/ANDROID_KABI_RESERVE(1);/{N;N;N;N;N;N;N;s|\tANDROID_KABI_RESERVE(1);\n\tANDROID_KABI_RESERVE(2);\n\tANDROID_KABI_RESERVE(3);\n\tANDROID_KABI_RESERVE(4);\n\tANDROID_KABI_RESERVE(5);\n\tANDROID_KABI_RESERVE(6);\n\tANDROID_KABI_RESERVE(7);\n\tANDROID_KABI_RESERVE(8);|#ifdef CONFIG_SYSVIPC\n\tANDROID_KABI_USE(1, struct sysv_sem sysvsem);\n\t_ANDROID_KABI_REPLACE(ANDROID_KABI_RESERVE(2); ANDROID_KABI_RESERVE(3), struct sysv_shm sysvshm);\n#else\n\tANDROID_KABI_RESERVE(1);\n\tANDROID_KABI_RESERVE(2);\n\tANDROID_KABI_RESERVE(3);\n#endif\n\tANDROID_KABI_RESERVE(4);\n\tANDROID_KABI_RESERVE(5);\n\tANDROID_KABI_RESERVE(6);\n\tANDROID_KABI_RESERVE(7);\n\tANDROID_KABI_RESERVE(8);|;}' "$SCHEDFILE"
+            elif grep -q "ANDROID_KABI_RESERVE(3);" "$SCHEDFILE"; then
+              echo "└─ ♻️ Fallback Kernel ABI Detected — ☘️ Using Slots 3, 4 and 5"
+              sed -i -e '/ANDROID_KABI_RESERVE(3);/{N;N;N;s|\tANDROID_KABI_RESERVE(3);\n\tANDROID_KABI_RESERVE(4);\n\tANDROID_KABI_RESERVE(5);\n\tANDROID_KABI_RESERVE(6);|#ifdef CONFIG_SYSVIPC\n\tANDROID_KABI_USE(3, struct sysv_sem sysvsem);\n\t_ANDROID_KABI_REPLACE(ANDROID_KABI_RESERVE(4); ANDROID_KABI_RESERVE(5), struct sysv_shm sysvshm);\n#else\n\tANDROID_KABI_RESERVE(3);\n\tANDROID_KABI_RESERVE(4);\n\tANDROID_KABI_RESERVE(5);\n#endif\n\tANDROID_KABI_RESERVE(6);|;}' "$SCHEDFILE"
+            else
+              echo "└─ ⚠️ Unable to Determine Compatible Kernel ABI Layout — Aborting..."
+              exit 9
+            fi
+
+            # Verify SYSVSEM, SYSVSHM and SYSVIPC Fields Were Injected Successfully
+            echo "└─ 🔎 Verifying Injection..."
+            # Verify SYSVSEM Field Was Injected Successfully
+            grep -q "struct sysv_sem" "$SCHEDFILE" || {
+              echo "└─ ⚠️ Missing SYSVSEM Injection"
+              exit 1
+            }
+
+            # Verify SYSVSHM Field Was Injected Successfully
+            grep -q "struct sysv_shm" "$SCHEDFILE" || {
+              echo "└─ ⚠️ Missing SYSVSHM Injection"
+              exit 1
+            }
+
+            # Verify CONFIG_SYSVIPC Guard Exists
+            grep -q "CONFIG_SYSVIPC" "$SCHEDFILE" || {
+              echo "└─ ⚠️ Missing SYSVIPC Configuration Guard"
+              exit 1
+            }
+            echo "└─ 📌 Injection Verification Passed"
+            # Configure Kernel System and Network Options
+            {
+              echo "CONFIG_SYSVIPC=y"           
+              echo "CONFIG_DEVTMPFS=y"
+              echo "CONFIG_PID_NS=y"
+              echo "CONFIG_IPC_NS=y"
+              echo "CONFIG_USER_NS=y"
+              echo "CONFIG_NAMESPACES=y"
+              echo "CONFIG_POSIX_MQUEUE=y"             
+              echo "CONFIG_TMPFS_POSIX_ACL=y"
+              echo "CONFIG_TMPFS_XATTR=y"
+              echo "CONFIG_NETFILTER_XT_TARGET_REJECT=y"
+              echo "CONFIG_NETFILTER_XT_TARGET_LOG=y"
+              echo "CONFIG_NETFILTER_XT_MATCH_RECENT=y"
+            } >> "$DEFCONFIG"
+            # Restore MIDAS Fix
+            echo "└─ 🔧 Applying Ghost Task Fix Patch for BSP Midas..."
+            apply "${PATCHDIR}/001-Ghost-Task-Midas.patch"           
+            echo "🎉 DroidSpaces SYSVIPC Injection Completed Successfully"          
+          else
+            echo "└─ ⏭️ DroidSpaces Disabled — Skipping Integration"
+          fi
+
+          # NT Synchronization Primitives
+          if [[ "${{ inputs.NTSYNC }}" == "true" ]]; then
+            echo "└─ 🧠 NT Synchronization Enabled via DroidSpaces"
+            # Validate Required Variables Early
+            if [[ -z "${KERNELMODULE:-}" ]]; then
+              echo "└─ ⚠️ Kernel Module Version is Not Set, Aborting..."
+              exit 1
+            fi
+
+            echo "└─ 🔄 Target Kernel Module Version : $KERNELMODULE"
+            echo "└─ 🛠️ Applying NT Synchronization Patches..."
+            # Define NT Synchronization Paths
+            NTSYNCDIR="${WORKDIR}/WildKernels/common/ntsync"
+            NTSYNCCOMPATPATCH="ntsync_compat_${KERNELMODULE}.patch"
+            NTSYNCBASEPATCH="ntsync_base.patch"
+            echo "└─ 📂 Patch Directory              : $NTSYNCDIR"
+            # Ensure Patch Repository Exists
+            if [[ ! -d "$NTSYNCDIR" ]]; then
+              echo "└─ 📥 NT Synchronization Patch Directory Missing, Cloning Repository..."
+              rm -rf "${WORKDIR}/WildKernels"
+              git clone --depth=1 \
+                https://github.com/WildKernels/kernel_patches.git \
+                "${WORKDIR}/WildKernels"
+            fi
+
+            # Verify NT Synchronization Patch Directory
+            if [[ ! -d "$NTSYNCDIR" ]]; then
+              echo "└─ ⚠️ Failed to Locate NT Synchronization Patch Directory After Clone..."
+              exit 1
+            fi
+
+            echo "└─ 📄 Available NT Synchronization Patches :"
+            ls -la "$NTSYNCDIR"
+            # Function : Apply NT Synchronization Patch
+            applyntsyncpatch() {
+              local ntsyncpatchfile="$1"
+              local ntsynctemppatch="${SOURCEDIR}/${ntsyncpatchfile}"
+              # Skip Missing NT Synchronization Patch
+              if [[ ! -f "$NTSYNCDIR/$ntsyncpatchfile" ]]; then
+                echo "└─ ⚠️ Missing Patch             : $ntsyncpatchfile"
+                return 0
+              fi
+
+              # Copy NT Synchronization Patch to Kernel Source
+              cp "$NTSYNCDIR/$ntsyncpatchfile" "$ntsynctemppatch"
+              echo "└─ ➡️ Applying $ntsyncpatchfile"
+              # Apply NT Synchronization Patch Forward
+              patchstatus=0
+              patch -d "$SOURCEDIR" -p1 --forward < "$ntsynctemppatch" || patchstatus=$?
+
+              # Remove Temporary NT Synchronization Patch Copy
+              rm -f "$ntsynctemppatch"
+              echo "└─ 🧹 Cleaned                    : $ntsyncpatchfile"
+              # Validate NT Synchronization Patch Result
+              if [[ "$patchstatus" -ne 0 ]]; then
+                echo "└─ ⚠️ Patch Failed             : $ntsyncpatchfile"
+                return "$patchstatus"
+              fi
+            }
+
+            # Apply NT Synchronization Patches
+            applyntsyncpatch "$NTSYNCCOMPATPATCH"
+            applyntsyncpatch "$NTSYNCBASEPATCH"
+            echo "└─ ☘️ NT Synchronization Patch Process Completed Successfully"
+            # Load Reject Checker and Run Rejection Check
+            source "$REJECTCHECKER"
+            checkrejects "$SOURCEDIR"
+            # Configure NT Synchronization Kernel Configuration Options
+            {
+              echo "CONFIG_NTSYNC=y"
+            } >> "$DEFCONFIG"
+            echo "└─ 🎉 NT Synchronization Primitives Done!"
+          else
+            echo "└─ ⏭️ NT Synchronization Disabled — Skipping Integration"
+          fi
+      
+      - name: ⚙️ ReKernel Integration
+        if: ${{ inputs.REKERNEL == 'Built-in' || inputs.REKERNEL == 'Module' }}
+        shell: bash
+        run: |
+          RKREPODIR="${WORKDIR}/ReKernel"
+          RKSRCDIR="${RKREPODIR}/LKM-Source"
+          RKTARGETDIR="${SOURCEDIR}/drivers/rekernel"
+          DRIVERSDIR="${SOURCEDIR}/drivers"
+          KCONFIGFILE="${DRIVERSDIR}/Kconfig"
+          MAKEFILE="${DRIVERSDIR}/Makefile"
+          echo "└─ 🔧 ReKernel Integration"
+          if [[ ! -d "$SOURCEDIR" || ! -f "$SOURCEDIR/Makefile" ]]; then
+            echo "└─ ⚠️ Kernel Source Directory Not Found: ${SOURCEDIR}"
+            exit 1
+          fi
+   
+          if [[ ! -f "$KCONFIGFILE" || ! -f "$MAKEFILE" ]]; then
+            echo "└─ ⚠️ Kernel Drivers Build Files Not Found"
+            exit 1
+          fi
+      
+          if [[ ! -d "$RKREPODIR/.git" ]]; then
+            echo "└─ 📥 Cloning ReKernel..."
+            git clone --depth=1 \
+              https://github.com/Sakion-Team/Re-Kernel.git \
+              "$RKREPODIR"
+          else
+            echo "└─ ℹ️ ReKernel Repository Already Exists"
+          fi
+    
+          for FILE in Kconfig Makefile; do
+            if [[ ! -s "${RKSRCDIR}/${FILE}" ]]; then
+              echo "└─ ⚠️ ReKernel Source File Missing : ${RKSRCDIR}/${FILE}"
+              exit 1
+            fi
+     
+          done
+     
+          echo "└─ 📂 Source : ${RKSRCDIR}"
+          if ! grep -qF 'source "drivers/rekernel/Kconfig"' "$KCONFIGFILE"; then
+            python3 - "$KCONFIGFILE" <<'PY'
+          import pathlib
+          import re
+          import sys
+          path = pathlib.Path(sys.argv[1])
+          content = path.read_text()
+          if 'source "drivers/rekernel/Kconfig"' not in content:
+              matches = list(re.finditer(r"(?m)^endmenu[ \t]*$", content))
+              if not matches:
+                  raise SystemExit("└─ ⚠️ No Endmenu Found in Drivers/KConfig")
+              match = matches[-1]
+              content = (
+                  content[:match.start()]
+                  + 'source "drivers/rekernel/Kconfig"\n\n'
+                  + content[match.start():]
+              )
+              path.write_text(content)
+          PY
+          fi
+       
+          if ! grep -qF 'obj-$(CONFIG_REKERNEL) += rekernel/' "$MAKEFILE"; then
+            printf '\nobj-$(CONFIG_REKERNEL) += rekernel/\n' >> "$MAKEFILE"
+          fi
+      
+          echo "└─ ♻️ Synchronizing ReKernel Source..."
+          rm -rf "$RKTARGETDIR"
+          mkdir -p "$RKTARGETDIR"
+          cp -a "${RKSRCDIR}/." "$RKTARGETDIR/"
+          for FILE in Kconfig Makefile; do
+            if [[ ! -s "${RKTARGETDIR}/${FILE}" ]]; then
+              echo "└─ ⚠️ ReKernel Integration File Missing : ${FILE}"
+              exit 1
+            fi
+      
+          done
+     
+          grep -qF 'source "drivers/rekernel/Kconfig"' "$KCONFIGFILE"
+          grep -qF 'obj-$(CONFIG_REKERNEL) += rekernel/' "$MAKEFILE"
+          # Configure ReKernel Kernel Configuration Options
+          {
+            echo "CONFIG_REKERNEL=y"
+          } >> "$DEFCONFIG"
+          echo "└─ 📌 ReKernel Kernel Options Enabled"
+          echo "└─ 📌 ReKernel Source Synced"
+          echo "└─ 📌 Kconfig Integrated"
+          echo "└─ 📌 Makefile Integrated"
+          echo "└─ 🎉 ReKernel Integration Complete"
+    
+      - name: 🛡️ Integrate NoMount
+        if: ${{ inputs.NOMOUNT != 'None' }}
+        shell: bash
+        run: |
+          echo "└─ 🔧 NoMount Built-in Integration"
+          NOMOUNTSOURCE="${SOURCEDIR}"
+          NOMOUNTBRANCH="${{ inputs.NOMOUNT }}"
+          echo "└─ 📂 Kernel Source  : ${NOMOUNTSOURCE}"
+          echo "└─ 📌 NoMount Branch : ${NOMOUNTBRANCH}"
+          # Verify Kernel Source
+          if [ ! -d "$NOMOUNTSOURCE" ]; then
+            echo "└─ ⚠️ Kernel Source Directory Not Found"
+            echo "└─ 📂 Expected     : $NOMOUNTSOURCE"
+            exit 1
+          fi
+    
+          # Verify Kernel Filesystem Directory
+          if [ ! -d "$NOMOUNTSOURCE/fs" ]; then
+            echo "└─ ⚠️ Kernel Filesystem Directory Not Found"
+            echo "└─ 📂 Expected     : $NOMOUNTSOURCE/fs"
+            exit 1
+          fi
+      
+          cd "$NOMOUNTSOURCE"
+          echo "└─ 📥 Integrating NoMount Into Kernel Source..."
+          case "$NOMOUNTBRANCH" in
+            Master)
+              NOMOUNTURL="https://raw.githubusercontent.com/maxsteeel/nomount/refs/heads/master/kernel/setup.sh"
+              echo "└─ 📌 Repository : maxsteeel/nomount"
+              echo "└─ 🌿 Branch     : master"
+              curl -fsSL \
+                "$NOMOUNTURL" |
+                bash -
+              ;;
+            Dev)
+              NOMOUNTURL="https://raw.githubusercontent.com/maxsteeel/nomount/refs/heads/dev/kernel/setup.sh"
+              echo "└─ 📌 Repository : maxsteeel/nomount"
+              echo "└─ 🌿 Branch     : dev"
+              curl -fsSL \
+                "$NOMOUNTURL" |
+                bash -s -- dev
+              ;;
+            *)
+              echo "└─ ⚠️ Unsupported NoMount Selection : $NOMOUNTBRANCH"
+              exit 1
+              ;;
+          esac
+          echo "└─ 📌 NoMount Setup Script Completed"
+          # Validate NoMount Source
+          if [ ! -d "$NOMOUNTSOURCE/fs/nomount" ]; then
+            echo "└─ ⚠️ NoMount Source Directory Not Found"
+            echo "└─ 📂 Expected     : $NOMOUNTSOURCE/fs/nomount"
+            exit 1
+          fi
+      
+          echo "└─ 📂 NoMount Source :"
+          ls -la "$NOMOUNTSOURCE/fs/nomount"
+          echo "└─ 🔎 Verifying NoMount Kernel Integration..."
+          if [ ! -f "$NOMOUNTSOURCE/fs/nomount/Kconfig" ]; then
+            echo "└─ ⚠️ NoMount KConfig Not Found"
+            exit 1
+          fi
+   
+          if [ ! -f "$NOMOUNTSOURCE/fs/nomount/Makefile" ]; then
+            echo "└─ ⚠️ NoMount Makefile Not Found"
+            exit 1
+          fi
+     
+          if ! grep -qF 'nomount' "$NOMOUNTSOURCE/fs/Kconfig"; then
+            echo "└─ ⚠️ NoMount KConfig is Not Included From FS/KConfig"
+            exit 1
+          fi
+      
+          if ! grep -qF 'nomount/' "$NOMOUNTSOURCE/fs/Makefile"; then
+            echo "└─ ⚠️ NoMount Makefile is Not Included From fs/Makefile"
+            exit 1
+          fi
+
+          # Configure NoMount Kernel Configuration Options
+          {
+            echo "CONFIG_NOMOUNT=y"
+          } >> "$DEFCONFIG"
+          echo "└─ 📌 NoMount Kernel Options Enabled"
+          echo "└─ 📌 NoMount Kconfig Integration Verified"
+          echo "└─ 📌 NoMount Makefile Integration Verified"
+          echo "└─ 📌 NoMount Source Integration Verified"
+          echo "└─ 🎉 NoMount Built-in Integration Complete"
+
+      - name: ⚙️ Kernel Build Metadata
+        shell: bash
+        env:
+          KERNELSUFFIX: ${{ inputs.KERNELSUFFIX }}
+          KERNELBUILDTIME: ${{ inputs.KERNELBUILDTIME }}
+        run: |
+          # Configure Kernel Local Version
+          echo "└─ 🔧 Configuring Kernel Local Version..."
+          if [[ -n "$KERNELSUFFIX" ]]; then
+            LOCALVERSION="-${KERNELSUFFIX}-4k"
+          else
+            LOCALVERSION="-${SRCCOMMIT}-4k"
+          fi
+
+          # Apply Kernel Local Version
+          if [[ -n "${DEFCONFIG:-}" && -f "$DEFCONFIG" ]]; then
+            # Remove Existing Local Version Settings
+            sed -i \
+              -e '/^CONFIG_LOCALVERSION=/d' \
+              -e '/^CONFIG_LOCALVERSION_AUTO=/d' \
+              "$DEFCONFIG"
+            # Set Custom Kernel Local Version
+            printf 'CONFIG_LOCALVERSION="%s"\n' "$LOCALVERSION" \
+              >> "$DEFCONFIG"
+            # Disable Automatic Kernel Local Version Suffix
+            echo "# CONFIG_LOCALVERSION_AUTO is not set" \
+              >> "$DEFCONFIG"
+          else
+            echo "└─ ⚠️ Kernel Defconfig Not Found : ${DEFCONFIG:-unset}"
+            exit 1
+          fi
+
+          # Verify Kernel Local Version Configuration
+          if ! grep -Fxq "CONFIG_LOCALVERSION=\"$LOCALVERSION\"" "$DEFCONFIG"; then
+            echo "└─ ⚠️ Failed to Apply Kernel Local Version"
+            exit 1
+          fi
+
+          # Verify Automatic Local Version Is Disabled
+          if ! grep -Fxq '# CONFIG_LOCALVERSION_AUTO is not set' "$DEFCONFIG"; then
+            echo "└─ ⚠️ Failed to Disable Automatic Kernel Local Version"
+            exit 1
+          fi
+
+          # Display Configured Kernel Local Version
+          echo "└─ 📌 Kernel Local Version        :"
+          grep '^CONFIG_LOCALVERSION=' "$DEFCONFIG"
+          # Resolve Build Timestamp Input
+          TIMEINPUT="$KERNELBUILDTIME"
+          if [[ -n "$TIMEINPUT" ]]; then
+            DATESTR="$TIMEINPUT"
+            echo "└─ 🔎 Using Custom Build Time : $DATESTR"
+          else
+            DATESTR="$(TZ='UTC' date '+%a %b %-d %H:%M:%S UTC %Y')"
+            echo "└─ 🛠️ Using Current UTC Time  : $DATESTR"
+          fi
+
+          # Validate Build Timestamp Format
+          if ! date -d "$DATESTR" >/dev/null 2>&1; then
+            echo "└─ ⚠️ Invalid Build Time"
+            echo "└─ 📌 Value                   : $DATESTR"
+            echo "└─ 📌 Expected                : <Day> <Month> <DD> <HH:MM:SS> UTC <YYYY>"
+            exit 1
+          fi
+
+          # Configure Kbuild Build Metadata
+          export KBUILD_BUILD_TIMESTAMP="$DATESTR"
+          export KBUILD_BUILD_VERSION="1"
+          # Export Build Metadata To Following Workflow Steps
+          {
+            echo "LOCALVERSION=$LOCALVERSION"
+            echo "KBUILD_BUILD_TIMESTAMP=$KBUILD_BUILD_TIMESTAMP"
+            echo "KBUILD_BUILD_VERSION=$KBUILD_BUILD_VERSION"
+          } >> "$GITHUB_ENV"
+          # Display Final Build Metadata
+          echo "└─ 🔎 Final Kernel Local Version : $LOCALVERSION"
+          echo "└─ 🔍 Kbuild Build Metadata"
+          echo "└─ 📌 Build Timestamp             : $KBUILD_BUILD_TIMESTAMP"
+          echo "└─ 📌 Build Version               : $KBUILD_BUILD_VERSION"
+          echo "└─ 📌 Android Base                : $ANDROIDVERSION"
+          echo "└─ 📌 Kernel Base                 : $KERNELVERSION"
+          echo "└─ 📌 Kernel Version              : $FULLVERSION"
+          # Validate Build Timestamp
+          if [[ -z "${KBUILD_BUILD_TIMESTAMP:-}" ]]; then
+            echo "└─ ⚠️ Kbuild Build Timestamp Not Set"
+            exit 1
+          fi
+
+          # Validate Build Version
+          if [[ -z "${KBUILD_BUILD_VERSION:-}" ]]; then
+            echo "└─ ⚠️ Kbuild Build Version Not Set"
+            exit 1
+          fi
+
+          # Confirm Build Metadata Configuration
+          echo "└─ 🎉 Kernel Build Metadata Configured"
+       
+      - name: 🔨 Compile Kernel
+        if: ${{ !inputs.DEBUGKERNELBUILD }}
+        shell: bash
+        run: |
+          # Configure Build Environment
+          WORKDIR="$GITHUB_WORKSPACE"
+          export PATH="/usr/lib/ccache:$PATH"
+          export PATH="$WORKDIR/clang/bin:$PATH"
+          export ARCH=arm64
+          export LLVM=1
+          export LLVM_IAS=1
+          export KBUILD_BUILD_USER="${{ inputs.GITOWNER }}"
+          export KBUILD_BUILD_HOST="${{ inputs.GITHOST }}"
+          # Configure Cache
+          if [[ "${{ inputs.DEBUGBUILDCCACHE }}" == "true" ]]; then
+            export CCACHE_LOGFILE="$GITHUB_WORKSPACE/ccache.log"
+          fi
+
+          export CCACHE_COMPILERCHECK="content"
+          export CCACHE_BASEDIR="$GITHUB_WORKSPACE"
+          export CCACHE_NOHASHDIR="true"
+          export CCACHE_NOHARDLINK="true"
+          export CCACHE_DIR="${CCACHE_DIR:-$HOME/.cache/ccache}"
+          export CCACHE_MAXSIZE="2G"
+          export CCACHE_IS_KERNEL_COMPILING="true"
+          touch "$CCACHE_DIR/ccache.conf"
+          echo "sloppiness = file_stat_matches,include_file_ctime,include_file_mtime,pch_defines,file_macro,time_macros" >> "$CCACHE_DIR/ccache.conf"
+          # Validate Kernel Paths
+          if [[ -z "${SOURCEDIR:-}" || ! -f "$SOURCEDIR/Makefile" ]]; then
+            echo "└─ ⚠️ Kernel Makefile Not Found"
+            echo "└─ 📂 Expected : ${SOURCEDIR:-<Unset>}/Makefile"
+            exit 1
+          fi
+
+          if [[ -z "${OUTDIR:-}" ]]; then
+            echo "└─ ⚠️ Kernel Output Directory Not Set"
+            exit 1
+          fi
+
+          if [[ -z "${LIBDIR:-}" ]]; then
+            echo "└─ ⚠️ Fake Time Library Directory Not Set"
+            exit 1
+          fi
+
+          if [[ -z "${DEFCONFIG:-}" || ! -s "$DEFCONFIG" ]]; then
+            echo "└─ ⚠️ GKI Default Configuration Not Found or Empty"
+            echo "└─ 📂 Expected : ${DEFCONFIG:-<Unset>}"
+            exit 1
+          fi
+
+          IMAGE="$OUTDIR/arch/arm64/boot/Image"
+          CCWRAPPER="$GITHUB_WORKSPACE/cc-wrapper"
+          LDWRAPPER="$GITHUB_WORKSPACE/ld-wrapper"
+          TESTWRAPPER="$GITHUB_WORKSPACE/test-wrapper.sh"
+          # Validate Build Tools
+          echo "└─ 🔎 Validating Build Tools..."
+          for TOOL in make clang ld.lld ccache; do
+            if ! command -v "$TOOL" >/dev/null 2>&1; then
+              echo "└─ ⚠️ Required Build Tool Not Found : $TOOL"
+              exit 1
+            fi
+            
+          done
+
+          # Display Compiler Versions
+          PAHOLEVERSION="$(pahole --version 2>/dev/null | head -n 1 || true)"
+          if [[ -z "$PAHOLEVERSION" ]]; then
+            echo "└─ 📌 Pahole : Not Installed"
+          else
+            echo "└─ 📌 Pahole : $PAHOLEVERSION"
+          fi
+
+          echo "└─ 📌 Clang : $(clang --version | head -n 1)"
+          echo "└─ 📌 LLD   : $(ld.lld --version | head -n 1)"
+          # Validate Fake Time Libraries
+          if [[ ! -s "$LIBDIR/libfakestat.so" || ! -s "$LIBDIR/libfaketimeMT.so" ]]; then
+            echo "└─ ⚠️ Fake Time Libraries Not Found"
+            echo "└─ 📂 Library Directory : $LIBDIR"
+            exit 1
+          fi
+
+          chmod 755 "$LIBDIR/libfakestat.so" "$LIBDIR/libfaketimeMT.so"
+          # Configure Fake Time
+          export FAKESTAT="2025-05-25 12:00:00"
+          export FAKETIME="@2025-05-25 13:00:00"
+          export PRELOAD_LIBS="$LIBDIR/libfakestat.so:$LIBDIR/libfaketimeMT.so"
+          # Create Compiler Wrapper
+          printf '%s\n' \
+            '#!/bin/bash' \
+            'export LD_PRELOAD="$PRELOAD_LIBS"' \
+            'export FAKESTAT="$FAKESTAT"' \
+            'export FAKETIME="$FAKETIME"' \
+            'exec ccache clang "$@"' \
+            > "$CCWRAPPER"
+          # Create Linker Wrapper
+          printf '%s\n' \
+            '#!/bin/bash' \
+            'export LD_PRELOAD="$PRELOAD_LIBS"' \
+            'export FAKESTAT="$FAKESTAT"' \
+            'export FAKETIME="$FAKETIME"' \
+            'exec ld.lld "$@"' \
+            > "$LDWRAPPER"
+          # Create Fake Time Test Wrapper
+          printf '%s\n' \
+            '#!/bin/bash' \
+            'export LD_PRELOAD="$PRELOAD_LIBS"' \
+            'export FAKESTAT="$FAKESTAT"' \
+            'export FAKETIME="$FAKETIME"' \
+            'echo "Wrapper environment check complete."' \
+            'exec "$@"' \
+            > "$TESTWRAPPER"
+          chmod 755 "$CCWRAPPER" "$LDWRAPPER" "$TESTWRAPPER"
+          # Test Fake Time Environment
+          echo "└─ 🧪 Testing Fake Time Wrappers..."
+          "$TESTWRAPPER" date
+          "$TESTWRAPPER" stat "$SOURCEDIR/Makefile"
+          echo "└─ 🕒 Build Time: $(LD_PRELOAD="$PRELOAD_LIBS" date)"
+          LD_PRELOAD="$PRELOAD_LIBS" stat "$SOURCEDIR/Makefile"
+          # Validate Kbuild Metadata
+          if [[ -z "${KBUILD_BUILD_TIMESTAMP:-}" ]]; then
+            echo "└─ ⚠️ Kbuild Build Timestamp Not Set"
+            exit 1
+          fi
+
+          if [[ -z "${KBUILD_BUILD_VERSION:-}" ]]; then
+            echo "└─ ⚠️ Kbuild Build Version Not Set"
+            exit 1
+          fi
+
+          echo "└─ 📌 Build Timestamp: $KBUILD_BUILD_TIMESTAMP"
+          echo "└─ 📌 Build Version: $KBUILD_BUILD_VERSION"
+          # Generate GKI Kernel Configuration
+          echo "└─ ⚙️ Generating GKI Kernel Configuration..."
+          make -C "$SOURCEDIR" \
+            ARCH="$ARCH" \
+            LLVM="$LLVM" \
+            LLVM_IAS="$LLVM_IAS" \
+            O="$OUTDIR" \
+            gki_defconfig
+          # Validate Generated Configuration
+          CONFIGFILE="$OUTDIR/.config"
+          if [[ ! -s "$CONFIGFILE" ]]; then
+            echo "└─ ⚠️ GKI Configuration Was Not Generated"
+            exit 1
+          fi
+       
+          # Resolve Configuration Dependencies
+          echo "└─ ⚙️ Resolving Kernel Configuration..."
+          make -C "$SOURCEDIR" \
+            ARCH="$ARCH" \
+            LLVM="$LLVM" \
+            LLVM_IAS="$LLVM_IAS" \
+            O="$OUTDIR" \
+            olddefconfig
+          # Validate Final Configuration
+          if [[ ! -s "$CONFIGFILE" ]]; then
+            echo "└─ ⚠️ Final Kernel Configuration is Missing"
+            exit 1
+          fi
+        
+          # Start Build Timer and Remove Old Image
+          BUILDSTART="$(date +%s)"
+          rm -f "$IMAGE"
+          # Build Kernel Image
+          echo "└─ 🔨 Building Kernel Image..."
+          make -C "$SOURCEDIR" \
+            -j"$(nproc --all)" \
+            ARCH="$ARCH" \
+            LLVM="$LLVM" \
+            LLVM_IAS="$LLVM_IAS" \
+            CC="$CCWRAPPER" \
+            LD="$LDWRAPPER" \
+            HOSTLD="ld.lld" \
+            O="$OUTDIR" \
+            KCFLAGS+=-O2 \
+            KCFLAGS+=-Wno-error \
+            Image
+          # Calculate Build Duration
+          BUILDEND="$(date +%s)"
+          BUILDTIME="$((BUILDEND - BUILDSTART))"
+          # Verify Fake Time After Build
+          echo "└─ 🕒 Post-Build Fake Time: $(LD_PRELOAD="$PRELOAD_LIBS" date)"
+          LD_PRELOAD="$PRELOAD_LIBS" stat "$SOURCEDIR/Makefile"
+          # Display Compiler Cache Statistics
+          echo "└─ 📊 Compiler Cache Status"
+          ccache -s
+          # Validate Kernel Image
+          if [[ ! -s "$IMAGE" ]]; then
+            echo "└─ ⚠️ Kernel Image Missing or Empty"
+            echo "└─ 📂 Expected: $IMAGE"
+            exit 1
+          fi
+
+          # Display Build Result
+          echo "└─ 📦 Kernel Image"
+          ls -lh "$IMAGE"
+          echo "└─ ⏱️ Build Duration : ${BUILDTIME}Second(s)"
+          echo "└─ 🎉 Kernel Build Complete"
+          # Display Available Disk Space
+          echo "└─ 💾 Disk Space"
+          df -h
+          # Generate Compiler Cache Summary
+          CCACHESUMMARY="$(ccache -s 2>&1)"
+          {
+            echo "## 🧠 Compiler Cache Performance Summary"
+            echo "| Metric | Result |"
+            echo "|---|---:|"
+            echo "| Build Status | 🚀 Success |"
+            echo "| Build Time | **${BUILDTIME}s** |"
+            echo "| Cacheable Calls | $(echo "$CCACHESUMMARY" | grep 'Cacheable calls:' | sed 's/.*Cacheable calls:[[:space:]]*//' || true) |"
+            echo "| Cache Hits | $(echo "$CCACHESUMMARY" | grep -E '^[[:space:]]*Hits:' | head -n 1 | sed 's/.*Hits:[[:space:]]*//' || true) |"
+            echo "| Direct Hits | $(echo "$CCACHESUMMARY" | grep 'Direct:' | sed 's/.*Direct:[[:space:]]*//' || true) |"
+            echo "| Preprocessed Hits | $(echo "$CCACHESUMMARY" | grep 'Preprocessed:' | sed 's/.*Preprocessed:[[:space:]]*//' || true) |"
+            echo "| Cache Misses | $(echo "$CCACHESUMMARY" | grep -E '^[[:space:]]*Misses:' | head -n 1 | sed 's/.*Misses:[[:space:]]*//' || true) |"
+            echo "| Uncacheable Calls | $(echo "$CCACHESUMMARY" | grep 'Uncacheable calls:' | sed 's/.*Uncacheable calls:[[:space:]]*//' || true) |"
+            echo "| Cache Size | $(echo "$CCACHESUMMARY" | grep 'Cache size' | sed 's/.*Cache size (GB):[[:space:]]*//' || true) |"
+            echo "### ⚡ Build Result"
+            echo "**🎉 Build Completed Successfully**"
+          } >> "$GITHUB_STEP_SUMMARY"
+      
+      - name: 🧪 Generate Dummy Kernel Image
+        if: ${{ inputs.DEBUGKERNELBUILD }}
+        shell: bash
+        run: |
+          IMAGE="$OUTDIR/arch/arm64/boot/Image"
+          mkdir -p "$(dirname "$IMAGE")"
+          printf '%s\n' "DEBUG DUMMY IMAGE" > "$IMAGE"
+          SIZE="$(stat -c%s "$IMAGE")"
+          echo "└─ 🧪 Debug Mode    : Kernel Build Skipped"
+          echo "└─ 📂 Kernel Output : $OUTDIR"
+          echo "└─ 📂 Dummy Image   : $IMAGE"
+          echo "└─ 📦 Image Size    : ${SIZE} Bytes"
+          if [[ "$SIZE" -le 0 ]]; then
+            echo "└─ ⚠️ Failed to Create Dummy Image"
+            exit 1
+          fi
+         
+          echo "└─ 🎉 Dummy Image Created Successfully"      
+
+      - name: 🔎 Verify Kernel Build Metadata
+        id: kernelverify
+        shell: bash
+        run: |
+          echo "└─ 🔎 Verifying Kernel Build Metadata..."
+          echo "└─ 📌 Expected Kernel Version : $FULLVERSION"
+          echo "└─ 📌 Expected Build Time     : $KBUILD_BUILD_TIMESTAMP"
+          echo "└─ 📂 Kernel Output           : $OUTDIR"
+          IMAGE="$OUTDIR/arch/arm64/boot/Image"
+          UTSHEADER="$OUTDIR/include/generated/utsversion.h"
+          if [[ ! -s "$IMAGE" ]]; then
+            echo "└─ ⚠️ Kernel Image Missing or Empty"
+            echo "└─ 📂 Expected : $IMAGE"
+            exit 1
+          fi
+
+          echo "└─ 📌 Kernel Image Verified"
+          echo "└─ 📦 Image Size : $(stat -c%s "$IMAGE") Bytes"
+          if [[ "${{ inputs.DEBUGKERNELBUILD }}" == "true" ]]; then
+            UTSVERSION="DEBUG-DUMMY"
+            echo "└─ 🧪 Debug Build : Skipping UTS Metadata Verification"
+          else
+            if [[ ! -f "$UTSHEADER" ]]; then
+              echo "└─ ⚠️ UTS Version Header Not Found"
+              echo "└─ 📂 Expected : $UTSHEADER"
+              exit 1
+            fi
+
+            UTSVERSION="$(
+              sed -n \
+                's/^#define UTS_VERSION "\(.*\)"/\1/p' \
+                "$UTSHEADER" |
+                sed -n '1p'
+            )"
+            if [[ -z "$UTSVERSION" ]]; then
+              echo "└─ ⚠️ UTS Version Not Found"
+              exit 1
+            fi
+
+            echo "└─ 📌 Kernel UTS Version : $UTSVERSION"
+            if [[ "$UTSVERSION" == *"$KBUILD_BUILD_TIMESTAMP"* ]]; then
+              echo "└─ 📌 Kernel Build Timestamp Matches"
+            else
+              echo "└─ ⚠️ Kernel Build Timestamp Does Not Match"
+              echo "└─ 📌 Expected : $KBUILD_BUILD_TIMESTAMP"
+              echo "└─ 📌 Found    : $UTSVERSION"
+              exit 1
+            fi
+          fi
+
+          echo "utsversion=$UTSVERSION" >> "$GITHUB_OUTPUT"
+          echo "└─ 🎉 Kernel Build Metadata Verified"   
+
+      - name: 🩹 Apply KernelPatch-Next
+        if: ${{ inputs.KERNELPATCH && !inputs.DEBUGKERNELBUILD }}
+        shell: bash
+        run: |
+          cd "$OUTDIR/arch/arm64/boot"
+          wget -q \
+            https://github.com/KernelSU-Next/KPatch-Next/releases/latest/download/kptools-linux \
+            -O kptools-linux
+          wget -q \
+            https://github.com/KernelSU-Next/KPatch-Next/releases/latest/download/kpimg-linux \
+            -O kpimg-linux
+          chmod +x kptools-linux
+          ./kptools-linux \
+            -p \
+            -i Image \
+            -k kpimg-linux \
+            -o oImage
+          mv -f oImage Image
+          rm -f kptools-linux kpimg-linux
+          echo "└─ 🎉 KPM Patched"
+   
+      - name: 📦 Package AnyKernel3
+        id: package
+        shell: bash
+        env:
+          AOSPSOURCE: ${{ inputs.AOSPSOURCE }}
+          ATTR: ${{ inputs.ATTR }}
+          GITOWNER: ${{ inputs.GITOWNER }}
+          BUILDARTIFACT: ${{ inputs.BUILDARTIFACT }}
+          FULLVERSION: ${{ steps.kernelversion.outputs.fullversion }}
+          ROOTENGINE: ${{ inputs.ROOTENGINE }}
+          KSUVERSION: ${{ steps.rootengine.outputs.ksuversion }}
+        run: |
+          # Define AnyKernel3 Paths
+          AK3DIR="${GITHUB_WORKSPACE}/anykernel3"
+          PACKDIR="${GITHUB_WORKSPACE}/pack"
+          IMAGE="${OUTDIR}/arch/arm64/boot/Image"
+          # Define Source Branches and Metadata
+          LINEAGEBRANCH=""
+          CRDROIDBRANCH=""
+          CRDROIDDEVICE=""          
+          LINEAGEPATCH="${RUNNER_TEMP}/RELEASE_PLATFORM_SECURITY_PATCH.textproto"
+          CRDROIDPATCH="${RUNNER_TEMP}/crDroidOTA.json"
+          case "$AOSPSOURCE" in
+            Lineage-24.0)
+              LINEAGEBRANCH="lineage-24.0"
+              OSLEVELVERSION="17.0.0"
+              ;;
+            Lineage-23.2)
+              LINEAGEBRANCH="lineage-23.2"
+              OSLEVELVERSION="16.0.0"
+              ;;              
+            CrDroid-17.0)
+              CRDROIDBRANCH="17.0"
+              CRDROIDDEVICE="dodge"
+              OSLEVELVERSION="17.0.0"
+              ;;
+            CrDroid-16.0)
+              CRDROIDBRANCH="16.0"
+              CRDROIDDEVICE="dodge"
+              OSLEVELVERSION="16.0.0"
+              ;;              
+            *)
+              echo "└─ ⚠️ Unsupported Android Source : $AOSPSOURCE"
+              exit 1
+              ;;
+          esac
+          # Display Package Configuration
+          echo "└─ 📦 AnyKernel3 Packaging"
+          echo "└─ 📂 Kernel Source       : ${SOURCEDIR}"
+          echo "└─ 📂 AnyKernel3          : ${AK3DIR}"
+          echo "└─ 📂 Package Directory   : ${PACKDIR}"
+          echo "└─ 📂 Output Directory    : ${OUTDIR}"
+          echo "└─ 📌 Android Source      : ${AOSPSOURCE}"
+          if [[ -n "$LINEAGEBRANCH" ]]; then
+            echo "└─ 📌 LineageOS Branch  : ${LINEAGEBRANCH}"
+          fi
+      
+          if [[ -n "$CRDROIDBRANCH" ]]; then
+            echo "└─ 📌 CrDroid Branch    : ${CRDROIDBRANCH}"
+            echo "└─ 📌 CrDroid Device    : ${CRDROIDDEVICE}"
+          fi
+      
+          # Validate Kernel Image
+          echo "└─ 🔎 Validating Kernel Image..."
+          if [[ ! -s "$IMAGE" ]]; then
+            echo "└─ ⚠️ Kernel Image Missing or Empty"
+            echo "└─ 📂 Expected : ${IMAGE}"
+            exit 1
+          fi
+      
+          SIZE="$(stat -c%s "$IMAGE")"
+          echo "└─ 📌 Kernel Image Verified"
+          echo "└─ 📌 Kernel Image Size : ${SIZE} Bytes"
+          # Prepare Directories
+          rm -rf "$AK3DIR" "$PACKDIR"
+          mkdir -p "$OUTDIR" "$PACKDIR" "$RUNNER_TEMP"
+          # Clone AnyKernel3
+          echo "└─ 📥 Cloning AnyKernel3..."
+          git clone \
+            --depth=1 \
+            --branch master \
+            https://github.com/AndreiMikh/AnyKernel3.git \
+            "$AK3DIR"
+          echo "└─ 📌 AnyKernel3 Cloned Successfully"
+          # Prepare AnyKernel3 Package
+          echo "└─ 📥 Preparing AnyKernel3 Package..."
+          cp -a "$AK3DIR"/. "$PACKDIR"/
+          cp "$IMAGE" "$PACKDIR/Image"
+          if [[ ! -s "$PACKDIR/anykernel.sh" ]]; then
+            echo "└─ ⚠️ AnyKernel3 Anykernel Script Missing"
+            exit 1
+          fi
+     
+          echo "└─ 📌 AnyKernel3 Package Prepared"
+          # Configure AnyKernel3 Kernel Name
+          echo "└─ 🔧 Configuring AnyKernel3 Kernel Name..."
+          if [[ "$ATTR" == "true" ]]; then
+            KERNELNAME="AOSP ${AOSPSOURCE} Kernel | Build by ${GITOWNER}"
+          else
+            KERNELNAME="${AOSPSOURCE} OPlus AOSP SM8750 Kernel"
+          fi
+     
+          if ! grep -q '^kernel.string=' "$PACKDIR/anykernel.sh"; then
+            echo "└─ ⚠️ Kernel.String Setting Not Found"
+            exit 1
+          fi
+         
+          sed -i \
+            "s#^kernel.string=.*#kernel.string=${KERNELNAME}#" \
+            "$PACKDIR/anykernel.sh"
+          echo "└─ 📌 AnyKernel3 Kernel Name Configured"
+          # Detect Android Security Patchlevel
+          echo "└─ 🔎 Detecting Android Security Patchlevel..."
+          AOSPPATCHFULL=""
+          case "$AOSPSOURCE" in
+            Lineage-24.0|Lineage-23.2)
+              # Define LineageOS Release Metadata
+              LINEAGERELEASEURL="https://raw.githubusercontent.com/LineageOS/android_vendor_lineage/${LINEAGEBRANCH}/release/flag_values/cp2a/RELEASE_PLATFORM_SECURITY_PATCH.textproto"
+              echo "└─ 📌 Source   : LineageOS"
+              echo "└─ 📌 Branch   : ${LINEAGEBRANCH}"
+              echo "└─ 📂 Metadata : ${LINEAGERELEASEURL}"
+              rm -f "$LINEAGEPATCH"
+              # Fetch LineageOS Release Metadata
+              if curl -fsSL --retry 3 --retry-delay 2 \
+                "$LINEAGERELEASEURL" \
+                -o "$LINEAGEPATCH" &&
+                [[ -s "$LINEAGEPATCH" ]]; then
+                echo "└─ 📌 LineageOS Release Metadata Downloaded"
+                # Extract Security Patchlevel
+                AOSPPATCHFULL="$(
+                  awk '
+                    /string_value[[:space:]]*:/ {
+                      if (match($0, /20[0-9][0-9]-[0-9][0-9]-[0-9][0-9]/)) {
+                        print substr($0, RSTART, RLENGTH)
+                        exit
+                      }
+                    }
+                  ' "$LINEAGEPATCH"
+                )"
+                if [[ -n "$AOSPPATCHFULL" ]]; then
+                  echo "└─ 📌 LineageOS Security Patchlevel Found"
+                  echo "└─ 📲 Detected Patchlevel : ${AOSPPATCHFULL}"
+                else
+                  echo "└─ ⚠️ LineageOS Security Patchlevel Not Found"
+                fi
+              else
+                echo "└─ ⚠️ Failed To Fetch LineageOS Release Metadata"
+              fi
+              ;;
+            CrDroid-17.0|CrDroid-16.0)
+              # Define CrDroid OTA Metadata
+              CRDROIDURL="https://raw.githubusercontent.com/crdroidandroid/android_vendor_crDroidOTA/${CRDROIDBRANCH}/${CRDROIDDEVICE}.json"
+              echo "└─ 📌 Source   : CrDroid"
+              echo "└─ 📌 Branch   : ${CRDROIDBRANCH}"
+              echo "└─ 📌 Device   : ${CRDROIDDEVICE}"
+              echo "└─ 📂 Metadata : ${CRDROIDURL}"
+              rm -f "$CRDROIDPATCH"
+              # Fetch CrDroid OTA Metadata
+              if curl -fsSL --retry 3 --retry-delay 2 \
+                "$CRDROIDURL" \
+                -o "$CRDROIDPATCH" &&
+                [[ -s "$CRDROIDPATCH" ]]; then
+                echo "└─ 📌 CrDroid OTA Metadata Downloaded"
+                # Extract Security Patchlevel
+                AOSPPATCHFULL="$(
+                  python3 - "$CRDROIDPATCH" <<'PY'
+          import json
+          import re
+          import sys
+          pattern = re.compile(r"20\d{2}-\d{2}-\d{2}")
+          def findpatch(data):
+              if isinstance(data, dict):
+                  value = data.get("os_patch_level")
+                  if isinstance(value, str) and pattern.fullmatch(value):
+                      return value
+                  for child in data.values():
+                      result = findpatch(child)
+                      if result:
+                          return result
+              elif isinstance(data, list):
+                  for child in data:
+                      result = findpatch(child)
+                      if result:
+                          return result
+              return ""
+          try:
+              with open(sys.argv[1], encoding="utf-8") as source:
+                  metadata = json.load(source)
+              print(findpatch(metadata))
+          except (OSError, json.JSONDecodeError):
+              print("")
+          PY
+                )"
+                if [[ -n "$AOSPPATCHFULL" ]]; then
+                  echo "└─ 📌 CrDroid Security Patchlevel Found"
+                  echo "└─ 📲 Detected Patchlevel : ${AOSPPATCHFULL}"
+                else
+                  echo "└─ ⚠️ CrDroid Security Patchlevel Not Found"
+                fi
+              else
+                echo "└─ ⚠️ Failed To Fetch CrDroid OTA Metadata"
+              fi
+              ;;
+          esac
+          # Validate Security Patchlevel
+          if [[ "$AOSPPATCHFULL" =~ ^20[0-9]{2}-(0[1-9]|1[0-2])-(0[1-9]|[12][0-9]|3[01])$ ]]; then
+            AOSPPATCHLEVEL="${AOSPPATCHFULL:0:7}"
+            echo "└─ 📌 Android Security Patchlevel Detected"
+            echo "└─ 📲 Full Patchlevel         : ${AOSPPATCHFULL}"
+            echo "└─ 📲 Boot Patchlevel         : ${AOSPPATCHLEVEL}"
+          else
+            echo "└─ ⚠️ Valid Security Patchlevel Not Found"
+            echo "└─ ℹ️ Using Workflow Fallback   : 2026-07"
+            AOSPPATCHLEVEL="2026-07"
+          fi
+     
+          # Export Security Patchlevel
+          echo "AOSPPATCHLEVEL=${AOSPPATCHLEVEL}" >> "$GITHUB_ENV"
+          echo "└─ 📲 Final Boot Patchlevel     : ${AOSPPATCHLEVEL}"
+          # Generate AnyKernel3 Package Name
+          STAMP="$(date +%Y-%m-%d)"
+          ZIP="AnyKernel3-(Dodge-SM8750)-(${{ steps.kernelversion.outputs.fullversion }})(${{ steps.build-identity.outputs.suffix }})(${{ steps.rootengine.outputs.ksuversion }})(${STAMP}).zip"
+          ZIPPATH="${OUTDIR}/${ZIP}"
+          echo "└─ 📦 Creating AnyKernel3 ZIP..."
+          echo "└─ 📌 Package : ${ZIP}"
+          # Compress AnyKernel3 Package
+          cd "$PACKDIR"
+          if ! zip -r9 "$ZIPPATH" . -x "*.git*" >/dev/null; then
+            echo "└─ ⚠️ Failed To Create AnyKernel3 ZIP"
+            exit 1
+          fi
+      
+          cd "$GITHUB_WORKSPACE"
+          if [[ ! -s "$ZIPPATH" ]]; then
+            echo "└─ ⚠️ AnyKernel3 ZIP Missing or Empty"
+            exit 1
+          fi
+       
+          # Export Package Name
+          echo "ak3name=${ZIP}" >> "$GITHUB_OUTPUT"
+          echo "└─ 📌 AnyKernel3 Package Created"
+          ls -lh "$ZIPPATH"
+          # Generate Additional Artifacts
+          if [[ "$BUILDARTIFACT" == "All" ]]; then
+            echo "└─ 📦 Generating Additional Kernel Artifacts..."
+            # Copy Raw Kernel Image
+            cp "$IMAGE" "${OUTDIR}/Image"
+            if [[ ! -s "${OUTDIR}/Image" ]]; then
+              echo "└─ ⚠️ Failed To Generate Raw Kernel Image"
+              exit 1
+            fi
+       
+            echo "└─ 📌 Raw Kernel Image Generated"
+            echo "└─ 📂 ${OUTDIR}/Image"
+            # Generate Boot Image
+            echo "└─ 📦 Generating Boot Image..."
+            echo "└─ 📲 Android Security Patchlevel : ${AOSPPATCHLEVEL}"
+            if ! command -v mkbootimg >/dev/null 2>&1; then
+              echo "└─ ⚠️ MK Boot Img Not Found In PATH"
+              exit 1
+            fi
+       
+            rm -f "${OUTDIR}/boot.img"
+            if ! mkbootimg \
+              --kernel "$IMAGE" \
+              --header_version 4 \
+              --os_version "$OSLEVELVERSION" \
+              --os_patch_level "$AOSPPATCHLEVEL" \
+              --pagesize 4096 \
+              --base 0x80000000 \
+              -o "${OUTDIR}/boot.img"; then
+              echo "└─ ⚠️ Failed To Generate Boot Image"
+              exit 1
+            fi
+        
+            if [[ ! -s "${OUTDIR}/boot.img" ]]; then
+              echo "└─ ⚠️ Boot Image Missing or Empty"
+              exit 1
+            fi
+     
+            echo "└─ 📌 Boot Image Generated"
+            echo "└─ 📂 ${OUTDIR}/boot.img"
+            # Display Generated Artifacts
+            echo "└─ 🚀 All Mode               : Image + Boot Image Generated"
+            echo "└─ 📌 Generated Files        :"
+            ls -lh \
+              "${OUTDIR}/Image" \
+              "${OUTDIR}/boot.img"
+            echo "└─ 📲 Boot Image Patchlevel  : ${AOSPPATCHLEVEL}"
+          fi
+      
+          echo "└─ 🎉 AnyKernel3 Packaging Complete"
+
+      - name: 📤 Upload Kernel Artifacts
+        uses: actions/upload-artifact@v6
+        with:
+          name: Package-${{ inputs.AOSPSOURCE }}(${{ steps.kernelversion.outputs.fullversion }})-${{ inputs.ROOTENGINE }}(${{ steps.rootengine.outputs.ksuversion }})
+          path: |
+            out/AnyKernel3-*.zip
+            out/Image
+            out/boot.img
+          retention-days: 7
+          if-no-files-found: ignore
+
+
+      - name: 🚀 Upload Kernel Configuration
+        if: ${{ !inputs.DEBUGKERNELBUILD }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          AOSPSOURCE: ${{ inputs.AOSPSOURCE }}
+        shell: bash
+        run: |
+          # Identify AOSP Source Repository
+          case "$AOSPSOURCE" in
+            Lineage-24.0|Lineage-23.2)
+              AOSPSOURCEREPO="Lineage"
+              ;;
+            CrDroid-17.0|CrDroid-16.0)
+              AOSPSOURCEREPO="CrDroid"
+              ;;
+            *)
+              echo "└─ ⚠️ Unsupported AOSP Source : $AOSPSOURCE"
+              exit 1
+              ;;
+          esac
+          # Define Kernel Configuration and Release Details
+          CONFIGFILE="${GITHUB_WORKSPACE}/out/.config"
+          RENAMEDCONFIG="${GITHUB_WORKSPACE}/out/${AOSPSOURCEREPO}-KernelConfig.txt"
+          TAG="CCache-SM8750-${AOSPSOURCEREPO}"
+          ASSET="KernelConfig-${AOSPSOURCE}.zip"
+          ZIPFILE="${RUNNER_TEMP}/${ASSET}"
+          # Validate Generated Kernel Configuration
+          echo "└─ 🔍 Checking Generated Kernel Configuration..."
+          echo "└─ 📂 Expected Path : $CONFIGFILE"
+          if [ ! -s "$CONFIGFILE" ]; then
+            echo "└─ ⚠️ Generated Configuration Not Found or Empty"
+            echo "└─ 📂 Output Directory :"
+            ls -lah "${GITHUB_WORKSPACE}/out" 2>/dev/null || true
+            exit 1
+          fi
+
+          # Create Renamed Kernel Configuration Copy
+          cp "$CONFIGFILE" "$RENAMEDCONFIG"
+          CONFIGFILE="$RENAMEDCONFIG"
+          echo "└─ 📌 Configuration Copy Created"
+          echo "└─ 📂 Configuration Path : $CONFIGFILE"
+          # Display Original Configuration File Size
+          echo "└─ 📌 Configuration Found"
+          echo "└─ 📊 Original Size : $(stat -c '%s bytes' "$CONFIGFILE")"
+          # Validate ZIP Utility Availability
+          echo "└─ 🔍 Checking ZIP Utility..."
+          if ! command -v zip >/dev/null 2>&1; then
+            echo "└─ ⚠️ ZIP Utility Not Found"
+            exit 1
+          fi
+
+          # Create ZIP Archive Containing Kernel Configuration
+          echo "└─ 📦 Creating Configuration ZIP..."
+          rm -f "$ZIPFILE"
+          (
+            cd "$(dirname "$CONFIGFILE")"
+            zip -q "$ZIPFILE" "$(basename "$CONFIGFILE")"
+          )
+          # Validate ZIP Archive Integrity
+          if ! unzip -tq "$ZIPFILE"; then
+            echo "└─ ⚠️ Configuration ZIP Validation Failed"
+            exit 1
+          fi
+
+          # Display ZIP Archive Details and Contents
+          echo "└─ 📌 ZIP Created Successfully"
+          echo "└─ 📊 ZIP Size : $(stat -c '%s bytes' "$ZIPFILE")"
+          echo "└─ 📄 Contents :"
+          unzip -l "$ZIPFILE"
+          # Validate GitHub CLI Availability
+          echo "└─ 🔍 Checking GitHub CLI..."
+          if ! command -v gh >/dev/null 2>&1; then
+            echo "└─ ⚠️ GitHub CLI Not Found"
+            exit 1
+          fi
+
+          # Validate GitHub Authentication
+          echo "└─ 🔍 Checking GitHub Authentication..."
+          if ! gh auth status; then
+            echo "└─ ⚠️ GitHub Authentication Failed"
+            exit 1
+          fi
+
+          # Create Release or Update Existing Configuration Asset
+          echo "└─ 🔍 Checking GitHub Release..."
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            # Upload ZIP and Replace Existing Asset with Same File Name
+            echo "└─ 📌 Existing Release Found : $TAG"
+            echo "└─ 📦 Replacing Configuration Asset..."
+            gh release upload "$TAG" \
+              "$ZIPFILE" \
+              --repo "$GITHUB_REPOSITORY" \
+              --clobber
+          else
+            # Create a New Release and Upload Kernel Configuration ZIP
+            echo "└─ 📌 Release Not Found : Creating $TAG"
+            gh release create "$TAG" \
+              "$ZIPFILE" \
+              --repo "$GITHUB_REPOSITORY" \
+              --title "AOSP Kernel Configuration" \
+              --notes "Generated AOSP Merged Kernel Configuration"
+          fi
+
+          # Display Upload Confirmation / Release URL 
+          echo "└─ 🎉 Kernel Configuration ZIP Uploaded Successfully"
+          echo "└─ 🔗 https://github.com/${GITHUB_REPOSITORY}/releases/tag/${TAG}"
+   
+      - name: ☁️ Upload Public Compiler Cache
+        if: ${{ inputs.BUILDCCACHE }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: AndreiMikh/AndreiMikh-Kernel-Lab
+          CCACHE_DIR: ${{ github.workspace }}/.ccache
+          AOSPSOURCE: ${{ inputs.AOSPSOURCE }}
+        shell: bash
+        run: |
+          case "$AOSPSOURCE" in
+            Lineage-24.0|Lineage-23.2)
+              AOSPSOURCEREPO="Lineage"
+              ;;
+            CrDroid-17.0|CrDroid-16.0)
+              AOSPSOURCEREPO="CrDroid"
+              ;;
+            *)
+              echo "└─ ⚠️ Unsupported AOSP Source : $AOSPSOURCE"
+              exit 1
+              ;;
+          esac
+          ARCHIVE="CCache-SM8750-${AOSPSOURCE}.tar.zst"
+          RELEASETAG="CCache-SM8750-${AOSPSOURCEREPO}"
+          MAXSIZE=$((2 * 1024 * 1024 * 1024))
+          SELECTEDLEVEL=""
+          echo "└─ 📦 Packaging Public Compiler Cache..."
+          echo "└─ 📂 Compiler Cache Directory : $CCACHE_DIR"
+          echo "└─ 📏 Maximum Archive Size     : 2 GiB"
+          ccache -s || true
+          if [[ ! -d "$CCACHE_DIR" ]]; then
+            echo "└─ ⚠️ Compiler Cache Directory Not Found"
+            echo "└─ 📂 Expected : $CCACHE_DIR"
+            exit 1
+          fi
+     
+          # Remove Any Previous Archive
+          rm -f "$ARCHIVE"
+          # Try Compression Levels Until Archive Fits
+          for LEVEL in 1 3 5 7 9 11 13 15 17 19; do
+            echo "└─ 🗜️ Creating Archive with Zstandard Level -$LEVEL..."
+            if ! tar -I "zstd -T0 -${LEVEL}" \
+              -cf "$ARCHIVE" \
+              -C "$CCACHE_DIR" .; then
+              echo "└─ ⚠️ Archive Creation Failed at Level -$LEVEL"
+              rm -f "$ARCHIVE"
+              exit 1
+            fi
+       
+            ARCHIVESIZE="$(stat -c '%s' "$ARCHIVE")"
+            ARCHIVEHUMAN="$(du -h "$ARCHIVE" | cut -f1)"
+            echo "└─ 📦 Archive Size : $ARCHIVEHUMAN ($ARCHIVESIZE Bytes)"
+            if (( ARCHIVESIZE <= MAXSIZE )); then
+              SELECTEDLEVEL="$LEVEL"
+              echo "└─ 📌 Archive Fits the 2 GiB Limit"
+              break
+            fi
+            echo "└─ ⚠️ Archive Exceeds 2 GiB at Level -$LEVEL"
+            rm -f "$ARCHIVE"    
+      
+          done
+    
+          # Verify the Final Archive
+          if [[ -z "$SELECTEDLEVEL" || ! -f "$ARCHIVE" ]]; then
+            echo "└─ ⚠️ No Compression Level Produced an Archive Within 2 GiB"
+            echo "└─ ⚠️ Public Compiler Cache Upload Aborted"
+            exit 1
+          fi
+     
+          FINALSIZE="$(stat -c '%s' "$ARCHIVE")"
+          if (( FINALSIZE > MAXSIZE )); then
+            echo "└─ ⚠️ Final Archive Exceeds the Maximum Size"
+            rm -f "$ARCHIVE"
+            exit 1
+          fi
+    
+          echo "└─ 📌 Selected Zstandard Level  : -$SELECTEDLEVEL"
+          echo "└─ 📦 Final Archive Size        : $(du -sh "$ARCHIVE" | cut -f1)"
+          echo "└─ 🚀 Uploading Public Compiler Cache..."
+          if gh release create \
+            "$RELEASETAG" \
+            "$ARCHIVE" \
+            --repo "$GH_REPO" \
+            --title "$RELEASETAG" \
+            --notes 'Category: Compiler Cache | SM8750 — Public Compiler Cache for OPlus AOSP SM8750 Kernel Builds'; then
+            echo "└─ 📌 Public Compiler Cache Release Created"
+          elif gh release upload \
+            "$RELEASETAG" \
+            "$ARCHIVE" \
+            --repo "$GH_REPO" \
+            --clobber; then
+            echo "└─ 📌 Public Compiler Cache Release Updated"
+          else
+            echo "└─ ⚠️ Failed to Upload Public Compiler Cache"
+            rm -f "$ARCHIVE"
+            exit 1
+          fi
+    
+          rm -f "$ARCHIVE"
+          echo "└─ 🎉 Public Compiler Cache Uploaded Successfully"
+   
+      - name: 🐞 Upload Compiler Cache Debug Logs
+        if: ${{ inputs.DEBUGBUILDCCACHE }}
+        uses: actions/upload-artifact@v6
+        with:
+          name: CCache-Debug-Log
+          path: ccache.log
+          if-no-files-found: ignore
+
+      - name: 🧹 Cleanup Build Outputs on Failure
+        if: ${{ failure() }}
+        shell: bash
+        run: |
+          echo "└─ 🧹 Cleaning Failed Build Outputs..."
+          # Remove Kernel Build Output
+          if [[ -n "${OUTDIR:-}" && -d "$OUTDIR" ]]; then
+            echo "└─ 🗑️ Removing Kernel Build Output..."
+            rm -rf -- "$OUTDIR"
+          else
+            echo "└─ ℹ️ Kernel Build Output Not Found"
+          fi
+    
+          # Remove Generated Compiler Wrappers
+          for FILE in \
+            "$GITHUB_WORKSPACE/cc-wrapper" \
+            "$GITHUB_WORKSPACE/ld-wrapper"; do
+            if [[ -f "$FILE" ]]; then
+              rm -f -- "$FILE"
+              echo "└─ 🗑️ Removed : $FILE"
+            fi
+      
+          done
+   
+          # Preserve Compiler Cache Debug Logs
+          if [[ -f "$GITHUB_WORKSPACE/ccache.log" ]]; then
+            echo "└─ 📋 Preserving Compiler Cache Debug Log"
+          fi
+      
+          # Display Remaining Runner Storage
+          echo "└─ 📊 Runner Storage After Cleanup :"
+          df -h /
+          echo "└─ 🎉 Failure Cleanup Complete"
