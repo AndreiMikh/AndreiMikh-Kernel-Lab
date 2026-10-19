@@ -614,6 +614,8 @@ fun applyPostPatchFixups() {
 // ==========================
 // Android 16 / Kernel Base 6.12 / Sublevel 92 SMAPS-ROLLUP Compatibility Fix
 // ==========================
+val smapsRollupMarker =
+    "/* Kernel Base 6.12, Sublevel 92+ SHOW-SMAPS-ROLLUP() Compatibility Fix */"
 fun applyAndroid16SmapsRollupFakePatch() {
     val taskMmu = f("fs/proc/task_mmu.c")
     taskMmu.requireExists()
@@ -1183,7 +1185,7 @@ try {
     }
     println(
         "🚀 Fake Patches: $mode Completed " +
-        "(Android and Kernel Version = $kernelModule, Sublevel = $sublevel)"
+        "(Android/Kernel Base = $kernelModule, Sublevel = $sublevel)"
     )
 } catch (e: Exception) {
     System.err.println(
