@@ -1,7 +1,3 @@
-<p align="center">
-  <img src="AndreiMikh.png" alt="ANDREIMIKH KERNEL LAB" width="100%">
-</p>
-
 <br>
 
 ## 🔥 Supported Root Engines
