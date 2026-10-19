@@ -1992,6 +1992,42 @@ jobs:
           echo "└─ 📌 SUSFS Patch: $(basename "${SUSFSPATCH}")"                  
           # Enter Kernel Source Directory
           cd "${SOURCEDIR}"
+          # Apply temporary Android 15 / Kernel 6.6 compatibility patches
+          fakepatched=0
+          fakepatchedexpand=0
+          if [[ "${ANDROIDVERSION}" == "android15" && "${KERNELVERSION}" == "6.6" ]]; then
+            # Add Missing Pagemap Declarations
+            if ! grep -qxF $'\tunsigned int nr_subpages = __PAGE_SIZE / PAGE_SIZE;' fs/proc/task_mmu.c; then
+              echo "└─ 🔧 Patching Pagemap Declarations"
+              sed -i \
+                -e '/int ret = 0, copied = 0;/a\	unsigned int nr_subpages = __PAGE_SIZE / PAGE_SIZE;' \
+                -e '/int ret = 0, copied = 0;/a\	pagemap_entry_t *res = NULL;' \
+                fs/proc/task_mmu.c
+              fakepatched=1
+            fi
+
+            # Add Missing Headers
+            if ! grep -qxF '#include <linux/dma-buf.h>' fs/proc/base.c; then
+              echo "└─ 🔧 Adding DMA-BUF Header"
+              sed -i '/#include <linux\/cpufreq_times.h>/a #include <linux/dma-buf.h>' fs/proc/base.c
+            fi
+
+            if ! grep -qxF '#include <linux/zswap.h>' mm/memory.c; then
+              echo "└─ 🔧 Adding zswap header"
+              sed -i '/#include <linux\/sched\/sysctl.h>/a #include <linux/zswap.h>' mm/memory.c
+            fi
+
+            # Expand Last-VMA-End Block For Compatibility
+            if grep -qF 'if (vma->vm_end > last_vma_end)' fs/proc/task_mmu.c &&
+               ! grep -qF 'SUSFS_IS_INODE_SUS_MAP' fs/proc/task_mmu.c; then
+              echo "└─ 🔧 Expanding Last-VMA-End Block"
+              perl -i -0pe 's/\t\t\tif \(vma->vm_end > last_vma_end\)\n\t\t\t\tsmap_gather_stats\(vma, &mss, last_vma_end\);/\t\t\tif (vma->vm_end > last_vma_end) {\n\t\t\t\tsmap_gather_stats(vma, \&mss, last_vma_end);\n\t\t\t\tlast_vma_end = vma->vm_end;\n\t\t\t}/' fs/proc/task_mmu.c
+              fakepatchedexpand=1
+            fi
+          fi
+
+          echo "fakepatched=${fakepatched}"
+          echo "fakepatchedexpand=${fakepatchedexpand}"
           # Check Whether the Core Patch Is Already Applied
           echo "└─ 🔎 Checking SUSFS Core Patch Status..."
           if patch -R -p1 --dry-run \
@@ -2075,6 +2111,35 @@ jobs:
             rm -f "${ENABLEPATCH}"
           else
             echo "└─ ♻️ Skipping KernelSU Enable Patch : ${ROOTENGINE}"
+          fi
+
+          # Apply VMA-PAD-Start Fallback After SUSFS
+          if grep -qF 'VMA_PAD_START(' fs/proc/task_mmu.c &&
+             ! grep -qE '#include <linux/pgsize_migration(_inline)?\.h>|define VMA_PAD_START' fs/proc/task_mmu.c; then
+            sed -i '\|#include "internal.h"|a\
+          #undef VMA_PAD_START\
+          #ifndef VMA_PAD_START\
+          #define VMA_PAD_START(vma) ((vma)->vm_end)\
+          #endif' fs/proc/task_mmu.c
+            echo "└─ 🔧 Added VMA-PAD-Start fallback"
+          fi
+
+          # Revert Temporary Compatibility Patches
+          if [[ "${ANDROIDVERSION}" == "android15" && "${KERNELVERSION}" == "6.6" ]]; then
+            if [[ "${fake_patched_expand}" == "1" ]] &&
+               grep -qF 'if (vma->vm_end > last_vma_end) {' fs/proc/task_mmu.c &&
+               ! grep -qF 'SUSFS_IS_INODE_SUS_MAP' fs/proc/task_mmu.c; then
+              perl -i -0pe 's/\t\t\tif \(vma->vm_end > last_vma_end\) \{\n\t\t\t\tsmap_gather_stats\(vma, &mss, last_vma_end\);\n\t\t\t\tlast_vma_end = vma->vm_end;\n\t\t\t\}/\t\t\tif (vma->vm_end > last_vma_end)\n\t\t\t\tsmap_gather_stats(vma, \&mss, last_vma_end);/' fs/proc/task_mmu.c
+              echo "└─ ♻️ Last-VMA-End Reverted"
+            fi
+
+            if [[ "${fakepatched}" == "1" ]]; then
+              sed -i \
+                -e '/unsigned int nr_subpages = __PAGE_SIZE \/ PAGE_SIZE;/d' \
+                -e '/pagemap_entry_t \*res = NULL;/d' \
+                fs/proc/task_mmu.c
+              echo "└─ ♻️ Pagemap Declarations Reverted"
+            fi
           fi
 
           # Update SUSFS Options in Default Configuration
