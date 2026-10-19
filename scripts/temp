@@ -1,0 +1,360 @@
+
+ // ==========================
+ // Android 16 / 6.12 SUSFS Rejected-Hunk Repair
+ // ==========================
+fun applyAndroid16SusfsFixups() {
+    if (kernelModule != "android16-6.12") {
+        return
+    }
+
+    val exec = f("fs/exec.c")
+    val taskMmu = f("fs/proc/task_mmu.c")
+
+    exec.requireExists()
+    taskMmu.requireExists()
+
+    val susfsInclude = "#include <linux/susfs_def.h>"
+    val includeAnchor = "#include <linux/ksm.h>"
+
+    // Repair fs/exec.c without restoring linux/dma-buf.h.
+    var execText = exec.readText()
+
+    if (!execText.contains(susfsInclude)) {
+        check(execText.contains(includeAnchor)) {
+            "Cannot repair fs/exec.c: linux/ksm.h include anchor not found"
+        }
+
+        exec.insertAfterFirst(
+            Regex("""^#include <linux/ksm\.h>$"""),
+            "#ifdef CONFIG_KSU_SUSFS",
+            susfsInclude,
+            "#endif"
+        )
+
+        logPostfix(
+            exec,
+            "Added Missing SUSFS Header Include"
+        )
+    } else {
+        logSkip(exec, "SUSFS Header Include Already Present")
+    }
+
+    execText = exec.readText()
+
+    check(execText.contains(susfsInclude)) {
+        "SUSFS Header Verification Failed in fs/exec.c"
+    }
+
+    // Work with individual lines to repair partially applied hunks safely.
+    var lines = taskMmu.lines()
+
+    val showSmapStart = lines.indexOfFirst {
+        it.contains("show_smap(")
+    }
+
+    check(showSmapStart >= 0) {
+        "Cannot repair task_mmu.c: show_smap() not found"
+    }
+
+    val smapDeclaration = lines.indexOfFirst {
+        it.trim() == "struct mem_size_stats mss = {};"
+    }
+
+    check(smapDeclaration > showSmapStart) {
+        "Cannot repair show_smap(): mem_size_stats declaration not found"
+    }
+
+    val smapGuard = listOf(
+        "#ifdef CONFIG_KSU_SUSFS_SUS_MAP",
+        "\tif (vma->vm_file) {",
+        "\t\tif (SUSFS_IS_INODE_SUS_MAP(file_inode(vma->vm_file)))",
+        "\t\t\treturn 0;",
+        "\t}",
+        "#endif // #ifdef CONFIG_KSU_SUSFS_SUS_MAP"
+    )
+
+    if (
+        !lines.subList(
+            showSmapStart,
+            smapDeclaration + 1
+        ).any {
+            it.contains("SUSFS_IS_INODE_SUS_MAP")
+        }
+    ) {
+        lines.addAll(smapDeclaration + 1, smapGuard)
+        taskMmu.writeLines(lines)
+
+        logPostfix(
+            taskMmu,
+            "Repaired SUSFS Map-Hiding Guard in show_smap()"
+        )
+    } else {
+        logSkip(taskMmu, "show_smap() SUSFS Guard Already Present")
+    }
+
+    // Re-read after modifying show_smap().
+    lines = taskMmu.lines()
+
+    val rollupStart = lines.indexOfFirst {
+        it.contains("show_smaps_rollup(")
+    }
+
+    check(rollupStart >= 0) {
+        "Cannot repair task_mmu.c: show_smaps_rollup() not found"
+    }
+
+    val rollupCondition = lines.indexOfFirst {
+        it.trim() == "if (vma->vm_start < last_vma_end) {"
+    }
+
+    check(rollupCondition > rollupStart) {
+        "Cannot repair show_smaps_rollup(): VMA overlap condition not found"
+    }
+
+    val rollupGuard = listOf(
+        "#ifdef CONFIG_KSU_SUSFS_SUS_MAP",
+        "\t\tif (vma->vm_file && SUSFS_IS_INODE_SUS_MAP(file_inode(vma->vm_file)))",
+        "\t\t\tgoto bypass_orig_flow;",
+        "#endif // #ifdef CONFIG_KSU_SUSFS_SUS_MAP"
+    )
+
+    val conditionRegion = lines.subList(
+        rollupStart,
+        rollupCondition
+    )
+
+    if (!conditionRegion.any {
+        it.contains("SUSFS_IS_INODE_SUS_MAP")
+    }) {
+        lines.addAll(rollupCondition, rollupGuard)
+        taskMmu.writeLines(lines)
+
+        logPostfix(
+            taskMmu,
+            "Repaired SUSFS Map-Hiding Guard in show_smaps_rollup()"
+        )
+    } else {
+        logSkip(
+            taskMmu,
+            "show_smaps_rollup() SUSFS Guard Already Present"
+        )
+    }
+
+    // Add the bypass label independently in case only the guard was applied.
+    lines = taskMmu.lines()
+
+    val rollupEnd = lines.indexOfFirst {
+        it.contains("last_vma_end = vma->vm_end;") &&
+            lines.indexOfFirst { line ->
+                line.contains("show_smaps_rollup(")
+            } < lines.indexOf(it)
+    }
+
+    check(rollupEnd >= 0) {
+        "Cannot repair show_smaps_rollup(): last_vma_end assignment not found"
+    }
+
+    val label = "bypass_orig_flow:"
+
+    val rollupLabelExists = lines
+        .subList(rollupStart.coerceAtMost(lines.size), rollupEnd)
+        .any { it.trim() == label }
+
+    if (!rollupLabelExists) {
+        lines.add(
+            rollupEnd,
+            "\t\t$bypass_orig_flow"
+        )
+        taskMmu.writeLines(lines)
+
+        logPostfix(
+            taskMmu,
+            "Added SUSFS Rollup Bypass Label"
+        )
+    } else {
+        logSkip(taskMmu, "SUSFS Rollup Bypass Label Already Present")
+    }
+
+    // Verify the required SUSFS pieces before removing rejection files.
+    val finalExec = exec.readText()
+    val finalMmu = taskMmu.readText()
+
+    check(finalExec.contains(susfsInclude)) {
+        "SUSFS include verification failed"
+    }
+    check(finalMmu.contains("SUSFS_IS_INODE_SUS_MAP")) {
+        "SUSFS map-hiding verification failed"
+    }
+    check(finalMmu.contains(label)) {
+        "SUSFS rollup label verification failed"
+    }
+
+    val execReject = File(exec.path + ".rej")
+    val mmuReject = File(taskMmu.path + ".rej")
+
+    if (execReject.exists()) {
+        check(finalExec.contains(susfsInclude)) {
+            "Refusing to remove fs/exec.c.rej before verifying the repair"
+        }
+        check(execReject.delete()) {
+            "Could not remove ${execReject.path}"
+        }
+        logPostfix(execReject, "Removed After Source Verification")
+    }
+
+    if (mmuReject.exists()) {
+        check(
+            finalMmu.contains("SUSFS_IS_INODE_SUS_MAP") &&
+                finalMmu.contains(label)
+        ) {
+            "Refusing to remove task_mmu.c.rej before verifying the repair"
+        }
+        check(mmuReject.delete()) {
+            "Could not remove ${mmuReject.path}"
+        }
+        logPostfix(mmuReject, "Removed After Source Verification")
+    }
+}
+
+// ==========================
+// Postfix Fixups
+// ==========================
+fun applyPostPatchFixups() {
+    val taskMmu = f("fs/proc/task_mmu.c")
+
+    if (taskMmu.exists()) {
+        var content = taskMmu.readText()
+
+        // VMA-PAD-START Fallback
+        if (
+            content.contains("VMA_PAD_START(") &&
+            !Regex(
+                """#include <linux/pgsize_migration(_inline)?\.h>"""
+            ).containsMatchIn(content) &&
+            !Regex(
+                """^\s*#define\s+VMA_PAD_START"""
+            ).containsMatchIn(content)
+        ) {
+            val lines = taskMmu.lines()
+            lines.addAll(
+                1,
+                listOf(
+                    "#ifndef VMA_PAD_START",
+                    "#define VMA_PAD_START(vma) ((vma)->vm_end)",
+                    "#endif"
+                )
+            )
+            taskMmu.writeLines(lines)
+            logPostfix(taskMmu, "Inserted VMA-PAD-START() Fallback")
+        }
+
+        // FOLD-FILEMAP-FIXUP-ENTRY Compatibility
+        content = taskMmu.readText()
+
+        if (
+            content.contains("__fold_filemap_fixup_entry(") &&
+            !Regex(
+                """static\s+inline\s+void\s+__fold_filemap_fixup_entry"""
+            ).containsMatchIn(content)
+        ) {
+            val headerFile = f("include/linux/page_size_compat.h")
+
+            val headerDeclaresFn =
+                headerFile.exists() &&
+                    headerFile.readText().contains(
+                        "__fold_filemap_fixup_entry"
+                    )
+
+            if (headerDeclaresFn) {
+                if (!content.contains("#include <linux/page_size_compat.h>")) {
+                    taskMmu.insertAfterFirst(
+                        Regex("""^#include """),
+                        "#include <linux/page_size_compat.h>"
+                    )
+                    logPostfix(
+                        taskMmu,
+                        "Added PAGE-SIZE-COMPAT.H Include"
+                    )
+                }
+            } else {
+                val lines = taskMmu.lines()
+                val lastInclude = lines.indexOfLast {
+                    it.trimStart().startsWith("#include")
+                }
+                val insertAt = if (lastInclude >= 0) lastInclude + 1 else 1
+
+                lines.addAll(
+                    insertAt,
+                    listOf(
+                        "#ifndef __fold_filemap_fixup_entry",
+                        "static inline void __fold_filemap_fixup_entry(struct vma_iterator *iter, unsigned long *end) { }",
+                        "#endif /* __fold_filemap_fixup_entry */"
+                    )
+                )
+
+                taskMmu.writeLines(lines)
+                logPostfix(
+                    taskMmu,
+                    "Inserted FOLD-FILEMAP-FIXUP-ENTRY() Stub"
+                )
+            }
+        }
+    }
+
+    // Android 12 / 13 Nameidata Compatibility
+    if (
+        kernelModule == "android12-5.10" ||
+        kernelModule == "android13-5.10"
+    ) {
+        val namei = f("fs/namei.c")
+
+        if (
+            namei.exists() &&
+            namei.readText().contains(
+                "set_nameidata(nd, old_dfd, fake_filename, NULL)"
+            )
+        ) {
+            namei.replaceEachLine(
+                Regex(
+                    """set_nameidata\(nd, old_dfd, fake_filename, NULL\)"""
+                ),
+                "set_nameidata(nd, old_dfd, fake_filename)"
+            )
+            logPostfix(
+                namei,
+                "Rewrote 4-Arg SET-NAMEIDATA() to 3-Arg Form"
+            )
+        }
+    }
+
+    // Android 16 Getname-Flags Compatibility
+    if (kernelModule == "android16-6.12") {
+        val openC = f("fs/open.c")
+
+        if (
+            openC.exists() &&
+            openC.readText().contains(
+                "getname_flags(filename, lookup_flags, NULL)"
+            )
+        ) {
+            openC.replaceEachLine(
+                Regex(
+                    """getname_flags\(filename, lookup_flags, NULL\)"""
+                ),
+                "getname_flags(filename, lookup_flags)"
+            )
+            logPostfix(
+                openC,
+                "Rewrote 3-Arg GETNAME-FLAGS() to 2-Arg Form"
+            )
+        }
+    }
+}
+
+// ==========================
+// PostFix Compatibility Patches
+// ==========================
+fun postfix() {
+    applyAndroid16SusfsFixups()
+    applyPostPatchFixups()
+}
