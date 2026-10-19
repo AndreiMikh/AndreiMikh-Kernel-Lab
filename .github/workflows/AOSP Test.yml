@@ -999,22 +999,50 @@ jobs:
               -iname 'Kconfig' \
               -o -iname '*kernelFwUpdate*' \
             \) \
-            -print
-          # Define SetLocalVersion Script
-          SETLOCALVERSION="$SOURCEDIR/scripts/setlocalversion"
-          # Remove Dirty Kernel Suffix
-          if [[ -f "$SETLOCALVERSION" ]]; then
-            echo "└─ 🧹 Removing -Dirty Kernel Suffix from Kernel Release..."
-            sed -i \
-              "s/printf '%s' -dirty/printf '%s' ''/g" \
-              "$SETLOCALVERSION"
-            echo "└─ 📌 Dirty Kernel Suffix Removal Applied"
-            echo "└─ 📂 $SETLOCALVERSION"
-          else
-            echo "└─ ⚠️ SetLocalVersion Not Found : $SETLOCALVERSION"
-          fi
-         
+            -print         
           echo "└─ 🎉 Kernel Sources Prepared Successfully"
+
+      - name: 🧹 Check ABI Protected Exports
+        shell: bash
+        run: |
+          # Check Kernel Source Directory
+          echo "└─ 🧹 Checking ABI Protected Exports..."
+          echo "└─ 📂 Kernel Source : $SOURCEDIR"
+          # Skip Bazel-Specific Checks When Build Script Exists
+          if [[ -f "$SOURCEDIR/build/build.sh" ]]; then
+            echo "└─ ℹ️ Build Script Detected; Skipping Bazel-Specific Checks"
+            exit 0
+          fi
+
+          # Check For Bazel Build Metadata
+          if [[ -f "$SOURCEDIR/BUILD.bazel" ]]; then
+            echo "└─ 🔎 Bazel Build Metadata Detected"
+          else
+            echo "└─ ℹ️ Bazel Build Not Found"
+          fi
+
+          # Locate ABI Protected Export Metadata
+          for directory in \
+            "$SOURCEDIR/android" \
+            "$SOURCEDIR/common/android"; do
+            if [[ -d "$directory" ]]; then
+              find "$directory" \
+                -maxdepth 1 \
+                -type f \
+                -name 'abi_gki_protected_exports_*' \
+                -print
+            fi
+            
+          done
+
+          # Inspect Protected Module Configuration
+          if [[ -f "$SOURCEDIR/common/modules.bzl" ]]; then
+            echo "└─ ℹ️ Checking Protected Module Configuration..."
+            grep -n '^protected_modules = ' \
+              "$SOURCEDIR/common/modules.bzl" || true
+          fi
+
+          echo "└─ 🎉 Kernel Repository Check Completed"
    
       - name: 🤖 Detect Kernel Version
         id: kernelversion
@@ -1030,6 +1058,7 @@ jobs:
             echo "└─ 📂 Expected : $KERNELMAKEFILE"
             exit 1
           fi
+         
           # Detect Kernel Module Branch
           echo "└─ 🔍 Detecting Kernel Module Branch..."
           KERNELMODULE=""
@@ -1164,7 +1193,118 @@ jobs:
             echo "androidversion=$ANDROIDVERSION"
             echo "kernelversion=$KERNELVERSION"
           } >> "$GITHUB_OUTPUT"
-          echo "└─ 🎉 Kernel Version Detection Complete" 
+          echo "└─ 🎉 Kernel Version Detection Complete"
+
+      - name: ⚙️ Kernel Build Metadata
+        shell: bash
+        env:
+          KERNELSUFFIX: ${{ inputs.KERNELSUFFIX }}
+          KERNELBUILDTIME: ${{ inputs.KERNELBUILDTIME }}
+        run: |
+          # Configure Kernel Local Version
+          echo "└─ 🔧 Configuring Kernel Local Version..."
+          if [[ -n "$KERNELSUFFIX" ]]; then
+            LOCALVERSION="-${KERNELSUFFIX}-4k"
+          else
+            LOCALVERSION="-${SRCCOMMIT}-4k"
+          fi
+
+          # Apply Kernel Local Version
+          if [[ -n "${DEFCONFIG:-}" && -f "$DEFCONFIG" ]]; then
+            # Remove Existing Local Version Settings
+            sed -i \
+              -e '/^CONFIG_LOCALVERSION=/d' \
+              -e '/^CONFIG_LOCALVERSION_AUTO=/d' \
+              "$DEFCONFIG"
+            # Set Custom Kernel Local Version
+            printf 'CONFIG_LOCALVERSION="%s"\n' "$LOCALVERSION" \
+              >> "$DEFCONFIG"
+            # Disable Automatic Kernel Local Version Suffix
+            echo "# CONFIG_LOCALVERSION_AUTO is not set" \
+              >> "$DEFCONFIG"
+          else
+            echo "└─ ⚠️ Kernel Defconfig Not Found : ${DEFCONFIG:-unset}"
+            exit 1
+          fi
+
+          # Verify Kernel Local Version Configuration
+          if ! grep -Fxq "CONFIG_LOCALVERSION=\"$LOCALVERSION\"" "$DEFCONFIG"; then
+            echo "└─ ⚠️ Failed to Apply Kernel Local Version"
+            exit 1
+          fi
+
+          # Verify Automatic Local Version Is Disabled
+          if ! grep -Fxq '# CONFIG_LOCALVERSION_AUTO is not set' "$DEFCONFIG"; then
+            echo "└─ ⚠️ Failed to Disable Automatic Kernel Local Version"
+            exit 1
+          fi
+
+          # Display Configured Kernel Local Version
+          echo "└─ 📌 Kernel Local Version        :"
+          grep '^CONFIG_LOCALVERSION=' "$DEFCONFIG"
+          # Define SetLocalVersion Script
+          SETLOCALVERSION="$SOURCEDIR/scripts/setlocalversion"
+          # Remove Dirty Kernel Suffix
+          if [[ -f "$SETLOCALVERSION" ]]; then
+            echo "└─ 🧹 Removing 'Dirty' Kernel Suffix from Kernel Release..."
+            sed -i \
+              "s/printf '%s' -dirty/printf '%s' ''/g" \
+              "$SETLOCALVERSION"
+            echo "└─ 📌 Dirty Kernel Suffix Removal Applied"
+            echo "└─ 📂 $SETLOCALVERSION"
+          else
+            echo "└─ ⚠️ SetLocalVersion Not Found : $SETLOCALVERSION"
+            exit 1
+          fi
+          
+          # Resolve Build Timestamp Input
+          TIMEINPUT="$KERNELBUILDTIME"
+          if [[ -n "$TIMEINPUT" ]]; then
+            DATESTR="$TIMEINPUT"
+            echo "└─ 🔎 Using Custom Build Time : $DATESTR"
+          else
+            DATESTR="$(TZ='UTC' date '+%a %b %-d %H:%M:%S UTC %Y')"
+            echo "└─ 🛠️ Using Current UTC Time  : $DATESTR"
+          fi
+
+          # Validate Build Timestamp Format
+          if ! date -d "$DATESTR" >/dev/null 2>&1; then
+            echo "└─ ⚠️ Invalid Build Time"
+            echo "└─ 📌 Value                   : $DATESTR"
+            echo "└─ 📌 Expected                : <Day> <Month> <DD> <HH:MM:SS> UTC <YYYY>"
+            exit 1
+          fi
+
+          # Configure Kbuild Build Metadata
+          export KBUILD_BUILD_TIMESTAMP="$DATESTR"
+          export KBUILD_BUILD_VERSION="1"
+          # Export Build Metadata To Following Workflow Steps
+          {
+            echo "LOCALVERSION=$LOCALVERSION"
+            echo "KBUILD_BUILD_TIMESTAMP=$KBUILD_BUILD_TIMESTAMP"
+            echo "KBUILD_BUILD_VERSION=$KBUILD_BUILD_VERSION"
+          } >> "$GITHUB_ENV"
+          # Display Final Build Metadata
+          echo "└─ 🔎 Final Kernel Local Version : $LOCALVERSION"
+          echo "└─ 🔍 Kbuild Build Metadata"
+          echo "└─ 📌 Build Timestamp             : $KBUILD_BUILD_TIMESTAMP"
+          echo "└─ 📌 Build Version               : $KBUILD_BUILD_VERSION"
+          echo "└─ 📌 Android Base                : $ANDROIDVERSION"
+          echo "└─ 📌 Kernel Base                 : $KERNELVERSION"
+          echo "└─ 📌 Kernel Version              : $FULLVERSION"
+          # Validate Build Timestamp
+          if [[ -z "${KBUILD_BUILD_TIMESTAMP:-}" ]]; then
+            echo "└─ ⚠️ Kbuild Build Timestamp Not Set"
+            exit 1
+          fi
+
+          # Validate Build Version
+          if [[ -z "${KBUILD_BUILD_VERSION:-}" ]]; then
+            echo "└─ ⚠️ Kbuild Build Version Not Set"
+            exit 1
+          fi
+
+          echo "└─ 🎉 Kernel Build Metadata Configured"
    
       - name: 🆘 Solve Root Engine Source
         id: manager
@@ -2281,103 +2421,6 @@ jobs:
           echo "└─ 📌 NoMount Makefile Integration Verified"
           echo "└─ 📌 NoMount Source Integration Verified"
           echo "└─ 🎉 NoMount Built-in Integration Complete"
-
-      - name: ⚙️ Kernel Build Metadata
-        shell: bash
-        env:
-          KERNELSUFFIX: ${{ inputs.KERNELSUFFIX }}
-          KERNELBUILDTIME: ${{ inputs.KERNELBUILDTIME }}
-        run: |
-          # Configure Kernel Local Version
-          echo "└─ 🔧 Configuring Kernel Local Version..."
-          if [[ -n "$KERNELSUFFIX" ]]; then
-            LOCALVERSION="-${KERNELSUFFIX}-4k"
-          else
-            LOCALVERSION="-${SRCCOMMIT}-4k"
-          fi
-
-          # Apply Kernel Local Version
-          if [[ -n "${DEFCONFIG:-}" && -f "$DEFCONFIG" ]]; then
-            # Remove Existing Local Version Settings
-            sed -i \
-              -e '/^CONFIG_LOCALVERSION=/d' \
-              -e '/^CONFIG_LOCALVERSION_AUTO=/d' \
-              "$DEFCONFIG"
-            # Set Custom Kernel Local Version
-            printf 'CONFIG_LOCALVERSION="%s"\n' "$LOCALVERSION" \
-              >> "$DEFCONFIG"
-            # Disable Automatic Kernel Local Version Suffix
-            echo "# CONFIG_LOCALVERSION_AUTO is not set" \
-              >> "$DEFCONFIG"
-          else
-            echo "└─ ⚠️ Kernel Defconfig Not Found : ${DEFCONFIG:-unset}"
-            exit 1
-          fi
-
-          # Verify Kernel Local Version Configuration
-          if ! grep -Fxq "CONFIG_LOCALVERSION=\"$LOCALVERSION\"" "$DEFCONFIG"; then
-            echo "└─ ⚠️ Failed to Apply Kernel Local Version"
-            exit 1
-          fi
-
-          # Verify Automatic Local Version Is Disabled
-          if ! grep -Fxq '# CONFIG_LOCALVERSION_AUTO is not set' "$DEFCONFIG"; then
-            echo "└─ ⚠️ Failed to Disable Automatic Kernel Local Version"
-            exit 1
-          fi
-
-          # Display Configured Kernel Local Version
-          echo "└─ 📌 Kernel Local Version        :"
-          grep '^CONFIG_LOCALVERSION=' "$DEFCONFIG"
-          # Resolve Build Timestamp Input
-          TIMEINPUT="$KERNELBUILDTIME"
-          if [[ -n "$TIMEINPUT" ]]; then
-            DATESTR="$TIMEINPUT"
-            echo "└─ 🔎 Using Custom Build Time : $DATESTR"
-          else
-            DATESTR="$(TZ='UTC' date '+%a %b %-d %H:%M:%S UTC %Y')"
-            echo "└─ 🛠️ Using Current UTC Time  : $DATESTR"
-          fi
-
-          # Validate Build Timestamp Format
-          if ! date -d "$DATESTR" >/dev/null 2>&1; then
-            echo "└─ ⚠️ Invalid Build Time"
-            echo "└─ 📌 Value                   : $DATESTR"
-            echo "└─ 📌 Expected                : <Day> <Month> <DD> <HH:MM:SS> UTC <YYYY>"
-            exit 1
-          fi
-
-          # Configure Kbuild Build Metadata
-          export KBUILD_BUILD_TIMESTAMP="$DATESTR"
-          export KBUILD_BUILD_VERSION="1"
-          # Export Build Metadata To Following Workflow Steps
-          {
-            echo "LOCALVERSION=$LOCALVERSION"
-            echo "KBUILD_BUILD_TIMESTAMP=$KBUILD_BUILD_TIMESTAMP"
-            echo "KBUILD_BUILD_VERSION=$KBUILD_BUILD_VERSION"
-          } >> "$GITHUB_ENV"
-          # Display Final Build Metadata
-          echo "└─ 🔎 Final Kernel Local Version : $LOCALVERSION"
-          echo "└─ 🔍 Kbuild Build Metadata"
-          echo "└─ 📌 Build Timestamp             : $KBUILD_BUILD_TIMESTAMP"
-          echo "└─ 📌 Build Version               : $KBUILD_BUILD_VERSION"
-          echo "└─ 📌 Android Base                : $ANDROIDVERSION"
-          echo "└─ 📌 Kernel Base                 : $KERNELVERSION"
-          echo "└─ 📌 Kernel Version              : $FULLVERSION"
-          # Validate Build Timestamp
-          if [[ -z "${KBUILD_BUILD_TIMESTAMP:-}" ]]; then
-            echo "└─ ⚠️ Kbuild Build Timestamp Not Set"
-            exit 1
-          fi
-
-          # Validate Build Version
-          if [[ -z "${KBUILD_BUILD_VERSION:-}" ]]; then
-            echo "└─ ⚠️ Kbuild Build Version Not Set"
-            exit 1
-          fi
-
-          # Confirm Build Metadata Configuration
-          echo "└─ 🎉 Kernel Build Metadata Configured"
        
       - name: 🔨 Compile Kernel
         if: ${{ !inputs.DEBUGKERNELBUILD }}
