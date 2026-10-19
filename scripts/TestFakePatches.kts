@@ -196,6 +196,259 @@ fun File.replaceWholeLine(
     return changed
 }
 
+
+
+fun replaceExactOnce(
+    content: String,
+    old: String,
+    new: String,
+    file: File,
+    label: String
+): String {
+    var count = 0
+    var index = 0
+    while (true) {
+        index = content.indexOf(old, index)
+        if (index < 0) break
+        count++
+        index += old.length
+    }
+    check(count == 1) {
+        "$label: Expected exactly one matching anchor in ${file.path}, found $count"
+    }
+    return content.replaceFirst(old, new)
+}
+fun replaceFakePatchAnchor(
+    content: String,
+    old: String,
+    new: String,
+    file: File,
+    label: String
+): Pair<String, Boolean> {
+    var count = 0
+    var index = 0
+    while (true) {
+        index = content.indexOf(old, index)
+        if (index < 0) break
+        count++
+        index += old.length
+    }
+    check(count <= 1) {
+        "$label: Multiple matching anchors found in ${file.path}"
+    }
+    if (count == 0) {
+        check(content.contains(smapsRollupFakeMarker)) {
+            "$label: Expected anchor not found in ${file.path}"
+        }
+        return content to false
+    }
+    return content.replaceFirst(old, new) to true
+}
+val smapsRollupFakeMarker =
+    "/* Fake-patch marker for 6.12 sublevel 92+ show_smaps_rollup reshape. */"
+fun fakePatchLines(vararg lines: String): String =
+    lines.joinToString("\n", postfix = "\n")
+val A_NEW_LOOP = fakePatchLines(
+    "\tif (!IS_ERR(vma))",
+    "\t\tvma_start = vma->vm_start;",
+    "",
+    "\twhile (vma) {",
+    "\t\tif (IS_ERR(vma)) {",
+    "\t\t\tret = PTR_ERR(vma);",
+    "\t\t\tgoto out_unlock;",
+    "\t\t}",
+    "",
+    "\t\tif (vma->vm_start < last_vma_end) {",
+    "\t\t\t/*",
+    "\t\t\t * After retaking the lock, already reported VMA grew",
+    "\t\t\t * or got merged with the next one and we found it",
+    "\t\t\t * again. Gather stats for the remaining portion by",
+    "\t\t\t * starting at last_vma_end.",
+    "\t\t\t */",
+    "\t\t\tsmap_gather_stats_range(priv, vma, &mss, last_vma_end);",
+    "\t\t} else {",
+    "\t\t\t/* Found next unreported VMA, start from its beginning */",
+    "\t\t\tsmap_gather_stats(priv, vma, &mss);",
+    "\t\t}",
+    "\t\tlast_vma_end = vma->vm_end;"
+)
+val A_OLD_LOOP = fakePatchLines(
+    "\tvma_start = vma->vm_start;",
+    "\tdo {",
+    "\t\tsmap_gather_stats(vma, &mss, 0);",
+    "\t\tlast_vma_end = vma->vm_end;",
+    smapsRollupFakeMarker
+)
+val A_NEW_TAIL = fakePatchLines(
+    "\t\t\tpos = last_vma_end;",
+    "\t\t\tvma_iter_init(&priv->iter, mm, pos);",
+    "\t\t}",
+    "\t\tvma = proc_get_vma(m, &pos);",
+    "\t}"
+)
+val A_OLD_TAIL = fakePatchLines(
+    "\t\t\tpos = last_vma_end;",
+    "\t\t\tvma_iter_init(&priv->iter, mm, pos);",
+    "\t\t}",
+    "\t\t\t/* Case 4 above */",
+    "\t\t\tif (vma->vm_end > last_vma_end) {",
+    "\t\t\t\tsmap_gather_stats(vma, &mss, last_vma_end);",
+    "\t\t\t\tlast_vma_end = vma->vm_end;",
+    "\t\t\t}",
+    "\t\t\tvma = proc_get_vma(m, &pos);",
+    "\t} for_each_vma(vmi, vma);"
+)
+val R_NEW_LOOP = fakePatchLines(
+    "\tvma_start = vma->vm_start;",
+    "\tdo {",
+    "#ifdef CONFIG_KSU_SUSFS_SUS_MAP",
+    "\t\tif (vma->vm_file && SUSFS_IS_INODE_SUS_MAP(file_inode(vma->vm_file)))",
+    "\t\t\tgoto bypass_orig_flow;",
+    "#endif // #ifdef CONFIG_KSU_SUSFS_SUS_MAP",
+    "\t\tsmap_gather_stats(vma, &mss, 0);",
+    "#ifdef CONFIG_KSU_SUSFS_SUS_MAP",
+    "bypass_orig_flow:",
+    "#endif // #ifdef CONFIG_KSU_SUSFS_SUS_MAP",
+    "\t\tlast_vma_end = vma->vm_end;",
+    smapsRollupFakeMarker
+)
+val R_OLD_LOOP = fakePatchLines(
+    "\tif (!IS_ERR(vma))",
+    "\t\tvma_start = vma->vm_start;",
+    "",
+    "\twhile (vma) {",
+    "\t\tif (IS_ERR(vma)) {",
+    "\t\t\tret = PTR_ERR(vma);",
+    "\t\t\tgoto out_unlock;",
+    "\t\t}",
+    "",
+    "#ifdef CONFIG_KSU_SUSFS_SUS_MAP",
+    "\t\tif (vma->vm_file && SUSFS_IS_INODE_SUS_MAP(file_inode(vma->vm_file)))",
+    "\t\t\tgoto bypass_orig_flow_rollup;",
+    "#endif // #ifdef CONFIG_KSU_SUSFS_SUS_MAP",
+    "\t\tif (vma->vm_start < last_vma_end) {",
+    "\t\t\t/*",
+    "\t\t\t * After retaking the lock, already reported VMA grew",
+    "\t\t\t * or got merged with the next one and we found it",
+    "\t\t\t * again. Gather stats for the remaining portion by",
+    "\t\t\t * starting at last_vma_end.",
+    "\t\t\t */",
+    "\t\t\tsmap_gather_stats_range(priv, vma, &mss, last_vma_end);",
+    "\t\t} else {",
+    "\t\t\t/* Found next unreported VMA, start from its beginning */",
+    "\t\t\tsmap_gather_stats(priv, vma, &mss);",
+    "\t\t}",
+    "#ifdef CONFIG_KSU_SUSFS_SUS_MAP",
+    "bypass_orig_flow_rollup:",
+    "#endif // #ifdef CONFIG_KSU_SUSFS_SUS_MAP",
+    "\t\tlast_vma_end = vma->vm_end;",
+    smapsRollupFakeMarker
+)
+val R_NEW_TAIL = fakePatchLines(
+    "\t\t\t/* Case 4 above */",
+    "\t\t\tif (vma->vm_end > last_vma_end) {",
+    "#ifdef CONFIG_KSU_SUSFS_SUS_MAP",
+    "\t\t\t\tif (!vma->vm_file || !(SUSFS_IS_INODE_SUS_MAP(file_inode(vma->vm_file)))) {",
+    "\t\t\t\t\tsmap_gather_stats(vma, &mss, last_vma_end);",
+    "\t\t\t\t\tlast_vma_end = vma->vm_end;",
+    "\t\t\t\t}",
+    "#else",
+    "\t\t\t\tsmap_gather_stats(vma, &mss, last_vma_end);",
+    "\t\t\t\tlast_vma_end = vma->vm_end;",
+    "#endif // #ifdef CONFIG_KSU_SUSFS_SUS_MAP",
+    "\t\t\t}",
+    "\t\t\tvma = proc_get_vma(m, &pos);",
+    "\t} for_each_vma(vmi, vma);"
+)
+val R_OLD_TAIL = fakePatchLines(
+    "\t\tvma = proc_get_vma(m, &pos);",
+    "\t}"
+)
+fun applyAndroid16SmapsRollupFakePatch() {
+    if (kernelModule != "android16-6.12" || sublevel < 92) return
+    val file = f("fs/proc/task_mmu.c")
+    file.requireExists()
+    var content = file.readText()
+    check(content.contains("proc_get_vma(m, &pos)")) {
+        "Expected 6.12+ proc_get_vma() loop not found in ${file.path}"
+    }
+    check(content.contains("smap_gather_stats_range(priv, vma, &mss, last_vma_end);")) {
+        "Expected 6.12+ smap_gather_stats_range() not found in ${file.path}"
+    }
+    var changed = false
+    var result = replaceFakePatchAnchor(
+        content,
+        A_NEW_LOOP,
+        A_OLD_LOOP,
+        file,
+        "SUSFS Fake-Patch Loop"
+    )
+    content = result.first
+    changed = changed || result.second
+    result = replaceFakePatchAnchor(
+        content,
+        A_NEW_TAIL,
+        A_OLD_TAIL,
+        file,
+        "SUSFS Fake-Patch Tail"
+    )
+    content = result.first
+    changed = changed || result.second
+    if (changed) {
+        file.writeText(content)
+        logApply(
+            file,
+            "Applied Android 16 / 6.12 SUSFS show_smaps_rollup Fake-Patch"
+        )
+    } else {
+        logSkip(
+            file,
+            "SUSFS show_smaps_rollup Fake-Patch Anchors Already Transformed"
+        )
+    }
+}
+fun revertAndroid16SmapsRollupFakePatch() {
+    if (kernelModule != "android16-6.12" || sublevel < 92) return
+    val file = f("fs/proc/task_mmu.c")
+    file.requireExists()
+    var content = file.readText()
+    if (!content.contains(smapsRollupFakeMarker)) {
+        logSkip(file, "SUSFS SHOW-SMAPS-ROLLUP Marker Not Found")
+        return
+    }
+    var changed = false
+    var result = replaceFakePatchAnchor(
+        content,
+        R_NEW_LOOP,
+        R_OLD_LOOP,
+        file,
+        "SUSFS Fake-Patch Restoration Loop"
+    )
+    content = result.first
+    changed = changed || result.second
+    result = replaceFakePatchAnchor(
+        content,
+        R_NEW_TAIL,
+        R_OLD_TAIL,
+        file,
+        "SUSFS Fake-Patch Restoration Tail"
+    )
+    content = result.first
+    changed = changed || result.second
+    if (changed) {
+        file.writeText(content)
+        logPostfix(
+            file,
+            "Restored Modern Android 16 / 6.12 SHOW-SMAPS-ROLLUP Loop With SUS-MAP Guards"
+        )
+    } else {
+        logSkip(
+            file,
+            "SUSFS SHOW-SMAPS-ROLLUP Loop Already Restored or Anchors Not Present"
+        )
+    }
+}
+
 // ==========================
 // Logging
 // ==========================
