@@ -587,7 +587,7 @@ fun applyPostPatchFixups() {
         }
     }
 
-    // Android 16 Getname-Flags Compatibility
+    // Android 16 Getname-Flags Post-Patch Compatibility
     if (kernelModule == "android16-6.12") {
         val openC = f("fs/open.c")
         if (
