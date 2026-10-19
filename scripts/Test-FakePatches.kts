@@ -1,9 +1,7 @@
 #!/usr/bin/env kotlin
 import java.io.File
 import kotlin.system.exitProcess
-// ============================================================
 // Basic File Helpers
-// ============================================================
 fun File.requireExists() {
     check(exists()) {
         "Required File Does Not Exist: $path"
@@ -16,9 +14,7 @@ fun File.writeLines(lines: List<String>) {
 }
 fun File.rel(): String =
     path.removePrefix("$workDir/").removePrefix("$workDir\\")
-// ============================================================
 // Safe Insert Helpers
-// ============================================================
 fun File.insertAfterFirst(
     anchor: Regex,
     vararg newLines: String
@@ -79,9 +75,7 @@ fun File.insertBeforeFirst(
     writeLines(lines)
     return true
 }
-// ============================================================
 // Safe Delete Helpers
-// ============================================================
 fun File.deleteLine(pattern: Regex): Boolean {
     requireExists()
     val lines = lines()
@@ -150,9 +144,7 @@ fun File.deleteBlock(
     }
     return changed
 }
-// ============================================================
 // Replace Helpers
-// ============================================================
 fun File.replaceEachLine(
     pattern: Regex,
     replacement: String
@@ -192,9 +184,7 @@ fun File.replaceWholeLine(
     }
     return changed
 }
-// ============================================================
 // Logging
-// ============================================================
 fun logApply(file: File, detail: String) =
     println("[APPLY]   ${file.rel()} | $detail")
 fun logPostfix(file: File, detail: String) =
@@ -203,9 +193,7 @@ fun logRevert(file: File, detail: String) =
     println("[REVERT]  ${file.rel()} | $detail")
 fun logSkip(file: File, detail: String) =
     println("[SKIP]    ${file.rel()} | $detail")
-// ============================================================
-// Environment
-// ============================================================
+// Environment Variables
 val kernelModule =
     System.getenv("KERNELMODULE") ?: ""
 val sublevel =
@@ -218,9 +206,7 @@ val workDir =
         ?: "kernel_workspace/kernel_platform/common"
 fun f(relPath: String) =
     File(workDir, relPath)
-// ============================================================
 // Common Anchors
-// ============================================================
 val fdinfoCommentStart =
     Regex("""^[ \t]*/\*$""")
 val fdinfoCommentEnd =
@@ -237,9 +223,7 @@ val inotifyHelper =
         "}",
         ""
     )
-// ============================================================
 // Inotify FDInfo
-// ============================================================
 fun addInotifyMarkUserMaskFunction(file: File) {
     if (file.readText().contains("inotify_mark_user_mask(")) {
         logSkip(file, "INOTIFY MARK USER MASK() Already Present")
@@ -251,14 +235,14 @@ fun addInotifyMarkUserMaskFunction(file: File) {
     )
     logApply(
         file,
-        "Inserted INOTIFY MARK USER MASK() Helper Before INOTIFY FDINFO()"
+        "Inserted Inotify Mark User Mask() Helper Before Inotify FDInfo()"
     )
 }
 fun applyFdinfo(file: File) {
     file.requireExists()
     val content = file.readText()
     if (content.contains("inotify_mark_user_mask(")) {
-        logSkip(file, "FDINFO Patch Already Applied")
+        logSkip(file, "FDInfo Patch Already Applied")
         return
     }
     check(
@@ -288,13 +272,13 @@ fun applyFdinfo(file: File) {
     )
     logApply(
         file,
-        "Replaced IGNORED MASK:%X With IGNORED MASK:0"
+        "Replaced Ignored Mask:%X With Ignored Mask:0"
     )
     addInotifyMarkUserMaskFunction(file)
 }
 fun revertFdinfo(file: File) {
     if (!file.exists()) {
-        logSkip(file, "FDINFO File Does Not Exist")
+        logSkip(file, "FDInfo File Does Not Exist")
         return
     }
     val content = file.readText()
@@ -302,7 +286,7 @@ fun revertFdinfo(file: File) {
         !content.contains("inotify_mark_user_mask(") &&
         !content.contains("ignored_mask:0")
     ) {
-        logSkip(file, "FDINFO Patch Not Present")
+        logSkip(file, "FDInfo Patch Not Present")
         return
     }
     file.replaceEachLine(
@@ -321,12 +305,10 @@ fun revertFdinfo(file: File) {
     )
     logRevert(
         file,
-        "Restored Original FDINFO Mask Handling"
+        "Restored Original FDInfo Mask Handling"
     )
 }
-// ============================================================
 // Android 15 VMA Compatibility
-// ============================================================
 fun applyAndroid15VmaBlock(
     taskMmu: File,
     namespace: File
@@ -347,7 +329,7 @@ fun applyAndroid15VmaBlock(
     )
     logApply(
         taskMmu,
-        "Inserted LAST VMA END Update After SMAP GATHER STATS()"
+        "Inserted Last VMA End Update After SMAP Gather Stats()"
     )
     val lines = taskMmu.lines()
     val updateIndex =
@@ -355,7 +337,7 @@ fun applyAndroid15VmaBlock(
             it.contains("last_vma_end = vma->vm_end;")
         }
     check(updateIndex >= 0) {
-        "Unable to Locate Inserted LAST VMA END Assignment"
+        "Unable to Locate Inserted Last VMA End Assignment"
     }
     val ifIndex =
         (updateIndex - 1 downTo 0)
@@ -380,7 +362,7 @@ fun applyAndroid15VmaBlock(
     taskMmu.writeLines(lines)
     logApply(
         taskMmu,
-        "Wrapped LAST VMA END Update in Conditional Block"
+        "Wrapped Last VMA End Update in Conditional Block"
     )
     namespace.insertAfterFirst(
         Regex("""#include <trace/hooks/blk\.h>"""),
@@ -388,7 +370,7 @@ fun applyAndroid15VmaBlock(
     )
     logApply(
         namespace,
-        "Added TRACE/HOOKS/FS Header Include"
+        "Added Trace/Hooks/Filesystem Header Include"
     )
     taskMmu.insertAfterFirst(
         Regex("""int ret = 0, copied = 0;"""),
@@ -397,7 +379,7 @@ fun applyAndroid15VmaBlock(
     )
     logApply(
         taskMmu,
-        "Added NR SUBPAGES And PAGEMAP ENTRY T Declarations"
+        "Added NR Subpages And Pagemap Entry-T Declarations"
     )
 }
 fun revertAndroid15VmaBlock(
@@ -454,20 +436,16 @@ fun revertAndroid15VmaBlock(
     )
     logRevert(
         namespace,
-        "Removed TRACE/HOOKS/FS.H Include"
+        "Removed Trace/Hooks/Filesystem Header Include"
     )
 }
-// ============================================================
 // Postfix Fixups
-// ============================================================
 fun applyPostPatchFixups() {
     val taskMmu =
         f("fs/proc/task_mmu.c")
     if (taskMmu.exists()) {
         var content = taskMmu.readText()
-        // ----------------------------------------------------
-        // VMA PAD START() Fallback
-        // ----------------------------------------------------
+        // VMA Pad Start() Fallback
         if (
             content.contains("VMA_PAD_START(") &&
             !Regex(
@@ -489,12 +467,10 @@ fun applyPostPatchFixups() {
             taskMmu.writeLines(lines)
             logPostfix(
                 taskMmu,
-                "Inserted VMA PAD START() Fallback"
+                "Inserted VMA Pad Start() Fallback"
             )
         }
-        // ----------------------------------------------------
-        // FOLD FILEMAP FIXUP ENTRY() Compatibility
-        // ----------------------------------------------------
+        // Fold Filemap Fixup Entry() Compatibility
         content = taskMmu.readText()
         if (
             content.contains("__fold_filemap_fixup_entry(") &&
@@ -520,7 +496,7 @@ fun applyPostPatchFixups() {
                     )
                     logPostfix(
                         taskMmu,
-                        "Added PAGE_SIZE_COMPAT.H Include"
+                        "Added Page Size Compat Header Include"
                     )
                 }
             } else {
@@ -545,14 +521,12 @@ fun applyPostPatchFixups() {
                 taskMmu.writeLines(lines)
                 logPostfix(
                     taskMmu,
-                    "Inserted No-OP FOLD FILEMAP FIXUP ENTRY() Stub"
+                    "Inserted Fold Filemap Fixup Entry() Stub"
                 )
             }
         }
     }
-    // --------------------------------------------------------
     // Android 12 / 13 Nameidata Compatibility
-    // --------------------------------------------------------
     if (
         kernelModule == "android12-5.10" ||
         kernelModule == "android13-5.10"
@@ -574,13 +548,11 @@ fun applyPostPatchFixups() {
 
             logPostfix(
                 namei,
-                "Rewrote 4-Arg SET NAMEIDATA() to 3-Arg Form"
+                "Rewrote 4-Arg Set Nameidata() to 3-Arg Form"
             )
         }
     }
-    // --------------------------------------------------------
-    // Android 16 GETNAME FLAGS() Compatibility
-    // --------------------------------------------------------
+    // Android 16 Getname Flags() Compatibility
     if (kernelModule == "android16-6.12") {
         val openC = f("fs/open.c")
         if (
@@ -598,19 +570,14 @@ fun applyPostPatchFixups() {
             )
             logPostfix(
                 openC,
-                "Rewrote 3-Arg GETNAME FLAGS() to 2-Arg Form"
+                "Rewrote 3-Arg Getname Flags() to 2-Arg Form"
             )
         }
     }
 }
-
-// ============================================================
 // Apply
-// ============================================================
 fun apply() {
-    // --------------------------------------------------------
     // Android 12 / 5.10
-    // --------------------------------------------------------
     if (kernelModule == "android12-5.10") {
         if (sublevel <= 43) {
             val file = f("fs/proc/base.c")
@@ -622,7 +589,7 @@ fun apply() {
             )
             logApply(
                 file,
-                "Normalized THIS LEN/MIN T() to SIZE T"
+                "Normalized This Len/Min-T() to Size-T"
             )
         }
         if (sublevel <= 117) {
@@ -631,9 +598,7 @@ fun apply() {
             )
         }
     }
-    // --------------------------------------------------------
     // Android 13 / 5.10
-    // --------------------------------------------------------
     if (kernelModule == "android13-5.10") {
         if (sublevel <= 107) {
             applyFdinfo(
@@ -641,9 +606,7 @@ fun apply() {
             )
         }
     }
-    // --------------------------------------------------------
     // Android 13 / 5.15
-    // --------------------------------------------------------
     if (kernelModule == "android13-5.15") {
         if (sublevel <= 41) {
             val namespace =
@@ -654,7 +617,7 @@ fun apply() {
             )
             logApply(
                 namespace,
-                "Added LINUX/MNT IDMAPPING Header Include"
+                "Added Linux/Mnt IDMapping Header Include"
             )
             val openC =
                 f("fs/open.c")
@@ -664,7 +627,7 @@ fun apply() {
             )
             logApply(
                 openC,
-                "Added LINUX/MNT IDMAPPING Header Include"
+                "Added Linux/Mnt IDMapping Header Include"
             )
             applyFdinfo(
                 f("fs/notify/fdinfo.c")
@@ -680,7 +643,7 @@ fun apply() {
             ) {
                 logApply(
                     memory,
-                    "Removed LINUX/SWAP SLOTS Header"
+                    "Removed Linux/Swap Slots Header"
                 )
             }
         }
@@ -694,7 +657,7 @@ fun apply() {
             ) {
                 logApply(
                     namespace,
-                    "Removed TRACE/HOOKS/BLK Header"
+                    "Removed Trace/Hooks/Blk Header"
                 )
             }
         }
@@ -708,14 +671,12 @@ fun apply() {
             ) {
                 logApply(
                     taskMmu,
-                    "Removed TRACE/HOOKS/MM Header"
+                    "Removed Trace/Hooks/MM Header"
                 )
             }
         }
     }
-    // --------------------------------------------------------
     // Android 14 / 6.1
-    // --------------------------------------------------------
     if (kernelModule == "android14-6.1") {
         if (sublevel <= 25) {
             val base =
@@ -726,7 +687,7 @@ fun apply() {
             )
             logApply(
                 base,
-                "Added TRACE/HOOKS/SCHED Header"
+                "Added Trace/Hooks/Sched Header"
             )
         }
         if (sublevel <= 141) {
@@ -738,7 +699,7 @@ fun apply() {
             )
             logApply(
                 base,
-                "Added LINUX/DMA-BUF Header"
+                "Added Linux/DMA-BUF Header"
             )
         }
         if (sublevel >= 157) {
@@ -751,7 +712,7 @@ fun apply() {
             ) {
                 logApply(
                     namespace,
-                    "Removed TRACE/HOOKS/BLK Header"
+                    "Removed Trace/Hooks/Blk Header"
                 )
             }
             val superC =
@@ -764,14 +725,12 @@ fun apply() {
             ) {
                 logApply(
                     superC,
-                    "Removed TRACE/HOOKS/FS Header and Following Line"
+                    "Removed Trace/Hooks/Filesystem Header and Following Line"
                 )
             }
         }
     }
-    // --------------------------------------------------------
     // Android 15 / 6.6
-    // --------------------------------------------------------
     if (kernelModule == "android15-6.6") {
         if (sublevel <= 30) {
             applyAndroid15VmaBlock(
@@ -788,7 +747,7 @@ fun apply() {
             )
             logApply(
                 memory,
-                "Added LINUX/ZSWAP Header"
+                "Added Linux/ZSwap Header"
             )
         }
         if (sublevel <= 92) {
@@ -800,13 +759,11 @@ fun apply() {
             )
             logApply(
                 base,
-                "Added LINUX/DMA-BUF Header"
+                "Added Linux/DMA-BUF Header"
             )
         }
     }
-    // --------------------------------------------------------
     // Android 16 / 6.12
-    // --------------------------------------------------------
     if (kernelModule == "android16-6.12") {
         if (sublevel >= 58) {
             val exec =
@@ -818,25 +775,34 @@ fun apply() {
             ) {
                 logApply(
                     exec,
-                    "Removed LINUX/DMA-BUF Header"
+                    "Removed Linux/DMA-BUF Header"
+                )
+            }
+        }
+        if (sublevel >= 69) {
+            val taskMmu =
+                f("fs/proc/task_mmu.c")
+            if (
+                taskMmu.replaceEachLine(
+                    Regex("""vma_data_pages"""),
+                    "vma_pages"
+                )
+            ) {
+                logApply(
+                    taskMmu,
+                    "Renamed VMA Data Pages To VMA Pages"
                 )
             }
         }
     }
 }
-// ============================================================
 // Postfix
-// ============================================================
 fun postfix() {
     applyPostPatchFixups()
 }
-// ============================================================
 // Revert
-// ============================================================
 fun revert() {
-    // --------------------------------------------------------
     // Android 12 / 5.10
-    // --------------------------------------------------------
     if (kernelModule == "android12-5.10") {
         if (sublevel <= 43) {
             val file =
@@ -849,7 +815,7 @@ fun revert() {
             ) {
                 logRevert(
                     file,
-                    "Restored INT THIS LEN/MIN T(INT)"
+                    "Restored Int This Len/Min-T(Int)"
                 )
             }
         }
@@ -859,9 +825,7 @@ fun revert() {
             )
         }
     }
-    // --------------------------------------------------------
     // Android 13 / 5.10
-    // --------------------------------------------------------
     if (kernelModule == "android13-5.10") {
         if (sublevel <= 107) {
             revertFdinfo(
@@ -869,9 +833,7 @@ fun revert() {
             )
         }
     }
-    // --------------------------------------------------------
     // Android 13 / 5.15
-    // --------------------------------------------------------
     if (kernelModule == "android13-5.15") {
         if (sublevel <= 41) {
             val namespace =
@@ -881,7 +843,7 @@ fun revert() {
             )
             logRevert(
                 namespace,
-                "Removed LINUX/MNT IDMAPPING Header"
+                "Removed Linux/Mnt IDMapping Header"
             )
             val openC =
                 f("fs/open.c")
@@ -890,7 +852,7 @@ fun revert() {
             )
             logRevert(
                 openC,
-                "Removed LINUX/MNT IDMAPPING Header"
+                "Removed Linux/Mnt IDMapping Header"
             )
             val susfs =
                 f("fs/susfs.c")
@@ -909,7 +871,7 @@ fun revert() {
                 )
                 logRevert(
                     susfs,
-                    "Restored SUSFS IUID INTO MNT() Form"
+                    "Restored SUSFS IUID Into Mnt() Form"
                 )
             }
             revertFdinfo(
@@ -929,7 +891,7 @@ fun revert() {
                 )
                 logRevert(
                     memory,
-                    "Restored LINUX/SWAP SLOTS Header"
+                    "Restored Linux/Swap Slots Header"
                 )
             }
         }
@@ -946,7 +908,7 @@ fun revert() {
                 )
                 logRevert(
                     namespace,
-                    "Restored TRACE/HOOKS/BLK Header"
+                    "Restored Trace/Hooks/Blk Header"
                 )
             }
         }
@@ -963,14 +925,12 @@ fun revert() {
                 )
                 logRevert(
                     taskMmu,
-                    "Restored TRACE/HOOKS/MM Header"
+                    "Restored Trace/Hooks/MM Header"
                 )
             }
         }
     }
-    // --------------------------------------------------------
     // Android 14 / 6.1
-    // --------------------------------------------------------
     if (kernelModule == "android14-6.1") {
         if (sublevel <= 25) {
             val base =
@@ -980,7 +940,7 @@ fun revert() {
             )
             logRevert(
                 base,
-                "Removed TRACE/HOOKS/SCHED Header"
+                "Removed Trace/Hooks/Sched Header"
             )
         }
         if (sublevel <= 141) {
@@ -991,7 +951,7 @@ fun revert() {
             )
             logRevert(
                 base,
-                "Removed LINUX/DMA-BUF Header"
+                "Removed Linux/DMA-BUF Header"
             )
         }
         if (sublevel >= 157) {
@@ -1019,17 +979,15 @@ fun revert() {
             }
             logRevert(
                 namespace,
-                "Restored TRACE/HOOKS/BLK Header"
+                "Restored Trace/Hooks/Blk Header"
             )
             logRevert(
                 superC,
-                "Restored TRACE/HOOKS/FS Header"
+                "Restored Trace/Hooks/Filesystem Header"
             )
         }
     }
-    // --------------------------------------------------------
     // Android 15 / 6.6
-    // --------------------------------------------------------
     if (kernelModule == "android15-6.6") {
         if (sublevel <= 30) {
             revertAndroid15VmaBlock(
@@ -1045,7 +1003,7 @@ fun revert() {
             )
             logRevert(
                 memory,
-                "Removed LINUX/ZSWAP Header"
+                "Removed Linux/ZSwap Header"
             )
         }
         if (sublevel <= 92) {
@@ -1056,13 +1014,11 @@ fun revert() {
             )
             logRevert(
                 base,
-                "Removed LINUX/DMA-BUF Header"
+                "Removed Linux/DMA-BUF Header"
             )
         }
     }
-    // --------------------------------------------------------
     // Android 16 / 6.12
-    // --------------------------------------------------------
     if (kernelModule == "android16-6.12") {
         if (sublevel >= 58) {
             val exec =
@@ -1077,15 +1033,30 @@ fun revert() {
                 )
                 logRevert(
                     exec,
-                    "Restored LINUX/DMA-BUF Header"
+                    "Restored Linux/DMA-BUF Header"
+                )
+            }
+        }
+        if (sublevel >= 69) {
+            val taskMmu =
+                f("fs/proc/task_mmu.c")
+            if (
+                taskMmu.readText()
+                    .contains("vma_pages")
+            ) {
+                taskMmu.replaceEachLine(
+                    Regex("""vma_pages"""),
+                    "vma_data_pages"
+                )
+                logRevert(
+                    taskMmu,
+                    "Restored VMA Data Pages"
                 )
             }
         }
     }
 }
-// ============================================================
 // Main
-// ============================================================
 try {
     when (mode) {
         "Apply" -> apply()
@@ -1099,8 +1070,8 @@ try {
         }
     }
     println(
-        "🚀 Fake Patches: $mode Completed " +
-        "(Kernel Module=$kernelModule, Sub Level=$sublevel)"
+        "🚀 Fake Patches : $mode Completed " +
+        "( Kernel Version = $kernelModule - Sublevel = $sublevel )"
     )
 } catch (e: Exception) {
     System.err.println(
