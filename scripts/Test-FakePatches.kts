@@ -780,17 +780,30 @@ fun apply() {
             }
         }
         if (sublevel >= 69) {
-            val taskMmu =
-                f("fs/proc/task_mmu.c")
-            if (
-                taskMmu.replaceEachLine(
-                    Regex("""vma_data_pages"""),
-                    "vma_pages"
-                )
-            ) {
+            val taskMmu = f("fs/proc/task_mmu.c")
+            taskMmu.requireExists()
+            val content = taskMmu.readText()
+            if (content.contains("vma_data_pages")) {
+                check(
+                    taskMmu.replaceEachLine(
+                        Regex("""\bvma_data_pages\b"""),
+                        "vma_pages"
+                    )
+                ) {
+                    "Failed to Rename VMA Data Pages in ${taskMmu.path}"
+                }
                 logApply(
                     taskMmu,
                     "Renamed VMA Data Pages To VMA Pages"
+                )
+            } else if (content.contains("vma_pages")) {
+                logSkip(
+                    taskMmu,
+                    "VMA Pages Compatibility Already Applied"
+                )
+            } else {
+                error(
+                    "Neither VMA Data Pages Nor VMA Pages Found In ${taskMmu.path}"
                 )
             }
         }
@@ -1036,21 +1049,32 @@ fun revert() {
                     "Restored Linux/DMA-BUF Header"
                 )
             }
-        }
+        }        
         if (sublevel >= 69) {
-            val taskMmu =
-                f("fs/proc/task_mmu.c")
-            if (
-                taskMmu.readText()
-                    .contains("vma_pages")
-            ) {
-                taskMmu.replaceEachLine(
-                    Regex("""vma_pages"""),
-                    "vma_data_pages"
-                )
+            val taskMmu = f("fs/proc/task_mmu.c")
+            taskMmu.requireExists()
+            val content = taskMmu.readText()
+            if (content.contains("vma_pages")) {
+                check(
+                    taskMmu.replaceEachLine(
+                        Regex("""\bvma_pages\b"""),
+                        "vma_data_pages"
+                    )
+                ) {
+                    "Failed to Restore VMA Data Pages in ${taskMmu.path}"
+                }
                 logRevert(
                     taskMmu,
                     "Restored VMA Data Pages"
+                )
+            } else if (content.contains("vma_data_pages")) {
+                logSkip(
+                    taskMmu,
+                    "VMA Data Pages Already Restored"
+                )
+            } else {
+                error(
+                    "Neither VMA Pages Nor VMA Data Pages Found in ${taskMmu.path}"
                 )
             }
         }
