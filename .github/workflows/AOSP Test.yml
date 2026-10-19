@@ -2506,118 +2506,52 @@ jobs:
         if: ${{ inputs.REKERNEL == 'Built-in' }}
         shell: bash
         run: |
+          # Initialize ReKernel Built-in Integration
           echo "└─ 🔧 ReKernel Built-in Integration"
           # Validate Kernel Source Directory
           echo "└─ 🔍 Validating Kernel Source..."
-          test -f "$SOURCEDIR/Makefile" || exit 1
-          # Define ReKernel Integration Paths
-          echo "└─ 📂 Preparing ReKernel Directories..."
-          mkdir -p "$SOURCEDIR/drivers/rekernel"
-          BINDER="$SOURCEDIR/drivers/android/binder.c"
-          ALLOC="$SOURCEDIR/drivers/android/binder_alloc.c"
-          SIGNAL="$SOURCEDIR/kernel/signal.c"
-          # Generate ReKernel Netlink Header
-          echo "└─ 📝 Generating ReKernel Netlink Header..."
-          cat > "$SOURCEDIR/drivers/rekernel/rekernel.h" <<'EOF'
-          /* SPDX-License-Identifier: GPL-2.0-only */
-          #ifndef _REKERNEL_H
-          #define _REKERNEL_H
-          #include <linux/init.h>
-          #include <linux/types.h>
-          #include <linux/string.h>
-          #include <linux/kernel.h>
-          #include <linux/seq_file.h>
-          #include <linux/proc_fs.h>
-          #include <linux/freezer.h>
-          #include <linux/sched.h>
-          #include <linux/netlink.h>
-          #include <net/sock.h>
-          #define NETLINK_REKERNEL_MAX 26
-          #define NETLINK_REKERNEL_MIN 22
-          #define USER_PORT 100
-          #define PACKET_SIZE 128
-          #define MIN_USERAPP_UID 10000
-          #define MAX_SYSTEM_UID 2000
-          #define RESERVE_ORDER 17
-          #define WARN_AHEAD_SPACE (1 << RESERVE_ORDER)
-          static struct sock *rekernel_netlink;
-          extern struct net init_net;
-          static int netlink_unit = NETLINK_REKERNEL_MIN;
-          static inline bool line_is_frozen(struct task_struct *task)
-          {
-              return frozen(task->group_leader) || freezing(task->group_leader);
+          test -f "$SOURCEDIR/Makefile" || {
+            echo "└─ ⚠️ Kernel Source Directory Not Found"
+            exit 1
           }
-          static int send_netlink_message(char *msg, uint16_t len)
-          {
-              struct sk_buff *skb;
-              struct nlmsghdr *nlh;
-              if (!rekernel_netlink) return -ENOTCONN;
-              skb = nlmsg_new(len, GFP_ATOMIC);
-              if (!skb) return -ENOMEM;
-              nlh = nlmsg_put(skb, 0, 0, netlink_unit, len, 0);
-              if (!nlh) { nlmsg_free(skb); return -EMSGSIZE; }
-              memcpy(nlmsg_data(nlh), msg, len);
-              return netlink_unicast(rekernel_netlink, skb, USER_PORT, MSG_DONTWAIT);
-          }
-          static void netlink_rcv_msg(struct sk_buff *skb) {}
-          static struct netlink_kernel_cfg rekernel_cfg = { .input = netlink_rcv_msg };
-          static int rekernel_unit_show(struct seq_file *m, void *v)
-          {
-              seq_printf(m, "%d\n", netlink_unit);
-              return 0;
-          }
-          static int rekernel_unit_open(struct inode *inode, struct file *file)
-          {
-              return single_open(file, rekernel_unit_show, NULL);
-          }
-          static const struct proc_ops rekernel_unit_fops = {
-              .proc_open = rekernel_unit_open, .proc_read = seq_read,
-              .proc_lseek = seq_lseek, .proc_release = single_release,
-          };
-          static int start_rekernel_server(void)
-          {
-              char buff[32];
-              if (rekernel_netlink) return 0;
-              for (netlink_unit = NETLINK_REKERNEL_MIN;
-                   netlink_unit < NETLINK_REKERNEL_MAX; netlink_unit++) {
-                  rekernel_netlink = netlink_kernel_create(&init_net, netlink_unit, &rekernel_cfg);
-                  if (rekernel_netlink) break;
-              }
-              if (!rekernel_netlink) return -1;
-              if (proc_mkdir("rekernel", NULL)) {
-                  snprintf(buff, sizeof(buff), "%d", netlink_unit);
-                  proc_create(buff, 0644, proc_mkdir("rekernel", NULL), &rekernel_unit_fops);
-              }
-              return 0;
-          }
-          #endif
-          EOF
-          # Include ReKernel Header in Kernel Sources
-          echo "└─ 🧩 Adding ReKernel Headers..."
-          sed -i '/#include <linux\/file.h>/a #ifdef CONFIG_REKERNEL\n#include "../rekernel/rekernel.h"\n#endif' "$BINDER"
-          sed -i '/#include <linux\/slab.h>/a #ifdef CONFIG_REKERNEL\n#include "../rekernel/rekernel.h"\n#endif' "$ALLOC"
-          sed -i '/#include <linux\/file.h>/a #ifdef CONFIG_REKERNEL\n#include "../drivers/rekernel/rekernel.h"\n#endif' "$SIGNAL"
-          # Monitor Binder Replies to Frozen System Processes
-          echo "└─ 📡 Adding Binder Reply Monitoring..."
-          sed -i '/trace_android_vh_binder_reply(target_proc, proc, thread, tr);/a #ifdef CONFIG_REKERNEL\n\tif (start_rekernel_server() == 0 \&\& target_proc \&\& target_proc->tsk \&\& proc->tsk \&\& task_uid(target_proc->tsk).val <= MAX_SYSTEM_UID \&\& proc->pid != target_proc->pid \&\& line_is_frozen(target_proc->tsk)) { char msg[PACKET_SIZE]; snprintf(msg, sizeof(msg), "type=Binder,bindertype=reply,oneway=0,from_pid=%d,from=%d,target_pid=%d,target=%d;", proc->pid, task_uid(proc->tsk).val, target_proc->pid, task_uid(target_proc->tsk).val); send_netlink_message(msg, strlen(msg)); }\n#endif' "$BINDER"
-          # Monitor Binder Transactions to Frozen User Apps
-          echo "└─ 📡 Adding Binder Transaction Monitoring..."
-          sed -i '/e->to_node = target_node->debug_id;/a #ifdef CONFIG_REKERNEL\n\tif (start_rekernel_server() == 0 \&\& target_proc \&\& target_proc->tsk \&\& proc->tsk \&\& task_uid(target_proc->tsk).val > MIN_USERAPP_UID \&\& proc->pid != target_proc->pid \&\& line_is_frozen(target_proc->tsk)) { char msg[PACKET_SIZE]; snprintf(msg, sizeof(msg), "type=Binder,bindertype=transaction,oneway=%d,from_pid=%d,from=%d,target_pid=%d,target=%d;", !!(tr->flags \& TF_ONE_WAY), proc->pid, task_uid(proc->tsk).val, target_proc->pid, task_uid(target_proc->tsk).val); send_netlink_message(msg, strlen(msg)); }\n#endif' "$BINDER"
-          # Monitor Binder ASYNC Buffer Pressure
-          echo "└─ 📊 Adding Binder Async Buffer Monitoring..."
-          sed -i '/if (is_async && alloc->free_async_space < size) {/a #ifdef CONFIG_REKERNEL\n\tif (alloc->free_async_space < WARN_AHEAD_SPACE) { struct task_struct *task; rcu_read_lock(); task = find_task_by_vpid(alloc->pid); if (task \&\& line_is_frozen(task) \&\& start_rekernel_server() == 0) { char msg[PACKET_SIZE]; snprintf(msg, sizeof(msg), "type=Binder,bindertype=free_buffer_full,oneway=1,from_pid=%d,from=%d,target_pid=%d,target=%d;", current->pid, task_uid(current).val, task->pid, task_uid(task).val); rcu_read_unlock(); send_netlink_message(msg, strlen(msg)); } else rcu_read_unlock(); }\n#endif' "$ALLOC"
-          # Monitor Termination Signals Involving Frozen Tasks
-          echo "└─ 🚦 Adding Signal Monitoring..."
-          sed -i '/trace_android_vh_do_send_sig_info(sig, current, p);/a #ifdef CONFIG_REKERNEL\n\tif (start_rekernel_server() == 0 \&\& line_is_frozen(current) \&\& (sig == SIGKILL || sig == SIGTERM || sig == SIGABRT || sig == SIGQUIT)) { char msg[PACKET_SIZE]; snprintf(msg, sizeof(msg), "type=Signal,signal=%d,killer_pid=%d,killer=%d,dst_pid=%d,dst=%d;", sig, task_tgid_nr(p), task_uid(p).val, task_tgid_nr(current), task_uid(current).val); send_netlink_message(msg, strlen(msg)); }\n#endif' "$SIGNAL"
-          # Register ReKernel Build Files
-          echo "└─ 🛠️ Registering ReKernel Build Files..."
-          grep -qF 'source "drivers/rekernel/Kconfig"' "$SOURCEDIR/drivers/Kconfig" || echo 'source "drivers/rekernel/Kconfig"' >> "$SOURCEDIR/drivers/Kconfig"
-          grep -qF 'obj-$(CONFIG_REKERNEL) += rekernel/' "$SOURCEDIR/drivers/Makefile" || echo 'obj-$(CONFIG_REKERNEL) += rekernel/' >> "$SOURCEDIR/drivers/Makefile"
-          # Enable ReKernel in Kernel Configuration
-          echo "└─ ⚙️ Configuring ReKernel Kernel Options..."
-          {
-            echo "CONFIG_REKERNEL=y"
-          } >> "$DEFCONFIG"
+          # Define ReKernel Patch Path
+          echo "└─ 🔍 Validating ReKernel Patch..."
+          REKERNELPATCH="$PATCHDIR/AOSP/Misc/ReKernel-AOSP.patch"
+          # Ensure ReKernel Patch Exists
+          if [[ ! -f "$REKERNELPATCH" ]]; then
+            echo "└─ ⚠️ ReKernel Patch Not Found : $REKERNELPATCH"
+            exit 1
+          fi
+
+          # Display Kernel Source and Patch Paths
+          echo "└─ 📂 Kernel Source : $SOURCEDIR"
+          echo "└─ 📄 Patch File    : $REKERNELPATCH"
+          # Detect Whether ReKernel Patch is Already Applied
+          echo "└─ 🔎 Checking Patch Status..."
+          if patch --dry-run -R -p1 -d "$SOURCEDIR" < "$REKERNELPATCH" >/dev/null 2>&1; then
+            echo "└─ 📌 ReKernel Patch Already Applied"
+          else
+            # Apply ReKernel Patch
+            echo "└─ 🩹 Applying ReKernel AOSP Patch..."
+            patch --batch --forward -F3 -p1 -d "$SOURCEDIR" < "$REKERNELPATCH" || {
+              echo "└─ ⚠️ Failed to Apply ReKernel Patch"
+              exit 1
+            }
+          fi
+
+          # Validate and Enable ReKernel Kernel Configuration
+          echo "└─ 🔍 Validating ReKernel Configuration..."
+          if ! grep -qF 'CONFIG_REKERNEL' "$DEFCONFIG"; then
+            # Add ReKernel Configuration When No Entry Exists
+            echo "└─ ⚙️ Enabling ReKernel..."
+            echo 'CONFIG_REKERNEL=y' >> "$DEFCONFIG"
+          elif ! grep -qE '^CONFIG_REKERNEL=y$' "$DEFCONFIG"; then
+            # Remove Existing ReKernel Setting Before Enabling
+            sed -i '/^# CONFIG_REKERNEL is not set$/d' "$DEFCONFIG"
+            sed -i '/^CONFIG_REKERNEL=/d' "$DEFCONFIG"
+            echo 'CONFIG_REKERNEL=y' >> "$DEFCONFIG"
+          fi
+
           echo "└─ 🎉 ReKernel Integration Completed"
        
       - name: 🔨 Compile Kernel
