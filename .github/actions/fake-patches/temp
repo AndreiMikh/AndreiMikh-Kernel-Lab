@@ -10,7 +10,7 @@ inputs:
     description: "Kernel Base / Family"
     required: true
   sublevel:
-    description: "Kernel Sublevel Number"
+    description: "Kernel Sublevel Value"
     required: false
     default: "0"
   common-kernel-folder:
@@ -419,21 +419,32 @@ runs:
             # But Does Not Provide its Inline Implementation
             if hastext "$TASK" '__fold_filemap_fixup_entry(' &&
                ! grep -Eq \
-                 'static[[:space:]]+inline[[:space:]]+void[[:space:]]+__fold_filemap_fixup_entry' \
+                 '^[[:space:]]*(static[[:space:]]+)?inline[[:space:]]+[^;]*__fold_filemap_fixup_entry[[:space:]]*\(' \
                  "$TASK"; then
               HEADER="$COMMONKERNELFOLDER/include/linux/page_size_compat.h"
-              # Prefer Existing Compatibility Header When it Defines
-              # Required Helper
+              # Prefer the Existing Compatibility Header
               if [[ -f "$HEADER" ]] &&
                  hastext "$HEADER" '__fold_filemap_fixup_entry'; then
-                grep -Fq '#include <linux/page_size_compat.h>' "$TASK" ||
-                  insertfirstafter "$TASK" '^#include ' \
-                    '#include <linux/page_size_compat.h>'
+                if ! grep -Fq '#include <linux/page_size_compat.h>' "$TASK"; then
+                  if ! insertfirstafter "$TASK" '^#include ' \
+                    '#include <linux/page_size_compat.h>'; then
+                    echo "⚠️ Failed to Insert PAGE-SIZE-COMPAT Header Into $TASK" >&2
+                    return 1
+                  fi
+                fi
+
+                if ! grep -Fq '#include <linux/page_size_compat.h>' "$TASK"; then
+                  echo "⚠️ PAGE-SIZE-COMPAT Header Was Not Inserted Into $TASK" >&2
+                  return 1
+                fi
+
+                echo "└─ 📌 Using Existing Filemap Fixup Compatibility Header"
               else
-                # Otherwise insert a guarded fallback after the include block.
-                perl -0pi -e \
-                  's/((?:^#include[^\n]*\n)+)/$1#ifndef __fold_filemap_fixup_entry\nstatic inline void __fold_filemap_fixup_entry(struct vma_iterator *iter, unsigned long *end) { }\n#endif \/\* __fold_filemap_fixup_entry \*\/\n/s' \
-                  "$TASK"
+                echo "└─ ⚠️ No Compatible Filemap Fixup Implementation Found" >&2
+                echo "└─ 📌 Source: $TASK" >&2
+                echo "└─ 📌 Expected Header: $HEADER" >&2
+                echo "└─ ⚠️ Refusing to Insert an Empty Fallback" >&2
+                return 1
               fi
             fi
           fi
@@ -607,8 +618,11 @@ runs:
         runfakepatch() {
           local mode
           local modes="${1:-Apply}"
-          IFS=',' read -ra MODELIST <<< "$modes"
-          for mode in "${MODELIST[@]}"; do
+          local -a requestedmodes        
+          IFS=',' read -ra requestedmodes <<< "$modes"        
+          for mode in "${requestedmodes[@]}"; do
+            mode="${mode#"${mode%%[![:space:]]*}"}"
+            mode="${mode%"${mode##*[![:space:]]}"}"     
             case "$mode" in
               Apply)
                 fakepatchapply
@@ -623,9 +637,10 @@ runs:
                 echo "⚠️ Unsupported FakePatches Mode: $mode" >&2
                 return 2
                 ;;
-            esac
+            esac        
             echo "🎉 FakePatches: $mode Completed (Kernel Base $KERNELMODULE, Sublevel $SUBLEVELVALUE)"
+        
           done
-        }        
+        }
         # Run Selected Operation; Default to Apply When Unset
         runfakepatch "${FAKEPATCHMODE:-Apply}"
