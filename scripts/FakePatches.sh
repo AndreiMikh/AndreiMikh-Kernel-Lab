@@ -2,12 +2,8 @@
 set -Eeuo pipefail
 
 # FakePatches.sh
-# Usage: ./FakePatches.sh <Apply|PostFix|Revert> [WorkDir]
+# Usage: FakePatches.sh <Apply|PostFix|Revert> [WorkDir]
 # KERNELMODULE and SUBLEVEL are read from the environment.
-#
-# Python 3 is used for the line/regex editing primitives so Kotlin Regex and
-# line-oriented file-editing behavior can be preserved reliably from Bash.
-
 exec python3 - "$@" <<'PY'
 import os
 import re
@@ -16,21 +12,16 @@ from pathlib import Path
 
 def fail(message):
     raise RuntimeError(message)
-
 def require_exists(path):
     if not path.exists():
-        fail(f"Required file does not exist: {path}")
-
+        fail(f"Required File Does Not Exist: {path}")
 def read_lines(path):
     return path.read_text().splitlines()
-
 def write_lines(path, lines):
     path.write_text("\n".join(lines) + "\n")
-
 def rel(path):
     value = str(path)
     return value.removeprefix(work_dir + "/").removeprefix(work_dir + "\\")
-
 def insert_after_first(path, anchor, *new_lines):
     require_exists(path)
     lines = read_lines(path)
@@ -300,10 +291,10 @@ def apply():
         if sublevel <= 41:
             namespace = f("fs/namespace.c")
             insert_after_first(namespace, re.compile(r"^#include <linux/shmem_fs\.h>$"), "#include <linux/mnt_idmapping.h>")
-            log_apply(namespace, "Added LINUX/MNT-IDMAPPING.H Include")
+            log_apply(namespace, "Added LINUX/MNT-ID-Mapping Header Include")
             open_c = f("fs/open.c")
             insert_after_first(open_c, re.compile(r"^#include <linux/compat\.h>$"), "#include <linux/mnt_idmapping.h>")
-            log_apply(open_c, "Added LINUX/MNT-IDMAPPING.H Include")
+            log_apply(open_c, "Added Linux/Mnt-ID-Mapping Header Include")
             apply_fdinfo(f("fs/notify/fdinfo.c"))
         if sublevel >= 123:
             memory = f("mm/memory.c")
@@ -318,11 +309,11 @@ def apply():
         if sublevel <= 25:
             base = f("fs/proc/base.c")
             insert_after_first(base, re.compile(r"^#include <trace/events/oom\.h>$"), "#include <trace/hooks/sched.h>")
-            log_apply(base, "Added TRACE/HOOKS/SCHED.H")
+            log_apply(base, "Added Trace/Hooks/Sched Header")
         if sublevel <= 141:
             base = f("fs/proc/base.c")
             insert_after_first(base, re.compile(r"^#include <linux/cpufreq_times\.h>$"), "#include <linux/dma-buf.h>")
-            log_apply(base, "Added LINUX/DMA-BUF.H")
+            log_apply(base, "Added Linux/DMA-BUF Header")
         if sublevel >= 157:
             namespace = f("fs/namespace.c")
             if delete_line(namespace, re.compile(r"^#include <trace/hooks/blk\.h>$")): log_apply(namespace, "Removed TRACE/HOOKS/BLK.H")
@@ -333,11 +324,11 @@ def apply():
         if sublevel <= 57:
             memory = f("mm/memory.c")
             insert_after_first(memory, re.compile(r"^#include <linux/sched/sysctl\.h>$"), "#include <linux/zswap.h>")
-            log_apply(memory, "Added LINUX/ZSWAP.H")
+            log_apply(memory, "Added Linux/Zswap Header")
         if sublevel <= 92:
             base = f("fs/proc/base.c")
             insert_after_first(base, re.compile(r"^#include <linux/cpufreq_times\.h>$"), "#include <linux/dma-buf.h>")
-            log_apply(base, "Added LINUX/DMA-BUF.H")
+            log_apply(base, "Added Linux/DMA-BUF Header")
     if kernel_module == "android16-6.12":
         if sublevel >= 58:
             exec_c = f("fs/exec.c")
@@ -354,47 +345,47 @@ def revert():
         if sublevel <= 43:
             path = f("fs/proc/base.c")
             if replace_whole_line(path, "size_t this_len = min_t(size_t, count, PAGE_SIZE);", "int this_len = min_t(int, count, PAGE_SIZE);"):
-                log_revert(path, "Restored INT THIS-LEN/MIN-T(INT)")
+                log_revert(path, "Restored Int This-Len/Min-T(Int)")
         if sublevel <= 117: revert_fdinfo(f("fs/notify/fdinfo.c"))
     if kernel_module == "android13-5.10" and sublevel <= 107: revert_fdinfo(f("fs/notify/fdinfo.c"))
     if kernel_module == "android13-5.15":
         if sublevel <= 41:
             namespace = f("fs/namespace.c")
             delete_line(namespace, re.compile(r"^#include <linux/mnt_idmapping\.h>$"))
-            log_revert(namespace, "Removed LINUX/MNT-ID-MAPPING.H")
+            log_revert(namespace, "Removed Linux/Mnt-ID-Mapping Header")
             open_c = f("fs/open.c")
             delete_line(open_c, re.compile(r"^#include <linux/mnt_idmapping\.h>$"))
-            log_revert(open_c, "Removed LINUX/MNT-ID-MAPPING.H")
+            log_revert(open_c, "Removed Linux/Mnt-ID-Mapping Header")
             susfs = f("fs/susfs.c")
             if susfs.exists():
                 replace_each_line(susfs, re.compile(re.escape("i_uid_into_mnt(i_user_ns(&fi->inode), &fi->inode).val")), "i_uid_into_mnt(&init_user_ns, &fi->inode).val")
                 replace_each_line(susfs, re.compile(re.escape("i_uid_into_mnt(i_user_ns(inode), inode).val")), "i_uid_into_mnt(&init_user_ns, inode).val")
-                log_revert(susfs, "Restored SUSFS IUID-INTO-MNT() Form")
+                log_revert(susfs, "Restored SUSFS IUID-Into-Mnt() Form")
             revert_fdinfo(f("fs/notify/fdinfo.c"))
         if sublevel >= 123:
             memory = f("mm/memory.c")
             if "#include <linux/swap_slots.h>" not in memory.read_text():
                 insert_before_first(memory, re.compile(r"#ifdef CONFIG_KSU_SUSFS_SUS_MAP"), "#include <linux/swap_slots.h>")
-                log_revert(memory, "Restored LINUX/SWAP-SLOTS.H")
+                log_revert(memory, "Restored Linux/Swapslots Header")
         if sublevel >= 197:
             namespace = f("fs/namespace.c")
             if "#include <trace/hooks/blk.h>" not in namespace.read_text():
                 insert_after_first(namespace, re.compile(r'^#include "internal\.h"$'), "#include <trace/hooks/blk.h>")
-                log_revert(namespace, "Restored TRACE/HOOKS/BLK.H")
+                log_revert(namespace, "Restored Trace/Hooks/Blk Header")
         if sublevel >= 206:
             task_mmu = f("fs/proc/task_mmu.c")
             if "#include <trace/hooks/mm.h>" not in task_mmu.read_text():
                 insert_after_first(task_mmu, re.compile(r"^#include <linux/pkeys\.h>$"), "#include <trace/hooks/mm.h>")
-                log_revert(task_mmu, "Restored TRACE/HOOKS/MM.H")
+                log_revert(task_mmu, "Restored Trace/Hooks/MM Header")
     if kernel_module == "android14-6.1":
         if sublevel <= 25:
             base = f("fs/proc/base.c")
             delete_line(base, re.compile(r"^#include <trace/hooks/sched\.h>$"))
-            log_revert(base, "Removed TRACE/HOOKS/SCHED.H")
+            log_revert(base, "Removed Trace/Hooks/Sched Header")
         if sublevel <= 141:
             base = f("fs/proc/base.c")
             delete_line(base, re.compile(r"^#include <linux/dma-buf\.h>$"))
-            log_revert(base, "Removed LINUX/DMA-BUF.H")
+            log_revert(base, "Removed Linux/DMA-BUF Header")
         if sublevel >= 157:
             namespace = f("fs/namespace.c")
             if "#include <trace/hooks/blk.h>" not in namespace.read_text():
