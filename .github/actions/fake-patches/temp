@@ -1,0 +1,656 @@
+name: "Native Kernel FakePatches"
+description: "Apply, Post-Fix, or Revert Native Bash / Perl Kernel Compatibility FakePatches"
+
+inputs:
+  mode:
+    description: "FakePatches Operation: Apply, PostFix, or Revert"
+    required: true
+    default: Apply
+  kernel-module:
+    description: "Kernel Family, For Example android15-6.6"
+    required: true
+  sublevel:
+    description: "Kernel Sublevel Number"
+    required: false
+    default: "0"
+  common-kernel-folder:
+    description: "Path to the Kernel Source Tree"
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Run ${{ inputs.mode }} FakePatches
+      shell: bash
+      env:
+        KERNELMODULE: ${{ inputs.kernel-module }}
+        SUBLEVEL: ${{ inputs.sublevel }}
+        COMMONKERNELFOLDER: ${{ inputs.common-kernel-folder }}
+        FAKEPATCHMODE: ${{ inputs.mode }}
+      run: |
+        set -e
+
+        # Validate Required inputs before Touching the Kernel Source
+        : "${KERNELMODULE:?must be set}"
+        : "${COMMONKERNELFOLDER:?must be set}"
+
+        # Normalize Sublevel to a Non-Negative Integer
+        SUBLEVELVALUE="${SUBLEVEL:-0}"
+        [[ "$SUBLEVELVALUE" =~ ^[0-9]+$ ]] || SUBLEVELVALUE=0
+
+        # Print standardized patch operation logs.
+        logpatch() {
+          printf '[%s] %s | %s\n' "$1" "$2" "$3"
+        }
+
+        # Require a Source File When a Patch Cannot Work Without it
+        needfile() {
+          [[ -f "$1" ]] || {
+            echo "⚠️ Required File Missing: $1" >&2
+            return 1
+          }
+        }
+
+        # Check Whether a File Contains an Exact Literal String
+        hastext() {
+          grep -Fq -- "$2" "$1"
+        }
+
+        # Insert a line after the first regex-matching line.
+        # Skip the insertion when the exact line already exists.
+        insertfirstafter() {
+          local file="$1" anchor="$2" line="$3" tmp
+
+          needfile "$file"
+
+          if hastext "$file" "$line"; then
+            return 0
+          fi
+
+          grep -Eq -- "$anchor" "$file" || {
+            echo "⚠️ Anchor Not Found in $file: $anchor" >&2
+            return 1
+          }
+
+          tmp="${file}.fakepatch.tmp"
+
+          awk -v anchor="$anchor" -v new="$line" '
+            {
+              print
+              if (!done && $0 ~ anchor) {
+                print new
+                done=1
+              }
+            }
+            END {
+              if (!done) exit 3
+            }
+          ' "$file" > "$tmp" || {
+            rm -f "$tmp"
+            echo "⚠️ Failed to insert into $file" >&2
+            return 1
+          }
+
+          mv "$tmp" "$file"
+        }
+
+        # Insert a line before the first regex-matching line.
+        # Skip the insertion when the exact line already exists.
+        insertfirstbefore() {
+          local file="$1" anchor="$2" line="$3" tmp
+
+          needfile "$file"
+
+          if hastext "$file" "$line"; then
+            return 0
+          fi
+
+          grep -Eq -- "$anchor" "$file" || {
+            echo "⚠️ Anchor not found in $file: $anchor" >&2
+            return 1
+          }
+
+          tmp="${file}.fakepatch.tmp"
+
+          awk -v anchor="$anchor" -v new="$line" '
+            $0 ~ anchor && !done {
+              print new
+              done=1
+            }
+            {
+              print
+            }
+            END {
+              if (!done) exit 3
+            }
+          ' "$file" > "$tmp" || {
+            rm -f "$tmp"
+            echo "⚠️ Failed to insert into $file" >&2
+            return 1
+          }
+
+          mv "$tmp" "$file"
+        }
+
+        # Delete Source Lines Matching a Perl Regular Expression
+        # Missing Optional Files are Intentionally Ignored
+        deletematchinglines() {
+          local file="$1" regex="$2"
+
+          [[ -f "$file" ]] || return 0
+
+          MATCHREGEX="$regex" perl -ni -e \
+            'print unless /$ENV{MATCHREGEX}/' "$file"
+        }
+
+        # Replace Regex Matches Using an Environment-Provided Pattern
+        # Avoids Embedding Dynamic Patterns Directly in Perl Code
+        replaceperl() {
+          local file="$1" regex="$2" replacement="$3"
+
+          needfile "$file"
+
+          MATCHREGEX="$regex" REPLACEMENT="$replacement" \
+            perl -pi -e \
+              's/$ENV{MATCHREGEX}/$ENV{REPLACEMENT}/g' "$file"
+        }
+
+        # Apply INOTIFY FDINFO Compatibility Patch
+        # Older Kernel Implementations may Expose Ignored Mask Separately
+        applyfdinfo() {
+          local file="$1"
+
+          needfile "$file"
+
+          # Avoid Adding the Helper More Than Once
+          if hastext "$file" 'inotify_mark_user_mask('; then
+            logpatch SKIP "$file" 'FDINFO Patch Already Applied'
+            return
+          fi
+
+          # Fail Rather Than Silently Modifying an Unexpected Source Layout
+          hastext "$file" 'mask, mark.ignored_mask' || {
+            echo "⚠️ Expected FDINFO Expression Missing: $file" >&2
+            return 1
+          }
+
+          # Remove Legacy Mask Declaration Comment Block
+          perl -0pi -e \
+            's/^[ \t]*\/\*\n.*?^[ \t]*u32 mask = mark->mask & IN_ALL_EVENTS;\n//ms' \
+            "$file"
+
+          # Use a Helper for the User-Visible Event Mask and Normalize Logging
+          perl -pi -e \
+            's/\bmask,\s*mark\.ignored_mask/inotify_mark_user_mask(mark)/g; s/ignored_mask:%x/ignored_mask:0/g' \
+            "$file"
+
+          # Define Helper Immediately Before INOTIFY FDINFO
+          if ! grep -Fq 'static inline u32 inotify_mark_user_mask(' "$file"; then
+            perl -0pi -e \
+              's/^(static void inotify_fdinfo\(struct seq_file \*m, struct fsnotify_mark \*mark\)\n)/static inline u32 inotify_mark_user_mask(struct fsnotify_mark *mark)\n{\n\treturn mark->mask \& IN_ALL_EVENTS;\n}\n\n$1/m' \
+              "$file"
+          fi
+
+          # Confirm Compatibility Helper was Inserted Successfully
+          hastext "$file" 'inotify_mark_user_mask(' || {
+            echo "⚠️ Could Not Apply FDINFO Patch to $file" >&2
+            return 1
+          }
+
+          logpatch APPLY "$file" 'Applied inotify fdinfo compatibility patch'
+        }
+
+        # Revert INOTIFY FDINFO Compatibility Patch
+        revertfdinfo() {
+          local file="$1"
+
+          [[ -f "$file" ]] || {
+            logpatch SKIP "$file" 'File missing'
+            return
+          }
+
+          # Nothing to Restore if Neither Marker Exists
+          if ! hastext "$file" 'inotify_mark_user_mask(' &&
+             ! hastext "$file" 'ignored_mask:0'; then
+            return
+          fi
+
+          # Restore Original Expression and Diagnostic Format
+          perl -pi -e \
+            's/inotify_mark_user_mask\(mark\)/mask/g; s/ignored_mask:0/ignored_mask:%x/g' \
+            "$file"
+
+          # Remove Helper Definition
+          perl -0pi -e \
+            's/^static inline u32 inotify_mark_user_mask\(struct fsnotify_mark \*mark\)\n\{\n.*?^\}\n\n?//ms' \
+            "$file"
+
+          logpatch REVERT "$file" 'Restored Original FDINFO Mask Handling'
+        }
+
+        # Apply Kernel-Version-Specific Compatibility Changes
+        fakepatchapply() {
+          case "$KERNELMODULE" in
+
+            # Android 12 / Linux 5.10:
+            # Normalize THIS-LEN and Apply Older FDINFO Compatibility Fix
+            android12-5.10)
+              if (( SUBLEVELVALUE <= 43 )); then
+                FILE="$COMMONKERNELFOLDER/fs/proc/base.c"
+
+                if [[ -f "$FILE" ]]; then
+                  perl -pi -e \
+                    's/(?:int|size_t)\s+this_len\s*=\s*min_t\s*\(\s*(?:int|size_t)\s*,/size_t this_len = min_t(size_t,/' \
+                    "$FILE"
+
+                  logpatch APPLY "$FILE" 'Normalized this_len min_t to size_t'
+                fi
+              fi
+
+              (( SUBLEVELVALUE > 117 )) || \
+                applyfdinfo "$COMMONKERNELFOLDER/fs/notify/fdinfo.c"
+              ;;
+
+            # Android 13 / Linux 5.10:
+            # Apply fdinfo compatibility to older sublevels.
+            android13-5.10)
+              (( SUBLEVELVALUE > 107 )) || \
+                applyfdinfo "$COMMONKERNELFOLDER/fs/notify/fdinfo.c"
+              ;;
+
+            # Android 13 / Linux 5.15:
+            # Add mount idmapping headers and remove obsolete includes
+            # for newer sublevel compatibility.
+            android13-5.15)
+              if (( SUBLEVELVALUE <= 41 )); then
+                insertfirstafter "$COMMONKERNELFOLDER/fs/namespace.c" \
+                  '^#include <linux/shmem_fs\.h>$' \
+                  '#include <linux/mnt_idmapping.h>'
+
+                insertfirstafter "$COMMONKERNELFOLDER/fs/open.c" \
+                  '^#include <linux/compat\.h>$' \
+                  '#include <linux/mnt_idmapping.h>'
+
+                applyfdinfo "$COMMONKERNELFOLDER/fs/notify/fdinfo.c"
+              fi
+
+              if (( SUBLEVELVALUE >= 123 )); then
+                deletematchinglines "$COMMONKERNELFOLDER/mm/memory.c" \
+                  '^#include <linux/swap_slots\.h>$'
+              fi
+
+              if (( SUBLEVELVALUE >= 197 )); then
+                deletematchinglines "$COMMONKERNELFOLDER/fs/namespace.c" \
+                  '^#include <trace/hooks/blk\.h>$'
+              fi
+
+              if (( SUBLEVELVALUE >= 206 )); then
+                deletematchinglines "$COMMONKERNELFOLDER/fs/proc/task_mmu.c" \
+                  '^#include <trace/hooks/mm\.h>$'
+              fi
+              ;;
+
+            # Android 14 / Linux 6.1:
+            # Add trace and DMA-BUF headers on older sublevels.
+            # Remove obsolete trace-hook includes on newer sublevels.
+            android14-6.1)
+              if (( SUBLEVELVALUE <= 25 )); then
+                insertfirstafter "$COMMONKERNELFOLDER/fs/proc/base.c" \
+                  '^#include <trace/events/oom\.h>$' \
+                  '#include <trace/hooks/sched.h>'
+              fi
+
+              if (( SUBLEVELVALUE <= 141 )); then
+                insertfirstafter "$COMMONKERNELFOLDER/fs/proc/base.c" \
+                  '^#include <linux/cpufreq_times\.h>$' \
+                  '#include <linux/dma-buf.h>'
+              fi
+
+              if (( SUBLEVELVALUE >= 157 )); then
+                deletematchinglines "$COMMONKERNELFOLDER/fs/namespace.c" \
+                  '^#include <trace/hooks/blk\.h>$'
+
+                perl -0pi -e \
+                  's/^#include <trace\/hooks\/fs\.h>\n[^\n]*\n//m' \
+                  "$COMMONKERNELFOLDER/fs/super.c"
+              fi
+              ;;
+
+            # Android 15 / Linux 6.6:
+            # Adapt SMAPS VMA Tracking and Pagemap Declarations on Older
+            # Sublevels, then Add Required ZSWAP and DMA-BUF Headers
+            android15-6.6)
+              if (( SUBLEVELVALUE <= 30 )); then
+                TASK="$COMMONKERNELFOLDER/fs/proc/task_mmu.c"
+                NS="$COMMONKERNELFOLDER/fs/namespace.c"
+
+                needfile "$TASK"
+                needfile "$NS"
+
+                # Use Declaration as the Marker for this Patch Group
+                if ! hastext "$TASK" \
+                  'unsigned int nr_subpages = __PAGE_SIZE / PAGE_SIZE;'; then
+
+                  # Update LAST-VMA-END After Gathering SMAPS Statistics
+                  # Add Braces to the VMA-END Check for Safe Statement Grouping
+                  if ! hastext "$TASK" 'smap_gather_stats(vma, &mss, last_vma_end);'; then
+                    echo "⚠️ Expected SMAPS Anchor Missing: $TASK" >&2
+                    return 1
+                  fi
+
+                  perl -0pi -e \
+                    's/(smap_gather_stats\(vma, &mss, last_vma_end\);)/$1\n\t\t\t\tlast_vma_end = vma->vm_end;/s' \
+                    "$TASK"
+
+                  perl -0pi -e \
+                    's/if\s*\(vma->vm_end > last_vma_end\)\n(\s*)last_vma_end = vma->vm_end;/if (vma->vm_end > last_vma_end) {\n$1\tlast_vma_end = vma->vm_end;\n$1}/s' \
+                    "$TASK"
+
+                  # Add the filesystem trace hook required by this patch set.
+                  insertfirstafter "$NS" \
+                    '#include <trace/hooks/blk\.h>' \
+                    '#include <trace/hooks/fs.h>'
+
+                  # Insert pagemap variables beside the existing declarations.
+                  insertfirstafter "$TASK" \
+                    'int ret = 0, copied = 0;' \
+                    $'\tunsigned int nr_subpages = __PAGE_SIZE / PAGE_SIZE;'
+
+                  insertfirstafter "$TASK" \
+                    'unsigned int nr_subpages = __PAGE_SIZE / PAGE_SIZE;' \
+                    $'\tpagemap_entry_t *res = NULL;'
+                fi
+              fi
+
+              # Older 6.6 sublevels may require the zswap header.
+              if (( SUBLEVELVALUE <= 57 )); then
+                insertfirstafter "$COMMONKERNELFOLDER/mm/memory.c" \
+                  '^#include <linux/sched/sysctl\.h>$' \
+                  '#include <linux/zswap.h>'
+              fi
+
+              # Older 6.6 sublevels may require the DMA-BUF header.
+              if (( SUBLEVELVALUE <= 92 )); then
+                insertfirstafter "$COMMONKERNELFOLDER/fs/proc/base.c" \
+                  '^#include <linux/cpufreq_times\.h>$' \
+                  '#include <linux/dma-buf.h>'
+              fi
+              ;;
+
+            # Android 16 / Linux 6.12:
+            # Remove an obsolete DMA-BUF include and adapt the VMA page API.
+            android16-6.12)
+              if (( SUBLEVELVALUE >= 58 )); then
+                deletematchinglines "$COMMONKERNELFOLDER/fs/exec.c" \
+                  '^#include <linux/dma-buf\.h>$'
+              fi
+
+              if (( SUBLEVELVALUE >= 69 )); then
+                replaceperl "$COMMONKERNELFOLDER/fs/proc/task_mmu.c" \
+                  '\bvma_data_pages\b' 'vma_pages'
+              fi
+              ;;
+          esac
+        }
+
+        # Apply compatibility fixups after the primary patch stage.
+        # These changes accommodate APIs that differ between kernel versions.
+        fakepatchpostfix() {
+          TASK="$COMMONKERNELFOLDER/fs/proc/task_mmu.c"
+
+          if [[ -f "$TASK" ]]; then
+
+            # Supply a fallback VMA_PAD_START definition when the source
+            # references it but lacks the corresponding header or definition.
+            if hastext "$TASK" 'VMA_PAD_START(' &&
+               ! grep -Eq \
+                 '#include <linux/pgsize_migration(_inline)?\.h>|^[[:space:]]*#define[[:space:]]+VMA_PAD_START' \
+                 "$TASK"; then
+
+              perl -0pi -e \
+                's/\A([^\n]*\n)/$1#ifndef VMA_PAD_START\n#define VMA_PAD_START(vma) ((vma)->vm_end)\n#endif\n/s' \
+                "$TASK"
+            fi
+
+            # Supply the filemap fixup helper when the source references it
+            # but does not provide its inline implementation.
+            if hastext "$TASK" '__fold_filemap_fixup_entry(' &&
+               ! grep -Eq \
+                 'static[[:space:]]+inline[[:space:]]+void[[:space:]]+__fold_filemap_fixup_entry' \
+                 "$TASK"; then
+
+              HEADER="$COMMONKERNELFOLDER/include/linux/page_size_compat.h"
+
+              # Prefer the existing compatibility header when it defines
+              # the required helper.
+              if [[ -f "$HEADER" ]] &&
+                 hastext "$HEADER" '__fold_filemap_fixup_entry'; then
+
+                grep -Fq '#include <linux/page_size_compat.h>' "$TASK" ||
+                  insertfirstafter "$TASK" '^#include ' \
+                    '#include <linux/page_size_compat.h>'
+              else
+                # Otherwise insert a guarded fallback after the include block.
+                perl -0pi -e \
+                  's/((?:^#include[^\n]*\n)+)/$1#ifndef __fold_filemap_fixup_entry\nstatic inline void __fold_filemap_fixup_entry(struct vma_iterator *iter, unsigned long *end) { }\n#endif \/\* __fold_filemap_fixup_entry \*\/\n/s' \
+                  "$TASK"
+              fi
+            fi
+          fi
+
+          # Older Android 12/13 kernels use a three-argument set_nameidata().
+          if [[ "$KERNELMODULE" == android12-5.10 ||
+                "$KERNELMODULE" == android13-5.10 ]]; then
+
+            FILE="$COMMONKERNELFOLDER/fs/namei.c"
+
+            if [[ -f "$FILE" ]]; then
+              replaceperl "$FILE" \
+                'set_nameidata\(nd, old_dfd, fake_filename, NULL\)' \
+                'set_nameidata(nd, old_dfd, fake_filename)'
+            fi
+          fi
+
+          # Android 16 / Linux 6.12 may use the Two-Argument GETNAME-FLAGS()
+          if [[ "$KERNELMODULE" == android16-6.12 ]]; then
+            FILE="$COMMONKERNELFOLDER/fs/open.c"
+
+            if [[ -f "$FILE" ]]; then
+              replaceperl "$FILE" \
+                'getname_flags\(filename, lookup_flags, NULL\)' \
+                'getname_flags(filename, lookup_flags)'
+            fi
+          fi
+
+          logpatch POSTFIX "$KERNELMODULE" \
+            'Post-patch compatibility fixups complete'
+        }
+
+        # Revert supported changes for each kernel family
+        # Revert should be run against the same source version used for Apply
+        fakepatchrevert() {
+          case "$KERNELMODULE" in
+
+            # Restore the older this_len declaration and fdinfo implementation.
+            android12-5.10)
+              if (( SUBLEVELVALUE <= 43 )); then
+                perl -pi -e \
+                  's/^size_t this_len = min_t\(size_t, count, PAGE_SIZE\);$/int this_len = min_t(int, count, PAGE_SIZE);/' \
+                  "$COMMONKERNELFOLDER/fs/proc/base.c"
+              fi
+
+              (( SUBLEVELVALUE > 117 )) || \
+                revertfdinfo "$COMMONKERNELFOLDER/fs/notify/fdinfo.c"
+              ;;
+
+            # Restore the fdinfo implementation for older Android 13 kernels.
+            android13-5.10)
+              (( SUBLEVELVALUE > 107 )) || \
+                revertfdinfo "$COMMONKERNELFOLDER/fs/notify/fdinfo.c"
+              ;;
+
+            # Restore Android 13 / Linux 5.15 header and SUSFS compatibility.
+            android13-5.15)
+              if (( SUBLEVELVALUE <= 41 )); then
+                deletematchinglines "$COMMONKERNELFOLDER/fs/namespace.c" \
+                  '^#include <linux/mnt_idmapping\.h>$'
+
+                deletematchinglines "$COMMONKERNELFOLDER/fs/open.c" \
+                  '^#include <linux/mnt_idmapping\.h>$'
+
+                # Restore the original user-namespace arguments in SUSFS.
+                FILE="$COMMONKERNELFOLDER/fs/susfs.c"
+
+                if [[ -f "$FILE" ]]; then
+                  replaceperl "$FILE" \
+                    'i_uid_into_mnt\(i_user_ns\(&fi->inode\), &fi->inode\)\.val' \
+                    'i_uid_into_mnt(&init_user_ns, &fi->inode).val'
+
+                  replaceperl "$FILE" \
+                    'i_uid_into_mnt\(i_user_ns\(inode\), inode\)\.val' \
+                    'i_uid_into_mnt(&init_user_ns, inode).val'
+                fi
+
+                revertfdinfo "$COMMONKERNELFOLDER/fs/notify/fdinfo.c"
+              fi
+
+              # Restore the swap_slots header for newer sublevels.
+              if (( SUBLEVELVALUE >= 123 )); then
+                FILE="$COMMONKERNELFOLDER/mm/memory.c"
+
+                grep -Fq '#include <linux/swap_slots.h>' "$FILE" ||
+                  insertfirstbefore "$FILE" \
+                    '^#ifdef CONFIG_KSU_KSUFS_SUS_MAP|^#ifdef CONFIG_KSU_SUSFS_SUS_MAP' \
+                    '#include <linux/swap_slots.h>'
+              fi
+
+              # Restore the block trace hook for newer sublevels.
+              if (( SUBLEVELVALUE >= 197 )); then
+                FILE="$COMMONKERNELFOLDER/fs/namespace.c"
+
+                grep -Fq '#include <trace/hooks/blk.h>' "$FILE" ||
+                  insertfirstafter "$FILE" \
+                    '^#include "internal\.h"$' \
+                    '#include <trace/hooks/blk.h>'
+              fi
+
+              # Restore the MM trace hook for newer sublevels.
+              if (( SUBLEVELVALUE >= 206 )); then
+                FILE="$COMMONKERNELFOLDER/fs/proc/task_mmu.c"
+
+                grep -Fq '#include <trace/hooks/mm.h>' "$FILE" ||
+                  insertfirstafter "$FILE" \
+                    '^#include <linux/pkeys\.h>$' \
+                    '#include <trace/hooks/mm.h>'
+              fi
+              ;;
+
+            # Restore Android 14 / Linux 6.1 header changes.
+            android14-6.1)
+              if (( SUBLEVELVALUE <= 25 )); then
+                deletematchinglines "$COMMONKERNELFOLDER/fs/proc/base.c" \
+                  '^#include <trace/hooks/sched\.h>$'
+              fi
+
+              if (( SUBLEVELVALUE <= 141 )); then
+                deletematchinglines "$COMMONKERNELFOLDER/fs/proc/base.c" \
+                  '^#include <linux/dma-buf\.h>$'
+              fi
+
+              # Re-add trace hooks removed by the Apply stage.
+              if (( SUBLEVELVALUE >= 157 )); then
+                FILE="$COMMONKERNELFOLDER/fs/namespace.c"
+
+                grep -Fq '#include <trace/hooks/blk.h>' "$FILE" ||
+                  insertfirstafter "$FILE" \
+                    '^#include "internal\.h"$' \
+                    '#include <trace/hooks/blk.h>'
+
+                FILE="$COMMONKERNELFOLDER/fs/super.c"
+
+                grep -Fq '#include <trace/hooks/fs.h>' "$FILE" ||
+                  insertfirstafter "$FILE" \
+                    '^#include "internal\.h"$' \
+                    '#include <trace/hooks/fs.h>'
+              fi
+              ;;
+
+            # Remove Android 15 / Linux 6.6 SMAPS and header compatibility edits.
+            android15-6.6)
+              if (( SUBLEVELVALUE <= 30 )); then
+                TASK="$COMMONKERNELFOLDER/fs/proc/task_mmu.c"
+                NS="$COMMONKERNELFOLDER/fs/namespace.c"
+
+                deletematchinglines "$NS" \
+                  '^#include <trace/hooks/fs\.h>$'
+
+                deletematchinglines "$TASK" \
+                  '^[[:space:]]*unsigned int nr_subpages = __PAGE_SIZE / PAGE_SIZE;$'
+
+                deletematchinglines "$TASK" \
+                  '^[[:space:]]*pagemap_entry_t \*res = NULL;$'
+
+                deletematchinglines "$TASK" \
+                  '^[[:space:]]*last_vma_end = vma->vm_end;$'
+
+                # Restore the original unbraced VMA end condition.
+                perl -0pi -e \
+                  's/if\s*\(vma->vm_end > last_vma_end\)\s*\{/if (vma->vm_end > last_vma_end)/g; s/(if \(vma->vm_end > last_vma_end\)\n[^\n]*\n)[ \t]*\}\n/$1/s' \
+                  "$TASK"
+              fi
+
+              # Remove headers introduced for older sublevels.
+              if (( SUBLEVELVALUE <= 57 )); then
+                deletematchinglines "$COMMONKERNELFOLDER/mm/memory.c" \
+                  '^#include <linux/zswap\.h>$'
+              fi
+
+              if (( SUBLEVELVALUE <= 92 )); then
+                deletematchinglines "$COMMONKERNELFOLDER/fs/proc/base.c" \
+                  '^#include <linux/dma-buf\.h>$'
+              fi
+              ;;
+
+            # Restore Android 16 / Linux 6.12 API compatibility changes.
+            android16-6.12)
+              if (( SUBLEVELVALUE >= 58 )); then
+                FILE="$COMMONKERNELFOLDER/fs/exec.c"
+
+                grep -Fq '#include <linux/dma-buf.h>' "$FILE" ||
+                  insertfirstafter "$FILE" '^#include ' \
+                    '#include <linux/dma-buf.h>'
+              fi
+
+              if (( SUBLEVELVALUE >= 69 )); then
+                replaceperl "$COMMONKERNELFOLDER/fs/proc/task_mmu.c" \
+                  '\bvma_pages\b' 'vma_data_pages'
+              fi
+              ;;
+          esac
+
+          logpatch REVERT "$KERNELMODULE" 'Revert operations complete'
+        }
+
+        # Dispatch the requested operation and reject unsupported mode names
+        runfakepatch() {
+          case "$1" in
+            Apply)
+              fakepatchapply
+              ;;
+            PostFix)
+              fakepatchpostfix
+              ;;
+            Revert)
+              fakepatchrevert
+              ;;
+            *)
+              echo "Usage: Mode Must be Apply, PostFix, or Revert" >&2
+              return 2
+              ;;
+          esac
+
+          echo "🚀 Fake Patches: $1 Completed (Android and Kernel Version = $KERNELMODULE, Sublevel = $SUBLEVELVALUE)"
+        }
+
+        # Run Selected Operation; Default to Apply When Unset
+        runfakepatch "${FAKEPATCHMODE:-Apply}"
