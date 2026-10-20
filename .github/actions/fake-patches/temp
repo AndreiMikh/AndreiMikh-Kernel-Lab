@@ -32,9 +32,26 @@ runs:
         # Validate Required Inputs Before Touching Kernel Source
         : "${KERNELMODULE:?must be set}"
         : "${COMMONKERNELFOLDER:?must be set}"
-        # Normalize Sublevel to a Non-Negative Integer
-        SUBLEVELVALUE="${SUBLEVEL:-0}"
-        [[ "$SUBLEVELVALUE" =~ ^[0-9]+$ ]] || SUBLEVELVALUE=0
+        # Validate Kernel Sublevel
+        SUBLEVELVALUE="${SUBLEVEL:-0}"       
+        if [[ ! "$SUBLEVELVALUE" =~ ^[0-9]+$ ]]; then
+          echo "⚠️ Invalid Kernel Sublevel: $SUBLEVEL" >&2
+          exit 2
+        fi
+        
+        # Validate Requested FakePatches Modes
+        IFS=',' read -ra MODELIST <<< "${FAKEPATCHMODE:-Apply}"        
+        for mode in "${MODELIST[@]}"; do
+          case "$mode" in
+            Apply|PostFix|Revert) ;;
+            *)
+              echo "⚠️ Unsupported FakePatches Mode: $mode" >&2
+              exit 2
+              ;;
+          esac
+
+        done
+
         # Print standardized patch operation logs.
         logpatch() {
           printf '[%s] %s | %s\n' "$1" "$2" "$3"
@@ -130,9 +147,11 @@ runs:
         replaceperl() {
           local file="$1" regex="$2" replacement="$3"
           needfile "$file"
+        
           MATCHREGEX="$regex" REPLACEMENT="$replacement" \
-            perl -pi -e \
-              's/$ENV{MATCHREGEX}/$ENV{REPLACEMENT}/g' "$file"
+            perl -pi -e '
+              s/$ENV{MATCHREGEX}/$ENV{REPLACEMENT}/g;
+            ' "$file"
         }
         # Apply INOTIFY FDINFO Compatibility Patch
         # Older Kernel Implementations May Expose Ignored Mask Separately
@@ -286,39 +305,51 @@ runs:
               if (( SUBLEVELVALUE <= 30 )); then
                 TASK="$COMMONKERNELFOLDER/fs/proc/task_mmu.c"
                 NS="$COMMONKERNELFOLDER/fs/namespace.c"
+                # Validate Required Source Files
                 needfile "$TASK"
-                needfile "$NS"
-                # Use Declaration as the Marker for Patch Group
-                if ! hastext "$TASK" \
-                  'unsigned int nr_subpages = __PAGE_SIZE / PAGE_SIZE;'; then
-                  # Update LAST-VMA-END After Gathering SMAPS Statistics
-                  # Add Braces to VMA-END Check for Safe Statement Grouping
+                needfile "$NS"            
+                # Update LAST-VMA-END After Gathering SMAPS Statistics
+                if ! hastext "$TASK" 'last_vma_end = vma->vm_end;'; then
                   if ! hastext "$TASK" 'smap_gather_stats(vma, &mss, last_vma_end);'; then
                     echo "⚠️ Expected SMAPS Anchor Missing: $TASK" >&2
                     return 1
                   fi
-
+              
                   perl -0pi -e \
-                    's/(smap_gather_stats\(vma, &mss, last_vma_end\);)/$1\n\t\t\t\tlast_vma_end = vma->vm_end;/s' \
+                    's/(smap_gather_stats\(vma, &mss, last_vma_end\);)(?!\s*last_vma_end = vma->vm_end;)/$1\n\t\t\t\tlast_vma_end = vma->vm_end;/s' \
                     "$TASK"
+                fi
+              
+                # Add Braces to VMA-END Condition
+                if grep -Eq 'if[[:space:]]*\(vma->vm_end > last_vma_end\)[[:space:]]*$' "$TASK"; then
                   perl -0pi -e \
-                    's/if\s*\(vma->vm_end > last_vma_end\)\n(\s*)last_vma_end = vma->vm_end;/if (vma->vm_end > last_vma_end) {\n$1\tlast_vma_end = vma->vm_end;\n$1}/s' \
+                    's/if\s*\(vma->vm_end > last_vma_end\)\n([ \t]*)last_vma_end = vma->vm_end;/if (vma->vm_end > last_vma_end) {\n$1\tlast_vma_end = vma->vm_end;\n$1}/s' \
                     "$TASK"
-                  # Add Filesystem Trace Hook Required by Patch Set
+                fi
+              
+                # Add Filesystem Trace Hook Only When Missing
+                if ! hastext "$NS" '#include <trace/hooks/fs.h>'; then
                   insertfirstafter "$NS" \
                     '#include <trace/hooks/blk\.h>' \
                     '#include <trace/hooks/fs.h>'
-                  # Insert Pagemap Variables Beside the Existing Declarations
+                fi
+              
+                # Add Pagemap Declarations Independently
+                if ! hastext "$TASK" 'unsigned int nr_subpages = __PAGE_SIZE / PAGE_SIZE;'; then
                   insertfirstafter "$TASK" \
                     'int ret = 0, copied = 0;' \
                     $'\tunsigned int nr_subpages = __PAGE_SIZE / PAGE_SIZE;'
+                fi
+
+                # Add Pagemap Result Pointer Declaration
+                if ! hastext "$TASK" 'pagemap_entry_t *res = NULL;'; then
                   insertfirstafter "$TASK" \
                     'unsigned int nr_subpages = __PAGE_SIZE / PAGE_SIZE;' \
                     $'\tpagemap_entry_t *res = NULL;'
                 fi
               fi
 
-              # Older 6.6 Sublevels May Require Zswap Header
+              # Older 6.6 Sublevels May Require ZSWAP Header
               if (( SUBLEVELVALUE <= 57 )); then
                 insertfirstafter "$COMMONKERNELFOLDER/mm/memory.c" \
                   '^#include <linux/sched/sysctl\.h>$' \
@@ -332,9 +363,8 @@ runs:
                   '#include <linux/dma-buf.h>'
               fi
               ;;
-
             # Android 16 / Linux 6.12:
-            # Remove an Obsolete DMA-BUF Include and Adapt VMA Page API
+            # Remove an Obsolete DMA-BUF Include and Adapt VMA PAGE API
             android16-6.12)
               if (( SUBLEVELVALUE >= 58 )); then
                 deletematchinglines "$COMMONKERNELFOLDER/fs/exec.c" \
@@ -353,8 +383,8 @@ runs:
         fakepatchpostfix() {
           TASK="$COMMONKERNELFOLDER/fs/proc/task_mmu.c"
           if [[ -f "$TASK" ]]; then
-            # Supply a Fallback VMA PAD START Definition When Source
-            # References it But Lacks Corresponding Header or Definition
+            # Supply Fallback VMA PAD START Definition When Source
+            # References Lacks Corresponding Header or Definition
             if hastext "$TASK" 'VMA_PAD_START(' &&
                ! grep -Eq \
                  '#include <linux/pgsize_migration(_inline)?\.h>|^[[:space:]]*#define[[:space:]]+VMA_PAD_START' \
