@@ -29,7 +29,7 @@ def regex(pattern):
 # ==========================
 def requiredexists(path):
     if not path.exists():
-        raise RuntimeError(f"Required file does not exist: {path}")
+        raise RuntimeError(f"Required File Does Not Exist: {path}")
 
 
 def lines(path):
