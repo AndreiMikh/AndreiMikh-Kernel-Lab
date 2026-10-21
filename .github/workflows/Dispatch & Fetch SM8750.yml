@@ -710,38 +710,46 @@ jobs:
           [[ -s "./Release.txt" ]] || {
             echo "⚠️ Release.txt is Missing / Empty"
             exit 1
-          }
-
-          # Collect ZIP Files From Final Bundle
-          # Do Not Upload Kernel-Bundle.zip or Scan Unrelated Workspace Directories
-          # Track File Names and SHA-256 Hashes to Detect Duplicate Assets
+          }          
+          # Do Not Upload Kernel-Bundle.zip or Scan Unrelated Workspace Directories          
+          # Collect ZIP Files From Final Bundle and Resolve Duplicate Asset File Names
           declare -A SEENHASH=()
+          declare -A SEENNAME=()
           ASSETS=()
-          # Find ZIP Files Recursively and Process Them in Deterministic Order
+          # Process ZIP Files in Deterministic Order
           while IFS= read -r -d '' ZIP; do
-            # Extract File Name and Calculate its SHA-256 Hash
             NAME="$(basename "$ZIP")"
             HASH="$(sha256sum "$ZIP" | cut -d ' ' -f 1)"
-            # Check Whether Asset With Same File Name Was Already Collected
+            # Skip Identical Files That Have Already Been Collected
             if [[ -n "${SEENHASH[$NAME]+x}" ]]; then
-              # Reject Duplicate File Names if Their File Contents Differ
-              if [[ "${SEENHASH[$NAME]}" != "$HASH" ]]; then
-                echo "⚠️ Conflicting Files Share Asset Name: $NAME"
-                echo "Rename Files Before Publishing..."
-                exit 1
+              if [[ "${SEENHASH[$NAME]}" == "$HASH" ]]; then
+                echo "⏭️ Skipping Identical Duplicate: $NAME"
+                continue
               fi
 
-              # Skip Identical Duplicates to Avoid Uploading Aame Asset Twice
-              echo "⏭️ Skipping Identical Duplicate: $NAME"
-              continue
+              # Rename Files With Different Contents to Avoid Release Asset Conflicts
+              DEVICE="$(basename "$(dirname "$ZIP")")"
+              EXT="${NAME##*.}"
+              BASE="${NAME%.*}"
+              NAME="${BASE}-${DEVICE}.${EXT}"
+              # Ensure Renamed Asset File Name is Unique
+              if [[ -n "${SEENNAME[$NAME]+x}" ]]; then
+                echo "⚠️ Duplicate Generated Asset Name: $NAME"
+                exit 1
+              fi
             fi
 
-            # Register File Name and Hash, Then Add ZIP to Upload List
-            SEENHASH["$NAME"]="$HASH"
-            ASSETS+=("$ZIP")
+            # Register Asset File Name and Content Hash
+            SEENHASH["$(basename "$ZIP")"]="$HASH"
+            SEENNAME["$NAME"]=1
+            # Stage Asset Using its Unique File Name
+            DEST="$RUNNER_TEMP/$NAME"
+            cp "$ZIP" "$DEST"
+            ASSETS+=("$DEST")
+            echo "📦 Staged: $NAME"
             
           done < <(find Final -type f -name "*.zip" -print0 | sort -z)
-          
+  
           # Stop if No Eligible ZIP Files Were Found
           if [[ ${#ASSETS[@]} -eq 0 ]]; then
             echo "⚠️ No Device ZIP Files Found in Final Bundle"
