@@ -671,88 +671,106 @@ jobs:
           echo "TAG=$TAG" >> "$GITHUB_ENV"
           echo "CHANNEL=$CHANNEL" >> "$GITHUB_ENV"
 
+
       - name: 🚀 Publish Channel-Based Release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
         run: |
-          set -euo pipefail
+          set -Eeuo pipefail
           cd "$GITHUB_WORKSPACE"
-          echo "Repo: $GITHUB_REPOSITORY"
-          gh auth status || true
-          gh repo view "$GITHUB_REPOSITORY" || true
+          REPO="$GITHUB_REPOSITORY"
           CHANNEL="${{ github.event.inputs.RELEASECHANNEL }}"
           RUN="${GITHUB_RUN_NUMBER}"
-          CHANNELLOWER=$(echo "$CHANNEL" | tr '[:upper:]' '[:lower:]')
-          case "$CHANNELLOWER" in
+          case "${CHANNEL,,}" in
             stable)
               TAG="SM8750-Stable"
-              PRERELEASE="false"
-              LATEST="true"
+              PRERELEASE=false
+              LATEST=true
               ;;
-
             beta)
               TAG="SM8750-Beta"
-              PRERELEASE="true"
-              LATEST="false"
+              PRERELEASE=true
+              LATEST=false
               ;;
-
             nightly|*)
               TAG="SM8750-Nightly"
-              PRERELEASE="true"
-              LATEST="false"
+              PRERELEASE=true
+              LATEST=false
               ;;
           esac
-          echo "TAG=$TAG"
-          TITLE="🚀 SM8750 ${CHANNEL} | Build Number ${RUN}"
-          echo "🔍 Scanning Release Assets..."
-          ASSETS=()
-          ZIPBUNDLE=$(find . -type f -name "Kernel-Bundle.zip" | head -n 1)
-          if [[ -z "$ZIPBUNDLE" || ! -s "$ZIPBUNDLE" ]]; then
-            echo "⚠️ Missing Bundle Zip"
+          TITLE="🚀 SM8750 ${CHANNEL}"
+          echo "📦 Repository: $REPO"
+          echo "🏷️ Release Tag: $TAG"
+          gh auth status
+          # Validate required files
+          [[ -s "./Kernel-Bundle.zip" ]] || {
+            echo "⚠️ Kernel-Bundle.zip is Missing"
             exit 1
-          fi
-
-          ASSETS+=("$ZIPBUNDLE")
-          echo "📦 Bundle: $ZIPBUNDLE"
-          echo "📦 Collecting Final Device Zips..."
-          while IFS= read -r zip; do
-            ASSETS+=("$zip")
-          done < <(
-            find . -type f -name "*.zip" \
-              ! -name "Kernel-Bundle.zip" \
-              | sort
-          )
-          if [[ ${#ASSETS[@]} -eq 0 ]]; then
-            echo "⚠️ No Release Assets Found"
+          }
+          [[ -s "./Release.txt" ]] || {
+            echo "⚠️ Release.txt is Missing"
             exit 1
-          fi
+          }
+          # Stage Release Assets Outside Workspace
+          # Prevents Scanning Both Bundle and Final Asset(s)
+          STAGING="$RUNNER_TEMP/release-assets"
+          mkdir -p "$STAGING"
+          cp "./Kernel-Bundle.zip" "$STAGING/Kernel-Bundle.zip"
+          # Collect Only Organized Device ZIP(s)
+          # Release Asset Names Must be Unique
+          declare -A SEENHASH=()
+          while IFS= read -r -d '' ZIP; do
+            NAME="$(basename "$ZIP")"
+            HASH="$(sha256sum "$ZIP" | cut -d ' ' -f 1)"
+            if [[ -n "${SEENHASH[$NAME]+x}" ]]; then
+              if [[ "${SEENHASH[$NAME]}" != "$HASH" ]]; then
+                echo "⚠️ Conflicting Files Share Asset Name: $NAME"
+                echo "🧾 Rename Files Before Publishing..."
+                exit 1
+              fi
 
-          echo "📦 Assets to Upload:"
-          printf '%s\n' "${ASSETS[@]}"
-          if [[ ! -s Release.txt ]]; then
-            echo "⚠️ Release.txt is missing"
-            exit 1
-          fi
+              echo "⏭️ Skipping Identical Duplicate: $NAME"
+              continue
+            fi
 
-          if gh release view "$TAG" >/dev/null 2>&1; then
-            echo "♻️ Release Exists → Updating Assets"
-            gh release upload "$TAG" \
-              --repo "$GITHUB_REPOSITORY" \
-              "${ASSETS[@]}" \
-              --clobber
+            SEENHASH["$NAME"]="$HASH"
+            cp "$ZIP" "$STAGING/$NAME"
+            echo "📦 Staged: $NAME"
+          done < <(find Final -type f -name "*.zip" -print0 | sort -z)
+          echo "📋 Release Assets:"
+          find "$STAGING" -maxdepth 1 -type f -printf '%f\n' | sort
+          # Create or Update Release Without Uploading Assets Yet
+          if gh release view "$TAG" --repo "$REPO" >/dev/null 2>&1; then
+            echo "♻️ Release Exists; Updating Metadata..."
             gh release edit "$TAG" \
-              --repo "$GITHUB_REPOSITORY" \
+              --repo "$REPO" \
               --title "$TITLE" \
               --notes-file Release.txt \
               --prerelease="$PRERELEASE" \
               --latest="$LATEST"
           else
-            echo "🚀 Release Does Not Exist → Creating Release"
+            echo "🚀 Creating Release: $TAG"
             gh release create "$TAG" \
-              --repo "$GITHUB_REPOSITORY" \
+              --repo "$REPO" \
               --title "$TITLE" \
               --notes-file Release.txt \
               --prerelease="$PRERELEASE" \
-              --latest="$LATEST" \
-              "${ASSETS[@]}"
+              --latest="$LATEST"
           fi
+
+          # Upload Staged Assets With Unique File Names
+          shopt -s nullglob
+          ASSETS=("$STAGING"/*)
+          if [[ ${#ASSETS[@]} -eq 0 ]]; then
+            echo "⚠️ No Release Assets Found"
+            exit 1
+          fi
+
+          echo "⬆️ Uploading ${#ASSETS[@]} Unique Asset(s)"
+          gh release upload "$TAG" \
+            --repo "$REPO" \
+            --clobber \
+            "${ASSETS[@]}"
+          echo "🎉 Release Published Successfully"
+          gh release view "$TAG" --repo "$REPO"
