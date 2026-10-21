@@ -671,7 +671,6 @@ jobs:
           echo "TAG=$TAG" >> "$GITHUB_ENV"
           echo "CHANNEL=$CHANNEL" >> "$GITHUB_ENV"
 
-
       - name: 🚀 Publish Channel-Based Release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -679,9 +678,11 @@ jobs:
         run: |
           set -Eeuo pipefail
           cd "$GITHUB_WORKSPACE"
+          # Define Target Repository, Release Channel, and Workflow Run Number
           REPO="$GITHUB_REPOSITORY"
           CHANNEL="${{ github.event.inputs.RELEASECHANNEL }}"
           RUN="${GITHUB_RUN_NUMBER}"
+          # Configure Release Tag and Publication Settings For Each Channel
           case "${CHANNEL,,}" in
             stable)
               TAG="SM8750-Stable"
@@ -699,50 +700,61 @@ jobs:
               LATEST=false
               ;;
           esac
-          TITLE="🚀 SM8750 ${CHANNEL}"
+          # Set Release Title Using Selected Release Channel
+          TITLE="🚀 OnePlus SM8750 ${CHANNEL}"
+          # Display repository and release information for debugging.
           echo "📦 Repository: $REPO"
           echo "🏷️ Release Tag: $TAG"
           gh auth status
-          # Validate required files
-          [[ -s "./Kernel-Bundle.zip" ]] || {
-            echo "⚠️ Kernel-Bundle.zip is Missing"
-            exit 1
-          }
+          # Stop Workflow if Release Notes File is Missing or Empty
           [[ -s "./Release.txt" ]] || {
-            echo "⚠️ Release.txt is Missing"
+            echo "⚠️ Release.txt is Missing / Empty"
             exit 1
           }
-          # Stage Release Assets Outside Workspace
-          # Prevents Scanning Both Bundle and Final Asset(s)
-          STAGING="$RUNNER_TEMP/release-assets"
-          mkdir -p "$STAGING"
-          cp "./Kernel-Bundle.zip" "$STAGING/Kernel-Bundle.zip"
-          # Collect Only Organized Device ZIP(s)
-          # Release Asset Names Must be Unique
+
+          # Collect ZIP Files From Final Bundle
+          # Do Not Upload Kernel-Bundle.zip or Scan Unrelated Workspace Directories
+          # Track File Names and SHA-256 Hashes to Detect Duplicate Assets
           declare -A SEENHASH=()
+          ASSETS=()
+          # Find ZIP Files Recursively and Process Them in Deterministic Order
           while IFS= read -r -d '' ZIP; do
+            # Extract File Name and Calculate its SHA-256 Hash
             NAME="$(basename "$ZIP")"
             HASH="$(sha256sum "$ZIP" | cut -d ' ' -f 1)"
+            # Check Whether Asset With Same File Name Was Already Collected
             if [[ -n "${SEENHASH[$NAME]+x}" ]]; then
+              # Reject Duplicate File Names if Their File Contents Differ
               if [[ "${SEENHASH[$NAME]}" != "$HASH" ]]; then
                 echo "⚠️ Conflicting Files Share Asset Name: $NAME"
-                echo "🧾 Rename Files Before Publishing..."
+                echo "Rename Files Before Publishing..."
                 exit 1
               fi
 
+              # Skip Identical Duplicates to Avoid Uploading Aame Asset Twice
               echo "⏭️ Skipping Identical Duplicate: $NAME"
               continue
             fi
 
+            # Register File Name and Hash, Then Add ZIP to Upload List
             SEENHASH["$NAME"]="$HASH"
-            cp "$ZIP" "$STAGING/$NAME"
-            echo "📦 Staged: $NAME"
+            ASSETS+=("$ZIP")
+            
           done < <(find Final -type f -name "*.zip" -print0 | sort -z)
-          echo "📋 Release Assets:"
-          find "$STAGING" -maxdepth 1 -type f -printf '%f\n' | sort
-          # Create or Update Release Without Uploading Assets Yet
+          
+          # Stop if No Eligible ZIP Files Were Found
+          if [[ ${#ASSETS[@]} -eq 0 ]]; then
+            echo "⚠️ No Device ZIP Files Found in Final Bundle"
+            exit 1
+          fi
+
+          # Print List of Assets That Will be Uploaded
+          echo "📋 ZIP files to upload:"
+          printf '  %s\n' "${ASSETS[@]}"
+          # Check Whether Channel Release Already Exists
           if gh release view "$TAG" --repo "$REPO" >/dev/null 2>&1; then
-            echo "♻️ Release Exists; Updating Metadata..."
+            # Update Existing Release Metadata Without Deleting its Assets
+            echo "♻️ Release Wxists; Updating Metadata..."
             gh release edit "$TAG" \
               --repo "$REPO" \
               --title "$TITLE" \
@@ -750,6 +762,7 @@ jobs:
               --prerelease="$PRERELEASE" \
               --latest="$LATEST"
           else
+            # Create Release Without Attaching Assets During Creation
             echo "🚀 Creating Release: $TAG"
             gh release create "$TAG" \
               --repo "$REPO" \
@@ -759,18 +772,24 @@ jobs:
               --latest="$LATEST"
           fi
 
-          # Upload Staged Assets With Unique File Names
-          shopt -s nullglob
-          ASSETS=("$STAGING"/*)
-          if [[ ${#ASSETS[@]} -eq 0 ]]; then
-            echo "⚠️ No Release Assets Found"
-            exit 1
-          fi
+          # Initialize Counters for Sequential Asset Uploads
+          TOTAL=${#ASSETS[@]}
+          INDEX=0
+          # Upload Each ZIP Separately to Avoid a Single Multi-File Upload Operation
+          for ZIP in "${ASSETS[@]}"; do
+            # Increment Counter and Display Current Asset Being Uploaded
+            INDEX=$((INDEX + 1))
+            echo "⬆️ [$INDEX/$TOTAL] Uploading: $(basename "$ZIP")"
+            # Upload Current ZIP to Release
+            # Clobber Replaces an Existing Asset With the Same File Name
+            gh release upload "$TAG" "$ZIP" \
+              --repo "$REPO" \
+              --clobber
+            # Report Success Only After GitHub Confirms Upload Completed
+            echo "🎉 [$INDEX/$TOTAL] Uploaded: $(basename "$ZIP")"
+            
+          done
 
-          echo "⬆️ Uploading ${#ASSETS[@]} Unique Asset(s)"
-          gh release upload "$TAG" \
-            --repo "$REPO" \
-            --clobber \
-            "${ASSETS[@]}"
-          echo "🎉 Release Published Successfully"
+          # Print Final Result and Display Published Release Details
+          echo "🎉 All $TOTAL ZIP Files Uploaded Successfully!"
           gh release view "$TAG" --repo "$REPO"
