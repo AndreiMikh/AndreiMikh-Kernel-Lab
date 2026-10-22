@@ -154,41 +154,45 @@ jobs:
             RUNSENDPOINT="repos/$REPO/actions/workflows/$WORKFLOWID/runs"
           fi
 
+          
           # Fetch Runs Page by Page
           echo "🔎 Fetching Workflow Runs..."
           PERPAGE=100
           PAGE=1
-          ALLRUNS="[]"
+          RUNSFILE=$(mktemp)
+          RESPFILE=$(mktemp)
+          trap 'rm -f "$RUNSFILE" "$RESPFILE"' EXIT
           while true; do
-            RESP=$(gh api \
-              "$RUNSENDPOINT?per_page=$PERPAGE&page=$PAGE" 2>/dev/null) || {
-                echo "⚠️ Failed to Fetch Workflow Runs (Page $PAGE)"
-                exit 1
-              }
-            if ! echo "$RESP" | jq -e \
-              '.workflow_runs | type == "array"' >/dev/null; then
+            if ! gh api \
+              "$RUNSENDPOINT?per_page=$PERPAGE&page=$PAGE" \
+              > "$RESPFILE"; then
+              echo "⚠️ Failed to Fetch Workflow Runs (Page $PAGE)"
+              exit 1
+            fi
+
+            if ! jq -e \
+              '.workflow_runs | type == "array"' \
+              "$RESPFILE" >/dev/null; then
               echo "⚠️ Invalid Workflow Runs API Response"
               exit 1
             fi
 
-            RUNS=$(echo "$RESP" | jq '.workflow_runs')
-            COUNTPAGE=$(echo "$RUNS" | jq 'length')
+            COUNTPAGE=$(jq '.workflow_runs | length' "$RESPFILE")
             if [[ "$COUNTPAGE" -eq 0 ]]; then
               break
             fi
 
-            ALLRUNS=$(jq -cn \
-              --argjson old "$ALLRUNS" \
-              --argjson new "$RUNS" \
-              '$old + $new')
+            # Append Each Run as a Separate JSON Line
+            jq -c '.workflow_runs[]' "$RESPFILE" >> "$RUNSFILE"
             echo "📄 Retrieved Page $PAGE ($COUNTPAGE Runs)"
             PAGE=$((PAGE + 1))
             
           done
-                
+
           # Count All Retrieved Runs
           TOTALRUNS=$(wc -l < "$RUNSFILE")
           echo "📌 Total Runs Fetched : $TOTALRUNS"
+
           # Cancel In-Progress or Pending Runs
           if [[ "$CANCELALL" == "true" ]]; then
             echo "⚙️ Cancelling In-Progress or Pending Runs..."
@@ -207,9 +211,7 @@ jobs:
                   CANCELCOUNT=$((CANCELCOUNT + 1))
                 fi
               fi
-              
             done < <(
-            
               jq -c '
                 select(
                   .status == "in_progress" or
