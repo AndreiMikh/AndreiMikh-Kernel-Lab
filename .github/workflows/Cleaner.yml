@@ -185,74 +185,100 @@ jobs:
             PAGE=$((PAGE + 1))
             
           done
-
-          TOTALRUNS=$(echo "$ALLRUNS" | jq 'length')
-          echo "📌 Total Runs Fetched: $TOTALRUNS"            
+                
+          # Count All Retrieved Runs
+          TOTALRUNS=$(wc -l < "$RUNSFILE")
+          echo "📌 Total Runs Fetched : $TOTALRUNS"
+          # Cancel In-Progress or Pending Runs
           if [[ "$CANCELALL" == "true" ]]; then
-            echo "⚙️ Cancelling in Progress or Pending Runs..."
-            CANCELCOUNT=0
+            echo "⚙️ Cancelling In-Progress or Pending Runs..."
             while IFS= read -r run; do
-              ID=$(echo "$run" | jq -r '.id')
-              # Skip Current Workflow Run (Safety)
+              ID=$(printf '%s\n' "$run" | jq -r '.id')
               if [[ "$ID" == "$CURRENTRUNID" ]]; then
                 continue
               fi
-              
-              # Dry Run Support
+
               if [[ "$DRYRUN" == "true" ]]; then
-                echo "🔍 Would Cancel Run ID: $ID"
+                echo "🔍 Would Cancel Run ID : $ID"
                 CANCELCOUNT=$((CANCELCOUNT + 1))
               else
-                echo "♻️ Cancelling Run ID: $ID"
+                echo "♻️ Cancelling Run ID : $ID"
                 if gh api -X POST "repos/$REPO/actions/runs/$ID/cancel"; then
                   CANCELCOUNT=$((CANCELCOUNT + 1))
                 fi
               fi
-           
+              
             done < <(
-              echo "$ALLRUNS" | jq -c '
-                .[] | select(
+            
+              jq -c '
+                select(
                   .status == "in_progress" or
                   .status == "queued" or
                   .status == "pending" or
                   .status == "requested" or
                   .status == "waiting"
                 )
-              '
+              ' "$RUNSFILE"
             )
             echo "📌 Cancelled $CANCELCOUNT Runs"
           fi
 
+          # Process Runs For Deletion
           echo "⚙️ Processing Delete Logic..."
           if [[ "$REVERSEORDER" == "true" ]]; then
-            SORTEDRUNS=$(echo "$ALLRUNS" | jq 'sort_by(.run_started_at)')
+            SORTEXPR='sort_by(.run_started_at) | .[0:$count][]'
           else
-            SORTEDRUNS=$(echo "$ALLRUNS" | jq 'sort_by(.run_started_at) | reverse')
+            SORTEXPR='sort_by(.run_started_at) | reverse | .[0:$count][]'
           fi
 
-          RUNSTODELETE=$(echo "$SORTEDRUNS" | jq ".[0:${COUNT}]")
           while IFS= read -r run; do
-            ID=$(echo "$run" | jq -r '.id')
-            STATUS=$(echo "$run" | jq -r '.conclusion')
-            STATE=$(echo "$run" | jq -r '.status')
-            if [[ "$STATE" == "in_progress" || "$STATE" == "queued" ]]; then continue; fi
-            if [[ "$STATUS" == "failure" && "$DELETEFAILED" != "true" ]]; then continue; fi
-            if [[ "$STATUS" == "success" && "$DELETESUCCESS" != "true" ]]; then continue; fi
-            if [[ "$STATUS" == "cancelled" && "$DELETECANCELLED" != "true" ]]; then continue; fi
+            ID=$(printf '%s\n' "$run" | jq -r '.id')
+            STATUS=$(printf '%s\n' "$run" | jq -r '.conclusion')
+            STATE=$(printf '%s\n' "$run" | jq -r '.status')
+            # Skip Active Runs
+            if [[ "$STATE" == "in_progress" ||
+                  "$STATE" == "queued" ||
+                  "$STATE" == "pending" ||
+                  "$STATE" == "requested" ||
+                  "$STATE" == "waiting" ]]; then
+              continue
+            fi
+
+            # Filter by Selected Conclusion
+            if [[ "$STATUS" == "failure" && "$DELETEFAILED" != "true" ]]; then
+              continue
+            fi
+
+            if [[ "$STATUS" == "success" && "$DELETESUCCESS" != "true" ]]; then
+              continue
+            fi
+
+            if [[ "$STATUS" == "cancelled" && "$DELETECANCELLED" != "true" ]]; then
+              continue
+            fi
+
+            if [[ "$STATUS" != "failure" &&
+                  "$STATUS" != "success" &&
+                  "$STATUS" != "cancelled" ]]; then
+              continue
+            fi
+
             MATCHEDCOUNT=$((MATCHEDCOUNT + 1))
             if [[ "$DRYRUN" == "true" ]]; then
-              echo "🔍 Would Delete Run ID: $ID"
+              echo "🔍 Would Delete Run ID : $ID ($STATUS)"
               DELETEDCOUNT=$((DELETEDCOUNT + 1))
             else
-              echo "🔧 Deleting Run ID: $ID"
+              echo "🔧 Deleting Run ID : $ID ($STATUS)"
               if gh api -X DELETE "repos/$REPO/actions/runs/$ID"; then
                 DELETEDCOUNT=$((DELETEDCOUNT + 1))
               else
-                echo "⚠️ Delete Failed"
+                echo "⚠️ Delete Failed : $ID"
               fi
             fi
             
-          done < <(echo "$RUNSTODELETE" | jq -c '.[]')
+          done < <(
+            jq -s --argjson count "$COUNT" "$SORTEXPR" "$RUNSFILE"
+          )                    
           if [[ "$WORKFLOWNAME" != "All Workflows" ]]; then
             echo "🧹 Cleaning Cleaner Workflow Runs (📃 Excluding Cleaner Workflow Current Run)..."
             # Get the Workflow ID of this Cleaner Workflow
