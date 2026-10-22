@@ -248,21 +248,26 @@ jobs:
 
           # Select Workflow Runs For Deletion
           echo "⚙️ Processing Delete Logic..."
-          # Sort Runs by Start Time and Apply Requested Count Limit
-          if [[ "$REVERSEORDER" == "true" ]]; then
-            # Select the Oldest Runs First
-            jq -s -c --argjson count "$COUNT" '
-              sort_by(.run_started_at // .created_at // "") |
-              .[0:$count][]
-            ' "$RUNSFILE" > "$DELETEFILE"
-          else
-            # Select Newest Runs First
-            jq -s -c --argjson count "$COUNT" '
-              sort_by(.run_started_at // .created_at // "") |
-              reverse |
-              .[0:$count][]
-            ' "$RUNSFILE" > "$DELETEFILE"
-          fi
+          # Filter Completed Runs by Selected Conclusions
+          jq -s -c \
+            --argjson count "$COUNT" \
+            --argjson failed "${DELETEFAILED:-false}" \
+            --argjson success "${DELETESUCCESS:-false}" \
+            --argjson cancelled "${DELETECANCELLED:-false}" '
+              map(select(
+                .status == "completed" and
+                (
+                  (.conclusion == "failure" and $failed) or
+                  (.conclusion == "success" and $success) or
+                  (.conclusion == "cancelled" and $cancelled)
+                )
+              ))
+              | sort_by(.run_started_at // .created_at // "")
+              | (if $reverse then . else reverse end)
+              | .[0:$count][]
+            ' --argjson reverse "${REVERSEORDER:-false}" \
+            "$RUNSFILE" > "$DELETEFILE"
+          echo "📊 Matching Runs Selected: $(jq -s 'length' "$DELETEFILE")"
 
           # Evaluate Each Selected Run Against Deletion Rules
           while IFS= read -r RUN; do
