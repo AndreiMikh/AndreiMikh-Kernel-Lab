@@ -84,7 +84,9 @@ jobs:
 
       # Clean Workflow Runs
       - name: 🔧 Clean Workflow Runs
+        shell: bash
         env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPO: ${{ github.repository }}
           COUNT: ${{ inputs.count }}
           DRYRUN: ${{ inputs.dryrun }}
@@ -98,209 +100,297 @@ jobs:
           CACHEMODE: ${{ inputs.cachemode }}
         run: |
           set -e
-          # Counters Initialization
+          # Initialize Workflow Run Counters
           TOTALRUNS=0
           MATCHEDCOUNT=0
           DELETEDCOUNT=0
-          CANCELCOUNT=0        
-          # Save Original Input
+          CANCELCOUNT=0
+          # Save Original Count and Apply Default
           ORIGINALCOUNT="${COUNT:-}"
-          # Apply Default if Empty
-          COUNT=${COUNT:-100}
-          # Validate Numeric
-          if ! [[ "$COUNT" =~ ^[0-9]+$ ]]; then
+          COUNT="${COUNT:-100}"
+          # Validate Count to Prevent Invalid Numeric Input
+          if ! [[ "$COUNT" =~ ^[0-9]+$ ]] || (( COUNT < 1 )); then
             COUNT=100
+            echo "⚠️ Invalid Count Input (${ORIGINALCOUNT:-Empty}), Defaulting to $COUNT"
           fi
 
-          # Warn if Changed
-          if [[ "$COUNT" != "$ORIGINALCOUNT" ]]; then
-            echo "⚠️ Invalid Count Input (${ORIGINALCOUNT:-Empty}), Defaulting to $COUNT"
-          fi  
-          
           echo "📌 Using COUNT=$COUNT"
-          # Determine whether to scan one workflow or every workflow.
+          # Create Temporary Storage to Avoid Oversized JSON Arguments
+          TEMPDIR=$(mktemp -d)
+          trap 'rm -rf "$TEMPDIR"' EXIT
+          # Define Files for Retrieved, Pending, and Selected Runs
+          RUNSFILE="$TEMPDIR/runs.jsonl"
+          CANCELFILE="$TEMPDIR/cancel.jsonl"
+          DELETEFILE="$TEMPDIR/delete.jsonl"
+          # Initialize Workflow Run Storage
+          : > "$RUNSFILE"
+          # Select the Workflow Runs API Endpoint
           if [[ "$WORKFLOWNAME" == "All Workflows" ]]; then
             echo "🔎 Scanning all GitHub Actions workflows..."
             RUNSENDPOINT="repos/$REPO/actions/runs"
           else
             echo "🔎 Finding Workflow ID For \"$WORKFLOWNAME\"..."
+            # Retrieve Available Workflows
             WORKFLOWJSON=$(gh api "repos/$REPO/actions/workflows")
-            if ! echo "$WORKFLOWJSON" | jq -e \
-              '.workflows | type == "array"' >/dev/null; then
-              echo "⚠️ Unable to Retrieve Workflows..."
+            # Validate the Workflow API Response
+            if ! jq -e '.workflows | type == "array"' <<< "$WORKFLOWJSON" >/dev/null; then
+              echo "⚠️ Unable to Retrieve Workflows"
               exit 1
             fi
 
-            # Try Exact Workflow Name Match First
-            WORKFLOWID=$(echo "$WORKFLOWJSON" | jq -r \
-              --arg name "$WORKFLOWNAME" \
-              '.workflows[] | select(.name == $name) | .id' | head -n1)
-            # Fallback to Partial Match
+            # Attempt an Exact Workflow Name Match
+            WORKFLOWID=$(jq -r --arg name "$WORKFLOWNAME" \
+              '[.workflows[] | select(.name == $name) | .id][0] // empty' \
+              <<< "$WORKFLOWJSON")
+            # Fall Back to a Partial Workflow Name Match
             if [[ -z "$WORKFLOWID" ]]; then
               echo "⚠️ Exact Match Failed; Trying Partial Match..."
-              WORKFLOWID=$(echo "$WORKFLOWJSON" | jq -r \
-                --arg name "$WORKFLOWNAME" \
-                '.workflows[] | select(.name | contains($name)) | .id' \
-                | head -n1)
+              WORKFLOWID=$(jq -r --arg name "$WORKFLOWNAME" \
+                '[.workflows[] | select(.name | contains($name)) | .id][0] // empty' \
+                <<< "$WORKFLOWJSON")
             fi
 
+            # Stop if Requested Workflow Cannot Be Found
             if [[ -z "$WORKFLOWID" ]]; then
               echo "⚠️ Workflow Not Found: $WORKFLOWNAME"
               exit 1
             fi
 
             echo "✔️ Using Workflow ID: $WORKFLOWID"
+            # Restrict the API Endpoint to the Selected Workflow
             RUNSENDPOINT="repos/$REPO/actions/workflows/$WORKFLOWID/runs"
           fi
 
-          # Fetch Runs Page by Page
+          # Retrieve Workflow Runs One Page at a Time
           echo "🔎 Fetching Workflow Runs..."
           PERPAGE=100
           PAGE=1
-          ALLRUNS="[]"
           while true; do
-            RESP=$(gh api \
-              "$RUNSENDPOINT?per_page=$PERPAGE&page=$PAGE" 2>/dev/null) || {
-                echo "⚠️ Failed to Fetch Workflow Runs (Page $PAGE)"
-                exit 1
-              }
-            if ! echo "$RESP" | jq -e \
-              '.workflow_runs | type == "array"' >/dev/null; then
+            # Store Each API Response on Disk Instead of a Large Shell Variable
+            RESPFILE="$TEMPDIR/response.json"
+            # Fetch the Current Page of Workflow Runs
+            if ! gh api "$RUNSENDPOINT?per_page=$PERPAGE&page=$PAGE" > "$RESPFILE"; then
+              echo "⚠️ Failed to Fetch Workflow Runs (Page $PAGE)"
+              exit 1
+            fi
+
+            # Validate the Retrieved Runs
+            if ! jq -e '.workflow_runs | type == "array"' "$RESPFILE" >/dev/null; then
               echo "⚠️ Invalid Workflow Runs API Response"
               exit 1
             fi
 
-            RUNS=$(echo "$RESP" | jq '.workflow_runs')
-            COUNTPAGE=$(echo "$RUNS" | jq 'length')
-            if [[ "$COUNTPAGE" -eq 0 ]]; then
+            # Count Runs Returned on Page
+            COUNTPAGE=$(jq '.workflow_runs | length' "$RESPFILE")
+            # Stop When No More Runs Available
+            if (( COUNTPAGE == 0 )); then
               break
             fi
 
-            ALLRUNS=$(jq -cn \
-              --argjson old "$ALLRUNS" \
-              --argjson new "$RUNS" \
-              '$old + $new')
+            # Append Each Run as a Separate JSON Line
+            jq -c '.workflow_runs[]' "$RESPFILE" >> "$RUNSFILE"
             echo "📄 Retrieved Page $PAGE ($COUNTPAGE Runs)"
+            # Stop After Final Partial Page
+            if (( COUNTPAGE < PERPAGE )); then
+              break
+            fi
+
+            # Advance to the Next API Page
             PAGE=$((PAGE + 1))
             
           done
 
-          TOTALRUNS=$(echo "$ALLRUNS" | jq 'length')
-          echo "📌 Total Runs Fetched: $TOTALRUNS"            
+          # Calculate Total Number of Retrieved Runs
+          TOTALRUNS=$(wc -l < "$RUNSFILE")
+          echo "📌 Total Runs Fetched: $TOTALRUNS"
+          # Cancel All In-Progress or Pending Runs When Requested
           if [[ "$CANCELALL" == "true" ]]; then
-            echo "⚙️ Cancelling in Progress or Pending Runs..."
-            CANCELCOUNT=0
-            while IFS= read -r run; do
-              ID=$(echo "$run" | jq -r '.id')
-              # Skip Current Workflow Run (Safety)
+            echo "⚙️ Cancelling In-Progress or Pending Runs..."
+            # Select Runs That Can Be Cancellation Candidates
+            jq -c '
+              select(
+                .status == "in_progress" or
+                .status == "queued" or
+                .status == "pending" or
+                .status == "requested" or
+                .status == "waiting"
+              )
+            ' "$RUNSFILE" > "$CANCELFILE"
+            # Process Each Cancellation Candidate
+            while IFS= read -r RUN; do
+              [[ -z "$RUN" ]] && continue
+              # Extract Workflow Run ID
+              ID=$(jq -r '.id' <<< "$RUN")
+              # Never Cancel Current Cleaner Workflow Run
               if [[ "$ID" == "$CURRENTRUNID" ]]; then
                 continue
               fi
-              
-              # Dry Run Support
+
+              # Preview Cancellation Without Changing GitHub
               if [[ "$DRYRUN" == "true" ]]; then
                 echo "🔍 Would Cancel Run ID: $ID"
                 CANCELCOUNT=$((CANCELCOUNT + 1))
               else
+                # Cancel Selected Workflow Run
                 echo "♻️ Cancelling Run ID: $ID"
+
                 if gh api -X POST "repos/$REPO/actions/runs/$ID/cancel"; then
                   CANCELCOUNT=$((CANCELCOUNT + 1))
+                else
+                  echo "⚠️ Failed to Cancel Run ID: $ID"
                 fi
               fi
-           
-            done < <(
-              echo "$ALLRUNS" | jq -c '
-                .[] | select(
-                  .status == "in_progress" or
-                  .status == "queued" or
-                  .status == "pending" or
-                  .status == "requested" or
-                  .status == "waiting"
-                )
-              '
-            )
+              
+            done < "$CANCELFILE"
+
             echo "📌 Cancelled $CANCELCOUNT Runs"
           fi
 
+          # Select Workflow Runs For Deletion
           echo "⚙️ Processing Delete Logic..."
+          # Sort Runs by Start Time and Apply Requested Count Limit
           if [[ "$REVERSEORDER" == "true" ]]; then
-            SORTEDRUNS=$(echo "$ALLRUNS" | jq 'sort_by(.run_started_at)')
+            # Select the Oldest Runs First
+            jq -s -c --argjson count "$COUNT" '
+              sort_by(.run_started_at // .created_at // "") |
+              .[0:$count][]
+            ' "$RUNSFILE" > "$DELETEFILE"
           else
-            SORTEDRUNS=$(echo "$ALLRUNS" | jq 'sort_by(.run_started_at) | reverse')
+            # Select Newest Runs First
+            jq -s -c --argjson count "$COUNT" '
+              sort_by(.run_started_at // .created_at // "") |
+              reverse |
+              .[0:$count][]
+            ' "$RUNSFILE" > "$DELETEFILE"
           fi
 
-          RUNSTODELETE=$(echo "$SORTEDRUNS" | jq ".[0:${COUNT}]")
-          while IFS= read -r run; do
-            ID=$(echo "$run" | jq -r '.id')
-            STATUS=$(echo "$run" | jq -r '.conclusion')
-            STATE=$(echo "$run" | jq -r '.status')
-            if [[ "$STATE" == "in_progress" || "$STATE" == "queued" ]]; then continue; fi
-            if [[ "$STATUS" == "failure" && "$DELETEFAILED" != "true" ]]; then continue; fi
-            if [[ "$STATUS" == "success" && "$DELETESUCCESS" != "true" ]]; then continue; fi
-            if [[ "$STATUS" == "cancelled" && "$DELETECANCELLED" != "true" ]]; then continue; fi
+          # Evaluate Each Selected Run Against Deletion Rules
+          while IFS= read -r RUN; do
+            [[ -z "$RUN" ]] && continue
+            # Extract Run ID, Conclusion, and Current State
+            ID=$(jq -r '.id' <<< "$RUN")
+            STATUS=$(jq -r '.conclusion // ""' <<< "$RUN")
+            STATE=$(jq -r '.status // ""' <<< "$RUN")
+            # Protect Current Cleaner Workflow Run
+            if [[ "$ID" == "$CURRENTRUNID" ]]; then
+              continue
+            fi
+
+            # Only Delete Completed Workflow Runs
+            if [[ "$STATE" != "completed" ]]; then
+              continue
+            fi
+
+            # Respect Selected Deletion Categories
+            case "$STATUS" in
+              failure)
+                [[ "$DELETEFAILED" == "true" ]] || continue
+                ;;
+              success)
+                [[ "$DELETESUCCESS" == "true" ]] || continue
+                ;;
+              cancelled)
+                [[ "$DELETECANCELLED" == "true" ]] || continue
+                ;;
+              *)
+                # Preserve Runs With Other Conclusions
+                continue
+                ;;
+            esac
             MATCHEDCOUNT=$((MATCHEDCOUNT + 1))
+            # Preview Deletion Without Changing GitHub
             if [[ "$DRYRUN" == "true" ]]; then
               echo "🔍 Would Delete Run ID: $ID"
               DELETEDCOUNT=$((DELETEDCOUNT + 1))
             else
+              # Delete the Selected Workflow Run
               echo "🔧 Deleting Run ID: $ID"
               if gh api -X DELETE "repos/$REPO/actions/runs/$ID"; then
                 DELETEDCOUNT=$((DELETEDCOUNT + 1))
               else
-                echo "⚠️ Delete Failed"
+                echo "⚠️ Delete Failed: $ID"
               fi
             fi
             
-          done < <(echo "$RUNSTODELETE" | jq -c '.[]')
+          done < "$DELETEFILE"
+          
+          # Clean Previous Cleaner Runs Only When a Specific Workflow Was Selected
           if [[ "$WORKFLOWNAME" != "All Workflows" ]]; then
-            echo "🧹 Cleaning Cleaner Workflow Runs (📃 Excluding Cleaner Workflow Current Run)..."
-            # Get the Workflow ID of this Cleaner Workflow
-            SELFWORKFLOWID=$(gh api repos/$REPO/actions/workflows 2>/dev/null \
-              | jq -r '.workflows[] | select(.name == "🧹 Cleaner") | .id')
-            # Check if Cleaner Workflow Exists
+            echo "🧹 Cleaning Previous Cleaner Workflow Runs..."
+            # Resolve the Cleaner Workflow ID
+            SELFWORKFLOWID=$(gh api "repos/$REPO/actions/workflows" \
+              | jq -r '[.workflows[] | select(.name == "🧹 Cleaner") | .id][0] // empty')
+            # Continue Only if Cleaner Workflow Exists
             if [[ -n "$SELFWORKFLOWID" ]]; then
-              # Fetch Latest Runs of Cleaner Workflow (Limit: 50)
-              # Suppress API + JQ Errors to Avoid Breaking Script
-              SELFRUN=$(gh api "repos/$REPO/actions/workflows/$SELFWORKFLOWID/runs?per_page=50" 2>/dev/null \
-                | jq -c '.workflow_runs[]?' 2>/dev/null || true)
-              # Only Proceed if Runs Exist
-              if [[ -n "$SELFRUN" ]]; then
-                # Loop Through Each Run
-                while IFS= read -r run; do
-                  # Extract Run ID
-                  ID=$(echo "$run" | jq -r '.id')
-                  # Skip Current Running Workflow (Important Safety Check)
-                  if [[ "$ID" == "$CURRENTRUNID" ]]; then
-                    continue
-                  fi
+              # Initialize Temporary Storage for Cleaner Runs
+              SELFFILE="$TEMPDIR/cleaner-runs.jsonl"
+              SELFPAGE=1
+              : > "$SELFFILE"
+              # Retrieve Cleaner Runs Using Pagination
+              while true; do
+                RESPFILE="$TEMPDIR/cleaner-response.json"
+                # Fetch Current Cleaner Runs Page
+                if ! gh api \
+                  "repos/$REPO/actions/workflows/$SELFWORKFLOWID/runs?per_page=100&page=$SELFPAGE" \
+                  > "$RESPFILE"; then
+                  echo "⚠️ Failed to Fetch Previous Cleaner Runs"
+                  break
+                fi
 
-                  # Log / Dry Run Handling
-                  if [[ "$DRYRUN" == "true" ]]; then
-                    echo "🔍 Would Delete Cleaner Run ID: $ID"
+                # Validate Cleaner Runs API Response
+                if ! jq -e '.workflow_runs | type == "array"' "$RESPFILE" >/dev/null; then
+                  echo "⚠️ Invalid Cleaner Runs API Response"
+                  break
+                fi
+
+                # Count Cleaner Runs on Page
+                SELFCOUNT=$(jq '.workflow_runs | length' "$RESPFILE")
+                # Stop When No More Cleaner Runs Exist
+                if (( SELFCOUNT == 0 )); then
+                  break
+                fi
+
+                # Append Cleaner Runs to Temporary Storage
+                jq -c '.workflow_runs[]' "$RESPFILE" >> "$SELFFILE"
+                # Stop After Final Partial Page
+                if (( SELFCOUNT < 100 )); then
+                  break
+                fi
+
+                # Advance to Next Cleaner Runs Page
+                SELFPAGE=$((SELFPAGE + 1))
+              done
+
+              # Process Previously Retrieved Cleaner Runs
+              while IFS= read -r RUN; do
+                [[ -z "$RUN" ]] && continue
+                # Extract Cleaner Run ID
+                ID=$(jq -r '.id' <<< "$RUN")
+                # Never Delete Current Cleaner Workflow Run
+                if [[ "$ID" == "$CURRENTRUNID" ]]; then
+                  continue
+                fi
+
+                # Preview Cleaner Run Deletion When Dry Run is Enabled
+                if [[ "$DRYRUN" == "true" ]]; then
+                  echo "🔍 Would Delete Cleaner Run ID: $ID"
+                  DELETEDCOUNT=$((DELETEDCOUNT + 1))
+                else
+                  # Delete the Previous Cleaner Workflow Run
+                  echo "📌 Deleting Previous Cleaner Run ID: $ID"
+                  if gh api -X DELETE "repos/$REPO/actions/runs/$ID"; then
                     DELETEDCOUNT=$((DELETEDCOUNT + 1))
                   else
-                    echo "📌 Deleting Cleaner Previous Workflow Run ID: $ID"
-                    if gh api -X DELETE "repos/$REPO/actions/runs/$ID"; then
-                      DELETEDCOUNT=$((DELETEDCOUNT + 1))
-                    else
-                      echo "⚠️ Delete Failed"
-                    fi
-                  fi             
-
-                done < <(echo "$SELFRUN")
-
-              else
-                # No Runs Found Case
-                echo "⚠️ No Previous Cleaner Runs Found"
-              fi
-
+                    echo "⚠️ Delete Failed: $ID"
+                  fi
+                fi
+              done < "$SELFFILE"
             else
-              # Cleaner Workflow Not Found Case
               echo "⚠️ Cleaner Workflow ID Not Found"
             fi
           fi
-       
-          # Format Status
+
+          # Format Counter Values for Summary
           formatcount() {
             local value="$1"
             if [[ -z "$value" ]]; then
@@ -311,17 +401,20 @@ jobs:
               echo "$value"
             fi
           }
+
+          # Prepare Final Summary Values
           TOTALDISPLAY=$(formatcount "$TOTALRUNS")
           MATCHEDDISPLAY=$(formatcount "$MATCHEDCOUNT")
           DELETEDDISPLAY=$(formatcount "$DELETEDCOUNT")
-          CANCELDISPLAY=$(formatcount "$CANCELCOUNT")          
+          CANCELDISPLAY=$(formatcount "$CANCELCOUNT")
+          # Report Whether Dry Run Was Enabled
           if [[ "$DRYRUN" == "true" ]]; then
             DRYRUNSTATUS="✔️ Enabled"
           else
             DRYRUNSTATUS="⚠️ Disabled"
           fi
-          
-          # Workflow Cleanup Summary
+
+          # Write Workflow Cleanup Summary to GitHub Actions
           {
             echo "## 🧹 Workflow Cleanup Summary"
             echo ""
@@ -333,7 +426,7 @@ jobs:
             echo "| Number of Workflow Runs Successfully Deleted | $DELETEDDISPLAY |"
             echo "| Number of Workflow Runs Cancelled (Ongoing / Pending) | $CANCELDISPLAY |"
             echo "| Dry Run Mode Enabled (No Changes Applied) | $DRYRUNSTATUS |"
-          } >> $GITHUB_STEP_SUMMARY
+          } >> "$GITHUB_STEP_SUMMARY"
 
   clean-caches:
     runs-on: ubuntu-latest
