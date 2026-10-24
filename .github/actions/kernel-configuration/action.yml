@@ -1,0 +1,347 @@
+# Kernel Configuration Composite Action
+# Purpose:
+#   Configure Kernel Options Based on Selected Build Inputs and Detected Toolchain Capabilities
+# Supported Configuration:
+#   - KSU Root Engine and KernelPatch
+#   - SUSFS Core Features
+#   - TMPFS Attributes and ACLs
+#   - DroidSpaces and NT Synchronization Primitives
+#   - NoMount Kernel Support
+#   - TCP Congestion Control, BBRv3, ECN and Brutal
+#   - Linux Security Module Baseband Guard (BBG)
+#   - Netfilter, IP Set and IPv6 NAT
+#   - MediaTek 5.15 Kernel Compatibility Settings
+#   - Rust Support When Rust Compiler is Detected
+# Notes:
+#   - Updates Supplied Configuration in Place
+#   - HIDECONFIG Records Selected Options For Fake-Configuration Injection
+#   - Makefile May Be Modified When Fake-Configuration Injection is Required
+#   - Configuration Logic is Executed in a Bash Shell
+name: ⚙️ Kernel Configuration
+description: Configure Kernel Options For Root Engines, SUSFS, Networking, DroidSpaces, NoMount and Rust
+inputs:
+  COMMONKERNELFOLDER:
+    description: Common Kernel Source Directory
+    required: true
+  DEFCONFIG:
+    description: Kernel Configuration File Path
+    required: true
+  CPU:
+    description: Target CPU Identifier
+    required: true
+  ROOTENGINE:
+    description: Selected Root Engine
+    required: true
+  SUSFS:
+    description: SUSFS Revision
+    required: true
+  KERNELPATCH:
+    description: KernelPatch Mode
+    required: true
+  TCP:
+    description: TCP Congestion Control Selection
+    required: true
+  LSMBBG:
+    description: Enable Baseband Guard
+    required: true
+  NETFILTER:
+    description: Enable Netfilter and IP Set
+    required: true
+  LINUXCNTSYNC:
+    description: DroidSpaces and NT Synchronization Primitives Selection
+    required: true
+  NOMOUNT:
+    description: NoMount Selection
+    required: true
+  ANDROIDVERSION:
+    description: Android Version
+    required: true
+  KERNELVERSION:
+    description: Kernel Version
+    required: true
+  ENABLERUSTC:
+    description: Rust Compiler Detection Result
+    required: true
+runs:
+  using: composite
+  steps:
+    - name: ⚙️ Kernel Configuration
+      shell: bash
+      env:
+        COMMONKERNELFOLDER: ${{ inputs.COMMONKERNELFOLDER }}
+        DEFCONFIG: ${{ inputs.DEFCONFIG }}
+        CPU: ${{ inputs.CPU }}
+        ROOTENGINE: ${{ inputs.ROOTENGINE }}
+        SUSFS: ${{ inputs.SUSFS }}
+        KERNELPATCH: ${{ inputs.KERNELPATCH }}
+        TCP: ${{ inputs.TCP }}
+        LSMBBG: ${{ inputs.LSMBBG }}
+        NETFILTER: ${{ inputs.NETFILTER }}
+        LINUXCNTSYNC: ${{ inputs.LINUXCNTSYNC }}
+        NOMOUNT: ${{ inputs.NOMOUNT }}
+        ANDROIDVERSION: ${{ inputs.ANDROIDVERSION }}
+        KERNELVERSION: ${{ inputs.KERNELVERSION }}
+        ENABLERUSTC: ${{ inputs.ENABLERUSTC }}
+      run: |
+        set -Eeuo pipefail
+        # Move to Kernel Common Directory
+        cd "$COMMONKERNELFOLDER"
+        # Verify Defconfig Exists
+        [[ -f "$DEFCONFIG" ]] || {
+          echo "└─ ⚠️ Default Configuration Not Found : $DEFCONFIG"
+          exit 1
+        }
+        # Git Variables and Inputs
+        GKI="${ANDROIDVERSION}-${KERNELVERSION}"
+        MAKEFILE="$PWD/Makefile"
+        declare -a HIDECONFIGS=()
+        SETCONFIG() {
+          local value="$1"
+          local key="${value%%=*}"
+          if grep -qF "${key}=" "$DEFCONFIG" ||
+             grep -qF "# ${key} is not set" "$DEFCONFIG"; then
+            VALUE="$value" awk -v key="$key" '
+              $0 == "# " key " is not set" || index($0, key "=") == 1 {
+                print ENVIRON["VALUE"]
+                next
+              }
+              { print }
+            ' "$DEFCONFIG" > "${DEFCONFIG}.tmp" &&
+              mv "${DEFCONFIG}.tmp" "$DEFCONFIG" ||
+              rm -f "${DEFCONFIG}.tmp"
+          else
+            printf '%s\n' "$value" >> "$DEFCONFIG"
+          fi
+        }
+
+        HIDECONFIG() {
+          local value="$1"
+          local key="${value%%=*}"
+          SETCONFIG "$value"
+          HIDECONFIGS+=("$key")
+        }
+        FAKECONFIG() {
+          [[ ${#HIDECONFIGS[@]} -eq 0 ]] && return 0
+          local marker="# --- Fake Config Injector ---"
+          if ! grep -qF "$marker" "$MAKEFILE"; then
+            {
+              printf '\n%s\n' "$marker"
+              printf 'ifneq ($(strip $(CONFIG_FAKE_DISABLE)),)\n'
+              printf '$(obj)/config_data: $(KCONFIG_CONFIG) FORCE\n'
+              printf '\t$(Q)sed $(foreach opt,$(CONFIG_FAKE_DISABLE),-e '"'"'s|^$(opt)=.*|# $(opt) is not set|'"'"') $(KCONFIG_CONFIG) > $@\n'
+              printf 'endif\n'
+            } >> "$MAKEFILE"
+          fi
+
+          CONFIG_FAKE_DISABLE="${HIDECONFIGS[*]}"
+          export CONFIG_FAKE_DISABLE
+          echo "CONFIG_FAKE_DISABLE=$CONFIG_FAKE_DISABLE" >> "$GITHUB_ENV"
+        }
+
+        trap 'FAKECONFIG' EXIT
+        # Enable KSU Configuration For All Root Engine Sources
+        SETCONFIG "CONFIG_KSU=y"
+        # Configure ReSukiSU (BakaSU) Options
+        if [[ "$ROOTENGINE" == "BakaSU" ]]; then
+          SETCONFIG "CONFIG_KSU_MULTI_MANAGER_SUPPORT=y"
+          SETCONFIG "CONFIG_KSU_TOOLKIT_SUPPORT=y"
+          echo "└─ 🎉 Multi-Manager Support Enabled For $ROOTENGINE"
+        else
+          echo "└─ ☘️ Multi-Manager Support Not Enabled For $ROOTENGINE"
+        fi
+
+        # Configure KernelSU-Next Options
+        if [[ "$ROOTENGINE" == "KernelSU-Next" ]]; then
+          SETCONFIG "CONFIG_KSU_KPROBES_HOOK=n"
+          echo "└─ ☘️ Kprobes Hook Disabled For $ROOTENGINE"
+        fi
+
+        # KernelPatch Module (KPM) Configuration
+        if [[ "$KERNELPATCH" == "KPM" && "$ROOTENGINE" == "SukiSU-Ultra" ]]; then
+          SETCONFIG "CONFIG_KPM=y"
+          echo "└─ 🎉 KernelPatch Module Enabled For SukiSU-Ultra"
+        elif [[ "$ROOTENGINE" == "SukiSU-Ultra" || "$ROOTENGINE" == "BakaSU" ]]; then
+          SETCONFIG "CONFIG_KPM=n"
+          if [[ "$KERNELPATCH" == "KPN" ]]; then
+            echo "└─ ☘️ KernelPatch Module Disabled — KernelPatch-Next Selected"
+          elif [[ "$KERNELPATCH" == "None" ]]; then
+            echo "└─ ☘️ KernelPatch Module Disabled — None Selected"
+          else
+            echo "└─ ☘️ KernelPatch Module Disabled — Unsupported Combination"
+          fi
+        fi
+
+        # Apply SUSFS Core Configuration
+        if [[ "$SUSFS" != "-1" ]]; then
+          # Base SUSFS Core Configuration Settings (Common)
+          SETCONFIG "CONFIG_KSU_SUSFS=y"
+          SETCONFIG "CONFIG_KSU_SUSFS_HAS_MAGIC_MOUNT=y"
+          SETCONFIG "CONFIG_KSU_SUSFS_SUS_PATH=y"
+          SETCONFIG "CONFIG_KSU_SUSFS_SUS_MOUNT=y"
+          SETCONFIG "CONFIG_KSU_SUSFS_AUTO_ADD_SUS_KSU_DEFAULT_MOUNT=y"
+          SETCONFIG "CONFIG_KSU_SUSFS_AUTO_ADD_SUS_BIND_MOUNT=y"
+          SETCONFIG "CONFIG_KSU_SUSFS_SUS_KSTAT=y"
+          SETCONFIG "CONFIG_KSU_SUSFS_TRY_UMOUNT=y"
+          SETCONFIG "CONFIG_KSU_SUSFS_AUTO_ADD_TRY_UMOUNT_FOR_BIND_MOUNT=y"
+          SETCONFIG "CONFIG_KSU_SUSFS_SPOOF_UNAME=y"
+          SETCONFIG "CONFIG_KSU_SUSFS_ENABLE_LOG=y"
+          SETCONFIG "CONFIG_KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS=y"
+          SETCONFIG "CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG=y"
+          SETCONFIG "CONFIG_KSU_SUSFS_OPEN_REDIRECT=y"
+          SETCONFIG "CONFIG_KSU_SUSFS_SUS_MAP=y"
+          echo "└─ 🎉 SUSFS Core Configuration(s) Enabled"
+        else
+          SETCONFIG "CONFIG_KSU_SUSFS=n"
+          echo "└─ ☘️ SUSFS Core Configuration(s) Disabled"
+        fi
+
+        # TMPFS Configuration (Mountify)
+        echo "└─ 🚀 Applying TMPFS Configuration..."
+        SETCONFIG "CONFIG_TMPFS_XATTR=y"
+        SETCONFIG "CONFIG_TMPFS_POSIX_ACL=y"
+        echo "└─ 🎉 TMPFS Configuration Applied"
+        # Droidspaces / NT Synchronization Primitives Support Kernel Configuration
+        if [[ "$LINUXCNTSYNC" == "DroidSpaces+NTSync" ]]; then
+          echo "└─ 🚀 Applying Droidspaces / NT Synchronization Primitives Support Kernel Configurations..."
+          SETCONFIG "CONFIG_NTSYNC=y"
+          SETCONFIG "CONFIG_SYSVIPC=y"
+          SETCONFIG "CONFIG_MACVLAN=y"
+          SETCONFIG "CONFIG_DEVTMPFS=y"
+          SETCONFIG "CONFIG_PID_NS=y"
+          SETCONFIG "CONFIG_IPC_NS=y"
+          SETCONFIG "CONFIG_USER_NS=y"
+          SETCONFIG "CONFIG_NAMESPACES=y"
+          SETCONFIG "CONFIG_POSIX_MQUEUE=y"
+          SETCONFIG "CONFIG_NETFILTER_XT_TARGET_REJECT=y"
+          SETCONFIG "CONFIG_NETFILTER_XT_TARGET_LOG=y"
+          SETCONFIG "CONFIG_NETFILTER_XT_MATCH_RECENT=y"
+          echo "└─ 🎉 Droidspaces / NT Synchronization Primitives Support Core Configuration Applied"
+        else
+          echo "└─ ☘️ Droidspaces / NT Synchronization Primitives Support Disabled — Skipping Configuration..."
+        fi
+
+        # NoMount Kernel Support Configuration
+        if [[ "$NOMOUNT" == "NoMount" || "$NOMOUNT" == "NoMount-Dev" ]]; then
+          echo "└─ 🚀 Enabling NoMount Kernel Support..."
+          SETCONFIG "CONFIG_NOMOUNT=y"
+          echo "└─ 🎉 NoMount Kernel Support Enabled"
+        else
+          echo "└─ ☘️ NoMount Kernel Support Disabled, Skipping..."
+          SETCONFIG "CONFIG_NOMOUNT=n"
+        fi
+
+        # BBR + ECN Kernel Configuration with Brutal Default and Cubic Fallback
+        if [[ "$TCP" != "None" ]]; then
+          echo "└─ 🚀 Applying ECN Configurations..."
+          # Base BBR + ECN Settings
+          SETCONFIG "CONFIG_NET_SCH_FQ=y"
+          SETCONFIG "CONFIG_TCP_CONG_BIC=n"
+          SETCONFIG "CONFIG_TCP_CONG_WESTWOOD=n"
+          SETCONFIG "CONFIG_TCP_CONG_HTCP=n"
+          SETCONFIG "CONFIG_IP_ECN=y"
+          SETCONFIG "CONFIG_TCP_ECN=y"
+          SETCONFIG "CONFIG_IPV6_ECN=y"
+          SETCONFIG "CONFIG_IP_NF_TARGET_ECN=y"
+          # Additional TCP Algorithms if Brutal is Selected
+          if [[ "$TCP" == "BBRV1+ECN+Brutal" ||
+                "$TCP" == "BBRV1+BBRV3+ECN+Brutal" ]]; then
+            echo "└─ 🚀 Applying Brutal Specific Configurations..."
+            SETCONFIG "CONFIG_TCP_CONG_BRUTAL=y"
+            SETCONFIG "CONFIG_TCP_CONG_CUBIC=y"
+            # Set Brutal as Default Only if it's Compiled
+            SETCONFIG "CONFIG_DEFAULT_TCP_CONG=brutal"
+            echo "└─ 🎉 BBR + ECN : Brutal Default Enabled (Cubic Fallback Included)"
+          else
+            # Not Brutal → Use Cubic as Safe Default
+            SETCONFIG "CONFIG_DEFAULT_TCP_CONG=cubic"
+            echo "└─ 🎉 BBR + ECN : Using Cubic as Default (Brutal Not Selected)"
+          fi
+          
+        else
+          echo "└─ ☘️ Congestion Control Disabled, Skipping BBR + ECN Configuration"
+          echo "└─ 🧩 Default Congestion Control Remains Unchanged"
+        fi
+
+        # Additional TCP Congestion Control Configuration For BBRv3
+        if [[ ("$TCP" == "BBRV1+BBRV3+ECN" ||
+               "$TCP" == "BBRV1+BBRV3+ECN+Brutal") &&
+               "$GKI" != "android16-6.12" ]]; then
+          HIDECONFIG "CONFIG_TCP_CONG_ADVANCED=y"
+          SETCONFIG "CONFIG_TCP_CONG_BBR=y"
+          SETCONFIG "CONFIG_TCP_CONG_BBR3=y"
+          echo "└─ 🚀 Applying BBRV3 Specific Configurations..."
+        fi
+
+        # Linux Security Module Baseband Guard Configuration
+        if [[ "$LSMBBG" == "true" ]]; then
+          SETCONFIG "CONFIG_BBG=y"
+          echo "└─ 🎉 Linux Security Module Baseband Guard Configuration Applied"
+        else
+          echo "└─ ☘️ Linux Security Module Baseband Guard Disabled, Skipping..."
+        fi
+
+        # IPSet and IPv6 NAT Configuration
+        if [[ "$CPU" == sm* && "$NETFILTER" == "true" ]]; then
+          # BPF Stream Parser For Non-6.12 Kernels
+          if [[ "$KERNELVERSION" != "6.12" ]]; then
+            SETCONFIG "CONFIG_BPF_STREAM_PARSER=y"
+            echo "└─ 🎉 BPF Stream Parser Enabled For Kernel $KERNELVERSION"
+          else
+            echo "└─ ☘️ BPF Stream Parser Disabled For Kernel $KERNELVERSION, Skipping..."
+          fi
+        fi
+
+        # Netfilter and IPSet Core Configuration
+        if [[ "$NETFILTER" == "true" ]]; then
+          SETCONFIG "CONFIG_NETFILTER_XT_MATCH_ADDRTYPE=y"
+          SETCONFIG "CONFIG_NETFILTER_XT_SET=y"
+          SETCONFIG "CONFIG_IP_SET=y"
+          SETCONFIG "CONFIG_IP_SET_MAX=65534"
+          SETCONFIG "CONFIG_IP_SET_BITMAP_IP=y"
+          SETCONFIG "CONFIG_IP_SET_BITMAP_IPMAC=y"
+          SETCONFIG "CONFIG_IP_SET_BITMAP_PORT=y"
+          SETCONFIG "CONFIG_IP_SET_HASH_IP=y"
+          SETCONFIG "CONFIG_IP_SET_HASH_IPMARK=y"
+          SETCONFIG "CONFIG_IP_SET_HASH_IPPORT=y"
+          SETCONFIG "CONFIG_IP_SET_HASH_IPPORTIP=y"
+          SETCONFIG "CONFIG_IP_SET_HASH_IPPORTNET=y"
+          SETCONFIG "CONFIG_IP_SET_HASH_IPMAC=y"
+          SETCONFIG "CONFIG_IP_SET_HASH_MAC=y"
+          SETCONFIG "CONFIG_IP_SET_HASH_NETPORTNET=y"
+          SETCONFIG "CONFIG_IP_SET_HASH_NET=y"
+          SETCONFIG "CONFIG_IP_SET_HASH_NETNET=y"
+          SETCONFIG "CONFIG_IP_SET_HASH_NETPORT=y"
+          SETCONFIG "CONFIG_IP_SET_HASH_NETIFACE=y"
+          SETCONFIG "CONFIG_IP_SET_LIST_SET=y"
+          HIDECONFIG "CONFIG_IP6_NF_NAT=y"
+          SETCONFIG "CONFIG_IP6_NF_TARGET_MASQUERADE=y"
+          SETCONFIG "CONFIG_NETFILTER_XT_TARGET_HL=y"
+          SETCONFIG "CONFIG_IP_NF_TARGET_TTL=y"
+          SETCONFIG "CONFIG_IP6_NF_TARGET_HL=y"
+          SETCONFIG "CONFIG_NETFILTER_XT_MATCH_HL=y"
+          SETCONFIG "CONFIG_IP_NF_MATCH_TTL=y"
+          SETCONFIG "CONFIG_IP6_NF_MATCH_HL=y"
+          SETCONFIG "CONFIG_IP_NF_MANGLE=y"
+          SETCONFIG "CONFIG_IP6_NF_MANGLE=y"
+          echo "└─ 🎉 Netfilter and IPSet Core Configuration Applied"
+        fi
+
+        # Apply Build Issues Fix
+        # Mediatek 5.15 Kernels
+        if [[ "$KERNELVERSION" == "5.15" && "$CPU" == mt* ]]; then
+          SETCONFIG "CONFIG_OPLUS_SYSTEM_KERNEL=y"
+          SETCONFIG "CONFIG_OPLUS_FEATURE_CMDLINE=m"
+          SETCONFIG "CONFIG_OPLUS_FEATURE_OPLUSBOOT=m"
+          SETCONFIG "CONFIG_OPLUS_FEATURE_BUILDVARIANT=m"
+          SETCONFIG "CONFIG_OPLUS_FEATURE_OPROJECT=m"
+          echo "└─ 🎉 Mediatek 5.15 Kernel Configuration Applied"
+        fi
+
+        # Enable Rust Support if Requested
+        if [[ "$ENABLERUSTC" == "true" ]]; then
+          SETCONFIG "CONFIG_RUST=y"
+          SETCONFIG "CONFIG_ANDROID_BINDER_IPC_RUST=m"
+          echo "└─ 🎉 Rust Support Request Applied and Granted"
+        else
+          echo "└─ ☘️ Rust Support Not Requested"
+        fi
