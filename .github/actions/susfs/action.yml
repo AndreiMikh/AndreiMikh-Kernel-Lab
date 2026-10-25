@@ -9,6 +9,9 @@ inputs:
   COMMONKERNELFOLDER:
     description: Kernel Source Directory
     required: true
+  PATCHDIR:
+    description: Patch Source Directory
+    required: true
   # Root Engine Used by the Kernel Build
   ROOTENGINE:
     description: Root Engine
@@ -50,33 +53,157 @@ outputs:
 runs:
   using: composite
   steps:
-    # Apply Fake Patches Before Integrating SUSFS
+    # Apply Temporary Fake Patches Before SUSFS Integration
     - name: ♻️ Fake Patches (Invert)
       if: ${{ inputs.SUSFSREPOSITORY != '-1' }}
       shell: bash
       env:
-        # Kernel Source and Script Paths from the Caller Environment
-        SCRIPTSDIR: ${{ env.SCRIPTSDIR }}
-        COMMONKERNELFOLDER: ${{ env.COMMONKERNELFOLDER }}
-        # Optional Kotlin Installation Directory
-        KOTLINHOME: ${{ env.KOTLINHOME }}
+        # Kernel Source Directory
+        COMMONKERNELFOLDER: ${{ inputs.COMMONKERNELFOLDER }}
+        # Kernel Compatibility Patch Directory
+        PATCHDIR: ${{ inputs.PATCHDIR }}
+        # Android and Kernel Version Information
+        ANDROIDVERSION: ${{ inputs.ANDROIDVERSION }}
+        KERNELVERSION: ${{ inputs.KERNELVERSION }}
       run: |
         set -Eeuo pipefail
-        # Resolve Fake Patch Script Path
-        FAKESCRIPT="${SCRIPTSDIR}/FakePatches.kts"
-        # Resolve Kotlin Compiler Location
-        KOTLINHOME="${KOTLINHOME:-$HOME/kotlinc}"
-        KOTLINC="${KOTLINHOME}/bin/kotlinc"
-        # Display Script and Compiler Paths
-        echo "└─ 📌 Script          : $FAKESCRIPT"
-        echo "└─ 📌 Compiler        : $KOTLINC"
-        # Verify Kotlin Compiler Availability and Version
-        echo "└─ ☕ Kotlin Compiler :"
-        "$KOTLINC" -version
-        # Apply Temporary Fake Patches Before SUSFS Integration
-        echo "└─ 🔧 Applying Fake Patches..."
-        "$KOTLINC" -script "$FAKESCRIPT" Apply "$COMMONKERNELFOLDER"
-        echo "🎉 Fake Patches Applied Successfully"
+        # Enter Common Kernel Source Directory
+        cd "$COMMONKERNELFOLDER"
+        # Initialize the Temporary Fake Patch State File
+        STATEFILE="${RUNNER_TEMP}/fake-patches-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.state"
+        : > "$STATEFILE"
+        # Initialize Fake Patch Tracking Flags
+        fakepatched=0
+        fakepatchedexpand=0
+        fakepatchednrsubpages=0
+        fakepatchedres=0
+        fakepatcheddmabuf=0
+        fakepatchedzswap=0
+        fakepatchedswapslots=0
+        # Apply Android 15 / Kernel 6.6 Compatibility Patches
+        if [[ "$ANDROIDVERSION" == "android15" && "$KERNELVERSION" == "6.6" ]]; then
+          # Add Missing FILESYSTEM TRACE HOOK Header
+          if ! grep -qxF '#include <trace/hooks/fs.h>' ./fs/namespace.c; then
+            if grep -qxF '#include <trace/hooks/blk.h>' ./fs/namespace.c; then
+              echo "└─ ♻️ Adding FILESYSTEM TRACE HOOK Header"
+              sed -i '/#include <trace\/hooks\/blk.h>/a #include <trace/hooks/fs.h>' ./fs/namespace.c
+            fi
+          fi
+
+          # Apply FOLD FIXUP ENTRIES BACKPORT When Missing
+          if ! grep -qxF 'extern void __fold_filemap_fixup_entry(struct vma_iterator *iter, unsigned long *end);' ./include/linux/page_size_compat.h; then
+            echo "└─ ♻️ Applying FOLD FIXUP ENTRIES Backport"
+            patch -p1 < "$PATCHDIR/SuSFS/Fold-Fixup-Entries.patch"
+          fi
+
+          # Add Fake NR SUBPAGES Declaration When Missing
+          if ! grep -qE '^[[:space:]]*unsigned int nr_subpages = __PAGE_SIZE / PAGE_SIZE;$' ./fs/proc/task_mmu.c; then
+            echo "└─ ♻️ Adding Fake NR SUBPAGES Declaration"
+            sed -i '/int ret = 0, copied = 0;/a\
+                unsigned int nr_subpages = __PAGE_SIZE / PAGE_SIZE;' ./fs/proc/task_mmu.c
+            fakepatchednrsubpages=1
+            fakepatched=1
+          fi
+
+          # Add Fake PAGEMAP ENTRY Declaration When Missing
+          if ! grep -qE '^[[:space:]]*pagemap_entry_t \*res = NULL;$' ./fs/proc/task_mmu.c; then
+            echo "└─ ♻️ Adding Fake PAGEMAP ENTRY Declaration"
+            sed -i '/int ret = 0, copied = 0;/a\
+                pagemap_entry_t *res = NULL;' ./fs/proc/task_mmu.c
+            fakepatchedres=1
+            fakepatched=1
+          fi
+
+          # Add Missing DMA BUF Header
+          if ! grep -qxF '#include <linux/dma-buf.h>' ./fs/proc/base.c; then
+            if grep -qxF '#include <linux/cpufreq_times.h>' ./fs/proc/base.c; then
+              echo "└─ ♻️ Adding DMA BUF Header"
+              sed -i '/#include <linux\/cpufreq_times.h>/a #include <linux/dma-buf.h>' ./fs/proc/base.c
+              fakepatcheddmabuf=1
+              fakepatched=1
+            fi
+          fi
+
+          # Add Missing ZSWAP Header
+          if ! grep -qxF '#include <linux/zswap.h>' ./mm/memory.c; then
+            if grep -qxF '#include <linux/sched/sysctl.h>' ./mm/memory.c; then
+              echo "└─ ♻️ Adding ZSWAP Header"
+              sed -i '/#include <linux\/sched\/sysctl.h>/a #include <linux/zswap.h>' ./mm/memory.c
+              fakepatchedzswap=1
+              fakepatched=1
+            fi
+          fi
+
+          # Temporarily Expand LAST VMA END Conditional Block
+          if grep -qF 'if (vma->vm_end > last_vma_end)' ./fs/proc/task_mmu.c &&
+             ! grep -qF 'SUSFS_IS_INODE_SUS_MAP' ./fs/proc/task_mmu.c &&
+             ! grep -qF 'last_vma_end = vma->vm_end;' ./fs/proc/task_mmu.c; then
+            echo "└─ ♻️ Expanding LAST VMA END Conditional Block"
+            perl -i -0pe 's/\t\t\tif \(vma->vm_end > last_vma_end\)\n\t\t\t\tsmap_gather_stats\(vma, &mss, last_vma_end\);/\t\t\tif (vma->vm_end > last_vma_end) {\n\t\t\t\tsmap_gather_stats(vma, \&mss, last_vma_end);\n\t\t\t\tlast_vma_end = vma->vm_end;\n\t\t\t}/' ./fs/proc/task_mmu.c
+            # Track Expansion Only if Replacement Occurred
+            if grep -qF 'last_vma_end = vma->vm_end;' ./fs/proc/task_mmu.c; then
+              fakepatchedexpand=1
+              fakepatched=1
+            fi
+          fi
+        fi
+
+        # Android 12 / Kernel 5.10 Legacy Compatibility Check
+        if [[ "$ANDROIDVERSION" == "android12" && "$KERNELVERSION" == "5.10" ]]; then
+          if ! grep -qxF $'\tif (!vma_pages(vma))' ./fs/proc/task_mmu.c; then
+            echo "└─ ♻️ VMA PAGES(VMA) Line Missing; Marking Fake Patch"
+            fakepatched=1
+          fi
+        fi
+
+        # Android 13 / Kernel 5.15 Legacy Compatibility Checks
+        if [[ "$ANDROIDVERSION" == "android13" && "$KERNELVERSION" == "5.15" ]]; then
+          if ! grep -qxF $'\tif (!vma_pages(vma))' ./fs/proc/task_mmu.c; then
+            echo "└─ ♻️ VMA PAGES(VMA) Line Missing; Marking Fake Patch"
+            fakepatched=1
+          fi
+
+          # Temporarily Remove SWAP SLOTS Headers When Present
+          if grep -qxF '#include <linux/swap_slots.h>' ./mm/memory.c; then
+            echo "└─ ♻️ Removing SWAP SLOTS Headers"
+            sed -i '\|^#include <linux/swap_slots.h>$|d' ./mm/memory.c
+            fakepatchedswapslots=1
+            fakepatched=1
+          fi
+        fi
+
+        # Android 14 / Kernel 6.1 Legacy Compatibility Checks
+        if [[ "$ANDROIDVERSION" == "android14" && "$KERNELVERSION" == "6.1" ]]; then
+          if ! grep -qxF $'\tif (!vma_pages(vma))' ./fs/proc/task_mmu.c; then
+            echo "└─ ♻️ VMA PAGES(VMA) Line Missing; Marking Fake Patch"
+            fakepatched=1
+          fi
+
+          # Add Missing DMA BUF Header
+          if ! grep -qxF '#include <linux/dma-buf.h>' ./fs/proc/base.c; then
+            if grep -qxF '#include <linux/cpufreq_times.h>' ./fs/proc/base.c; then
+              echo "└─ ♻️ Adding DMA BUF Header"
+              sed -i '/#include <linux\/cpufreq_times.h>/a #include <linux/dma-buf.h>' ./fs/proc/base.c
+              fakepatcheddmabuf=1
+              fakepatched=1
+            fi
+          fi
+        fi
+
+        # Save Fake Patch Flags For Reverse Step
+        {
+          echo "fakepatched=$fakepatched"
+          echo "fakepatchedexpand=$fakepatchedexpand"
+          echo "fakepatchednrsubpages=$fakepatchednrsubpages"
+          echo "fakepatchedres=$fakepatchedres"
+          echo "fakepatcheddmabuf=$fakepatcheddmabuf"
+          echo "fakepatchedzswap=$fakepatchedzswap"
+          echo "fakepatchedswapslots=$fakepatchedswapslots"
+        } > "$STATEFILE"
+        # Export State File Path to Subsequent Workflow Steps
+        echo "FAKEPATCHSTATEFILE=$STATEFILE" >> "$GITHUB_ENV"
+        # Report Fake Patch Completion
+        echo "🎉 Fake Patches Applied"
 
     # Clone SUSFS and Apply Patches
     - name: 🩹 SUSFS Integration
@@ -87,7 +214,7 @@ runs:
         # Kernel Build Paths From Caller Environment
         WORKDIR: ${{ inputs.WORKDIR }}
         COMMONKERNELFOLDER: ${{ inputs.COMMONKERNELFOLDER }}
-        PATCHDIR: ${{ env.PATCHDIR }}
+        PATCHDIR: ${{ inputs.PATCHDIR }}
         REJECTCHECKER: ${{ env.REJECTCHECKER }}
         # Root Engine and SUSFS Configuration
         ROOTENGINE: ${{ inputs.ROOTENGINE }}
@@ -382,31 +509,106 @@ runs:
         checkrejects .
         echo "└─ 🎉 Kernel Compatibility Fix Stage Completed"
 
-    # Run Post-Fix Processing and Revert Temporary Fake Patches
+
+    # Revert Temporary Fake Patches After SUSFS Integration
     - name: ♻️ Fake Patches (Reverse)
       if: ${{ inputs.SUSFSREPOSITORY != '-1' }}
       shell: bash
       env:
-        # Kernel Source and Script Paths from the Caller Environment
-        SCRIPTSDIR: ${{ env.SCRIPTSDIR }}
-        COMMONKERNELFOLDER: ${{ env.COMMONKERNELFOLDER }}
-        # Optional Kotlin Installation Directory
-        KOTLINHOME: ${{ env.KOTLINHOME }}
+        # Kernel Source Directory
+        COMMONKERNELFOLDER: ${{ inputs.COMMONKERNELFOLDER }}
+        # Android and Kernel Version Information
+        ANDROIDVERSION: ${{ inputs.ANDROIDVERSION }}
+        KERNELVERSION: ${{ inputs.KERNELVERSION }}
       run: |
         set -Eeuo pipefail
-        # Resolve Fake Patch Script Path
-        FAKESCRIPT="${SCRIPTSDIR}/FakePatches.kts"
-        # Resolve Kotlin Compiler Location
-        KOTLINHOME="${KOTLINHOME:-$HOME/kotlinc}"
-        KOTLINC="${KOTLINHOME}/bin/kotlinc"
-        # Display Script and Compiler Paths
-        echo "└─ 📌 Script          : $FAKESCRIPT"
-        echo "└─ 📌 Compiler        : $KOTLINC"
-        # Verify Kotlin Compiler Availability and Version
-        echo "└─ ☕ Kotlin Compiler :"
-        "$KOTLINC" -version
-        # Run Post-Fix Processing Before Reverting Fake Patches
-        echo "└─ 🔧 Reverting Fake Patches..."
-        "$KOTLINC" -script "$FAKESCRIPT" PostFix "$COMMONKERNELFOLDER"
-        "$KOTLINC" -script "$FAKESCRIPT" Revert "$COMMONKERNELFOLDER"
+        # Enter Common Kernel Source Directory
+        cd "$COMMONKERNELFOLDER"
+        # Validate the Fake Patch State File
+        if [[ -z "${FAKEPATCHSTATEFILE:-}" || ! -f "$FAKEPATCHSTATEFILE" ]]; then
+          echo "└─ ⚠️ Fake Patch State File Not Found"
+          exit 1
+        fi
+
+        # Restore Fake Patch Tracking Flags
+        source "$FAKEPATCHSTATEFILE"
+        # Revert Android 15 / Kernel 6.6 Fake Patches
+        if [[ "$ANDROIDVERSION" == "android15" && "$KERNELVERSION" == "6.6" ]]; then
+          # Revert Temporary LAST VMA END Conditional Block Expansion
+          if [[ "$fakepatchedexpand" == 1 ]]; then
+            echo "└─ ♻️ Reverting LAST VMA END Conditional Block"
+            perl -i -0pe 's/\t\t\tif \(vma->vm_end > last_vma_end\) \{\n\t\t\t\tsmap_gather_stats\(vma, &mss, last_vma_end\);\n\t\t\t\tlast_vma_end = vma->vm_end;\n\t\t\t\}/\t\t\tif (vma->vm_end > last_vma_end)\n\t\t\t\tsmap_gather_stats(vma, \&mss, last_vma_end);/' ./fs/proc/task_mmu.c
+          fi
+
+          # Remove Fake NR SUBPAGES Declaration
+          if [[ "$fakepatchednrsubpages" == 1 ]]; then
+            echo "└─ ♻️ Removing Fake NR SUBPAGES Declaration"
+            sed -i '/^[[:space:]]*unsigned int nr_subpages = __PAGE_SIZE \/ PAGE_SIZE;$/d' ./fs/proc/task_mmu.c
+          fi
+
+          # Remove Fake PAGEMAP ENTRY Declaration
+          if [[ "$fakepatchedres" == 1 ]]; then
+            echo "└─ ♻️ Removing Fake PAGEMAP ENTRY Declaration"
+            sed -i '/^[[:space:]]*pagemap_entry_t \*res = NULL;$/d' ./fs/proc/task_mmu.c
+          fi
+
+          # Remove DMA BUF Headers Added by Fake Patch
+          if [[ "$fakepatcheddmabuf" == 1 ]]; then
+            echo "└─ ♻️ Removing Added DMA BUF Headers"
+            sed -i '\|^#include <linux/dma-buf.h>$|d' ./fs/proc/base.c
+          fi
+
+          # Remove ZSWAP Headers Added by Fake Patch
+          if [[ "$fakepatchedzswap" == 1 ]]; then
+            echo "└─ ♻️ Removing Added ZSWAP Headers"
+            sed -i '\|^#include <linux/zswap.h>$|d' ./mm/memory.c
+          fi
+        fi
+
+        # Revert Android 13 / Kernel 5.15 Fake Patch
+        if [[ "$ANDROIDVERSION" == "android13" && "$KERNELVERSION" == "5.15" ]]; then
+          # Restore SWAP SLOTS Headers Only if Step Removed it
+          if [[ "$fakepatchedswapslots" == 1 ]]; then
+            if ! grep -qxF '#include <linux/swap_slots.h>' ./mm/memory.c; then
+              echo "└─ ♻️ Restoring SWAP SLOTS Headers"
+              if grep -qxF '#include <linux/vmalloc.h>' ./mm/memory.c; then
+                sed -i '/#include <linux\/vmalloc.h>/a #include <linux/swap_slots.h>' ./mm/memory.c
+              else
+                echo "└─ ⚠️ VMALLOC Headers Anchor Missing; Cannot Restore SWAP SLOTS Headers"
+                exit 1
+              fi
+            fi
+          fi
+        fi
+
+        # Revert Android 14 / Kernel 6.1 Fake Patch
+        if [[ "$ANDROIDVERSION" == "android14" && "$KERNELVERSION" == "6.1" ]]; then
+          # Remove DMA BUF Header Added by Fake Patch
+          if [[ "$fakepatcheddmabuf" == 1 ]]; then
+            echo "└─ ♻️ Removing Added DMA BUF Header"
+            sed -i '\|^#include <linux/dma-buf.h>$|d' ./fs/proc/base.c
+          fi
+        fi
+
+        # Add VMA PAD START Fallback if Required
+        if [[ -f ./fs/proc/task_mmu.c ]] &&
+           grep -qF 'VMA_PAD_START(' ./fs/proc/task_mmu.c &&
+           ! grep -qE '#include <linux/pgsize_migration(_inline)?\.h>|^[[:space:]]*#define[[:space:]]+VMA_PAD_START\b' ./fs/proc/task_mmu.c; then
+          echo "└─ ♻️ Adding VMA PAD START Fallback"
+          if grep -qxF '#include "internal.h"' ./fs/proc/task_mmu.c; then
+            sed -i '/#include "internal.h"/a\
+        \
+        #undef VMA_PAD_START\
+        #ifndef VMA_PAD_START\
+        #define VMA_PAD_START(vma) ((vma)->vm_end)\
+        #endif' ./fs/proc/task_mmu.c
+          else
+            echo "└─ ⚠️ INTERNAL Headers Anchor Missing; Cannot Add VMA PAD START Fallback"
+            exit 1
+          fi
+        fi
+
+        # Remove Temporary Fake Patch State File
+        rm -f "$FAKEPATCHSTATEFILE"
+        # Report Fake Patch Reversal Completion
         echo "🎉 Fake Patches Reverted"
