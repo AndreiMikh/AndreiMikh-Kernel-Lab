@@ -182,6 +182,7 @@ runs:
           echo "└─ 🎉 Android 15 / 6.6 Fake Patch Preparation Complete"
         fi
 
+        
         # Invert Android 16 6.12 Compatibility Fixes
         if [[ "$KERNELMODULE" == "android16-6.12" ]]; then
           EXEC="$COMMONKERNELFOLDER/fs/exec.c"
@@ -189,30 +190,61 @@ runs:
           [[ -f "$EXEC" ]] || { echo "└─ ⚠️ Missing: $EXEC" >&2; exit 1; }
           [[ -f "$MMU" ]] || { echo "└─ ⚠️ Missing: $MMU" >&2; exit 1; }
           echo "└─ 🩹 Applying Android 16 / 6.12 SUSFS Fake Patches"
-          # Invert DMA-BUF Header From FS / EXEC
+          # Prepare DMA-BUF Header Compatibility in FS / EXEC
           if [[ "$SUBLEVEL" -le 58 ]]; then
             if grep -qF '#include <linux/dma-buf.h>' "$EXEC"; then
               echo "└─ ℹ️ DMA-BUF Header Already Present"
-            else
+            elif grep -qF '#include <linux/ksm.h>' "$EXEC"; then
               echo "└─ 🔧 Adding DMA-BUF Header to EXEC"
               sed -i '/^#include <linux\/ksm.h>$/a #include <linux/dma-buf.h>' "$EXEC"
+            else
+              echo "└─ ⚠️ Cannot locate KSM header in EXEC" >&2
+              exit 1
             fi
           fi
 
-          # Apply Sublevel 92 TASK-MMU Compatibility Fix
+          # Prepare Sublevel 92 TASK-MMU Compatibility
           if [[ "$SUBLEVEL" -le 92 ]]; then
             if grep -qF 'if (!vma_pages(vma))' "$MMU"; then
-              echo "└─ ℹ️ VMA DATA PAGES() Condition Already Present"
+              echo "└─ ℹ️ VMA PAGES() Condition Already Present"
             elif grep -qF 'if (!vma_data_pages(vma))' "$MMU"; then
               echo "└─ 🔧 Updating TASK-MMU Condition"
               sed -i 's/if (!vma_data_pages(vma))/if (!vma_pages(vma))/' "$MMU"
+            else
+              echo "└─ ⚠️ TASK-MMU VMA Condition Not Found" >&2
+              exit 1
             fi
           fi
 
-          # Detect Legacy SMAPS Rollup Layout
-          if grep -Fq $'vma_start = vma->vm_start;\n\tdo {\n\tsmap_gather_stats(vma, &mss, 0);' "$MMU"; then
-            echo "└─ ℹ️ Legacy SMAPS ROLLUP Layout Detected"
-            echo "└─ ℹ️ Legacy Rollup Adaptation is Handled by SUSFS Patch Adapter"
+          # Detect and Validate Legacy SMAPS Rollup Layout
+          if grep -Fq 'smap_gather_stats(vma, &mss, 0);' "$MMU"; then
+            echo "└─ 🔧 Legacy SMAPS ROLLUP Layout Detected"
+            # Add SUSFS Map Check to SHOW SMAP()
+            if ! grep -Fq 'SUSFS_IS_INODE_SUS_MAP(file_inode(vma->vm_file))' "$MMU"; then
+              if ! grep -Fq 'if (!vma_pages(vma))' "$MMU" &&
+                 ! grep -Fq 'if (!vma_data_pages(vma))' "$MMU"; then
+                echo "└─ ⚠️ Cannot Locate SHOW SMAP() Insertion Point" >&2
+                exit 1
+              fi
+
+              perl -0pi -e 's/(static\s+int\s+show_smap\s*\([^)]*\)\s*\{.*?)(\n[ \t]*if\s*\(!vma_(?:data_)?pages\(vma\))/$1\n#ifdef CONFIG_KSU_SUSFS_SUS_MAP\n\tif (vma->vm_file && SUSFS_IS_INODE_SUS_MAP(file_inode(vma->vm_file)))\n\t\treturn 0;\n#endif$2/s' "$MMU"
+                  or die "Cannot Adapt SHOW SMAP()";
+              ' "$MMU"
+              echo "└─ 📌 Added SUSFS map check to show_smap()"
+            else
+              echo "└─ ℹ️ SUSFS map check already present in show_smap()"
+            fi
+
+            # The legacy rollup loop requires its full source context.
+            # Refuse to guess where a skip would affect accounting.
+            if ! grep -Fq 'SUSFS legacy rollup adapter' "$MMU"; then
+              echo "└─ ⚠️ Legacy SHOW SMAPS ROLLUP() Needs a Source-Specific Adapter" >&2
+              echo "└─ ⚠️ No Rollup Changes Were Made; Refusing an Unsafe Insertion" >&2
+              exit 1
+            fi
+            
+          else
+            echo "└─ ℹ️ Non-Legacy SMAPS ROLLUP Layout Detected"
           fi
 
           echo "└─ 🎉 Android 16 / 6.12 Fake Patch Preparation Complete"
@@ -690,7 +722,7 @@ runs:
           [[ -f "$EXEC" ]] || { echo "└─ ⚠️ Missing: $EXEC" >&2; exit 1; }
           [[ -f "$MMU" ]] || { echo "└─ ⚠️ Missing: $MMU" >&2; exit 1; }
           echo "└─ ♻️ Reverting Android 16 / 6.12 SUSFS Fake Patches"
-          # Revert DMA-BUF Header Added During Fake Patch Preparation
+          # Revert DMA-BUF Header
           if [[ "$SUBLEVEL" -le 58 ]]; then
             if grep -qF '#include <linux/dma-buf.h>' "$EXEC"; then
               echo "└─ 🔧 Removing DMA-BUF Header From EXEC"
@@ -700,14 +732,30 @@ runs:
             fi
           fi
 
-          # Restore VMA Page Condition Expected Before Fake Patch Preparation
+          # Restore VMA Page Condition
           if [[ "$SUBLEVEL" -le 92 ]]; then
             if grep -qF 'if (!vma_pages(vma))' "$MMU"; then
               echo "└─ 🔧 Restoring VMA DATA PAGES() Condition"
               sed -i 's/if (!vma_pages(vma))/if (!vma_data_pages(vma))/' "$MMU"
             else
-              echo "└─ ℹ️ No VMA DATA PAGES() Condition to Restore"
+              echo "└─ ℹ️ No VMA Page Condition to Restore"
             fi
+          fi
+
+          # Revert SUSFS SHOW SMAP() Compatibility Check
+          if grep -qF 'SUSFS Fake Patch: show_smap' "$MMU"; then
+            echo "└─ 🔧 Removing show_smap() SUSFS Compatibility Check"
+            sed -i '/SUSFS Fake Patch: show_smap/,+7d' "$MMU"
+          else
+            echo "└─ ℹ️ No SHOW SMAP() Compatibility Check Marker Found"
+          fi
+
+          # Revert SUSFS Legacy show_smaps_rollup() Adapter
+          if grep -qF 'SUSFS Fake Patch: show_smaps_rollup' "$MMU"; then
+            echo "└─ 🔧 Removing show_smaps_rollup() SUSFS Compatibility Adapter"
+            sed -i '/SUSFS Fake Patch: show_smaps_rollup/,+12d' "$MMU"
+          else
+            echo "└─ ℹ️ No SHOW SMAPS ROLLUP() Adapter Marker Found"
           fi
 
           echo "└─ 🎉 Android 16 / 6.12 Fake Patch Reversal Complete"
