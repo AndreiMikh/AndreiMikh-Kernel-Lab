@@ -54,296 +54,117 @@ runs:
   steps:
     # Apply Temporary Compatibility Changes Before Integrating SUSFS
     # These Changes Prepare Older or Newer Kernel Sources for SUSFS Patch
-    - name: ♻️ Fake Patches (Invert)
+    # Apply Kernel Fake Patches Before SUSFS Integration
+    - name: Apply Fake Patches
       if: ${{ inputs.SUSFSREPOSITORY != '-1' }}
       shell: bash
       env:
-        COMMONKERNELFOLDER: ${{ inputs.COMMONKERNELFOLDER }}
-        ANDROIDVERSION: ${{ inputs.ANDROIDVERSION }}
-        KERNELVERSION: ${{ inputs.KERNELVERSION }}
+        KMI: ${{ inputs.ANDROIDVERSION }}-${{ inputs.KERNELVERSION }}
         SUBLEVEL: ${{ inputs.SUBLEVEL }}
+        COMMONKERNELFOLDER: ${{ inputs.COMMONKERNELFOLDER }}
       run: |
-        set -Eeuo pipefail
+        set -e
+
+        # Enter the Common Kernel Source Directory
         cd "$COMMONKERNELFOLDER"
-        KERNELMODULE="${ANDROIDVERSION}-${KERNELVERSION}"
-        echo "└─ 🔄 Applying Compatibility Patches for $KERNELMODULE-$SUBLEVEL"
-        # Select Compatibility Operations Using Android and Kernel Versions
-        case "$KERNELMODULE" in
-          android12-5.10)
-            # Correct MIN T() Type For Kernel Sublevels 43 and Older
-            if [[ "$SUBLEVEL" -le 43 ]]; then
-              sed -i -E \
-                's/(int|size_t)[[:space:]]+this_len[[:space:]]*=[[:space:]]*min_t[[:space:]]*\([[:space:]]*\1[[:space:]]*,/size_t this_len = min_t(size_t,/' \
-                fs/proc/base.c
-            fi
 
-            # Adapt FDINFO Handling For Kernels Through Sublevel 117
-            if [[ "$SUBLEVEL" -le 117 ]]; then
-              file="fs/notify/fdinfo.c"
-              # Abort if the Expected Kernel Source File is Missing
-              if [[ ! -f "$file" ]]; then
-                echo "⚠️ Missing File: $file" >&2
-                exit 1
-              fi
+        # Apply Android 12 5.10 Compatibility Patches
+        if [ "$KMI" = "android12-5.10" ]; then
+          # Fix this_len Declaration in fs/proc/base.c
+          if [ "$SUBLEVEL" -le 43 ]; then
+            echo "Applying BASE Android 12 5.10 Fake Patch"
+            perl -i -pe 's/(int|size_t)\s+this_len\s*=\s*min_t\s*\(\s*\1\s*,/size_t this_len = min_t(size_t,/;' fs/proc/base.c
+          fi
 
-              # Avoid Applying the Same Compatibility Transformation Twice
-              if ! grep -qF 'inotify_mark_user_mask(' "$file"; then
-                grep -qF 'mask, mark.ignored_mask' "$file" || {
-                  echo "⚠️ FDINFO Mask Expression Not Found: $file" >&2
-                  exit 1
-                }
-                # Remove the Original Local Mask Declaration Hlock
-                perl -0pi -e \
-                  's{^[ \t]*/\*.*?^[ \t]*u32 mask = mark->mask & IN_ALL_EVENTS;\n}{}gms' \
-                  "$file"
-                # Replace the Mask Expression and Ignored-Mask Format
-                perl -pi -e \
-                  's/\bmask,\s*mark\.ignored_mask/inotify_mark_user_mask(mark)/g; s/ignored_mask:%x/ignored_mask:0/g' \
-                  "$file"
-                # Insert the Compatibility Helper if it is Not Present
-                if ! grep -qF 'inotify_mark_user_mask(' "$file"; then
-                  grep -qE '^static void inotify_fdinfo\(struct seq_file \*m, struct fsnotify_mark \*mark\)$' "$file" || {
-                    echo "⚠️ FDINFO Function Anchor Missing: $file" >&2
-                    exit 1
-                  }
-                  sed -i \
-                    '/^static void inotify_fdinfo(struct seq_file \*m, struct fsnotify_mark \*mark)$/i\static inline u32 inotify_mark_user_mask(struct fsnotify_mark *mark)\n{\n\treturn mark->mask \& IN_ALL_EVENTS;\n}\n' \
-                    "$file"
-                fi
-              fi
-            fi
-            ;;
-          android13-5.10)
-            # Adapt FDINFO Handling For Kernels Through Sublevel 107
-            if [[ "$SUBLEVEL" -le 107 ]]; then
-              file="fs/notify/fdinfo.c"
-              # Require the Expected Source File
-              if [[ ! -f "$file" ]]; then
-                echo "⚠️ Missing File: $file" >&2
-                exit 1
-              fi
+          # Update Inotify Mask Handling in fs/notify/fdinfo.c
+          if [ "$SUBLEVEL" -le 117 ]; then
+            echo "Applying FDINFO Android 12 5.10 Fake Patch"
+            sed -i '/^[[:space:]]*\/\*$/,/^[[:space:]]*u32 mask = mark->mask & IN_ALL_EVENTS;$/d' fs/notify/fdinfo.c
+            perl -i -pe 's/\bmask,\s*mark->ignored_mask/inotify_mark_user_mask(mark)/g' fs/notify/fdinfo.c
+            perl -i -pe 's/ignored_mask:%x/ignored_mask:0/g' fs/notify/fdinfo.c
+          fi
+        fi
 
-              # Skip the Transformation When the Helper Already Exists
-              if ! grep -qF 'inotify_mark_user_mask(' "$file"; then
-                grep -qF 'mask, mark.ignored_mask' "$file" || {
-                  echo "⚠️ FDINFO Mask Expression Not Found: $file" >&2
-                  exit 1
-                }
-                # Remove the Original Local Mask Declaration Block
-                perl -0pi -e \
-                  's{^[ \t]*/\*.*?^[ \t]*u32 mask = mark->mask & IN_ALL_EVENTS;\n}{}gms' \
-                  "$file"
-                # Update the Mask Expression and Ignored-Mask Format
-                perl -pi -e \
-                  's/\bmask,\s*mark\.ignored_mask/inotify_mark_user_mask(mark)/g; s/ignored_mask:%x/ignored_mask:0/g' \
-                  "$file"
-                # Insert the Helper Before FDINFO Function When Needed
-                if ! grep -qF 'inotify_mark_user_mask(' "$file"; then
-                  grep -qE '^static void inotify_fdinfo\(struct seq_file \*m, struct fsnotify_mark \*mark\)$' "$file" || {
-                    echo "⚠️ FDINFO Function Anchor Missing: $file" >&2
-                    exit 1
-                  }
-                  sed -i \
-                    '/^static void inotify_fdinfo(struct seq_file \*m, struct fsnotify_mark \*mark)$/i\static inline u32 inotify_mark_user_mask(struct fsnotify_mark *mark)\n{\n\treturn mark->mask \& IN_ALL_EVENTS;\n}\n' \
-                    "$file"
-                fi
-              fi
-            fi
-            ;;
-          android13-5.15)
-            # Add Mount ID Mapping Headers and FDINFO Compatibility
-            # For Kernel Sublevels 41 and Older
-            if [[ "$SUBLEVEL" -le 41 ]]; then
-              file="fs/namespace.c"
-              line='#include <linux/mnt_idmapping.h>'
-              # Add the Mount ID Mapping Header After SHMEM Header
-              if ! grep -qF "$line" "$file"; then
-                grep -qE '^#include <linux/shmem_fs\.h>$' "$file" || {
-                  echo "⚠️ Anchor Not Found: $file" >&2
-                  exit 1
-                }
-                sed -i '/^#include <linux\/shmem_fs\.h>$/a #include <linux/mnt_idmapping.h>' "$file"
-              fi
+        # Apply Android 13 5.15 Compatibility Patches
+        if [ "$KMI" = "android13-5.15" ]; then
+          # Add Mount ID Mapping Headers and Update Inotify Mask Handling
+          if [ "$SUBLEVEL" -le 41 ]; then
+            echo "Applying NAMESPACE Android 13 5.15 SUSFS fixes"
+            sed -i '/^#include <linux\/shmem_fs.h>$/a #include <linux/mnt_idmapping.h>' fs/namespace.c
+            echo "Applying open.c Android 13 5.15 Fake Patch"
+            sed -i '/^#include <linux\/compat.h>$/a #include <linux/mnt_idmapping.h>' fs/open.c
+            echo "Applying FDINFO Android 13 5.15 Fake Patch"
+            sed -i '/^[[:space:]]*\/\*$/,/^[[:space:]]*u32 mask = mark->mask & IN_ALL_EVENTS;$/d' fs/notify/fdinfo.c
+            perl -i -pe 's/\bmask,\s*mark->ignored_mask/inotify_mark_user_mask(mark)/g' fs/notify/fdinfo.c
+            perl -i -pe 's/ignored_mask:%x/ignored_mask:0/g' fs/notify/fdinfo.c
+          fi
 
-              # Add the Same Header to FS/OPEN Source After Compat Header
-              file="fs/open.c"
-              if ! grep -qF '#include <linux/mnt_idmapping.h>' "$file"; then
-                grep -qE '^#include <linux/compat\.h>$' "$file" || {
-                  echo "⚠️ Anchor Not Found: $file" >&2
-                  exit 1
-                }
-                sed -i '/^#include <linux\/compat\.h>$/a #include <linux/mnt_idmapping.h>' "$file"
-              fi
+          # Remove Obsolete Swap Slots Header
+          if [ "$SUBLEVEL" -ge 123 ]; then
+            echo "Applying MEMORY Android 13 5.15 Fake Patch"
+            sed -i '/#include <linux\/swap_slots\.h>/d' mm/memory.c
+          fi
 
-              # Verify the FDINFO Source File Exists
-              file="fs/notify/fdinfo.c"
-              if [[ ! -f "$file" ]]; then
-                echo "⚠️ Missing File: $file" >&2
-                exit 1
-              fi
+          # Remove Block Trace Hook Header
+          if [ "$SUBLEVEL" -ge 197 ]; then
+            echo "Applying NAMESPACE Android 13 5.15 Fake Patch"
+            sed -i '/^#include <trace\/hooks\/blk.h>$/d' fs/namespace.c
+          fi
 
-              # Apply FDINFO Compatibility Only When the Helper is Absent
-              if ! grep -qF 'inotify_mark_user_mask(' "$file"; then
-                grep -qF 'mask, mark.ignored_mask' "$file" || {
-                  echo "⚠️ FDINFO Mask Expression Not Found: $file" >&2
-                  exit 1
-                }
-                # Remove the Original Local Mask Declaration Block
-                perl -0pi -e \
-                  's{^[ \t]*/\*.*?^[ \t]*u32 mask = mark->mask & IN_ALL_EVENTS;\n}{}gms' \
-                  "$file"
-                # Replace the Mask Expression and Ignored-Mask Format
-                perl -pi -e \
-                  's/\bmask,\s*mark\.ignored_mask/inotify_mark_user_mask(mark)/g; s/ignored_mask:%x/ignored_mask:0/g' \
-                  "$file"
-                # Add the Helper Before INOTIFY FDINFO() if Required
-                if ! grep -qF 'inotify_mark_user_mask(' "$file"; then
-                  grep -qE '^static void inotify_fdinfo\(struct seq_file \*m, struct fsnotify_mark \*mark\)$' "$file" || {
-                    echo "⚠️ FDINFO Function Anchor Missing: $file" >&2
-                    exit 1
-                  }
-                  sed -i \
-                    '/^static void inotify_fdinfo(struct seq_file \*m, struct fsnotify_mark \*mark)$/i\static inline u32 inotify_mark_user_mask(struct fsnotify_mark *mark)\n{\n\treturn mark->mask \& IN_ALL_EVENTS;\n}\n' \
-                    "$file"
-                fi
-              fi
-            fi
+          # Remove the Memory Trace Hook Header
+          if [ "$SUBLEVEL" -ge 206 ]; then
+            echo "Applying task_mmu.c Android 13 5.15 Fake Patch"
+            sed -i '/^#include <trace\/hooks\/mm.h>$/d' fs/proc/task_mmu.c
+          fi
+        fi
 
-            # Remove the Swap Slots Header Starting at Sublevel 123
-            if [[ "$SUBLEVEL" -ge 123 ]]; then
-              sed -i '/^#include <linux\/swap_slots\.h>$/d' mm/memory.c
-            fi
+        # Apply Android 14 6.1 Compatibility Patches
+        if [ "$KMI" = "android14-6.1" ]; then
+          # Add the DMA-BUF Header to proc/base.c
+          if [ "$SUBLEVEL" -le 141 ]; then
+            echo "Applying BASE Android 14 6.1 Fake Patch"
+            sed -i '/^#include <linux\/cpufreq_times.h>$/a #include <linux/dma-buf.h>' fs/proc/base.c
+          fi
 
-            # Remove the Block Trace Hook Header Starting at Sublevel 197
-            if [[ "$SUBLEVEL" -ge 197 ]]; then
-              sed -i '/^#include <trace\/hooks\/blk\.h>$/d' fs/namespace.c
-            fi
+          # Remove Block Trace Hook Header
+          if [ "$SUBLEVEL" -ge 157 ]; then
+            echo "Applying NAMESPACE Android 14 6.1 Fake Patch"
+            sed -i '/^#include <trace\/hooks\/blk.h>$/d' fs/namespace.c
+          fi
+        fi
 
-            # Remove the MM Trace Hook Header Starting at Sublevel 206
-            if [[ "$SUBLEVEL" -ge 206 ]]; then
-              sed -i '/^#include <trace\/hooks\/mm\.h>$/d' fs/proc/task_mmu.c
-            fi
-            ;;
-          android14-6.1)
-            # Add the Scheduler Trace Hook For Kernel Sublevels 25 and Older
-            if [[ "$SUBLEVEL" -le 25 ]]; then
-              file="fs/proc/base.c"
-              if ! grep -qF '#include <trace/hooks/sched.h>' "$file"; then
-                grep -qE '^#include <trace/events/oom\.h>$' "$file" || {
-                  echo "⚠️ Anchor Not Found: $file" >&2
-                  exit 1
-                }
-                sed -i '/^#include <trace\/events\/oom\.h>$/a #include <trace/hooks/sched.h>' "$file"
-              fi
-            fi
+        # Apply Android 15 6.6 Compatibility Patches
+        if [ "$KMI" = "android15-6.6" ]; then
+          # Fix VMA Tracking and Add Required Declarations and Trace Hook
+          if [ "$SUBLEVEL" -le 30 ]; then
+            echo "Applying taskmmu.c, namespace.c Android 15 6.6 Fake Patch"
+            sed -i '/smap_gather_stats(vma, &mss, last_vma_end);/a\last_vma_end = vma->vm_end;' fs/proc/task_mmu.c
+            perl -0777 -i -pe '@l=split/\n/;for($i=$#l;$i>=0;$i--){if($l[$i]=~/last_vma_end = vma->vm_end;/){$l[$i]="\t\t\t\t".$l[$i];splice(@l,$i+1,0,"\t\t\t}");for($j=$i;$j>=0;$j--){if($l[$j]=~/if\s*\(vma->vm_end > last_vma_end\)/){$l[$j]=~s/\)\s*$/) {/;last}}last}}$_=join"\n",@l' fs/proc/task_mmu.c
+            sed -i '/#include <trace\/hooks\/blk\.h>/a #include <trace\/hooks\/fs.h>' fs/namespace.c
+            sed -i -e '/int ret = 0, copied = 0;/a \\tunsigned int nr_subpages \= __PAGE_SIZE \/ PAGE_SIZE;' -e '/int ret = 0, copied = 0;/a \\tpagemap_entry_t \*res = NULL;' fs/proc/task_mmu.c
+          fi
 
-            # Add the DMA-BUF Header Through Sublevel 141
-            if [[ "$SUBLEVEL" -le 141 ]]; then
-              file="fs/proc/base.c"
-              if ! grep -qF '#include <linux/dma-buf.h>' "$file"; then
-                grep -qE '^#include <linux/cpufreq_times\.h>$' "$file" || {
-                  echo "⚠️ Anchor Not Found: $file" >&2
-                  exit 1
-                }
-                sed -i '/^#include <linux\/cpufreq_times\.h>$/a #include <linux/dma-buf.h>' "$file"
-              fi
-            fi
+          # Add the Zswap Header to mm/memory.c
+          if [ "$SUBLEVEL" -le 57 ]; then
+            echo "Applying memory.c Android 15 6.6 Fake Patch"
+            sed -i '/^#include <linux\/sched\/sysctl.h>$/a #include <linux/zswap.h>' mm/memory.c
+          fi
 
-            # Remove Obsolete Trace-Hook Compatibility Includes From Newer 6.1 Kernels
-            if [[ "$SUBLEVEL" -ge 157 ]]; then
-              sed -i '/^#include <trace\/hooks\/blk\.h>$/d' fs/namespace.c
-              sed -i '/^#include <trace\/hooks\/fs\.h>$/,+1d' fs/super.c
-            fi
-            ;;
-          android15-6.6)
-            # Apply VMA Compatibility Changes Through Sublevel 30
-            if [[ "$SUBLEVEL" -le 30 ]]; then
-              task="fs/proc/task_mmu.c"
-              namespace="fs/namespace.c"
-              # Both Source Files Must Exist Before Proceeding
-              [[ -f "$task" && -f "$namespace" ]] || {
-                echo "⚠️ Android 15 VMA Source Files Missing" >&2
-                exit 1
-              }
-              # Update the LAST VMA END Block Only When the New Declaration is Absent
-              if ! grep -qF 'unsigned int nr_subpages = __PAGE_SIZE / PAGE_SIZE;' "$task"; then
-                grep -qF 'smap_gather_stats(vma, &mss, last_vma_end);' "$task" || {
-                  echo "⚠️ SMAP Anchor Missing: $task" >&2
-                  exit 1
-                }
-                # Ensure LAST VMA END is Updated Inside the VMA Condition
-                perl -0pi -e \
-                  's/\t\t\tif \(vma->vm_end > last_vma_end\)\n(\t\t\t\tsmap_gather_stats\(vma, &mss, last_vma_end\);)/\t\t\tif (vma->vm_end > last_vma_end) {\n$1\n\t\t\t\tlast_vma_end = vma->vm_end;\n\t\t\t}/s' \
-                  "$task"
-                # Confirm the Expected Assignment was Inserted
-                grep -qF 'last_vma_end = vma->vm_end;' "$task" || {
-                  echo "⚠️ Failed to Update LAST VMA END Block" >&2
-                  exit 1
-                }
-              fi
+          # Add the DMA-BUF Header to fs/proc/base.c
+          if [ "$SUBLEVEL" -le 92 ]; then
+            echo "Applying base.c Android 15 6.6 Fake Patch"
+            sed -i '/^#include <linux\/cpufreq_times.h>$/a #include <linux/dma-buf.h>' fs/proc/base.c
+          fi
+        fi
 
-              # Add the File System Trace Hook After the Block Trace Hook
-              if ! grep -qxF '#include <trace/hooks/fs.h>' "$namespace"; then
-                grep -qxF '#include <trace/hooks/blk.h>' "$namespace" || {
-                  echo "⚠️ TRACE/HOOKS/BLK Header Anchor Missing" >&2
-                  exit 1
-                }
-                sed -i '/^#include <trace\/hooks\/blk.h>$/a #include <trace/hooks/fs.h>' "$namespace"
-              fi
-
-              # Add VMA-Related Declarations When They are Missing
-              if ! grep -qE '^[[:space:]]*unsigned int nr_subpages = __PAGE_SIZE / PAGE_SIZE;$' "$task"; then
-                grep -qF 'int ret = 0, copied = 0;' "$task" || {
-                  echo "⚠️ Declaration Anchor Missing: $task" >&2
-                  exit 1
-                }
-                sed -i \
-                  '/int ret = 0, copied = 0;/a\	unsigned int nr_subpages = __PAGE_SIZE / PAGE_SIZE;\
-        	pagemap_entry_t *res = NULL;' \
-                  "$task"
-              fi
-            fi
-
-            # Add the ZSWAP Header Through Sublevel 57
-            if [[ "$SUBLEVEL" -le 57 ]]; then
-              file="mm/memory.c"
-              if ! grep -qF '#include <linux/zswap.h>' "$file"; then
-                grep -qE '^#include <linux/sched/sysctl\.h>$' "$file" || {
-                  echo "⚠️ Anchor Not Found: $file" >&2
-                  exit 1
-                }
-                sed -i '/^#include <linux\/sched\/sysctl\.h>$/a #include <linux/zswap.h>' "$file"
-              fi
-            fi
-
-            # Add the DMA-BUF header through sublevel 92.
-            if [[ "$SUBLEVEL" -le 92 ]]; then
-              file="fs/proc/base.c"
-              if ! grep -qF '#include <linux/dma-buf.h>' "$file"; then
-                grep -qE '^#include <linux/cpufreq_times\.h>$' "$file" || {
-                  echo "⚠️ Anchor Not Found: $file" >&2
-                  exit 1
-                }
-
-                sed -i '/^#include <linux\/cpufreq_times\.h>$/a #include <linux/dma-buf.h>' "$file"
-              fi
-            fi
-            ;;
-
-          android16-6.12)
-            # Remove the DMA-BUF header starting at sublevel 58.
-            if [[ "$SUBLEVEL" -ge 58 ]]; then
-              sed -i '/^#include <linux\/dma-buf\.h>$/d' fs/exec.c
-            fi
-
-            # Rename vma_data_pages to vma_pages starting at sublevel 69.
-            if [[ "$SUBLEVEL" -ge 69 ]]; then
-              sed -i 's/vma_data_pages/vma_pages/g' fs/proc/task_mmu.c
-            fi
-            ;;
-        esac
-
-        echo "🎉 Fake Patches (Invert) Completed"
+        # Apply Android 16 6.12 Compatibility Patches
+        if [ "$KMI" = "android16-6.12" ]; then
+          # Remove the DMA-BUF Header from fs/exec.c
+          if [ "$SUBLEVEL" -ge 58 ]; then
+            echo "Applying exec.c Android 16 6.12 Fake Patch"
+            sed -i '/^#include <linux\/dma-buf.h>$/d' fs/exec.c
+          fi
+        fi
 
     # Clone the selected SUSFS repository, select its revision,
     # copy the required patch files, and apply SUSFS to the kernel.
@@ -368,14 +189,12 @@ runs:
         set -euo pipefail
         GKIVERSION="${ANDROIDVERSION}-${KERNELVERSION}"
         cd "$WORKDIR"
-
         echo "└─ 🧾 Android Version       : $ANDROIDVERSION"
         echo "└─ 🧾 Kernel Version        : $KERNELVERSION"
         echo "└─ 🔎 Detected Kernel Base  : $GKIVERSION"
         echo "└─ 📁 Kernel Directory      : $COMMONKERNELFOLDER"
         echo "└─ 📥 Cloning SUSFS..."
-
-        # Select the repository URL and branch according to the SUSFS variant.
+        # Select Repository URL and Branch According to SUSFS Variant
         if [[ "$SUSFSVARIANT" == "OGKI" ]]; then
           BRANCH="oki-${ANDROIDVERSION}-${KERNELVERSION}"
           REPOURL="https://github.com/cctv18/susfs4oki.git"
@@ -386,16 +205,15 @@ runs:
           FALLBACKURL="https://github.com/AndreiMikh/susfs4ksu.git"
         fi
 
-        # Select the development branch when the input is enabled.
+        # Select Development Branch When Input is Enabled
         if [[ "$SUSFSBRANCHDEV" == "true" ]]; then
           BRANCH="${BRANCH}-dev"
         fi
 
-        # Attempt to clone the selected branch up to three times.
+        # Attempt to Clone Selected Branch up to Three Times
         CLONED=false
         for attempt in {1..3}; do
           rm -rf susfs4ksu
-
           if git clone --depth=1 --single-branch \
             --branch "$BRANCH" "$REPOURL" susfs4ksu; then
             echo "└─ 📌 SUSFS Clone Successful"
@@ -404,18 +222,17 @@ runs:
           fi
 
           rm -rf susfs4ksu
-
-          # Increase the retry delay after each unsuccessful attempt.
+          # Increase Retry Delay After Each Unsuccessful Attempt
           if [[ "$attempt" -lt 3 ]]; then
             echo "└─ ⚠️ Clone Failed (Attempt $attempt/3)"
             sleep $((attempt * 3))
           fi
+          
         done
 
-        # Try the GitHub mirror if the primary GKI repository is unavailable.
+        # Try GitHub Mirror if Primary GKI Repository is Unavailable
         if [[ "$CLONED" != "true" && -n "$FALLBACKURL" ]]; then
           echo "└─ ⚠️ GitLab Unavailable, Trying GitHub Mirror..."
-
           if git clone --depth=1 --single-branch \
             --branch "$BRANCH" "$FALLBACKURL" susfs4ksu; then
             echo "└─ 📌 SUSFS GitHub Mirror Clone Successful"
@@ -423,7 +240,7 @@ runs:
           fi
         fi
 
-        # Stop the workflow if neither repository could be cloned.
+        # Stop Workflow if Neither Repository Could be Cloned
         if [[ "$CLONED" != "true" ]]; then
           echo "└─ ⚠️ SUSFS Clone Failed"
           echo "└─ 📦 Repository : $REPOURL"
@@ -434,29 +251,26 @@ runs:
 
         echo "└─ 📌 SUSFS Branch : $BRANCH"
         cd susfs4ksu
-
-        # Check whether a specific SUSFS revision or rollback was requested.
+        # Check Whether a Specific SUSFS Revision or Rollback was Requested
         if [[ -n "${SUSFSREPOSITORY:-}" && "$SUSFSREPOSITORY" != "-1" ]]; then
           echo "└─ 🔎 SUSFS Revision : $SUSFSREPOSITORY"
-
-          # A numeric value selects an ancestor commit relative to HEAD.
+          # A Numeric Value Selects an Ancestor Commit Relative to HEAD
           if [[ "$SUSFSREPOSITORY" =~ ^[0-9]+$ ]]; then
             echo "└─ 📦 Fetching Additional Git History..."
             git fetch --unshallow || git fetch --depth=1000 origin "$BRANCH"
-
             git checkout "HEAD~$SUSFSREPOSITORY" || {
               echo "└─ ⚠️ Failed Checkout HEAD~$SUSFSREPOSITORY"
               exit 1
             }
           else
-            # Expand shallow history when a commit hash is supplied.
+            # Expand Shallow History When a Commit Hash is Supplied
             if [[ "$SUSFSREPOSITORY" =~ ^[0-9a-fA-F]{7,40}$ ]]; then
               echo "└─ 📦 Expanding Shallow Clone History..."
               git fetch --unshallow origin || \
                 git fetch --deepen=200 origin "$BRANCH"
             fi
 
-            # Check out the requested tag, branch, or commit.
+            # Checkout Requested Tag, Branch or Commit
             git checkout "$SUSFSREPOSITORY" || {
               echo "└─ ⚠️ Invalid SUSFS Revision"
               exit 1
@@ -465,28 +279,23 @@ runs:
         fi
 
         echo "└─ 📌 Active SUSFS Commit : $(git rev-parse --short HEAD)"
-
-        # Read the SUSFS version from the checked-out kernel header.
+        # Read SUSFS Version From Checkout Kernel Header
         SUSFSVER="Unknown"
         SUSFSHEADER="./kernel_patches/include/linux/susfs.h"
-
         if [[ -f "$SUSFSHEADER" ]]; then
           SUSFSVER="$(awk -F'"' '/SUSFS_VERSION/ {print $2; exit}' "$SUSFSHEADER")"
           SUSFSVER="${SUSFSVER:-Unknown}"
         fi
 
-        # Export the detected version to the workflow environment and action output.
+        # Export Detected Version to the Workflow Environment and Action Output
         echo "└─ 📦 SUSFS Version : $SUSFSVER"
         echo "SUSFSVER=$SUSFSVER" >> "$GITHUB_ENV"
         echo "susfsver=$SUSFSVER" >> "$GITHUB_OUTPUT"
-
         cd ..
-
-        # Locate SUSFS core patches matching the selected Android/kernel base.
+        # Locate SUSFS Core Patches Matching the Selected Android / Kernel Base
         echo "└─ 🔎 Searching SUSFS Patches..."
         shopt -s nullglob
         SUSFSPATCHLIST=(./susfs4ksu/kernel_patches/50_add_susfs_in_gki-"${ANDROIDVERSION}"-"${KERNELVERSION}"*.patch)
-
         # Fail when no matching core patch is available.
         if [[ ${#SUSFSPATCHLIST[@]} -eq 0 ]]; then
           echo "└─ ⚠️ No SUSFS Patch Found"
@@ -494,27 +303,22 @@ runs:
           exit 1
         fi
 
-        # Select the last matching patch from the sorted array.
+        # Select Last Matching Patch From Sorted Array
         SUSFSPATCH="${SUSFSPATCHLIST[-1]}"
         echo "└─ 🧾 SUSFS Patch Directory : $SUSFSPATCH"
-
-        # Copy the core patch, filesystem sources, and Linux headers into the kernel tree.
+        # Copy the Core Patch, File System Sources and Linux Headers Into Kernel Tree
         if [[ "$SUSFSREPOSITORY" != "-1" ]]; then
           echo "└─ 📥 Copying SUSFS Patches..."
-
           cp "$SUSFSPATCH" "${COMMONKERNELFOLDER}/" 2>/dev/null || \
             echo "└─ ⚠️ Failed to Copy SUSFS Patches"
-
           cp -r ./susfs4ksu/kernel_patches/fs/* "${COMMONKERNELFOLDER}/fs/" 2>/dev/null || \
             echo "└─ ⚠️ Failed to Copy SUSFS Filesystem"
-
           cp -r ./susfs4ksu/kernel_patches/include/linux/* "${COMMONKERNELFOLDER}/include/linux/" 2>/dev/null || \
             echo "└─ ⚠️ Failed to Copy SUSFS Linux Header"
         fi
 
         cd "$COMMONKERNELFOLDER"
-
-        # Apply the SUSFS core patch to the common kernel source tree.
+        # Apply SUSFS Core Patch to Common Kernel Source Tree
         echo "└─ ⚙️ Applying SUSFS Core Patch (50 Add SUSFS Patch)"
         if patch -p1 < "$(basename "$SUSFSPATCH")"; then
           echo "└─ 📌 SUSFS 50 Enable Core Patch Applied"
@@ -522,21 +326,19 @@ runs:
           echo "└─ ⚠️ SUSFS Core Patch Already Applied or Failed"
         fi
 
-        # Apply the SUSFS enable patch only when the selected root engine is KernelSU.
+        # Apply SUSFS Enable Patch Only When Selected Root Engine is KernelSU
         if [[ "$ROOTENGINE" == "KernelSU" ]]; then
           echo "⚙️ Applying KernelSU SUSFS enable patch"
-
-          # Select the enable-patch branch for GKI or OGKI.
+          # Select the Enable Patch Branch for GKI or OKI
           if [[ "$SUSFSVARIANT" == "OGKI" ]]; then
             PATCHBRANCH="oki-${ANDROIDVERSION}-${KERNELVERSION}"
           else
             PATCHBRANCH="gki-${ANDROIDVERSION}-${KERNELVERSION}"
           fi
 
-          # Match the development suffix used by the core repository branch.
+          # Match Development Suffix Used by Core Repository Branch
           [[ "$SUSFSBRANCHDEV" == "true" ]] && PATCHBRANCH="${PATCHBRANCH}-dev"
-
-          # Construct the enable-patch URL for the selected repository.
+          # Construct the Enable Patch URL For Selected Repository
           case "$SUSFSVARIANT" in
             GKI)
               SUSFS10URL="https://gitlab.com/simonpunk/susfs4ksu/-/raw/${PATCHBRANCH}/kernel_patches/${ROOTENGINE}/10_enable_susfs_for_ksu.patch"
@@ -549,8 +351,7 @@ runs:
               exit 1
               ;;
           esac
-
-          # Verify that the enable patch is available before downloading it.
+          # Verify Enable Patch is Available Before Downloading
           echo "🔍 Checking Patch URL..."
           if ! wget --spider "$SUSFS10URL"; then
             echo "└─ ⚠️ Patch Does Not Exist:"
@@ -558,7 +359,7 @@ runs:
             exit 1
           fi
 
-          # Download the patch into the temporary enable.patch file.
+          # Download the Patch Into the Temporary Enable Patch File
           echo "🌐 Downloading Patch : $SUSFS10URL"
           if ! wget "$SUSFS10URL" -O enable.patch; then
             echo "└─ ⚠️ Failed to Download SUSFS Enable Patch"
@@ -568,11 +369,9 @@ runs:
           APPLIED=false
           ORIGDIR="$(pwd)"
           KSUDIR="$(dirname "$COMMONKERNELFOLDER")/KernelSU"
-
           echo "└─ 📂 Current Directory : $(pwd)"
           echo "└─ 🔧 Applying SUSFS Enable Patch..."
-
-          # Require the KernelSU source tree before attempting integration.
+          # Require the KernelSU Source Tree Before ttempting Integration
           if [[ ! -d "$KSUDIR" ]]; then
             echo "└─ ⚠️ KernelSU Directory Not Found:"
             echo "└─ $KSUDIR"
@@ -583,10 +382,8 @@ runs:
           # Apply the enable patch from inside the KernelSU source directory.
           echo "└─ 📂 Entering KernelSU Directory..."
           cd "$KSUDIR" || exit 1
-
           echo "└─ 📂 Current Directory : $(pwd)"
           echo "└─ 🔧 Applying SUSFS Enable Patch..."
-
           if patch -p1 < "$ORIGDIR/enable.patch"; then
             APPLIED=true
             echo "📌 SUSFS Enable Patch Applied Successfully"
@@ -599,7 +396,6 @@ runs:
           echo "└─ 📂 Returning to Original Directory..."
           cd "$ORIGDIR" || exit 1
           rm -f "$ORIGDIR/enable.patch"
-
           if [[ "$APPLIED" == "true" ]]; then
             echo "└─ 📌 KernelSU SUSFS Enable Patch Completed"
           else
@@ -611,12 +407,10 @@ runs:
         fi
 
         echo "🎉 SUSFS Patches Complete"
-
         # Apply the legacy compatibility patch for Android 13 / kernel 5.15
         # when the sublevel is older than 123.
         if [[ "$GKIVERSION" == "android13-5.15" && "$SUBLEVEL" -lt 123 ]]; then
           LEGACYPATCH="${PATCHDIR}/Legacy-5.15-Fix.patch"
-
           # Require the legacy patch file.
           if [[ ! -f "$LEGACYPATCH" ]]; then
             echo "└─ ⚠️ Patch Not Found : $LEGACYPATCH"
@@ -624,7 +418,6 @@ runs:
           fi
 
           echo "└─ 🚀 Applying Legacy Fix (Kernel 5.15.0–5.15.123)"
-
           # Detect whether the reverse patch applies, indicating the patch is already present.
           if patch -R -p1 --dry-run < "$LEGACYPATCH" >/dev/null 2>&1; then
             echo "└─ ⚠️ Patch Already Applied — Skipping"
