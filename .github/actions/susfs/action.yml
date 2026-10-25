@@ -142,6 +142,52 @@ runs:
 
         # Invert Android 16 6.12 Compatibility Fixes
         if [ "$KERNELMODULE" = "android16-6.12" ]; then
+          # Apply Sublevel 23 SUSFS Compatibility Fixes
+          if [ "$SUBLEVEL" -eq 23 ]; then
+            echo "└─ 🔧 Applying SUSFS Android 16 6.12.23 Fake Patches"
+            # Add SUSFS Header to FS / EXEC
+            if ! grep -qF '#include <linux/susfs_def.h>' fs/exec.c; then
+              if grep -qF '#include <linux/dma-buf.h>' fs/exec.c; then
+                sed -i '/^#include <linux\/dma-buf.h>$/a\
+                  #ifdef CONFIG_KSU_SUSFS\
+                  #include <linux/susfs_def.h>\
+                  #endif' fs/exec.c
+              else
+                echo "└─ ⚠️ DMA-BUF Include Not Found in FS / EXEC"
+                exit 1
+              fi
+            fi
+
+            # Add SUSFS Map Handling to SHOW SMAP()
+            if ! grep -qF 'SUSFS_IS_INODE_SUS_MAP(file_inode(vma->vm_file))' fs/proc/task_mmu.c; then
+              perl -0pi -e 's/(static int show_smap\([^}]*?\n\tstruct vm_area_struct \*vma = v;\n\tstruct mem_size_stats mss = \{\};)/$1\n\n#ifdef CONFIG_KSU_SUSFS_SUS_MAP\n\tif (vma->vm_file) {\n\t\tif (SUSFS_IS_INODE_SUS_MAP(file_inode(vma->vm_file)))\n\t\t\treturn 0;\n\t}\n#endif/s' fs/proc/task_mmu.c
+            fi
+
+            # Add SUSFS Map Handling to SHOW SMAPS ROLLUP()
+            if ! grep -qF 'goto bypass_orig_flow;' fs/proc/task_mmu.c; then
+              perl -0pi -e 's/(static int show_smaps_rollup\(.*?)(\n\t\tif \(vma->vm_start < last_vma_end\) \{)/$1\n#ifdef CONFIG_KSU_SUSFS_SUS_MAP\n\t\tif (vma->vm_file && SUSFS_IS_INODE_SUS_MAP(file_inode(vma->vm_file)))\n\t\t\tgoto bypass_orig_flow;\n#endif\n$2/s' fs/proc/task_mmu.c
+            fi
+
+            # Add the SUSFS Rollup Label
+            if ! grep -qF 'bypass_orig_flow:' fs/proc/task_mmu.c; then
+              perl -0pi -e 's/(\n\t\tlast_vma_end = vma->vm_end;)/\n#ifdef CONFIG_KSU_SUSFS_SUS_MAP\nbypass_orig_flow:\n#endif$1/' fs/proc/task_mmu.c
+            fi
+
+            # Verify SUSFS Compatibility Changes
+            grep -qF '#include <linux/susfs_def.h>' fs/exec.c || {
+              echo "└─ ⚠️ Failed to Add SUSFS Header to FS / EXEC"
+              exit 1
+            }
+            grep -qF 'SUSFS_IS_INODE_SUS_MAP(file_inode(vma->vm_file))' fs/proc/task_mmu.c || {
+              echo "└─ ⚠️ Failed to Add SUSFS Map Handling to TASK-MMU"
+              exit 1
+            }
+            grep -qF 'bypass_orig_flow:' fs/proc/task_mmu.c || {
+              echo "└─ ⚠️ Failed to Add SUSFS Rollup Label"
+              exit 1
+            }
+          fi
+         
           # Remove DMA-BUF Header From FS / EXEC
           if [ "$SUBLEVEL" -ge 58 ]; then
             echo "└─ 🔧 Applying EXEC Android 16 6.12 Fake Patch"
@@ -554,6 +600,17 @@ runs:
 
         # Reverse Android 15 6.6 Compatibility Fixes
         if [ "$KERNELMODULE" = "android15-6.6" ]; then
+          # Revert Sublevel 23 SUSFS Compatibility Fixes
+          if [ "$SUBLEVEL" -eq 23 ]; then
+            echo "└─ ♻️ Reverting SUSFS Android 16 6.12.23 Fake Patches"
+            # Remove the Temporary SUSFS Header
+            perl -0pi -e 's/\n#ifdef CONFIG_KSU_SUSFS\n#include <linux\/susfs_def\.h>\n#endif\n/\n/' fs/exec.c
+            # Remove Temporary SUSFS Map Handling and Label
+            perl -0pi -e 's/\n#ifdef CONFIG_KSU_SUSFS_SUS_MAP\n\tif \(vma->vm_file\) \{\n\t\tif \(SUSFS_IS_INODE_SUS_MAP\(file_inode\(vma->vm_file\)\)\)\n\t\t\treturn 0;\n\t\}\n#endif\n/\n/s' fs/proc/task_mmu.c
+            perl -0pi -e 's/\n#ifdef CONFIG_KSU_SUSFS_SUS_MAP\n\t\tif \(vma->vm_file && SUSFS_IS_INODE_SUS_MAP\(file_inode\(vma->vm_file\)\)\)\n\t\t\tgoto bypass_orig_flow;\n#endif\n/\n/s' fs/proc/task_mmu.c
+            perl -0pi -e 's/\n#ifdef CONFIG_KSU_SUSFS_SUS_MAP\nbypass_orig_flow:\n#endif\n/\n/s' fs/proc/task_mmu.c
+          fi
+        
           # Remove the Added Trace Hook and Declarations
           if [ "$SUBLEVEL" -le 30 ]; then
             echo "└─ ♻️ Reverting TASK-MMU and NAMESPACE Android 15 6.6 Fake Patches"
