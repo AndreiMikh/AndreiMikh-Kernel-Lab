@@ -405,173 +405,66 @@ jobs:
           REMOVEDOCKERIMAGES: false
           DEBUG: true
         run: |
-          # Enable Strict Error Handling
-          # Optional Cleanup Operations Handle Their Own Failures
           set -Eeuo pipefail
-          # ⏱️ Record Cleanup Start Time
-          CLEANUPSTART=$(date +%s)
           # Display Initial Disk Usage
           echo "└─ 🧹 Optimizing Build Storage..."
-          echo "└─ 📊 Disk Usage Before Cleanup:"
+          echo "└─ 📊 Disk Usage Before Cleanup :"
           df -h /
-          # Initialize Temporary Trash Directory
-          # Files are Moved First, Then Deleted to Separate Relocation From Purging
-          TRASHDIR="/tmp/.spacecleanup"
-          mkdir -p "$TRASHDIR"/{1..18}
-          # Safely Relocate Existing Files or Directories
-          # Skip Missing Paths and Continue if a Relocation Fails
-          sourcerelocate() {
-            local SOURCE="${1:-}"
-            local DESTINATION="${2:-}"
-            [[ -n "$SOURCE" && -n "$DESTINATION" ]] || return 0
-            if [[ -e "$SOURCE" || -L "$SOURCE" ]]; then
+          # Enable Safe Wildcard Expansion
+          shopt -s nullglob
+          # Initialize Cleanup Paths
+          CLEANUPPATHS=()
+          # Add Optional Software Cleanup Paths
+          [[ "${REMOVEDOTNET}" == "true" ]] && CLEANUPPATHS+=(/usr/share/dotnet)
+          [[ "${REMOVEANDROID}" == "true" ]] && CLEANUPPATHS+=(/usr/local/lib/android)
+          [[ "${REMOVEHASKELL}" == "true" ]] && CLEANUPPATHS+=(/opt/ghc)
+          [[ "${REMOVECODEQL}" == "true" ]] && CLEANUPPATHS+=(/opt/hostedtoolcache/CodeQL)
+          # Add Additional Unnecessary Software Paths
+          CLEANUPPATHS+=(
+            /usr/local/aws-sam-cli
+            /usr/local/share/chromium
+            /usr/local/share/powershell
+            /usr/local/lib/heroku
+            /opt/az
+            /opt/microsoft/powershell
+            /usr/local/julia*
+            /usr/local/bin/pulumi*
+          )
+          # Filter Existing Paths and Log Removals
+          EXISTINGPATHS=()
+          for CLEANUPPATH in "${CLEANUPPATHS[@]}"; do
+            if [[ -e "$CLEANUPPATH" || -L "$CLEANUPPATH" ]]; then
               if [[ "${DEBUG}" == "true" ]]; then
-                echo "└─ 🗑️ Relocating : $SOURCE"
+                echo "└─ 🗑️ Removing : ${CLEANUPPATH}"
               fi
-              
-              sudo mv -- "$SOURCE" "$DESTINATION" 2>/dev/null || {
-                echo "└─ ⚠️ Unable to Relocate : $SOURCE"
-                return 0
-              }
-            fi
-          }
 
-          # Relocate Selected Optional Software Directories in Parallel
-          echo "└─ 🚀 Relocating Unnecessary Software..."
-          # .NET SDK
-          if [[ "${REMOVEDOTNET}" == "true" ]]; then
-            sourcerelocate /usr/share/dotnet "$TRASHDIR/1" &
-          fi
-
-          # Android SDK
-          if [[ "${REMOVEANDROID}" == "true" ]]; then
-            sourcerelocate /usr/local/lib/android "$TRASHDIR/2" &
-          fi
-
-          # Haskell Toolchain
-          if [[ "${REMOVEHASKELL}" == "true" ]]; then
-            sourcerelocate /opt/ghc "$TRASHDIR/3" &
-          fi
-
-          # CodeQL Tool Cache
-          if [[ "${REMOVECODEQL}" == "true" ]]; then
-            sourcerelocate /opt/hostedtoolcache/CodeQL "$TRASHDIR/4" &
-          fi
-
-          # Additional Optional Software Directories
-          sourcerelocate /usr/local/aws-sam-cli "$TRASHDIR/5" &
-          sourcerelocate /usr/local/share/chromium "$TRASHDIR/6" &
-          sourcerelocate /usr/local/share/powershell "$TRASHDIR/7" &
-          sourcerelocate /usr/local/lib/heroku "$TRASHDIR/8" &
-          sourcerelocate /opt/az "$TRASHDIR/9" &
-          sourcerelocate /opt/microsoft/powershell "$TRASHDIR/10" &
-          sourcerelocate /usr/local/lib/node_modules "$TRASHDIR/11" &
-          sourcerelocate /opt/hostedtoolcache/go "$TRASHDIR/12" &
-          sourcerelocate /opt/hostedtoolcache/PyPy "$TRASHDIR/13" &
-          sourcerelocate /opt/hostedtoolcache/node "$TRASHDIR/14" &
-          # Relocate Optional Command-Line Tools
-          (
-            for SOURCE in \
-              /usr/local/bin/aliyun \
-              /usr/local/bin/azcopy \
-              /usr/local/bin/bicep \
-              /usr/local/bin/cmake-gui \
-              /usr/local/bin/cpack \
-              /usr/local/bin/helm \
-              /usr/local/bin/hub \
-              /usr/local/bin/kubectl \
-              /usr/local/bin/minikube \
-              /usr/local/bin/node \
-              /usr/local/bin/packer \
-              /usr/local/bin/sam \
-              /usr/local/bin/stack \
-              /usr/local/bin/terraform \
-              /usr/local/bin/oc
-            do
-              sourcerelocate "$SOURCE" "$TRASHDIR/15"
-              
-            done
-            
-          ) &
-          # Relocate Julia Installations
-          (
-            for SOURCE in /usr/local/julia*; do
-              [[ -e "$SOURCE" || -L "$SOURCE" ]] || continue
-              sourcerelocate "$SOURCE" "$TRASHDIR/16"
-            done
-          ) &
-          # Relocate Pulumi Executables
-          (
-            for SOURCE in /usr/local/bin/pulumi*; do
-              [[ -e "$SOURCE" || -L "$SOURCE" ]] || continue
-              sourcerelocate "$SOURCE" "$TRASHDIR/17"
-            done
-          ) &
-          # ⏳ Wait Until All Relocation Tasks Finish
-          RELOCATIONFAILED=false         
-          for PID in $(jobs -pr); do
-            if ! wait "$PID"; then
-              RELOCATIONFAILED=true
+              EXISTINGPATHS+=("$CLEANUPPATH")
             fi
             
           done
 
-          # Record Relocation Completion Time
-          echo "└─ ⏱️ Relocation Finished : $(date -u '+%H:%M:%S UTC')"
-          if [[ "$RELOCATIONFAILED" == "true" ]]; then
-            echo "└─ ⚠️ One or More Relocation Tasks Failed"
+          # Remove All Selected Software in One Command
+          if (( ${#EXISTINGPATHS[@]} > 0 )); then
+            echo "└─ 🗑️ Removing ${#EXISTINGPATHS[@]} Software Paths..."
+            sudo rm -rf -- "${EXISTINGPATHS[@]}"
           else
-            echo "└─ 🎉 Software Relocation Complete"
-          fi
-         
-          # 🗑️ Purge Relocated Files
-          echo "└─ 🗑️ Purging Relocated Files..."
-          if sudo rm -rf -- "$TRASHDIR"; then
-            echo "└─ 🧹 Temporary Cleanup Directory Removed"
-          else
-            echo "└─ ⚠️ Temporary Trash Cleanup was Incomplete"
+            echo "└─ ℹ️ No Software Paths Found"
           fi
 
-          # Record Purge Completion Time
-          echo "└─ ⏱️ Purge Finished : $(date -u '+%H:%M:%S UTC')"       
-          # Remove Optional Browser Packages
-          echo "└─ 📦 Removing Unneeded Browser Packages..."
-          sudo apt-get purge -y \
-            firefox \
-            google-chrome-stable \
-            microsoft-edge-stable \
-            >/dev/null 2>&1 || true
-          # Remove Unneeded Dependencies
-          sudo apt-get autoremove -y >/dev/null 2>&1 || true
-          # Clear Downloaded APT Package Archives
-          echo "└─ 🧹 Cleaning APT Cache..."
-          sudo apt-get clean >/dev/null 2>&1 || true
-          # Optionally Remove Docker Images
-          # Check Docker is Available and Daemon is Running
+          # Optionally Remove Unused Docker Images
           if [[ "${REMOVEDOCKERIMAGES}" == "true" ]] &&
              command -v docker >/dev/null 2>&1; then
-            echo "└─ 🐳 Checking Docker Images..."
-            if docker info >/dev/null 2>&1; then
-              mapfile -t DOCKER_IMAGES < <(
-                docker images --quiet 2>/dev/null | sort -u
-              )
-              if (( ${#DOCKER_IMAGES[@]} > 0 )); then
-                docker rmi "${DOCKER_IMAGES[@]}" 2>/dev/null || true
-              else
-                echo "└─ ☘️ No Docker Images Found"
-              fi
-              
-            else
-              echo "└─ ⚠️ Docker Daemon is Unavailable"
-            fi
+            echo "└─ 🐳 Removing Unused Docker Images..."
+            sudo docker image prune --all --force || true
           fi
 
+          # Clean APT Package Cache
+          echo "└─ 🧹 Cleaning APT Cache..."
+          sudo apt-get clean
           # Display Final Disk Usage
           echo "└─ 📊 Disk Usage After Cleanup :"
           df -h /
-          # ⏱️ Report Total Cleanup Duration
-          CLEANUPEND=$(date +%s)
-          echo "└─ ⏱️ Total Cleanup Time : $((CLEANUPEND - CLEANUPSTART)) Seconds"
+          # Complete Storage Optimization
           echo "└─ 🎉 Build Storage Optimization Complete"
 
       - name: 👤 Git Identity
