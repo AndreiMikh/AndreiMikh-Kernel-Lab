@@ -1782,136 +1782,15 @@ jobs:
 
           echo "└─ 🎉 IPv6 NAT Fix Stage Completed"
 
-      - name: 🚫 Vendor Kernel Module(s)
+      # Configure Vendor Kernel Module Blacklist
+      - name: 🚫 Configure Vendor Kernel Module(s) Blacklist
         if: ${{ inputs.DISABLEVENDORMODULE != 'None' }}
-        shell: bash
-        env:
-          BLACKLISTMODULES: ${{ inputs.DISABLEVENDORMODULE }}        
-          BBRV1: ${{ contains(inputs.TCPALGORITHM, 'BBRV1') }}
-          BBRV3: ${{ contains(inputs.TCPALGORITHM, 'BBRV3') }}      
-        run: |
-          set -Eeuo pipefail
-          # Move to Common Kernel Source Directory
-          cd "$COMMONKERNELFOLDER"
-          # Define Modules That Must Not be Included in Blacklist
-          RISKYMODULES=(
-            coresight
-            rust_binder
-            msm_kgsl
-            camera
-            oplusboot
-            rmnet_wlan
-            rmnet_core
-            msm_drm
-            cnss2
-            oplus_chg_v2
-            reboot_mode
-            rfkill
-            bootloader_log
-          )
-          # Initialize Module Lists and Duplicate Tracking
-          declare -a modules=()
-          declare -a validatedmodules=()
-          declare -A SEENMODULES=()
-          # Parse Comma-Separated Vendor Module Blacklist Input
-          IFS=',' read -r -a ADDR <<< "${BLACKLISTMODULES:-}"
-          for mod in "${ADDR[@]}"; do
-            # Remove Whitespace From Module Names
-            mod="${mod//[[:space:]]/}"
-            [[ -z "$mod" ]] && continue
-            # Reject Invalid Module Names to Prevent Malformed Configuration(s)
-            if [[ ! "$mod" =~ ^[a-zA-Z0-9_-]+$ ]]; then
-              echo "⚠️ Invalid Module Name(s) : $mod"
-              exit 1
-            fi
-
-            # Add Each Module Once, Preserving Input Order
-            if [[ -z "${SEENMODULES[$mod]+x}" ]]; then
-              SEENMODULES["$mod"]=1
-              modules+=("$mod")
-            fi
-          done
-
-          # Automatically Blacklist OPlus Network Tuning Modules
-          # When Either BBRv1 or BBRv3 is Enabled
-          if [[ "$BBRV1" == "true" || "$BBRV3" == "true" ]]; then
-            for mod in oplus_network_tuning oplus_networks_tuning; do
-              if [[ -z "${SEENMODULES[$mod]+x}" ]]; then
-                SEENMODULES["$mod"]=1
-                modules+=("$mod")
-              fi
-            done
-          fi
-
-          # Exclude Protected Modules From Blacklist
-          for mod in "${modules[@]}"; do
-            isrisky=false
-            for risky in "${RISKYMODULES[@]}"; do
-              if [[ "$mod" == "$risky" ]]; then
-                isrisky=true
-                echo "⚠️ Protected Module Excluded : $mod"
-                break
-              fi
-            done
-
-            # Keep Only Modules That Passed Protection Checks
-            if [[ "$isrisky" == "false" ]]; then
-              validatedmodules+=("$mod")
-            fi
-          done
-
-          # Format Validated Module Names as Comma-Separated
-          # Kconfig String, Enclosed in Double Quotes
-          RAWJOINED=$(IFS=,; printf '%s' "${validatedmodules[*]}")
-          RESULTLIST="\"${RAWJOINED}\""
-          echo "└─ 📂 Defconfig        : $DEFCONFIG"
-          echo "└─ 📦 Module Blacklist : $RESULTLIST"
-          echo "└─ 🌐 BBRv1 Enabled    : $BBRV1"
-          echo "└─ 🌐 BBRv3 Enabled    : $BBRV3"
-          if [[ ! -f "$DEFCONFIG" ]]; then
-            echo "⚠️ Defconfig Not Found : $DEFCONFIG"
-            exit 1
-          fi
-
-          # Update Existing Blacklist Option or Append if Missing
-          if grep -q '^CONFIG_DEBLOAT_VENDOR_MODULES=' "$DEFCONFIG"; then
-            sed -i \
-              "s|^CONFIG_DEBLOAT_VENDOR_MODULES=.*|CONFIG_DEBLOAT_VENDOR_MODULES=${RESULTLIST}|" \
-              "$DEFCONFIG"
-          else
-            printf '%s\n' \
-              "CONFIG_DEBLOAT_VENDOR_MODULES=${RESULTLIST}" \
-              >> "$DEFCONFIG"
-          fi
-
-          # Select Vendor Module Blacklist Patch Based on Kernel Version
-          MINIMUMVERSION="5.16"
-          if [[ "$(printf '%s\n' "$KERNELVERSION" "$MINIMUMVERSION" | sort -V | head -n1)" == "$KERNELVERSION" ]]; then
-            VMPATCHFILE="${PATCHDIR}/VendorModules/vendorblacklist-5.15-below.patch"
-          else
-            VMPATCHFILE="${PATCHDIR}/VendorModules/vendorblacklist-6.1-above.patch"
-          fi
-
-          echo "└─ 📄 Kernel Version : $KERNELVERSION"
-          echo "└─ 📄 Patch          : $VMPATCHFILE"
-          # Verify Selected Patch Exists
-          if [[ ! -f "$VMPATCHFILE" ]]; then
-            echo "⚠️ Vendor Module Patch Not Found : $VMPATCHFILE"
-            exit 1
-          fi
-
-          # Apply Patch if Needed; Otherwise Verify if Already Applied
-          if patch --dry-run -p1 < "$VMPATCHFILE" >/dev/null 2>&1; then
-            patch -p1 --forward < "$VMPATCHFILE"
-            echo "└─ 📌 Vendor Module Patch Applied"
-          elif patch --dry-run -R -p1 < "$VMPATCHFILE" >/dev/null 2>&1; then
-            echo "└─ 📌 Patch Already Applied"
-          else
-            echo "⚠️ Patch is Neither Applicable Nor Already Applied"
-            exit 1
-          fi
-
-          echo "└─ 🎉 Vendor / Kernel Module Configuration Complete"
+        uses: ./kernel_workspace/AndreiMikh-Kernel-Lab/.github/actions/module-blacklist
+        with:
+          # Requested Vendor Module Blacklist
+          DISABLEVENDORMODULE: ${{ inputs.DISABLEVENDORMODULE }}
+          # TCP Algorithm For Automatic OPlus Module Blacklisting
+          TCPALGORITHM: ${{ inputs.TCPALGORITHM }}
   
       - name: 🕒 Setup Custom Build Time
         shell: bash
