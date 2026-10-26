@@ -1182,7 +1182,7 @@ jobs:
           MANAGERTAG: ${{ needs.prepare.outputs.managertag }}
           SUSFS: ${{ inputs.SUSFSREPOSITORY }}
 
-      - name: 🩹 SUSFS and Kernel Compatibility Patches
+      - name: 🩹 SUSFS and Compatibility Patches
         id: susfs
         if: ${{ inputs.SUSFSREPOSITORY != '-1' }}
         uses: ./kernel_workspace/AndreiMikh-Kernel-Lab/.github/actions/susfs
@@ -1297,102 +1297,12 @@ jobs:
 
           echo "└─ 🎉 Scheduler Conversion Stage Completed"
 
-      - name: 🩹 DRM Atomic Clone Validation Flicker Fix
-        if: ${{ steps.kernel-version-setup.outputs.fullversion == '6.6.118' && startsWith(steps.extract-info.outputs.cpu, 'sm8750') }}       
-        shell: bash
-        run: |
-          set -Eeuo pipefail
-          DRMFIXPATCH="${PATCHDIR}/drm-atomic.patch"
-          echo "└─ 🚀 DRM Atomic Clone Validation Flicker Fix"
-          echo "└─ 📂 CPU        : ${CPU:-Unknown}"
-          echo "└─ 📂 Kernel     : ${FULLVERSION:-Unknown}"
-          echo "└─ 📂 Kernel Dir : $COMMONKERNELFOLDER"
-          echo "└─ 📄 Patch      : $DRMFIXPATCH"
-          # Validate Target Files
-          TARGETS=(
-            "drivers/gpu/drm/drm_atomic_helper.c"
-            "drivers/gpu/drm/drm_mode_config.c"
-            "include/drm/drm_mode_config.h"
-          )
-          # Move Into Kernel Source Directory
-          cd "$COMMONKERNELFOLDER"
-          echo "└─ 🔎 Validating DRM Atomic Target Files..."
-          for TARGET in "${TARGETS[@]}"; do
-            if [[ ! -f "$TARGET" ]]; then
-              echo "└─ ⚠️ Required DRM File Not Found :"
-              echo "$TARGET"
-              exit 1
-            fi
-            echo "└─ 📌 Found : $TARGET"
-          done
-    
-          echo "└─ 🧪 Checking Whether DRM Atomic Flicker Fix Can Be Applied..."
-          if git apply --check -p1 "$DRMFIXPATCH" >/dev/null 2>&1; then
-            echo "└─ 🚀 Applying DRM Atomic Clone Validation Flicker Fix..."
-            git apply --verbose -p1 "$DRMFIXPATCH"
-            echo "📌 DRM Atomic Flicker Fix Applied Successfully"
-          elif git apply --reverse --check -p1 "$DRMFIXPATCH" >/dev/null 2>&1; then
-            echo "└─ ℹ️ DRM Atomic Flicker Fix is Already Applied"
-            echo "└─ ⏭️ Skipping..."
-          else
-            echo "└─ ⚠️ DRM Atomic Patch is Incompatible with this Kernel Source"
-            echo "└─ ⚠️ Patch Validation Failed"
-            echo "└─ ⏭️ Skipping Patch..."
-          fi
-
-          # Load Reject Checker and Run Rejection Check
-          source "$REJECTCHECKER"
-          checkrejects .
-          echo "└─ 🎉 DRM Atomic Clone Validation Flicker Fix Completed"
+      - name: 🩹 Apply DRM Atomic Clone Validation Flicker Fix
+        if: ${{ steps.kernel-version-setup.outputs.kernelversion == '6.6' && startsWith(steps.extract-info.outputs.cpu, 'sm8750') }}
+        uses: ./kernel_workspace/AndreiMikh-Kernel-Lab/.github/actions/drm-atomic
 
       - name: 🛡️ Apply RTMutex CVE Fix
-        run: |
-          set -Eeuo pipefail
-          # Navigate to Kernel Common Directory
-          cd "$COMMONKERNELFOLDER"
-          # RTMutex Source Files Affected by CVE Fix
-          RTMUTEX="kernel/locking/rtmutex.c"
-          RTMUTEXAPIC="kernel/locking/rtmutex_api.c"
-          echo "└─ 🩹 Checking RTMutex CVE Fix compatibility..."
-          # Check Whether Kernel Matches Expected Pre-Fix RTMutex Code
-          if grep -qF $'raw_spin_lock(&current->pi_lock);\n\trt_mutex_dequeue(lock, waiter);\n\tcurrent->pi_blocked_on = NULL;\n\traw_spin_unlock(&current->pi_lock);' "$RTMUTEX" &&
-             grep -qF 'next_lock, NULL, current);' "$RTMUTEX" &&
-             grep -qF $'if (unlikely(ret))\n\t\tremove_waiter(lock, waiter);' "$RTMUTEXAPIC"; then
-            echo "└─ ⚙️ Compatible Kernel Detected..."
-            echo "└─ 🩹 Applying RTMutex CVE Fix..."
-            # Replace Unsafe Waiter Task Handling
-            perl -0pi -e '
-              my $old = qr/\traw_spin_lock\(&current->pi_lock\);\n\trt_mutex_dequeue\(lock, waiter\);\n\tcurrent->pi_blocked_on = NULL;\n\traw_spin_unlock\(&current->pi_lock\);/;
-              my $new = "\tstruct task_struct *waiter_task = waiter->task;\n\n\tif (!waiter_task)\n\t\treturn;\n\n\tscoped_guard(raw_spinlock, &waiter_task->pi_lock) {\n\t\trt_mutex_dequeue(lock, waiter);\n\t\twaiter_task->pi_blocked_on = NULL;\n\t}";
-              die "rtmutex waiter block not found\n" unless s/$old/$new/ == 1;
-            ' "$RTMUTEX"
-            # Use Actual Waiter Task For Priority Inheritance
-            perl -0pi -e '
-              die "rtmutex priority chain target not found\n"
-                unless s/next_lock, NULL, current\);/next_lock, NULL, waiter_task);/ == 1;
-            ' "$RTMUTEX"
-            # Fix Proxy Lock Error Handling
-            perl -0pi -e '
-              die "rtmutex proxy lock condition not found\n"
-                unless s/if \(unlikely\(ret\)\)\n\t\tremove_waiter\(lock, waiter\);/if (unlikely(ret < 0))\n\t\tremove_waiter(lock, waiter);/ == 1;
-            ' "$RTMUTEXAPIC"
-            # Verify All Expected CVE Changes Were Applied
-            if grep -qF 'struct task_struct *waiter_task = waiter->task;' "$RTMUTEX" &&
-               grep -qF 'if (!waiter_task)' "$RTMUTEX" &&
-               grep -qF 'scoped_guard(raw_spinlock, &waiter_task->pi_lock)' "$RTMUTEX" &&
-               grep -qF 'waiter_task->pi_blocked_on = NULL;' "$RTMUTEX" &&
-               grep -qF 'next_lock, NULL, waiter_task);' "$RTMUTEX" &&
-               grep -qF $'if (unlikely(ret < 0))\n\t\tremove_waiter(lock, waiter);' "$RTMUTEXAPIC"; then
-              echo "🎉 RTMutex CVE Fix Applied and Verified"
-            else
-              echo "└─ ⚠️ RTMutex CVE Fix Verification Failed"
-              exit 1
-            fi
-          else
-            # Skip Kernels with Incompatible or Already-Fixed RTMutex Code
-            echo "└─ ℹ️ Kernel is Not Compatible with RTMutex CVE Fix.."
-            echo "└─ ⏭️ Skipping..."
-          fi
+        uses: ./kernel_workspace/AndreiMikh-Kernel-Lab/.github/actions/rtmutex-cve
      
       - name: 🚧 Unicode Bypass
         if: ${{ inputs.UNICODE }}
@@ -1815,140 +1725,14 @@ jobs:
           echo "└─ Network     : Enabled"
           echo "└─ BUILD Bazel : Checked"
           
-      - name: 🌐 TCP Congestion Control BBRv3
+      # Apply BBRv3 TCP Congestion Control
+      - name: 🌐 Apply BBRv3 TCP Congestion Control
         if: >-
           ${{
             inputs.TCPALGORITHM == 'BBRV1+BBRV3+ECN' ||
             inputs.TCPALGORITHM == 'BBRV1+BBRV3+ECN+Brutal'
           }}
-        shell: bash
-        run: |
-          set -Eeuo pipefail
-          echo "└─ 🚀 Applying BBRv3..."
-          # Define Kernel Source and BBRv3 Patch Directories
-          BBRDIR="${PATCHDIR}/BBRV3"          
-          # Select BBRv3 Backport Patch For Current Android and Kernel Version
-          BBRPATCH="${BBRDIR}/bbrv3-${{ steps.kernel-version-setup.outputs.androidversion }}-${{ steps.kernel-version-setup.outputs.kernelversion }}.patch"
-          DEBUGFSPATCH="${BBRDIR}/bbrv3-adddebugfs-diagruntimetunables.patch"
-          # Validate BBRv3 Patch Directory
-          if [[ ! -d "${BBRDIR}" ]]; then
-            echo "└─ ⚠️ BBRv3 Patch Directory Not Found : ${BBRDIR}"
-            exit 1
-          fi
-
-          # Validate Main BBRv3 Patch
-          if [[ ! -f "${BBRPATCH}" ]]; then
-            echo "└─ ⚠️ BBRv3 Patch Not Found For ${{ steps.kernel-version-setup.outputs.androidversion }}-${{ steps.kernel-version-setup.outputs.kernelversion }}"
-            echo "Expected                : ${BBRPATCH}"
-            echo "Available BBRv3 Patches :"
-            find "${BBRDIR}" \
-              -maxdepth 1 \
-              -type f \
-              -name "*.patch" \
-              -print | sort
-            exit 1
-          fi
-
-          echo "└─ 📂 BBRv3 Patch Directory : ${BBRDIR}"
-          echo "└─ 📱 Android Version       : ${{ steps.kernel-version-setup.outputs.androidversion }}"
-          echo "└─ 🐧 Kernel Version        : ${{ steps.kernel-version-setup.outputs.kernelversion }}"
-          echo "└─ ⚙️ BBRv3 Patch           : $(basename "${BBRPATCH}")"
-          echo "└─ 🔧 DebugFS Patch         : $(basename "${DEBUGFSPATCH}")"
-          # Move to Kernel Common Directory
-          cd "$COMMONKERNELFOLDER"
-          # Apply Main BBRv3 Backport Patch
-          echo "└─ ⚙️ Applying BBRv3 Main Patch..."
-          patchstatus=0
-          if ! patch -p1 < "${BBRPATCH}"; then
-            patchstatus=$?
-            echo "└─ ⚠️ BBRv3 Main Patch Failed with Status ${patchstatus}"
-          else
-            echo "└─ 🚀 Main BBRv3 Patch Applied Successfully"
-          fi
-
-          # Android 16 / Kernel 6.12 DebugFS and Runtime Tunables
-          # Additional Patch Compatible to Android 16 / 6.12 BBRv3 Backport
-          if [[ "${{ steps.kernel-version-setup.outputs.androidversion }}" == "android16" && "${{ steps.kernel-version-setup.outputs.kernelversion }}" == "6.12" ]]; then
-            if [[ ! -f "${DEBUGFSPATCH}" ]]; then
-              echo "└─ ⚠️ Required BBRv3 DebugFS / Tunables Patch Not Found For Android16-6.12"
-              echo "Expected : ${DEBUGFSPATCH}"
-              if [[ "${patchstatus}" -eq 0 ]]; then
-                patchstatus=1
-              fi
-            else
-              echo "└─ ⚙️ Applying Android 16 / 6.12 DebugFS / Tunables Patch..."
-              echo "└─ 📄 Patch : $(basename "${DEBUGFSPATCH}")"
-              debugfsstatus=0
-              if patch -p1 < "${DEBUGFSPATCH}"; then
-                echo "└─ 🚀 BBRv3 DebugFS / Tunables Patch Applied Successfully"
-              else
-                debugfsstatus=$?
-                echo "└─ ⚠️ BBRv3 DebugFS / Tunables Patch Failed with Status ${debugfsstatus}"
-                if [[ "${patchstatus}" -eq 0 ]]; then
-                  patchstatus="${debugfsstatus}"
-                fi
-              fi
-            fi
-          else
-            echo "└─ ☘️ DebugFS / Tunables Patch Not Required For ${{ steps.kernel-version-setup.outputs.androidversion }}-${{ steps.kernel-version-setup.outputs.kernelversion }}"
-          fi
-
-          # ProcDou8vecMinmax() Compatibility
-          # Apply SYSCTL Compatibility Patches Whenever Required Function is Missing From Kernel Tree
-          if ! grep -qE 'proc_dou8vec_minmax[[:space:]]*\(' include/linux/sysctl.h; then
-            echo "⚙️ ProcDou8vecMinmax() is Missing"
-            echo "Applying Required SYSCTL Compatibility Patches..."
-            for COMPATPATCH in \
-              "sysctl-addprocdou8vec-minmax-pre-5-13.patch" \
-              "sysctl-fixdataracesproc-dou8vec-minmax-pre-5-13.patch"
-            do
-              COMPATFILE="${BBRDIR}/${COMPATPATCH}"             
-              # Make Sure Required Compatibility Patch Exists Before Attempting to Apply
-              if [[ ! -f "${COMPATFILE}" ]]; then
-                echo "└─ ⚠️ Required Compatibility Patch Not Found :"
-                echo "└─ ${COMPATFILE}"               
-                if [[ "${patchstatus}" -eq 0 ]]; then
-                  patchstatus=1
-                fi                         
-                continue
-              fi
-
-              echo "└─ ⚙️ Applying Compatibility Patch : ${COMPATPATCH}"             
-              compatstatus=0
-              if patch -p1 < "${COMPATFILE}"; then
-                echo "└─ 🚀 Applied ${COMPATPATCH}"
-              else
-                compatstatus=$?
-                echo "└─ ⚠️ Failed to Apply ${COMPATPATCH} (status ${compatstatus})"               
-                if [[ "${patchstatus}" -eq 0 ]]; then
-                  patchstatus="${compatstatus}"
-                fi
-              fi
-            done
-   
-          else
-            echo "└─ ℹ️ ProcDou8vecMinmax() Already Exists"
-            echo "└─ ☘️ Skipping SYSCTL Compatibility Patches"
-          fi
-
-          # Reject Checker
-          echo "└─ 🔎 Running Reject Checker..."
-          if [[ ! -f "${REJECTCHECKER}" ]]; then
-            echo "└─ ⚠️ Reject Checker Not Found : ${REJECTCHECKER}"
-            exit 1
-          fi
-
-          source "${REJECTCHECKER}"
-          checkrejects .
-          # Final Patch Status
-          if [[ "${patchstatus}" -ne 0 ]]; then
-            echo "└─ ⚠️ BBRv3 Patch Application Failed"
-            echo "└─ Android : ${{ steps.kernel-version-setup.outputs.androidversion }}"
-            echo "└─ Kernel  : ${{ steps.kernel-version-setup.outputs.kernelversion }}"
-            exit "${patchstatus}"
-          fi
-
-          echo "└─ 🎉 BBRv3 Patches Applied Successfully"
+        uses: ./kernel_workspace/AndreiMikh-Kernel-Lab/.github/actions/bbrv3
 
       - name: ⚙️ Kernel Configuration
         uses: ./kernel_workspace/AndreiMikh-Kernel-Lab/.github/actions/kernel-configuration
@@ -1998,136 +1782,15 @@ jobs:
 
           echo "└─ 🎉 IPv6 NAT Fix Stage Completed"
 
-      - name: 🚫 Vendor Kernel Module(s)
+      # Configure Vendor Kernel Module Blacklist
+      - name: 🚫 Configure Vendor Kernel Module(s) Blacklist
         if: ${{ inputs.DISABLEVENDORMODULE != 'None' }}
-        shell: bash
-        env:
-          BLACKLISTMODULES: ${{ inputs.DISABLEVENDORMODULE }}        
-          BBRV1: ${{ contains(inputs.TCPALGORITHM, 'BBRV1') }}
-          BBRV3: ${{ contains(inputs.TCPALGORITHM, 'BBRV3') }}      
-        run: |
-          set -Eeuo pipefail
-          # Move to Common Kernel Source Directory
-          cd "$COMMONKERNELFOLDER"
-          # Define Modules That Must Not be Included in Blacklist
-          RISKYMODULES=(
-            coresight
-            rust_binder
-            msm_kgsl
-            camera
-            oplusboot
-            rmnet_wlan
-            rmnet_core
-            msm_drm
-            cnss2
-            oplus_chg_v2
-            reboot_mode
-            rfkill
-            bootloader_log
-          )
-          # Initialize Module Lists and Duplicate Tracking
-          declare -a modules=()
-          declare -a validatedmodules=()
-          declare -A SEENMODULES=()
-          # Parse Comma-Separated Vendor Module Blacklist Input
-          IFS=',' read -r -a ADDR <<< "${BLACKLISTMODULES:-}"
-          for mod in "${ADDR[@]}"; do
-            # Remove Whitespace From Module Names
-            mod="${mod//[[:space:]]/}"
-            [[ -z "$mod" ]] && continue
-            # Reject Invalid Module Names to Prevent Malformed Configuration(s)
-            if [[ ! "$mod" =~ ^[a-zA-Z0-9_-]+$ ]]; then
-              echo "⚠️ Invalid Module Name(s) : $mod"
-              exit 1
-            fi
-
-            # Add Each Module Once, Preserving Input Order
-            if [[ -z "${SEENMODULES[$mod]+x}" ]]; then
-              SEENMODULES["$mod"]=1
-              modules+=("$mod")
-            fi
-          done
-
-          # Automatically Blacklist OPlus Network Tuning Modules
-          # When Either BBRv1 or BBRv3 is Enabled
-          if [[ "$BBRV1" == "true" || "$BBRV3" == "true" ]]; then
-            for mod in oplus_network_tuning oplus_networks_tuning; do
-              if [[ -z "${SEENMODULES[$mod]+x}" ]]; then
-                SEENMODULES["$mod"]=1
-                modules+=("$mod")
-              fi
-            done
-          fi
-
-          # Exclude Protected Modules From Blacklist
-          for mod in "${modules[@]}"; do
-            isrisky=false
-            for risky in "${RISKYMODULES[@]}"; do
-              if [[ "$mod" == "$risky" ]]; then
-                isrisky=true
-                echo "⚠️ Protected Module Excluded : $mod"
-                break
-              fi
-            done
-
-            # Keep Only Modules That Passed Protection Checks
-            if [[ "$isrisky" == "false" ]]; then
-              validatedmodules+=("$mod")
-            fi
-          done
-
-          # Format Validated Module Names as Comma-Separated
-          # Kconfig String, Enclosed in Double Quotes
-          RAWJOINED=$(IFS=,; printf '%s' "${validatedmodules[*]}")
-          RESULTLIST="\"${RAWJOINED}\""
-          echo "└─ 📂 Defconfig        : $DEFCONFIG"
-          echo "└─ 📦 Module Blacklist : $RESULTLIST"
-          echo "└─ 🌐 BBRv1 Enabled    : $BBRV1"
-          echo "└─ 🌐 BBRv3 Enabled    : $BBRV3"
-          if [[ ! -f "$DEFCONFIG" ]]; then
-            echo "⚠️ Defconfig Not Found : $DEFCONFIG"
-            exit 1
-          fi
-
-          # Update Existing Blacklist Option or Append if Missing
-          if grep -q '^CONFIG_DEBLOAT_VENDOR_MODULES=' "$DEFCONFIG"; then
-            sed -i \
-              "s|^CONFIG_DEBLOAT_VENDOR_MODULES=.*|CONFIG_DEBLOAT_VENDOR_MODULES=${RESULTLIST}|" \
-              "$DEFCONFIG"
-          else
-            printf '%s\n' \
-              "CONFIG_DEBLOAT_VENDOR_MODULES=${RESULTLIST}" \
-              >> "$DEFCONFIG"
-          fi
-
-          # Select Vendor Module Blacklist Patch Based on Kernel Version
-          MINIMUMVERSION="5.16"
-          if [[ "$(printf '%s\n' "$KERNELVERSION" "$MINIMUMVERSION" | sort -V | head -n1)" == "$KERNELVERSION" ]]; then
-            VMPATCHFILE="${PATCHDIR}/VendorModules/vendorblacklist-5.15-below.patch"
-          else
-            VMPATCHFILE="${PATCHDIR}/VendorModules/vendorblacklist-6.1-above.patch"
-          fi
-
-          echo "└─ 📄 Kernel Version : $KERNELVERSION"
-          echo "└─ 📄 Patch          : $VMPATCHFILE"
-          # Verify Selected Patch Exists
-          if [[ ! -f "$VMPATCHFILE" ]]; then
-            echo "⚠️ Vendor Module Patch Not Found : $VMPATCHFILE"
-            exit 1
-          fi
-
-          # Apply Patch if Needed; Otherwise Verify if Already Applied
-          if patch --dry-run -p1 < "$VMPATCHFILE" >/dev/null 2>&1; then
-            patch -p1 --forward < "$VMPATCHFILE"
-            echo "└─ 📌 Vendor Module Patch Applied"
-          elif patch --dry-run -R -p1 < "$VMPATCHFILE" >/dev/null 2>&1; then
-            echo "└─ 📌 Patch Already Applied"
-          else
-            echo "⚠️ Patch is Neither Applicable Nor Already Applied"
-            exit 1
-          fi
-
-          echo "└─ 🎉 Vendor / Kernel Module Configuration Complete"
+        uses: ./kernel_workspace/AndreiMikh-Kernel-Lab/.github/actions/module-blacklist
+        with:
+          # Requested Vendor Module Blacklist
+          DISABLEVENDORMODULE: ${{ inputs.DISABLEVENDORMODULE }}
+          # TCP Algorithm For Automatic OPlus Module Blacklisting
+          TCPALGORITHM: ${{ inputs.TCPALGORITHM }}
   
       - name: 🕒 Setup Custom Build Time
         shell: bash
@@ -3306,4 +2969,4 @@ jobs:
         run: |
           echo "└─ 🏷️ ReKernel Version : ${{ steps.rekernel.outputs.version-number }}"
           echo "└─ 📦 ReKernel Module  : ${{ steps.rekernel.outputs.module-path }}"
-            
+          
