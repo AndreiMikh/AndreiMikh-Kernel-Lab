@@ -639,54 +639,26 @@ jobs:
           echo "----------- Memory -----------"
           free -h
 
+      # Clean APT Metadata and Install Required Kernel Build Dependencies
       - name: 🧰 Build Dependencies
-        shell: bash
-        run: |
-          set -Eeuo pipefail  
-          # Remove Problematic Third-Party APT Repositories
-          echo "└─ 🧹 Removing Problematic APT Repositories..."
-          sudo rm -f /etc/apt/sources.list.d/google-chrome.list || true
-          sudo rm -f /etc/apt/sources.list.d/*chrome* || true      
-          # Clean Stale APT Metadata
-          echo "└─ 🧹 Cleaning APT Lists..."
-          sudo rm -rf /var/lib/apt/lists/*
-          sudo apt-get clean      
-          # Refresh Package Indexes with Retry
-          echo "└─ 🔄 Updating APT Indexes..."
-          sudo apt-get update \
-            -o Acquire::Retries=5 \
-            -o Acquire::http::Pipeline-Depth=0      
-          # Define Required APT Packages
-          export APTPACKAGES="bc build-essential bison clang curl dos2unix elfutils flex gawk git kmod lld llvm libdw-dev libelf-dev lz4 libncurses-dev libssl-dev libxml2-utils python3 rsync unzip zip zlib1g-dev"      
-          # Define APT Packages Script Path
-          APTSCRIPT="${SCRIPTSDIR}/APT-Packages.sh"      
-          # Verify APT Packages Script Exists
-          if [[ ! -f "$APTSCRIPT" ]]; then
-            echo "└─ ⚠️ APT Packages Script Not Found"
-            echo "└─ 📁 Expected Path : $APTSCRIPT"
-            exit 1
-          fi
-      
-          # Make APT Packages Script Executable
-          chmod +x "$APTSCRIPT"      
-          # Run APT Packages Installation with Persistent Cache
-          echo "└─ 🚀 Running APT Packages Script..."
-          bash "$APTSCRIPT" "$HOME/.apt-pkg-cache"      
-          echo "└─ 🎉 Build Dependencies Ready"
+        uses: ./kernel_workspace/AndreiMikh-Kernel-Lab/.github/actions/build-dependencies
 
+      # Resolve Selected Kernel Manifest File and Determine its Configuration
       - name: 📄 Resolve Manifest Configuration
         id: resolve-file
         uses: ./kernel_workspace/AndreiMikh-Kernel-Lab/.github/actions/resolve-manifest-file
         with:
           FILE: ${{ inputs.FILE }}
 
+      # Extract Kernel Manifest Information, Including Device and CPU Details
       - name: 🧬 Extract Manifest Information
         id: extract-info
         uses: ./kernel_workspace/AndreiMikh-Kernel-Lab/.github/actions/resolve-manifest
         with:
           FILE: ${{ steps.resolve-file.outputs.file }}
           GITHUBREPOSITORY: ${{ inputs.GITHUBREPOSITORY }}
-      
+
+      # Resolve Final Kernel Build Identity, Suffix and Enabled Features
       - name: 🪪 Build Identity
         id: suffix
         uses: ./kernel_workspace/AndreiMikh-Kernel-Lab/.github/actions/resolve-final-identity
@@ -1154,20 +1126,24 @@ jobs:
             2>/dev/null || true      
           echo "└─ 🎉 Default Config Checks Disabled"
 
+      # Resolve Kernel Version, Sublevel and Custom Suffix Configuration
       - name: 📌 Kernel Version and Suffix Setup
         id: kernel-version-setup
         uses: ./kernel_workspace/AndreiMikh-Kernel-Lab/.github/actions/resolve-kernelversion-config
         with:
           SUBLEVEL: ${{ inputs.SUBLEVEL }}
           SUFFIX: ${{ inputs.SUFFIX }}
-    
+
+      # Setup Kernel Toolchain and Resolve Compiler Configuration
       - name: 🧰 Kernel Toolchain Setup
         id: kernel-toolchain
         uses: ./kernel_workspace/AndreiMikh-Kernel-Lab/.github/actions/kernel-toolchain
-        
+
+      # Install and Configure Build Compilers and Required Toolchains
       - name: ⚙️ Setup Build Toolchains
         uses: ./kernel_workspace/AndreiMikh-Kernel-Lab/.github/actions/setup-build-compiler        
 
+      # Configure Selected Root Engine and Resolve its Build Parameters
       - name: ⚙️ Configure Root Engine
         id: rootengine
         uses: ./kernel_workspace/AndreiMikh-Kernel-Lab/.github/actions/config-root-engine
@@ -1182,7 +1158,8 @@ jobs:
           MANAGERTAG: ${{ needs.prepare.outputs.managertag }}
           SUSFS: ${{ inputs.SUSFSREPOSITORY }}
 
-      - name: 🩹 SUSFS and Compatibility Patches
+      # Apply SUSFS Integration and Required Kernel Compatibility Patches When Enabled
+      - name: 🩹 Apply SUSFS Integration and Compatibility Patches
         id: susfs
         if: ${{ inputs.SUSFSREPOSITORY != '-1' }}
         uses: ./kernel_workspace/AndreiMikh-Kernel-Lab/.github/actions/susfs
@@ -1192,7 +1169,8 @@ jobs:
           SUSFSVARIANT: ${{ inputs.SUSFSVARIANT }}
           SUSFSBRANCHDEV: ${{ inputs.SUSFSBRANCHDEV }}
           FILE: ${{ inputs.FILE }}
-          
+    
+      # Integrate NoMount into  Kernel and Prepare its Package When Selected
       - name: 🧩 NoMount Kernel Integration and Package
         id: nomount
         if: ${{ inputs.NOMOUNT == 'NoMount' || inputs.NOMOUNT == 'NoMount-Dev' }}
@@ -1292,66 +1270,14 @@ jobs:
           checkrejects .
           echo "└─ 🎉 Unicode Bypass Stage Completed"
                             
+      # Apply Fengchi / Windspeed Scheduler For Supported CPUs When Enabled
       - name: ⚡ Apply Fengchi / Windspeed Scheduler
         if: ${{ contains(fromJSON('["sm8750", "sm8735", "mt6991"]'), steps.extract-info.outputs.cpu) && inputs.WINDSPEED }}
-        shell: bash
-        env:
+        uses: ./kernel_workspace/AndreiMikh-Kernel-Lab/.github/actions/fengchi-scheduler
+        with:
           FILE: ${{ steps.resolve-file.outputs.file }}
-          CPU: ${{ env.CPU }}
-          CPUD: ${{ env.CPUD }}
-        run: |
-          set -Eeuo pipefail      
-          # Navigate to Kernel Common Directory
-          cd "$COMMONKERNELFOLDER"      
-          # Resolve CPU Branch and Patch Name
-          CPU="${CPU:-${CPUD:-}}"
-          CFILE="${FILE//_bak/}"     
-          # Check if Fengchi Scheduler Already Exists
-          for p in ./kernel/sched/hmbird* ./vendor/oplus/kernel/cpu/sched_ext/hmbird*; do
-            [[ -e "$p" ]] && {
-              echo "└─ 🎉 Fengchi Scheduler Already Exists"
-              echo "└─ ⏭️ Skipping Patch..."
-              exit 0
-            }
-          done      
-          # Clone Fengchi Patch Repository
-          rm -rf SCHEDPATCH
-          echo "└─ 📥 Cloning Fengchi Patch Repository..."      
-          git clone --depth=1 \
-            https://github.com/AndreiMikh/Kernel-Hmbird-Patch.git \
-            -b "$CPU" SCHEDPATCH || {
-              echo "└─ ⚠️ CPU Branch '$CPU' Does Not Exist"
-              echo "└─ ⚠️ Fengchi Does Not Support Device Yet"
-              exit 11
-            }      
-          # Locate Fengchi Patch
-          FENGCHIPATCH="fengchi_${CFILE}.patch"
-          FENGCHIPATH="./SCHEDPATCH/${FENGCHIPATCH}"      
-          [[ -f "$FENGCHIPATH" ]] || {
-            echo "└─ ⚠️ Patch '$FENGCHIPATCH' Not Found"
-            echo "└─ ⚠️ Fengchi Does Not Support Device Yet"
-            exit 12
-          }      
-          # Apply Fengchi Scheduler Patch
-          echo "└─ 🔧 Applying Fengchi Scheduler Patch..."          
-          cp "$FENGCHIPATH" ./
-          dos2unix "$FENGCHIPATCH" 2>/dev/null || true   
-          patchstatus=0
-          patch -p1 --forward -F3 < "$FENGCHIPATCH" || patchstatus=$?          
-          # Cleanup
-          rm -f "$FENGCHIPATCH"
-          rm -rf SCHEDPATCH          
-          # Load Reject Checker and Run Rejection Check
-          source "$REJECTCHECKER"
-          checkrejects .          
-          # Fail if Patch Application Failed
-          if [[ "$patchstatus" -ne 0 ]]; then
-            echo "└─ ⚠️ Fengchi Scheduler Patch Failed"
-            exit "$patchstatus"
-          fi
-      
-          echo "└─ 🎉 Fengchi Patch Applied Successfully"
 
+      # Integrate Linux Security Baseband-Guard (BBG) When Configured
       - name: 🔐 Linux Security Baseband-Guard
         uses: ./kernel_workspace/AndreiMikh-Kernel-Lab/.github/actions/baseband-guard
         with:
@@ -1668,17 +1594,27 @@ jobs:
           }}
         uses: ./kernel_workspace/AndreiMikh-Kernel-Lab/.github/actions/bbrv3
 
+      # Configure Kernel Options and Enable Selected Integrations
       - name: ⚙️ Kernel Configuration
         uses: ./kernel_workspace/AndreiMikh-Kernel-Lab/.github/actions/kernel-configuration
         with:
+          # Kernel Manifest Configuration File
           FILE: ${{ inputs.FILE }}
+          # Selected Root Engine
           ROOTENGINE: ${{ inputs.ROOTENGINE }}
+          # SUSFS Repository Revision or Disabled State
           SUSFS: ${{ inputs.SUSFSREPOSITORY }}
+          # Selected Kernel Patch Configuration
           KERNELPATCH: ${{ inputs.KERNELPATCH }}
+          # TCP Congestion Control Algorithm
           TCP: ${{ inputs.TCPALGORITHM }}
+          # Linux Security Baseband-Guard
           LSMBBG: ${{ inputs.LSMBBG }}
+          # Netfilter Support
           NETFILTER: ${{ inputs.NETFILTER }}
+          # DroidSPaces and NT Synchronization Primitives
           LINUXCNTSYNC: ${{ inputs.LINUXCNTSYNC }}
+          # NoMount Kernel Integration
           NOMOUNT: ${{ inputs.NOMOUNT }}
         
       - name: 🔧 IPv6 NAT Fix Stage
