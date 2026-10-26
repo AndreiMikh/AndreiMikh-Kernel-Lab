@@ -1,0 +1,175 @@
+# Configure Vendor Kernel Module(s) Blacklist
+name: 🚫 Configure Vendor Kernel Module(s) Blacklist
+description: Configure Vendor Module(s) Blacklist, Protect Critical Module(s) and Apply Kernel-Version-Specific Patch
+# Composite Action Inputs
+inputs:
+  # Comma-Separated Vendor Module Blacklist
+  DISABLEVENDORMODULE:
+    description: Vendor Modules to Blacklist
+    required: true
+  # Selected TCP Congestion Control Algorithm
+  TCPALGORITHM:
+    description: Selected TCP Congestion Control Algorithm
+    required: true
+# Composite Action Configuration
+runs:
+  using: composite
+  steps:
+    # Configure Vendor Module(s) Blacklist and Apply Kernel Patch
+    - name: 🚫 Configure Vendor Module(s) Blacklist
+      shell: bash
+      # Export Composite Action Inputs as Environment Variables
+      env:
+        COMMONKERNELFOLDER: ${{ env.COMMONKERNELFOLDER }}
+        DEFCONFIG: ${{ env.DEFCONFIG }}
+        BLACKLISTMODULES: ${{ inputs.DISABLEVENDORMODULE }}
+        TCPALGORITHM: ${{ inputs.TCPALGORITHM }}
+        PATCHDIR: ${{ env.PATCHDIR }}
+        KERNELVERSION: ${{ env.KERNELVERSION }}
+      run: |
+        # Enable Strict Bash Error Handling
+        set -Eeuo pipefail
+        # Navigate to Kernel Common Source Directory
+        cd "$COMMONKERNELFOLDER"
+        # Define Module(s) That Must Be Protected From Blacklisting
+        RISKYMODULES=(
+          coresight
+          rust_binder
+          msm_kgsl
+          camera
+          oplusboot
+          rmnet_wlan
+          rmnet_core
+          msm_drm
+          cnss2
+          oplus_chg_v2
+          reboot_mode
+          rfkill
+          bootloader_log
+        )
+        # Initialize Module(s) Lists and Duplicate Tracking
+        declare -a modules=()
+        declare -a validatedmodules=()
+        declare -A SEENMODULES=()
+        # Parse Comma-Separated Vendor Module(s) Blacklist
+        IFS=',' read -r -a ADDR <<< "${BLACKLISTMODULES:-}"
+        for mod in "${ADDR[@]}"; do
+          # Remove Whitespace From Module(s) Names
+          mod="${mod//[[:space:]]/}"
+          # Skip Empty Module(s) Names
+          [[ -z "$mod" ]] && continue
+          # Reject Invalid Module(s) Names
+          if [[ ! "$mod" =~ ^[a-zA-Z0-9_-]+$ ]]; then
+            echo "└─ ⚠️ Invalid Module(s) Name : $mod"
+            exit 1
+          fi
+
+          # Add Each Module(s) Once While Preserving Input Order
+          if [[ -z "${SEENMODULES[$mod]+x}" ]]; then
+            SEENMODULES["$mod"]=1
+            modules+=("$mod")
+          fi
+        done
+
+        # Detect Whether BBRv1 or BBRv3 Is Selected
+        BBRV1=false
+        BBRV3=false
+        if [[ "$TCPALGORITHM" == *BBRV1* ]]; then
+          BBRV1=true
+        fi
+
+        if [[ "$TCPALGORITHM" == *BBRV3* ]]; then
+          BBRV3=true
+        fi
+
+        # Automatically Blacklist OPlus Network Tuning Module(s)
+        # Add These Module(s) When Either BBRv1 or BBRv3 is Enabled
+        if [[ "$BBRV1" == "true" || "$BBRV3" == "true" ]]; then
+          for mod in oplus_network_tuning oplus_networks_tuning; do
+            if [[ -z "${SEENMODULES[$mod]+x}" ]]; then
+              SEENMODULES["$mod"]=1
+              modules+=("$mod")
+            fi
+          done
+        fi
+
+        # Exclude Protected Module(s) From Blacklist
+        for mod in "${modules[@]}"; do
+          isrisky=false
+          for risky in "${RISKYMODULES[@]}"; do
+            if [[ "$mod" == "$risky" ]]; then
+              isrisky=true
+              echo "└─ ⚠️ Protected Module(s) Excluded : $mod"
+              break
+            fi
+            
+          done
+
+          # Keep Only Module(s) That Passed Protection Checks
+          if [[ "$isrisky" == "false" ]]; then
+            validatedmodules+=("$mod")
+          fi
+          
+        done
+
+        # Format Validated Module(s) Names For Kernel Configuration String
+        RAWJOINED=$(IFS=,; printf '%s' "${validatedmodules[*]}")
+        RESULTLIST="\"${RAWJOINED}\""
+        # Display Final Blacklist Configuration
+        echo "└─ 📂 Defconfig           : $DEFCONFIG"
+        echo "└─ 📦 Module(s) Blacklist : $RESULTLIST"
+        echo "└─ 🌐 BBRv1 Enabled       : $BBRV1"
+        echo "└─ 🌐 BBRv3 Enabled       : $BBRV3"
+        # Validate Target Default Configuration
+        if [[ ! -f "$DEFCONFIG" ]]; then
+          echo "└─ ⚠️ Default Configuration Not Found : $DEFCONFIG"
+          exit 1
+        fi
+
+        # Update Existing Blacklist Option or Append It
+        if grep -q '^CONFIG_DEBLOAT_VENDOR_MODULES=' "$DEFCONFIG"; then
+          sed -i \
+            "s|^CONFIG_DEBLOAT_VENDOR_MODULES=.*|CONFIG_DEBLOAT_VENDOR_MODULES=${RESULTLIST}|" \
+            "$DEFCONFIG"
+        else
+          printf '%s\n' \
+            "CONFIG_DEBLOAT_VENDOR_MODULES=${RESULTLIST}" \
+            >> "$DEFCONFIG"
+        fi
+
+        # Select Vendor Module(s) Patch Based on Kernel Version
+        MINIMUMVERSION="5.16"
+        if [[ "$(printf '%s\n' "$KERNELVERSION" "$MINIMUMVERSION" | sort -V | head -n1)" == "$KERNELVERSION" ]]; then
+          VMPATCHFILE="${PATCHDIR}/VendorModules/vendorblacklist-5.15-below.patch"
+        else
+          VMPATCHFILE="${PATCHDIR}/VendorModules/vendorblacklist-6.1-above.patch"
+        fi
+
+        # Display Kernel Version and Selected Patch
+        echo "└─ 📄 Kernel Version : $KERNELVERSION"
+        echo "└─ 📄 Patch          : $VMPATCHFILE"
+        # Validate Selected Vendor Module(s) Patch
+        if [[ ! -f "$VMPATCHFILE" ]]; then
+          echo "└─ ⚠️ Vendor Module(s) Patch Not Found : $VMPATCHFILE"
+          exit 1
+        fi
+
+        # Check Whether Patch can be Applied
+        # Apply it if Compatible, Otherwise Check Whether it is Already Applied
+        if patch --dry-run -p1 < "$VMPATCHFILE" >/dev/null 2>&1; then
+          # Apply Vendor Module(s) Blacklist Patch
+          patch -p1 --forward < "$VMPATCHFILE"
+          echo "└─ 📌 Vendor Module(s) Patch Applied"
+        elif patch --dry-run -R -p1 < "$VMPATCHFILE" >/dev/null 2>&1; then
+          # Skip Patch if its Changes are Already Present
+          echo "└─ ℹ️ Vendor Module(s) Patch Already Applied"
+          echo "└─ ⏭️ Skipping Patch..."
+        else
+          # Stop if Patch is Neither Applicable Nor Already Applied
+          echo "└─ ⚠️ Vendor Module(s) Patch is Neither Applicable Nor Already Applied"
+          exit 1
+        fi
+
+        # 🎉 Report Successful Completion
+        echo "└─ 🎉 Vendor / Kernel Module(s) Configuration Complete"
+        
