@@ -215,40 +215,67 @@ runs:
             fi
           fi
 
-          # Detect and Validate Legacy SMAPS Rollup Layout
-          if grep -Fq 'smap_gather_stats(vma, &mss, 0);' "$MMU"; then
-            echo "└─ 🔧 Legacy SMAPS ROLLUP Layout Detected"
-            # Add SUSFS Map Check to SHOW SMAP()
-            if ! grep -Fq 'SUSFS_IS_INODE_SUS_MAP(file_inode(vma->vm_file))' "$MMU"; then
-              if grep -Fq 'if (!vma_pages(vma))' "$MMU" ||
-                 grep -Fq 'if (!vma_data_pages(vma))' "$MMU"; then
-                perl -0pi -e 's/(static\s+int\s+show_smap\s*\([^)]*\)\s*\{.*?)(\n[ \t]*if\s*\(!vma_(?:data_)?pages\(vma\))/$1\n#ifdef CONFIG_KSU_SUSFS_SUS_MAP\n\tif (vma->vm_file && SUSFS_IS_INODE_SUS_MAP(file_inode(vma->vm_file)))\n\t\treturn 0;\n#endif$2/s' "$MMU"
-                echo "└─ 📌 Added SUSFS Map Check to SHOW SMAP()"
-              else
-                echo "└─ ⚠️ Cannot Locate SHOW SMAP() Insertion Point" >&2
-              fi
-              
-            else
-              echo "└─ ℹ️ SUSFS Map Check Already Present"
-            fi
+          
+          # Detect and Adapt SMAPS Layout For SUSFS Compatibility
+          if grep -Fq 'bypass_orig_flow:' "$MMU"; then
+            echo "└─ ℹ️ SUSFS SMAPS ROLLUP Adapter Already Present"
+          fi
 
-            # Add SUSFS Map Check to Legacy SMAPS ROLLUP
-            if ! grep -Fq 'bypass_orig_flow:' "$MMU"; then
-              if perl -0pi -e 's{(static\s+int\s+show_smaps_rollup\s*\([^)]*\)\s*\{.*?\n[ \t]*vma_start\s*=\s*vma->vm_start;\n[ \t]*do\s*\{\n)([ \t]*)smap_gather_stats\(vma, &mss, 0\);\n([ \t]*)last_vma_end = vma->vm_end;}{$1$2#ifdef CONFIG_KSU_SUSFS_SUS_MAP\n$2if (vma->vm_file && SUSFS_IS_INODE_SUS_MAP(file_inode(vma->vm_file)))\n$2\tgoto bypass_orig_flow;\n$2#endif\n$2smap_gather_stats(vma, &mss, 0);\n$2#ifdef CONFIG_KSU_SUSFS_SUS_MAP\n$2bypass_orig_flow:\n$2#endif\n$3last_vma_end = vma->vm_end;}s' "$MMU"; then
-                if ! grep -Fq 'bypass_orig_flow:' "$MMU"; then
-                  echo "└─ ⚠️ Failed to Insert Legacy SMAPS ROLLUP Adapter" >&2
-                fi
-              fi
-              
+          # Add SUSFS Map Check to SHOW SMAP()
+          if ! grep -Fq 'SUSFS_FAKE_SHOW_SMAP' "$MMU"; then
+            if perl -0pi -e 's{(static\s+int\s+show_smap\s*\([^)]*\)\s*\{.*?)(\n[ \t]*if\s*\(!vma_(?:data_)?pages\(vma\)\))}{$1\n#ifdef CONFIG_KSU_SUSFS_SUS_MAP\n\t/* SUSFS_FAKE_SHOW_SMAP */\n\tif (vma->vm_file && SUSFS_IS_INODE_SUS_MAP(file_inode(vma->vm_file)))\n\t\treturn 0;\n#endif$2}s' "$MMU" &&
+               grep -Fq 'SUSFS_FAKE_SHOW_SMAP' "$MMU"; then
+              echo "└─ 📌 Added SUSFS Map Check to SHOW SMAP()"
+            else
+              echo "└─ ⚠️ Failed to Insert SUSFS Check Into SHOW SMAP()" >&2
+              exit 1
+            fi
+          else
+            echo "└─ ℹ️ SHOW SMAP() SUSFS Check Already Present"
+          fi
+
+          # Adapt Legacy or Modern SMAPS ROLLUP Layout
+          if grep -Fq 'bypass_orig_flow:' "$MMU"; then
+            echo "└─ ℹ️ SMAPS ROLLUP Adapter Already Present"
+          elif grep -Fq 'smap_gather_stats(vma, &mss, 0);' "$MMU"; then
+            echo "└─ 🔧 Legacy SMAPS ROLLUP Layout Detected"
+            # Insert SUSFS Check and Bypass Label Into Legacy Layout
+            perl -0pi -e 's{(static\s+int\s+show_smaps_rollup\s*\([^)]*\)\s*\{.*?\n[ \t]*vma_start\s*=\s*vma->vm_start;\n[ \t]*do\s*\{\n)([ \t]*)smap_gather_stats\(vma, &mss, 0\);\n([ \t]*)last_vma_end = vma->vm_end;}{$1$2#ifdef CONFIG_KSU_SUSFS_SUS_MAP\n$2if (vma->vm_file && SUSFS_IS_INODE_SUS_MAP(file_inode(vma->vm_file)))\n$2\tgoto bypass_orig_flow;\n$2#endif\n$2smap_gather_stats(vma, &mss, 0);\n$2#ifdef CONFIG_KSU_SUSFS_SUS_MAP\n$2bypass_orig_flow:\n$2#endif\n$3last_vma_end = vma->vm_end;}s' "$MMU"
+            if grep -Fq 'bypass_orig_flow:' "$MMU"; then
               echo "└─ 📌 Added Legacy SMAPS ROLLUP Adapter"
             else
-              echo "└─ ℹ️ Legacy SMAPS ROLLUP Adapter Already Present"
+              echo "└─ ⚠️ Failed to Adapt Legacy SMAPS ROLLUP Layout" >&2
+              exit 1
             fi
-            
+
+          elif grep -Fq 'smap_gather_stats(priv, vma, &mss)' "$MMU"; then
+            echo "└─ 🔧 Modern SMAPS ROLLUP Layout Detected"
+            # Insert SUSFS Check Before Modern VMA Overlap Handling
+            perl -0pi -e 's{(static\s+int\s+show_smaps_rollup\s*\([^)]*\)\s*\{.*?)(\n[ \t]*if\s*\(vma->vm_start\s*<\s*last_vma_end\))}{$1\n#ifdef CONFIG_KSU_SUSFS_SUS_MAP\n\tif (vma->vm_file && SUSFS_IS_INODE_SUS_MAP(file_inode(vma->vm_file)))\n\t\tgoto bypass_orig_flow;\n#endif$2}s' "$MMU"
+            # Insert Bypass Label Before Updating the Last VMA End
+            perl -0pi -e 's{(static\s+int\s+show_smaps_rollup\s*\([^)]*\)\s*\{.*?)(\n[ \t]*last_vma_end\s*=\s*vma->vm_end;)}{$1\n#ifdef CONFIG_KSU_SUSFS_SUS_MAP\nbypass_orig_flow:\n#endif$2}s' "$MMU"
+            # Verify Both Modern SUSFS Insertion Points
+            if grep -Fq 'goto bypass_orig_flow;' "$MMU" &&
+               grep -Fq 'bypass_orig_flow:' "$MMU"; then
+              echo "└─ 📌 Added Modern SMAPS ROLLUP Adapter"
+            else
+              echo "└─ ⚠️ Failed to Adapt Modern SMAPS ROLLUP Layout" >&2
+              exit 1
+            fi
+
           else
-            echo "└─ ℹ️ Non-Legacy SMAPS ROLLUP Layout Detected"
+            echo "└─ ⚠️ Unsupported SMAPS ROLLUP Layout" >&2
+            echo "└─ ℹ️ Expected legacy or modern smap_gather_stats() call" >&2
+            exit 1
           fi
-          
+
+          # Verify Required SUSFS Map Checks
+          if ! grep -Fq 'SUSFS_FAKE_SHOW_SMAP' "$MMU" ||
+             ! grep -Fq 'bypass_orig_flow:' "$MMU"; then
+            echo "└─ ⚠️ SUSFS Fake Patch Validation Failed" >&2
+            exit 1
+          fi
+
           echo "└─ 🎉 Android 16 / 6.12 Fake Patch Preparation Complete"
         fi
 
