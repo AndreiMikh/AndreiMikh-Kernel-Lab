@@ -1,0 +1,99 @@
+name: 🗝️ Cache Key and Status
+description: Display Compiler Cache Key, Restoration Source, Cache Availability and Final Cache Status
+inputs:
+  FILE:
+    description: Device Manifest Configuration File Name Used to Identify Build
+    required: true
+    default: ""
+  ROOTENGINE:
+    description: Selected Root Solution Used to Identify Release Cache
+    required: true
+    default: ""
+  LOCAL:
+    description: Whether an Exact GitHub Actions Cache was Restored
+    required: false
+    default: ""
+  RELEASE:
+    description: Whether a Public Release Compiler Cache was Restored
+    required: false
+    default: ""
+  RUNNEROS:
+    description: Runner Operating System Used to Identify Local Cache
+    required: true
+    default: ""
+runs:
+  using: composite
+  steps:
+    - name: 🗝️ Cache Key and Status
+      shell: bash
+      env:
+        RUNNEROS: ${{ inputs.RUNNEROS }}
+        FILE: ${{ inputs.FILE }}
+        ROOTENGINE: ${{ inputs.ROOTENGINE }}
+        CPU: ${{ env.CPU }}
+        LOCAL: ${{ inputs.LOCAL }}
+        RELEASE: ${{ inputs.RELEASE }}
+        CCACHE_DIR: ${{ env.CCACHE_DIR }}
+      run: |
+        set -euo pipefail
+        # Construct Logical Cache Keys Used by Workflow
+        LOCALCACHEKEY="CCache-${RUNNEROS}-${FILE}-${CPU}-${GITHUB_REF_NAME}"
+        RELEASECACHEKEY="Cache-${FILE}-${ROOTENGINE}-${GITHUB_REF_NAME}"
+        # Select Cache Key and Restoration Source
+        if [[ "$LOCAL" == "true" ]]; then
+          CACHEKEY="$LOCALCACHEKEY"
+          CACHESOURCE="Local"
+        elif [[ "$RELEASE" == "true" ]]; then
+          CACHEKEY="$RELEASECACHEKEY"
+          CACHESOURCE="Release"
+        else
+          CACHEKEY="$LOCALCACHEKEY"
+          CACHESOURCE="None"
+        fi
+
+        # Check Whether Compiler Cache Directory Contains Any Data
+        CACHEDATA=false
+        if [[ -d "$CCACHE_DIR" ]] &&
+          find "$CCACHE_DIR" -mindepth 1 -maxdepth 1 -print -quit | grep -q .; then
+          CACHEDATA=true
+        fi
+
+        # Display the Selected Cache Key and Restoration Results
+        echo "└─ 🔑 Cache Key         : $CACHEKEY"
+        echo "└─ 📍 Cache Source      : $CACHESOURCE"
+        echo "└─ 🎯 Local Cache Hit   : ${LOCAL:-false}"
+        echo "└─ 🎯 Release Cache Hit : ${RELEASE:-false}"
+        # Initialize the GitHub Actions Step Summary
+        {
+          echo "### 🧠 Compiler Cache Status"
+          echo ""
+          echo "| Status | Value |"
+          echo "|--------|-------|"
+        } >> "$GITHUB_STEP_SUMMARY"
+        # Determine Final Cache Status by Restoration Priority
+        # Priority:
+        #   1. Exact GitHub Actions Cache Hit
+        #   2. Exact Public Release Cache Hit
+        #   3. Existing Cache Data Restored Through Restore-Key Fallback
+        #   4. Completely Empty Cache — Cold Build
+        if [[ "$LOCAL" == "true" ]]; then
+          STATUS="♻️ Exact Cache Match Restored From Local (Fully Matched Cache Key with Identical Build Signature For Maximum Re-Use Efficiency)"
+          echo "└─ ♻️ Cache Data Found"
+        elif [[ "$RELEASE" == "true" ]]; then
+          STATUS="♻️ Exact Cache Match Restored From Release (Fully Matched Cache Key with Identical Build Signature For Maximum Re-Use Efficiency)"
+          echo "└─ ♻️ Cache Data Found"
+        elif [[ "$CACHEDATA" == "true" ]]; then
+          STATUS="♻️ Partial Cache Restored (Fallback Cache Retrieved Via Restore Keys — May Result in Lower But Still Effective Cache Hit Rate)"
+          echo "└─ ♻️ Cache Data Found"
+        else
+          # Usable Cached Compiler Objects Were Restored
+          # Kernel Build Will Therefore Start as a Cold Cache Build
+          STATUS="⚠️ No Cache Available (Cold Build — All Compilation Requests Will Be Processed Without Any Cached Objects)"
+          echo "└─ ⚠️ No Cache Found — Cold Build"
+        fi
+
+        # Append Final Cache Status to Workflow Summary
+        echo "| Cache | $STATUS |" >> "$GITHUB_STEP_SUMMARY"
+        # Display Final Cache Status in Workflow Log
+        echo "└─ 📦 Final Cache Status :"
+        echo "$STATUS"
