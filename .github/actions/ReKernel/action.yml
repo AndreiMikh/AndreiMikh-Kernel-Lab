@@ -1,0 +1,156 @@
+# ReKernel Composite Action
+name: 🛠️ ReKernel
+description: Integrate ReKernel Sources, Configure Kbuild and Enable Network Support
+inputs:
+  # ReKernel Integration Mode: Built-in, Module or Disabled
+  REKERNEL:
+    description: ReKernel Integration Mode
+    required: true
+runs:
+  using: composite
+  steps:
+    # 🛠️ Integrate ReKernel Unless Disabled or Running Kernel 6.12
+    - name: 🛠️ ReKernel
+      if: ${{ (inputs.REKERNEL == 'Built-in' || inputs.REKERNEL == 'Module') && inputs.KERNELVERSION != '6.12' }}
+      shell: bash
+      # Export Composite Input and Environment Variables
+      env:
+        REKERNEL: ${{ inputs.REKERNEL }}
+        KERNELVERSION: ${{ env.KERNELVERSION }}
+        WORKDIR: ${{ env.WORKDIR }}
+        COMMONKERNELFOLDER: ${{ env.COMMONKERNELFOLDER }}
+      run: |
+        # Enable Strict Bash Error Handling
+        set -Eeuo pipefail
+        # Define ReKernel Repository and Kernel Integration Paths
+        RKREPODIR="${WORKDIR}/ReKernel"
+        DRIVERSDIR="${COMMONKERNELFOLDER}/drivers"
+        RKTARGETDIR="${DRIVERSDIR}/rekernel"
+        KCONFIGFILE="${DRIVERSDIR}/Kconfig"
+        MAKEFILE="${DRIVERSDIR}/Makefile"
+        DEFCONFIG="${COMMONKERNELFOLDER}/arch/arm64/configs/gki_defconfig"
+        BUILDBAZEL="${COMMONKERNELFOLDER}/BUILD.bazel"
+        # Clone ReKernel When Repository is Not Already Available
+        if [[ ! -d "$RKREPODIR/.git" ]]; then
+          echo "└─ 📩 Cloning ReKernel..."
+          git clone --depth=1 \
+            https://github.com/Sakion-Team/Re-Kernel.git \
+            "$RKREPODIR"
+          echo "└─ 📌 ReKernel Cloned"
+        else
+          echo "└─ ⚠️ ReKernel Repository Already Exists"
+        fi
+
+        # Define ReKernel Kernel Module Source Directory
+        # ReKernel Kernel Sources are Provided by LKM-Source
+        RKSRCDIR="${RKREPODIR}/LKM-Source"
+        echo "└─ 📂 ReKernel Source : $RKSRCDIR"
+        # Verify ReKernel Source Tree Before Modifying Kernel
+        if [[ ! -d "$RKSRCDIR" ]]; then
+          echo "└─ ⚠️ ReKernel LKM-Source Directory Not Found"
+          exit 1
+        fi
+
+        # Verify ReKernel Kconfig File Exists
+        if [[ ! -f "$RKSRCDIR/Kconfig" ]]; then
+          echo "└─ ⚠️ ReKernel Kconfig Not Found"
+          exit 1
+        fi
+
+        # Verify ReKernel Makefile Exists
+        if [[ ! -f "$RKSRCDIR/Makefile" ]]; then
+          echo "└─ ⚠️ ReKernel Makefile Not Found"
+          exit 1
+        fi
+
+        # Add ReKernel Kconfig to Kernel Drivers Menu
+        echo "⚙️ Checking ReKernel Kconfig Entry..."
+        if grep -qF 'source "drivers/rekernel/Kconfig"' "$KCONFIGFILE"; then
+          echo "⚠️ ReKernel Kconfig Entry Already Exists"
+        else
+          sed -i \
+            '/endmenu/i source "drivers/rekernel/Kconfig"' \
+            "$KCONFIGFILE"
+          echo "📌 ReKernel Kconfig Entry Added"
+        fi
+
+        # Add ReKernel to Kernel Drivers Build System
+        echo "└─ ⚙️ Checking ReKernel Makefile Entry..."
+        if grep -qF 'obj-$(CONFIG_REKERNEL) += rekernel/' "$MAKEFILE"; then
+          echo "└─ ⚠️ ReKernel Makefile Entry Already Exists"
+        else
+          printf '\n# Re-Kernel Support\nobj-$(CONFIG_REKERNEL) += rekernel/\n' \
+            >> "$MAKEFILE"
+          echo "└─ 📌 ReKernel Makefile Entry Added"
+        fi
+
+        # Replace Any Existing ReKernel Source with Current Upstream Source
+        echo "└─ ♻️ Syncing ReKernel Source..."
+        rm -rf "$RKTARGETDIR"
+        mkdir -p "$RKTARGETDIR"
+        cp -af "$RKSRCDIR"/. "$RKTARGETDIR"/
+        echo "└─ 📌 ReKernel Source Synced"
+        # Configure ReKernel as Built-in or Loadable Module
+        echo "└─ ⚙️ Configuring CONFIG REKERNEL..."
+        if [[ "$REKERNEL" == "Built-in" ]]; then
+          REKERNELCONFIG="y"
+        elif [[ "$REKERNEL" == "Module" ]]; then
+          REKERNELCONFIG="m"
+        else
+          echo "└─ ⚠️ Unsupported ReKernel Mode : $REKERNEL"
+          exit 1
+        fi
+
+        # Update Existing CONFIG REKERNEL or Append it to GKI Default Configuration
+        if grep -qE '^CONFIG_REKERNEL=(y|m)$' "$DEFCONFIG"; then
+          sed -i \
+            "s/^CONFIG_REKERNEL=.*/CONFIG_REKERNEL=${REKERNELCONFIG}/" \
+            "$DEFCONFIG"
+          echo "└─ 📌 CONFIG REKERNEL=${REKERNELCONFIG}"
+        else
+          printf '\nCONFIG_REKERNEL=%s\n' "$REKERNELCONFIG" >> "$DEFCONFIG"
+          echo "└─ 📌 CONFIG REKERNEL=${REKERNELCONFIG} Added"
+        fi
+
+        # Enable ReKernel Network Support in GKI Default Configuration
+        if grep -qE '^CONFIG_REKERNEL_NETWORK=y$' "$DEFCONFIG"; then
+          echo "└─ 📌 CONFIG REKERNEL NETWORK Already Enabled"
+        else
+          printf 'CONFIG_REKERNEL_NETWORK=y\n' >> "$DEFCONFIG"
+          echo "└─ 📌 CONFIG REKERNEL NETWORK Enabled"
+        fi
+
+        # Add ReKernel Module to Bazel Kernel Module Outputs When Supported
+        if [[ -f "$BUILDBAZEL" ]]; then
+          echo "└─ ⚙️ Checking BUILD Bazel..."
+          # Avoid Adding a Duplicate ReKernel Module Entry
+          if grep -qF '"drivers/rekernel/rekernel.ko"' "$BUILDBAZEL"; then
+            echo "└─ ⚠️ ReKernel Module Already Present in BUILD Bazel"
+          else
+            # Append ReKernel to First Matching Kernel AArch64 Module Output
+            sed -i \
+              '0,/name = "kernel_aarch64",/{/module_implicit_outs/s|,$| + ["drivers/rekernel/rekernel.ko"],|}' \
+              "$BUILDBAZEL"
+            # Verify ReKernel Module was Added Successfully
+            if grep -qF '"drivers/rekernel/rekernel.ko"' "$BUILDBAZEL"; then
+              echo "└─ 📌 BUILD Bazel Patched"
+            else
+              echo "└─ ⚠️ Failed to Patch BUILD Bazel"
+              exit 1
+            fi
+          fi
+          
+        else
+          # Skip Bazel Integration When BUILD Bazel Does Not Exist
+          echo "└─ ℹ️ BUILD Bazel Not Found, Skipping"
+        fi
+
+        # Display ReKernel Integration Summary
+        echo "└─ 🎉 ReKernel Integration Completed Successfully"
+        echo "└─ Source      : Synced"
+        echo "└─ Kconfig     : Integrated"
+        echo "└─ Makefile    : Integrated"
+        echo "└─ Config      : ${REKERNELCONFIG}"
+        echo "└─ Network     : Enabled"
+        echo "└─ BUILD Bazel : Checked"
+        
