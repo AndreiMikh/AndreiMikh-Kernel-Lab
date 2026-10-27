@@ -396,7 +396,7 @@ jobs:
 
       # Optimize Build Storage in Background
       - name: 🧹 Optimize Build Storage
-        # 🚦 Run Only When Automatic Cleanup Is Disabled
+        id: storage-cleanup
         if: ${{ env.CLEANSPACE == 'Disabled' }}
         shell: bash
         env:
@@ -405,19 +405,17 @@ jobs:
           REMOVEANDROID: true
           REMOVEHASKELL: true
           REMOVECODEQL: true
-          # Enable or Disable Docker Image Cleanup
-          REMOVEDOCKERIMAGES: false
-          # Enable Detailed Cleanup Logging
           DEBUG: true
         run: |
           set -Eeuo pipefail
-          # 📊 Display Initial Disk Usage
+          # Display Initial Disk Usage
           echo "└─ 🧹 Starting Background Storage Cleanup..."
           df -h /
           # 🔧 Enable Safe Wildcard Expansion
           shopt -s nullglob
-          # Initialize Cleanup Path List
+          # Initialize Cleanup Paths
           CLEANUPPATHS=()
+          EXISTINGPATHS=()
           # Add Optional Software Cleanup Paths
           [[ "$REMOVEDOTNET" == "true" ]] && CLEANUPPATHS+=(/usr/share/dotnet)
           [[ "$REMOVEANDROID" == "true" ]] && CLEANUPPATHS+=(/usr/local/lib/android)
@@ -432,53 +430,51 @@ jobs:
             /opt/az
             /opt/microsoft/powershell
             /usr/local/julia*
-            /usr/local/bin/pulumi*
           )
-          # Filter List to Include Only Existing Paths
-          EXISTINGPATHS=()
+          # Identify Existing Cleanup Paths
           for CLEANUPPATH in "${CLEANUPPATHS[@]}"; do
             if [[ -e "$CLEANUPPATH" || -L "$CLEANUPPATH" ]]; then
-              # 📝 Log Each Selected Path When Debugging is Enabled
               if [[ "$DEBUG" == "true" ]]; then
                 echo "└─ 🗑️ Selected For Removal : $CLEANUPPATH"
               fi
 
-              # 📌 Add Existing Path to Removal List
               EXISTINGPATHS+=("$CLEANUPPATH")
             fi
             
           done
 
-          # Start Software Removal Without Waiting For Completion
+          # Launch Software Removal in Background
           if (( ${#EXISTINGPATHS[@]} > 0 )); then
-            # Define Background Cleanup Log and PID File
             CLEANUPLOG="${RUNNER_TEMP}/storage-cleanup.log"
             CLEANUPPIDFILE="${RUNNER_TEMP}/storage-cleanup.pid"
-            # Launch Removal Through sudo and Detach Standard Input
-            sudo nohup rm -rf -- "${EXISTINGPATHS[@]}" \
+            # Start a Detached Removal Process
+            nohup sudo rm -rf -- "${EXISTINGPATHS[@]}" \
               > "$CLEANUPLOG" 2>&1 < /dev/null &
-            # Capture and Save Background Process ID
+            # Save Background Process ID
             CLEANUPPID=$!
-            echo "$CLEANUPPID" > "$CLEANUPPIDFILE"
-            # Export Cleanup Tracking Values to Subsequent Steps
+            printf '%s\n' "$CLEANUPPID" > "$CLEANUPPIDFILE"
+            # Export Cleanup Tracking Values to Later Steps
             {
               echo "STORAGECLEANUPPID=$CLEANUPPID"
               echo "STORAGECLEANUPPIDFILE=$CLEANUPPIDFILE"
               echo "STORAGECLEANUPLOG=$CLEANUPLOG"
             } >> "$GITHUB_ENV"
-            # Report Background Cleanup Details
-            echo "└─ ✔ Background Cleanup Started — PID : $CLEANUPPID"
+            # Export Cleanup Tracking Values as Step Outputs
+            {
+              echo "storagecleanuppid=$CLEANUPPID"
+              echo "storagecleanuppidfile=$CLEANUPPIDFILE"
+              echo "storagecleanuplog=$CLEANUPLOG"
+            } >> "$GITHUB_OUTPUT"
+            echo "└─ ✔ Background Cleanup Launched — PID : $CLEANUPPID"
             echo "└─ 📄 Cleanup Log : $CLEANUPLOG"
           else
-            # Skip Removal When No Matching Paths Exist
             echo "└─ ℹ️ No Software Paths Found"
           fi
 
-          # Clean APT Package Cache
-          echo "└─ 🧹 Cleaning APT Cache..."
+          # Clean APT Cache While Software Removal Runs
           sudo apt-get clean
-          # Finish Launching the Cleanup Operations
-          echo "└─ 🎉 Storage Cleanup Launched"
+          # Allow Subsequent Build Steps to Proceed
+          echo "└─ 🎉 Background Storage Cleanup Launched"
 
       - name: 👤 Git Identity
         shell: bash
@@ -2135,10 +2131,42 @@ jobs:
             --clobber
           echo "└─ 🎉 CCache Tarball Uploaded Successfully"      
 
+      # Post Build Disk Usage Check
       - name: 💾 Post Build Disk Usage Check
+        if: ${{ always() && env.CLEANSPACE == 'Disabled' }}
+        shell: bash
+        env:
+          # Import Background Cleanup Outputs
+          STORAGECLEANUPPID: ${{ steps.storage-cleanup.outputs.storagecleanuppid }}
+          STORAGECLEANUPLOG: ${{ steps.storage-cleanup.outputs.storagecleanuplog }}
         run: |
-          echo "└─ 📊 Post-build Disk Usage Report..."
+          set -Eeuo pipefail
+          # Check Background Cleanup Process
+          if [[ -n "${STORAGECLEANUPPID:-}" ]]; then
+            CLEANUPPID="$STORAGECLEANUPPID"
+            CLEANUPLOG="${STORAGECLEANUPLOG:-}"
+            echo "└─ 🔎 Waiting For Background Cleanup — PID : $CLEANUPPID"
+            # Wait While Recorded Process Exists
+            while sudo kill -0 "$CLEANUPPID" 2>/dev/null; do
+              sleep 2
+              
+            done
+
+            # Display Cleanup Log
+            if [[ -n "$CLEANUPLOG" && -f "$CLEANUPLOG" ]]; then
+              echo "└─ 📄 Background Cleanup Log :"
+              sudo tail -n 30 "$CLEANUPLOG"
+            fi
+            
+          else
+            echo "└─ ℹ️ No Background Cleanup PID Found"
+          fi
+
+          # Display Post-Build Disk Usage
+          echo "└─ 📊 Post-Build Disk Usage Report :"
           df -h
+          # Report Completion
+          echo "└─ 🎉 Post-Build Disk Usage Check Completed"
     
       - name: 📋 Kernel Build Details
         uses: ./kernel_workspace/AndreiMikh-Kernel-Lab/.github/actions/Final-Build-Details
