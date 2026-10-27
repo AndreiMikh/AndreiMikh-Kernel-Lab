@@ -1000,63 +1000,77 @@ runs:
 
           echo "└─ 🎉 Android 15 / 6.6 Fake Patch Reversal Complete"
         fi
-        
+                
         # Revert Android 16 6.12 Compatibility Fixes
         if [[ "$KERNELMODULE" == "android16-6.12" ]]; then
           EXEC="$COMMONKERNELFOLDER/fs/exec.c"
           MMU="$COMMONKERNELFOLDER/fs/proc/task_mmu.c"
-          [[ -f "$EXEC" ]] || { echo "└─ ⚠️ Missing: $EXEC" >&2; exit 1; }
-          [[ -f "$MMU" ]] || { echo "└─ ⚠️ Missing: $MMU" >&2; exit 1; }
-          echo "└─ ♻️ Reverting Android 16 / 6.12 SUSFS Fake Patches"
-          # Revert DMA-BUF Header
-          if [[ "$SUBLEVEL" -le 58 ]]; then
-            if grep -qF '#include <linux/dma-buf.h>' "$EXEC"; then
-              echo "└─ 🔧 Removing DMA-BUF Header From EXEC"
-              sed -i '\|^#include <linux/dma-buf.h>$|d' "$EXEC"
-            else
-              echo "└─ ℹ️ DMA-BUF Header Not Present"
-            fi
-          fi
-
-          # Restore VMA Page Condition
-          if [[ "$SUBLEVEL" -le 92 ]]; then
-            if grep -qF 'if (!vma_pages(vma))' "$MMU"; then
-              echo "└─ ♻️ Restoring VMA DATA PAGES() Condition"
-              sed -i 's/if (!vma_pages(vma))/if (!vma_data_pages(vma))/' "$MMU"
-            else
-              echo "└─ ℹ️ No VMA Page Condition to Restore"
-            fi
-          fi
-
-          # Revert SUSFS SHOW SMAP() Compatibility Check
-          if grep -Fq 'SUSFS_FAKE_SHOW_SMAP' "$MMU"; then
-            echo "└─ ♻️ Removing SHOW SMAP() SUSFS Check"
-            perl -0pi -e 's/\n[ \t]*#ifdef CONFIG_KSU_SUSFS_SUS_MAP\n[ \t]*\/\* SUSFS_FAKE_SHOW_SMAP \*\/\n[ \t]*if \(vma->vm_file && SUSFS_IS_INODE_SUS_MAP\(file_inode\(vma->vm_file\)\)\)\n[ \t]*return 0;\n[ \t]*#endif\n/\n/' "$MMU"
-          elsif (grep -Fq 'SUSFS_IS_INODE_SUS_MAP(file_inode(vma->vm_file))' "$MMU") {
-            echo "└─ ♻️ Removing Unmarked SHOW SMAP() SUSFS Check"
-            perl -0pi -e 's/\n[ \t]*#ifdef CONFIG_KSU_SUSFS_SUS_MAP\n[ \t]*if \(vma->vm_file && SUSFS_IS_INODE_SUS_MAP\(file_inode\(vma->vm_file\)\)\)\n[ \t]*return 0;\n[ \t]*#endif\n/\n/' "$MMU"
+          if [[ ! -f "$EXEC" || ! -f "$MMU" ]]; then
+            echo "└─ ⚠️ Required Android 16 / 6.12 Source File Missing; Skipping Revert" >&2
           else
-            echo "└─ ℹ️ No SHOW SMAP() SUSFS Check Found"
-          fi
+            # Revert DMA-BUF Header
+            if [[ "$SUBLEVEL" -le 58 ]]; then
+              if grep -qFx '#include <linux/dma-buf.h>' "$EXEC"; then
+                echo "└─ ♻️ Reverting EXEC DMA-BUF Header"
+                sed -i '\|^#include <linux/dma-buf.h>$|d' "$EXEC"
+              else
+                echo "└─ ℹ️ DMA-BUF Header Already Absent"
+              fi
+              
+            else
+              echo "└─ ℹ️ DMA-BUF Header Revert Not Required For Sublevel $SUBLEVEL"
+            fi
 
-          # Revert Legacy and Modern SHOW SMAPS ROLLUP() Adapters
-          if grep -Fq 'bypass_orig_flow:' "$MMU"; then
-            echo "└─ ♻️ Removing SHOW SMAPS ROLLUP() SUSFS Adapter"
-            # Remove SUSFS Bypass Check
-            perl -0pi -e 's/\n[ \t]*#ifdef CONFIG_KSU_SUSFS_SUS_MAP\n[ \t]*if \(vma->vm_file && SUSFS_IS_INODE_SUS_MAP\(file_inode\(vma->vm_file\)\)\)\n[ \t]*goto bypass_orig_flow;\n[ \t]*#endif\n/\n/g' "$MMU"
+            # Restore VMA DATA PAGES() Condition
+            if [[ "$SUBLEVEL" -le 92 ]]; then
+              if grep -qF 'if (!vma_pages(vma))' "$MMU"; then
+                echo "└─ ♻️ Restoring VMA DATA PAGES() Condition"
+                sed -i 's/if (!vma_pages(vma))/if (!vma_data_pages(vma))/' "$MMU"
+              elif grep -qF 'if (!vma_data_pages(vma))' "$MMU"; then
+                echo "└─ ℹ️ VMA DATA PAGES() Condition Already Restored"
+              else
+                echo "└─ ⚠️ VMA Page Condition Not Found; Skipping" >&2
+              fi
+              
+            else
+              echo "└─ ℹ️ VMA Page Condition Revert Not Required For Sublevel $SUBLEVEL"
+            fi
+
+            # Revert SUSFS SHOW SMAP() Compatibility Check
+            if grep -Fq 'SUSFS_IS_INODE_SUS_MAP(file_inode(vma->vm_file))' "$MMU"; then
+              echo "└─ ♻️ Removing SHOW SMAP() SUSFS Check"
+              perl -0pi -e 's/\n[ \t]*#ifdef CONFIG_KSU_SUSFS_SUS_MAP\n[ \t]*(?:\/\* SUSFS_FAKE_SHOW_SMAP \*\/\n[ \t]*)?if \(vma->vm_file && SUSFS_IS_INODE_SUS_MAP\(file_inode\(vma->vm_file\)\)\)\n[ \t]*return 0;\n[ \t]*#endif(?: \/\/ #ifdef CONFIG_KSU_SUSFS_SUS_MAP)?//g' "$MMU"
+            else
+              echo "└─ ℹ️ No SHOW SMAP() SUSFS Check Found"
+            fi
+
+            # Revert SUSFS SHOW SMAPS ROLLUP() Compatibility Check
+            if grep -Fq 'goto bypass_orig_flow;' "$MMU"; then
+              echo "└─ ♻️ Removing SHOW SMAPS ROLLUP() SUSFS Check"
+              perl -0pi -e 's/\n[ \t]*#ifdef CONFIG_KSU_SUSFS_SUS_MAP\n[ \t]*if \(vma->vm_file && SUSFS_IS_INODE_SUS_MAP\(file_inode\(vma->vm_file\)\)\)\n[ \t]*goto bypass_orig_flow;\n[ \t]*#endif(?: \/\/ #ifdef CONFIG_KSU_SUSFS_SUS_MAP)?//g' "$MMU"
+            else
+              echo "└─ ℹ️ No SHOW SMAPS ROLLUP() SUSFS Check Found"
+            fi
+
             # Remove SUSFS Bypass Label
-            perl -0pi -e 's/\n[ \t]*#ifdef CONFIG_KSU_SUSFS_SUS_MAP\n[ \t]*bypass_orig_flow:\n[ \t]*#endif\n/\n/g' "$MMU"
-          else
-            echo "└─ ℹ️ No SHOW SMAPS ROLLUP() SUSFS Adapter Found"
-          fi
+            if grep -Fq 'bypass_orig_flow:' "$MMU"; then
+              echo "└─ ♻️ Removing SHOW SMAPS ROLLUP() Bypass Label"
+              perl -0pi -e 's/\n[ \t]*#ifdef CONFIG_KSU_SUSFS_SUS_MAP\n[ \t]*bypass_orig_flow:\n[ \t]*#endif(?: \/\/ #ifdef CONFIG_KSU_SUSFS_SUS_MAP)?//g' "$MMU"
+            else
+              echo "└─ ℹ️ No SUSFS Bypass Label Found"
+            fi
 
-          # Verify SUSFS Compatibility Markers Were Removed
-          if grep -Fq 'SUSFS_FAKE_SHOW_SMAP' "$MMU" ||
-             grep -Fq 'bypass_orig_flow:' "$MMU"; then
-            echo "└─ ⚠️ SUSFS Fake Patch Reversal Incomplete" >&2
-          fi
+            # Verify SUSFS Compatibility Markers Were Removed
+            if grep -Fq 'SUSFS_FAKE_SHOW_SMAP' "$MMU" ||
+               grep -Fq 'bypass_orig_flow:' "$MMU" ||
+               grep -Fq 'goto bypass_orig_flow;' "$MMU"; then
+              echo "└─ ⚠️ SUSFS Fake Patch Reversal Incomplete" >&2
+            else
+              echo "└─ ✅ SUSFS Fake Patch Reversal Verified"
+            fi
 
-          echo "└─ 🎉 Android 16 / 6.12 Fake Patch Reversal Complete"
+            echo "└─ 🎉 Android 16 / 6.12 Fake Patch Reversal Complete"
+          fi
         fi
 
         # Report Completion of Fake Patch Reversal
