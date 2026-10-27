@@ -578,62 +578,9 @@ jobs:
           echo "└─ 📂 Reject Checker  : ${REJECTCHECKER}"
           echo "------------------------------"
 
+      # Inspect Disk Space and Configure Swap
       - name: 🔄 Swap Disk Space
-        shell: bash
-        run: | 
-          set -euo pipefail          
-          echo "└─ 📌 Filesystem Disk Usage      :"
-          df -hT
-          echo "└─ 📌 Workspace Directory Size   :"
-          du -sh "$WORKSPACEDIR" 2>/dev/null || true
-          echo "└─ 🔎 Top 10 Largest Directories :"
-          du -h --max-depth=1 "$WORKSPACEDIR" 2>/dev/null | sort -hr | head -n 10
-          echo "└─ 🎉 Done..."
-
-      - name: 💾 Setup Swap File
-        shell: bash
-        run: |
-          set -euo pipefail
-          SWAPFILE="/swapfile"
-          SWAPSIZE="4G"
-          echo "└─ 🔍 Checking Existing Swap..."
-          if swapon --show=NAME --noheadings | grep -Fxq "$SWAPFILE"; then
-            echo "└─ ℹ️ Swap Already Active : $SWAPFILE"
-            free -h
-            exit 0
-          fi
-
-          echo "└─ 📦 Creating $SWAPSIZE Swap at $SWAPFILE..."
-          # Remove Stale Swap File if it Exists but is Not Active
-          if [ -e "$SWAPFILE" ]; then
-            echo "└─ 🧹 Removing Stale Swap File..."
-            sudo swapoff "$SWAPFILE" 2>/dev/null || true
-            sudo rm -f "$SWAPFILE"
-          fi
-
-          # Try Fallocate First
-          if sudo fallocate -l "$SWAPSIZE" "$SWAPFILE"; then
-            echo "└─ 🎉 Fallocate Succeeded"
-          else
-            echo "└─ ⚠️ Fallocate Failed → Falling Back to DD"
-            sudo dd \
-              if=/dev/zero \
-              of="$SWAPFILE" \
-              bs=1M \
-              count=4096 \
-              status=progress
-          fi
-
-          sudo chmod 600 "$SWAPFILE"
-          echo "└─ 🔧 Initializing Swap..."
-          sudo mkswap "$SWAPFILE"
-          echo "└─ 🚀 Enabling Swap..."
-          sudo swapon "$SWAPFILE"
-          echo "└─ 🎉 Swap Enabled Successfully"
-          echo "------------ Swap ------------"
-          swapon --show
-          echo "----------- Memory -----------"
-          free -h
+        uses: ./kernel_workspace/AndreiMikh-Kernel-Lab/.github/actions/Swap-Disk-Space
 
       # Clean APT Metadata and Install Required Kernel Build Dependencies
       - name: 🧰 Build Dependencies
@@ -678,41 +625,9 @@ jobs:
           UNICODE: ${{ inputs.UNICODE }}
           REKERNEL: ${{ inputs.REKERNEL }}
 
+      # Install and Configure Cache-ECS Composite Action
       - name: 📦 Install and Configure Cache-ECS
-        shell: bash
-        run: |
-          set -Eeuo pipefail      
-          # Cache-ECS Binary Source and Temporary Path
-          ECSURL="https://raw.githubusercontent.com/AndreiMikh/AndreiMikh-Kernel-Lab/LiquidAndrei/lib/ccache-x86-64"
-          ECSBIN="${RUNNER_TEMP}/ccache-ecs"      
-          # Download Cache-ECS Binary with Retry Protection
-          echo "└─ 📥 Downloading Cache-ECS..."      
-          curl -fsSL \
-            --retry 5 \
-            --retry-delay 3 \
-            --retry-all-errors \
-            --connect-timeout 30 \
-            -A "Mozilla/5.0" \
-            "$ECSURL" \
-            -o "$ECSBIN"     
-          # Verify Downloaded Binary Exists and is Not Empty
-          [[ -s "$ECSBIN" ]] || {
-            echo "└─ ⚠️ Cache-ECS Download Failed"
-            exit 1
-          }      
-          # Make Cache-ECS Executable
-          chmod +x "$ECSBIN"    
-          # Replace System Cache with Cache-ECS
-          echo "🔧 Installing Cache-ECS..."      
-          sudo install -m 0755 "$ECSBIN" /usr/bin/ccache      
-          # Remove Temporary Binary
-          rm -f "$ECSBIN"      
-          # Ensure System Binary Path is Used
-          export PATH="/usr/bin:$PATH"      
-          # Verify Cache-ECS Installation
-          echo "└─ 📜 Cache-ECS Version :"
-          ccache --version
-          echo "└─ 🎉 Cache-ECS Setup Complete"
+        uses: ./kernel_workspace/AndreiMikh-Kernel-Lab/.github/actions/Cache-ECS
     
       - name: ♻️ Release Cache Restoration
         id: cache-restoration
@@ -886,72 +801,9 @@ jobs:
           RELEASE: ${{ steps.cache-restoration.outputs.cache-restored }}
           RUNNEROS: ${{ runner.os }}
   
+      # Install Android Repository Tool
       - name: 🧰 Install Repository Tool
-        shell: bash
-        run: |
-          set -Eeuo pipefail
-          # Check Whether Repository Tool is Already Installed
-          if command -v repo >/dev/null 2>&1; then
-            echo "└─ 🎉 Repository Tool Already Installed"
-            echo "└─ 📦 Repository Tool Path :"
-            command -v repo
-            echo "└─ 📜 Repository Version   :"
-            repo --version
-            exit 0
-          fi
-
-          # Define Repository Tool Installation Paths
-          BIN="/usr/local/bin/repo"
-          GOOGLE="https://storage.googleapis.com/git-repo-downloads/repo"
-          GITHUB="https://raw.githubusercontent.com/GerritCodeReview/git-repo/main/repo"
-          # Download Repository Tool
-          download() {
-            local URL="$1"
-            echo "└─ 🌐 Downloading Repository Tool :"
-            echo "$URL"
-            curl \
-              -fL \
-              --retry 5 \
-              --retry-delay 3 \
-              --retry-all-errors \
-              --connect-timeout 15 \
-              --max-time 300 \
-              "$URL" \
-              -o repo
-          }
-          # Primary Source : Official Google Download
-          echo "└─ 📥 Installing Repository Tool..."
-          if download "$GOOGLE"; then
-            echo "└─ 🎉 Repository Tool Downloaded From Google"
-          else
-            # Fallback Source : Official GitHub Mirror
-            echo "└─ ⚠️ Google Download Failed"
-            echo "└─ 🔄 Trying Official GitHub Mirror..."
-            if download "$GITHUB"; then
-              echo "🎉 Repository Tool Downloaded From GitHub"
-            else
-              echo "└─ ⚠️ Failed to Download Repository Tool"
-              exit 1
-            fi
-          fi
-
-          # Install Repository Tool
-          chmod +x repo
-          sudo install -m 0755 repo "$BIN"
-          rm -f repo
-          # Validate Installation
-          if [[ ! -x "$BIN" ]]; then
-            echo "└─ ⚠️ Repository Tool Installation Failed"
-            echo "└─ 📌 Expected Path : $BIN"
-            exit 1
-          fi
-
-          # Verify Repository Tool
-          echo "└─ 📦 Repository Tool Path :"
-          command -v repo
-          echo "└─ 📜 Repository Version   :"
-          repo --version
-          echo "🎉 Repository Tool Ready"
+        uses: ./kernel_workspace/AndreiMikh-Kernel-Lab/.github/actions/Repo-Tool
    
       - name: 🔄 Initialize and Sync Repository
         env:
@@ -1078,47 +930,9 @@ jobs:
           echo "KERNELREPOSITORY=$KERNELREPOSITORY" >> "$GITHUB_ENV"
           echo "🎉 Kernel Repository Pipeline Complete"
 
+      # Cleanup Kernel Repository After Source Synchronization
       - name: 🧹 Cleanup Kernel Repository
-        shell: bash
-        run: |
-          set -euo pipefail
-          cd "$WORKDIR"     
-          # Post-Sync Kernel Tree Cleanup
-          # Removes ABI Protected Export Metadata and Disables Default Config Validation    
-          # Cleanup ABI Protected Exports
-          echo "└─ 🧹 Cleaning ABI Protected Exports..."
-          cd "$KERNELPLATFORM"      
-          rm -f common/android/abi_gki_protected_exports_* || true
-          sed -i 's/protected_modules = \[.*\]/protected_modules = []/' common/modules.bzl || true      
-          for directory in common msm-kernel; do
-            file="$directory/BUILD.bazel"
-            if [[ -f "$file" ]]; then
-              sed -i '/protected_exports_list/d' "$file"
-            fi
-          done
-      
-          cd "$WORKDIR"      
-          # Disable Default Config Checks
-          echo "└─ 🧹 Disabling Default Config Checks..."     
-          # Remove all Default Config Checks References From Build Config GKI
-          # Prevents CI or Build Failures Caused by Default Config Validation
-          find . -type f -name "build.config.gki" \
-            -exec grep -q "check_defconfig" {} \; \
-            -exec sed -i '/check_defconfig/d' {} \; \
-            2>/dev/null || true      
-          # Patch KLeaf Configuration, Convert Default Config Checks into an Explicit Disabled State
-          find . -type f -name "common_kernels.bzl" \
-            -exec sed -i \
-            's/check_defconfig *= *None,/check_defconfig = "disabled",/g' {} + \
-            2>/dev/null || true     
-          # Disable KLeaf Conditional Check Entirely
-          # Original : if Default Config Checks is None
-          # Patched  : if Default Config Checks is False
-          find . -type f -name "common_kernels.bzl" \
-            -exec sed -i \
-            's/if check_defconfig == None:/if False:  # Disabled by CI/g' {} + \
-            2>/dev/null || true      
-          echo "└─ 🎉 Default Config Checks Disabled"
+        uses: ./kernel_workspace/AndreiMikh-Kernel-Lab/.github/actions/Kernel-Cleanup
 
       # Resolve Kernel Version, Sublevel and Custom Suffix Configuration
       - name: 📌 Kernel Version and Suffix Setup
