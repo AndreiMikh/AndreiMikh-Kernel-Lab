@@ -1,0 +1,104 @@
+# Hmbird Scheduler Integration
+name: ⚡ Hmbird Scheduler Integration
+description: Apply the Device-Specific Hmbird Scheduler Patch
+inputs:
+  # 📄 Resolved Kernel Manifest File Used to Select the Hmbird Patch
+  FILE:
+    description: Resolved Kernel Manifest File
+    required: true
+runs:
+  using: composite
+  steps:
+    # Apply the Device-Specific Hmbird Scheduler Patch
+    - name: ⚡ Apply Fengchi Scheduler Patch
+      shell: bash
+      env:
+        # Kernel Common Source Directory
+        COMMONKERNELFOLDER: ${{ env.COMMONKERNELFOLDER }}
+        # 📄 Resolved Kernel Manifest File
+        FILE: ${{ inputs.FILE }}
+        # Primary CPU Identifier
+        CPU: ${{ env.CPU }}
+        # Fallback CPU Identifier
+        CPUD: ${{ env.CPUD }}
+        # Patch Reject Checker Script
+        REJECTCHECKER: ${{ env.REJECTCHECKER }}
+      run: |
+        set -Eeuo pipefail
+        # Navigate to Kernel Common Directory
+        cd "$COMMONKERNELFOLDER"
+        # Resolve CPU Branch and Normalize Manifest Filename
+        CPU="${CPU:-${CPUD:-}}"
+        CFILE="${FILE//_bak/}"
+        # Validate CPU Branch
+        if [[ -z "$CPU" ]]; then
+          echo "└─ ⚠️ CPU Branch is Empty"
+          echo "└─ ⚠️ Unable to Select Fengchi Scheduler Patch"
+          exit 1
+        fi
+
+        # Check Whether Hmbird Scheduler Already Exists
+        for p in ./kernel/sched/hmbird* ./vendor/oplus/kernel/cpu/sched_ext/hmbird*; do
+          [[ -e "$p" ]] && {
+            echo "└─ 🎉 Hmbird Scheduler Already Exists"
+            echo "└─ ⏭️ Skipping Patch..."
+            exit 0
+          }
+          
+        done
+
+        # Clone Hmbird Scheduler Patch Repository
+        rm -rf SCHEDPATCH
+        echo "└─ 📥 Cloning Hmbird Patch Repository..."
+        if ! git clone --depth=1 \
+          https://github.com/AndreiMikh/Kernel-Hmbird-Patch.git \
+          -b "$CPU" SCHEDPATCH; then
+          echo "└─ ⚠️ CPU Branch '$CPU' Does Not Exist or Cannot be Cloned"
+          echo "└─ ⚠️ Fengchi may Not Support Selected Device Yet"
+          rm -rf SCHEDPATCH
+          exit 11
+        fi
+
+        # Locate Device-Specific Hmbird Patch
+        FENGCHIPATCH="fengchi_${CFILE}.patch"
+        FENGCHIPATH="./SCHEDPATCH/${FENGCHIPATCH}"
+        if [[ ! -f "$FENGCHIPATH" ]]; then
+          echo "└─ ⚠️ Patch '$FENGCHIPATCH' Not Found"
+          echo "└─ ⚠️ Hmbird may Not Support Selected Device Yet"
+          rm -rf SCHEDPATCH
+          exit 12
+        fi
+
+        # Apply Hmbird Scheduler Patch with Fuzz Factor 3
+        echo "└─ 🔧 Applying Hmbird Scheduler Patch..."
+        cp "$FENGCHIPATH" ./
+        dos2unix "$FENGCHIPATCH" 2>/dev/null || true
+        # Track Patch Application Status
+        patchstatus=0
+        if patch -p1 --forward -F3 < "$FENGCHIPATCH"; then
+          echo "└─ 🎉 Hmbird Scheduler Patch Command Completed"
+        else
+          patchstatus=$?
+          echo "└─ ⚠️ Hmbird Scheduler Patch Command Failed"
+        fi
+
+        # Remove Temporary Patch Files and Repository
+        rm -f "$FENGCHIPATCH"
+        rm -rf SCHEDPATCH
+        # Validate Patch Reject Checker
+        if [[ ! -f "$REJECTCHECKER" ]]; then
+          echo "└─ ⚠️ Reject Checker Script Not Found : $REJECTCHECKER"
+          exit 1
+        fi
+
+        # Load Reject Checker and Inspect Patched Files
+        source "$REJECTCHECKER"
+        checkrejects .
+        # Fail if Patch Application was Unsuccessful
+        if [[ "$patchstatus" -ne 0 ]]; then
+          echo "└─ ⚠️ Hmbird Scheduler Patch Failed"
+          exit "$patchstatus"
+        fi
+
+        # Complete Hmbird Scheduler Integration
+        echo "└─ 🎉 Hmbird Scheduler Patch Applied Successfully"
