@@ -1,0 +1,114 @@
+# Linux Security Module Baseband Guard Composite Action
+# Purpose:
+#   Apply Baseband Guard Kernel Patches and Update Linux
+#   Security Module (LSM) Configuration
+# Features:
+#   - Downloads and Executes Baseband Guard Setup Script
+#   - Retries Failed Setup Attempts up to Three Times
+#   - Updates Linux Security Default Configuration 
+#   - Detects Baseband-guard Source Directory or Symlink
+#   - Checks for Baseband-Guard Source File
+# Notes:
+#   - Action Runs Only When Baseband-Guard is Enabled
+#   - Setup Failure After All Retries Terminates Action
+#   - Security Configuration File is Modified in Place
+name: 🔐 Linux Security Module Baseband Guard
+description: Apply Baseband Guard Kernel Patches and Update Linux Security Configuration
+# Define Composite Action Inputs
+inputs:
+  COMMONKERNELFOLDER:
+    description: Path to Kernel Common Source Directory
+    required: true
+  LSMBBG:
+    description: Enable Baseband Guard Support
+    required: true
+    default: "false"
+# Composite Action Execution
+runs:
+  using: composite
+  steps:
+    # Apply Baseband Guard Kernel Support    
+    - name: 🔐 Linux Security Module Baseband Guard
+      # Skip this step when Baseband Guard is disabled.
+      if: ${{ inputs.LSMBBG == 'true' }}
+      shell: bash
+      env:
+        # Pass Kernel Common Directory to Bash Script
+        COMMONKERNELFOLDER: ${{ inputs.COMMONKERNELFOLDER }}
+      run: |
+        set -euo pipefail
+        MAXRETRIES=3
+        # Navigate to Kernel Common Directory
+        cd "$COMMONKERNELFOLDER"
+        echo "└─ ➡️  Working Directory : $(pwd)"
+        echo "└─ 🔧 Enabling Kernel-Level Baseband Guard Support..."
+        # Download and Execute Setup Script
+        URLBBG="https://raw.githubusercontent.com/vc-teahouse/Baseband-guard/main/setup.sh"
+        echo "└─ 🌐 Fetching Baseband Guard Setup Script..."
+        # Retry Setup if Downloading or Execution Fails
+        for i in $(seq 1 "$MAXRETRIES"); do
+          if curl -fsSL "$URLBBG" | bash -s -- main; then
+            break
+          fi
+
+          echo "└─ ⚠️ Download / Setup Failed, Attempt $i/$MAXRETRIES..."
+          # Stop Workflow if Every Attempt Fails
+          if [[ "$i" -eq "$MAXRETRIES" ]]; then
+            echo "└─ ⚠️ Baseband Guard Setup Failed After $MAXRETRIES Attempts"
+            exit 1
+          fi
+
+          sleep 2
+          
+        done
+
+        echo "└─ 📌 Baseband Guard Patch Script Applied"
+        # Locate and Validate Linux Security Kernel Configuration File
+        BBGCONFIGFILE="./security/Kconfig"
+        if [[ ! -f "$BBGCONFIGFILE" ]]; then
+          echo "└─ ⚠️ Kernel Configuration File Not Found -> $BBGCONFIGFILE"
+          exit 1
+        fi
+
+        # Add Baseband Guard to Linux Security Default Configuration
+        echo "└─ ⚙️ Updating Linux Security Configuration..."
+        awk '
+          BEGIN { in_block=0 }
+          /^config LSM$/ { in_block=1 }
+          in_block && /^[[:space:]]*default/ {
+            if ($0 !~ /baseband_guard/) {
+              sub(/selinux/, "selinux,baseband_guard")
+            }
+          }
+          /^help$/ { in_block=0 }
+          { print }
+        ' "$BBGCONFIGFILE" > "${BBGCONFIGFILE}.tmp"
+        # Replace Original Kernel Configuration File With Updated Version
+        mv "${BBGCONFIGFILE}.tmp" "$BBGCONFIGFILE"
+        echo "└─ ⚙️ Linux Security Configuration Updated Successfully"
+        # Detect Baseband Guard Directory (Clone or Symlink)
+        BBGPATHDIR="$(find . -maxdepth 2 -type d -name "Baseband-guard" | head -n1 || true)"
+        # Resolve Target Path When Baseband-Guard is a Symlink
+        if [[ -L "./Baseband-guard" ]]; then
+          BBGPATHDIR="$(readlink -f ./Baseband-guard)"
+        fi
+
+        echo "└─ 🔎 Checking Baseband Guard Source..."
+        # Validate Baseband Guard Directory and Source File
+        if [[ -d "$BBGPATHDIR" ]]; then
+          echo "└─ 🔎 Baseband Guard Directory Found : $BBGPATHDIR"
+          if [[ -f "$BBGPATHDIR/baseband_guard.c" ]]; then
+            echo "└─ 🧾 Source File Detected"
+          else
+            # Print Directory Contents to Help Diagnose Missing Sources
+            echo "└─ ⚠️ Baseband Guard Sources Not Found Inside Baseband Guard"
+            ls -la "$BBGPATHDIR" || true
+          fi
+          
+        else
+          echo "└─ ⚠️ Baseband Guard Directory Not Found — Setup may have Failed"
+          exit 1
+        fi
+
+        # Report Successful Completion
+        echo "└─ 🎉 Baseband Guard Fully Applied and Configured"
