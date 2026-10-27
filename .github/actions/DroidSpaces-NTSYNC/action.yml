@@ -1,0 +1,212 @@
+
+# DroidSpaces / NT Synchronization Primitives Composite Action
+name: 🧩 DroidSpaces / NT Synchronization Primitives
+description: Apply DroidSpaces System V IPC ABI Fixes and NT Synchronization Patches
+inputs:
+  # Select Linux Counting and NT Synchronization Configuration
+  LINUXCNTSYNC:
+    description: Linux Counting and NT Synchronization Configuration
+    required: true
+runs:
+  using: composite
+  steps:
+    # Apply DroidSpaces and NT Synchronization When Selected
+    - name: 🧩 DroidSpaces / NT Synchronization Primitives
+      if: ${{ inputs.LINUXCNTSYNC == 'DroidSpaces+NTSync' }}
+      shell: bash
+      # Export Environment Variables
+      env:
+        KERNELMODULE: ${{ env.KERNELMODULE }}
+        COMMONKERNELFOLDER: ${{ env.COMMONKERNELFOLDER }}
+        PATCHDIR: ${{ env.PATCHDIR }}
+        WORKDIR: ${{ env.WORKDIR }}
+        REJECTCHECKER: ${{ env.REJECTCHECKER }}
+        ENABLERUSTC: ${{ env.ENABLERUSTC }}
+      run: |
+        # Enable Strict Bash Error Handling
+        set -euo pipefail
+        # Move to Kernel Common Directory
+        cd "$COMMONKERNELFOLDER"
+        # Function: Apply Patch With Already-Applied Detection
+        apply() {
+          local patchfile="$1"
+          # Detect Whether Patch has Already been Applied
+          if patch -R -p1 --dry-run < "$patchfile" >/dev/null 2>&1; then
+            echo "└─ 🎉 Already Applied : $(basename "$patchfile")"
+            return
+          fi
+
+          # Verify Patch Applicability Before Applying
+          if patch -p1 --dry-run < "$patchfile" >/dev/null 2>&1; then
+            # Apply the Patch Forward
+            patch -p1 --forward < "$patchfile"
+            echo "└─ 📌 Applied         : $(basename "$patchfile")"
+          else
+            # Stop if Patch Cannot be Applied
+            echo "└─ ⚠️ Failed Applying : $(basename "$patchfile")"
+            exit 1
+          fi
+        }
+        # Define Kernel Scheduler and User Header Paths
+        SCHEDFILE="include/linux/sched.h"
+        USERFILE="include/linux/sched/user.h"
+        # Verify Scheduler Header Exists
+        if [[ ! -f "$SCHEDFILE" ]]; then
+          echo "└─ ⚠️ Missing Scheduler Header File : $SCHEDFILE"
+          exit 1
+        fi
+
+        # Disable Original System V IPC Structure Fields
+        echo "└─ ⚙️ Disabling Original System V IPC (SYSVIPC) Struct Fields..."
+        sed -i 's/^\(\t\)struct sysv_sem\b.*sysvsem;/\1\/\/ struct sysv_sem\t\t\tsysvsem;/' "$SCHEDFILE"
+        sed -i 's/^\(\t\)struct sysv_shm\b.*sysvshm;/\1\/\/ struct sysv_shm\t\t\tsysvshm;/' "$SCHEDFILE"
+        # Android 12.5.10 Special ABI Handling
+        if [ "${KERNELMODULE:-}" = "android12-5.10" ]; then
+          echo "└─ 🔧 Fixing System V IPC Kernel ABI + POSIX MQUEUE ABI Padding For Android12-5.10..."
+          # Restore System V IPC Fields Outside genksyms Processing
+          sed -i '/^\tconst struct sched_class\t\*sched_class;/a \\n#ifndef __GENKSYMS__\n\tstruct sysv_sem\t\t\tsysvsem;\n\tstruct sysv_shm\t\t\tsysvshm;\n#endif\n' "$SCHEDFILE"
+          # Comment Out Original POSIX Message Queue Field
+          sed -i 's/^\tunsigned long mq_bytes;/\/\/unsigned long mq_bytes;/' "$USERFILE"
+          # Preserve Kernel ABI Padding When POSIX MQUEUE is Disabled
+          sed -i '/struct ratelimit_state ratelimit;/,/ANDROID_OEM_DATA_ARRAY(1, 2);/{/^\tANDROID_KABI_RESERVE(1);/{N;N;s/^\tANDROID_KABI_RESERVE(1);\n\tANDROID_KABI_RESERVE(2);\n\tANDROID_OEM_DATA_ARRAY(1, 2);/#if defined(CONFIG_POSIX_MQUEUE)\n\tANDROID_KABI_USE(1, unsigned long mq_bytes);\n\tANDROID_KABI_RESERVE(2);\n\tANDROID_OEM_DATA_ARRAY(1, 2);\n#else\n\tANDROID_KABI_RESERVE(1);\n\tANDROID_KABI_RESERVE(2);\n\tANDROID_OEM_DATA_ARRAY(1, 2);\n#endif/}}' "$USERFILE"
+        # Detect and Handle Other Kernel ABI Layouts
+        elif grep -q "sched_dl_entity.*\*dl_server" "$SCHEDFILE"; then
+          # Use Packed Union Strategy For DL Server Pointer Layouts
+          echo "└─ ♻️ Detected DL Server Pointer — ☘️ Using Packed Union Strategy"
+          sed -i 's|\tstruct sched_entity\t\tse;|#ifdef CONFIG_SYSVIPC\n\tunion {\n\t\tchar __kabi_ignored_0;\n\t\tstruct sysv_sem\t\t\tsysvsem;\n\t}__attribute__((packed));\n\tunion {\n\t\tchar __kabi_ignored_1;\n\t\tstruct sysv_shm\t\t\tsysvshm;\n\t}__attribute__((packed));\n#endif\n\n\tstruct sched_entity\t\tse;|' "$SCHEDFILE"
+        elif grep -q "ANDROID_KABI_USE(1," "$SCHEDFILE"; then
+          # Use ABI Slots 6, 7, and 8
+          echo "└─ ♻️ Detected Kernel ABI USE(1) — ☘️ Using Slots 6, 7 and 8"
+          sed -i -e '/ANDROID_KABI_RESERVE(6);/{N;N;s|\tANDROID_KABI_RESERVE(6);\n\tANDROID_KABI_RESERVE(7);\n\tANDROID_KABI_RESERVE(8);|#ifdef CONFIG_SYSVIPC\n\tANDROID_KABI_USE(6, struct sysv_sem sysvsem);\n\t_ANDROID_KABI_REPLACE(ANDROID_KABI_RESERVE(7); ANDROID_KABI_RESERVE(8), struct sysv_shm sysvshm);\n#else\n\tANDROID_KABI_RESERVE(6);\n\tANDROID_KABI_RESERVE(7);\n\tANDROID_KABI_RESERVE(8);\n#endif|;}' "$SCHEDFILE"
+        elif grep -q "ANDROID_KABI_RESERVE(1);" "$SCHEDFILE"; then
+          # Use Legacy ABI Slots 1, 2, and 3
+          echo "└─ ♻️ Detected Legacy Kernel ABI — ☘️ Using Slots 1, 2 and 3"
+          sed -i -e '/ANDROID_KABI_RESERVE(1);/{N;N;N;N;N;N;N;s|\tANDROID_KABI_RESERVE(1);\n\tANDROID_KABI_RESERVE(2);\n\tANDROID_KABI_RESERVE(3);\n\tANDROID_KABI_RESERVE(4);\n\tANDROID_KABI_RESERVE(5);\n\tANDROID_KABI_RESERVE(6);\n\tANDROID_KABI_RESERVE(7);\n\tANDROID_KABI_RESERVE(8);|#ifdef CONFIG_SYSVIPC\n\tANDROID_KABI_USE(1, struct sysv_sem sysvsem);\n\t_ANDROID_KABI_REPLACE(ANDROID_KABI_RESERVE(2); ANDROID_KABI_RESERVE(3), struct sysv_shm sysvshm);\n#else\n\tANDROID_KABI_RESERVE(1);\n\tANDROID_KABI_RESERVE(2);\n\tANDROID_KABI_RESERVE(3);\n#endif\n\tANDROID_KABI_RESERVE(4);\n\tANDROID_KABI_RESERVE(5);\n\tANDROID_KABI_RESERVE(6);\n\tANDROID_KABI_RESERVE(7);\n\tANDROID_KABI_RESERVE(8);|;}' "$SCHEDFILE"
+        elif grep -q "ANDROID_KABI_RESERVE(3);" "$SCHEDFILE"; then
+          # Use Fallback ABI Slots 3, 4, and 5
+          echo "└─ ♻️ Fallback Kernel ABI Detected — ☘️ Using Slots 3, 4 and 5"
+          sed -i -e '/ANDROID_KABI_RESERVE(3);/{N;N;N;s|\tANDROID_KABI_RESERVE(3);\n\tANDROID_KABI_RESERVE(4);\n\tANDROID_KABI_RESERVE(5);\n\tANDROID_KABI_RESERVE(6);|#ifdef CONFIG_SYSVIPC\n\tANDROID_KABI_USE(3, struct sysv_sem sysvsem);\n\t_ANDROID_KABI_REPLACE(ANDROID_KABI_RESERVE(4); ANDROID_KABI_RESERVE(5), struct sysv_shm sysvshm);\n#else\n\tANDROID_KABI_RESERVE(3);\n\tANDROID_KABI_RESERVE(4);\n\tANDROID_KABI_RESERVE(5);\n#endif\n\tANDROID_KABI_RESERVE(6);|;}' "$SCHEDFILE"
+        else
+          # Abort if No Supported ABI Layout Can be Detected
+          echo "└─ ⚠️ Unable to Determine Compatible Kernel ABI Layout — Aborting..."
+          exit 9
+        fi
+
+        # Verify System V IPC Structure Injection
+        echo "└─ 🔎 Verifying Injection..."
+        grep -q "struct sysv_sem" "$SCHEDFILE" || {
+          echo "└─ ⚠️ Missing SYSVSEM Injection"
+          exit 1
+        }
+        grep -q "struct sysv_shm" "$SCHEDFILE" || {
+          echo "└─ ⚠️ Missing SYSVSHM Injection"
+          exit 1
+        }
+        # Ensure Required Configuration Guard Exists
+        grep -q "CONFIG_SYSVIPC" "$SCHEDFILE" || {
+          echo "└─ ⚠️ Missing Configuration SYSVIPC Guard"
+          exit 1
+        }
+        echo "└─ 📌 Injection Verification Passed"
+        # Apply MIDAS Ghost Task Fix for OPlus BSP
+        echo "└─ 🔧 Applying Ghost Task Fix Patch For OPlus BSP Midas..."
+        apply "${PATCHDIR}/001-Ghost-Task-Midas.patch"
+        # Disable Rollback Protection Before Exit
+        RESTORE=0
+        echo "🎉 DroidSpaces System V IPC Injection Completed Successfully"
+        # Report NT Synchronization Primitives Enabled Through DroidSpaces
+        echo "└─ 🧠 NT Synchronization Enabled Via DroidSpaces"
+        # Validate Kernel Module Version Before Continuing
+        if [[ -z "${KERNELMODULE:-}" ]]; then
+          echo "└─ ⚠️ Kernel Module Version is Not Set, Aborting..."
+          exit 1
+        fi
+
+        echo "└─ 🔄 Target Kernel Module Version : $KERNELMODULE"
+        # Apply Compatibility Fixes When Rust Toolchain is Enabled
+        if [[ "$ENABLERUSTC" == "true" ]]; then
+          echo "└─ 🔧 Applying Compatibility Fixes..."
+          # Remove Conflicting NT Synchronization Source Files
+          [[ -f include/uapi/linux/ntsync.h ]] && rm -f include/uapi/linux/ntsync.h
+          [[ -f drivers/misc/ntsync.c ]] && rm -f drivers/misc/ntsync.c
+          # Export IPC Namespace Symbols for Rust Binder Module
+          if ! grep -qE '^[[:space:]]*EXPORT_SYMBOL_GPL\(put_ipc_ns\);' ipc/namespace.c; then
+            echo "EXPORT_SYMBOL_GPL(put_ipc_ns);" >> ipc/namespace.c
+          fi
+
+          if ! grep -qE '^[[:space:]]*EXPORT_SYMBOL_GPL\(init_ipc_ns\);' ipc/msgutil.c; then
+            echo "EXPORT_SYMBOL_GPL(init_ipc_ns);" >> ipc/msgutil.c
+          fi
+
+          # Verify IPC Namespace Symbol Exports
+          echo "└─ 🔎 Verifying IPC Namespace Symbol Exports..."
+          grep -qE '^[[:space:]]*EXPORT_SYMBOL_GPL\(put_ipc_ns\);' ipc/namespace.c || {
+            echo "└─ ⚠️ IPC Namespace Symbol Export Missing"
+            exit 1
+          }
+          grep -qE '^[[:space:]]*EXPORT_SYMBOL_GPL\(init_ipc_ns\);' ipc/msgutil.c || {
+            echo "└─ ⚠️ Init IPC Namespace Symbol Export Missing"
+            exit 1
+          }
+          echo "└─ 📌 IPC Namespace Symbol Exports Verified"
+        fi
+
+        # Apply NT Synchronization Compatibility and Base Patches
+        echo "└─ 🛠️ Applying NT Synchronization Patches..."
+        # Define NT Synchronization Patch Paths
+        NTSYNCDIR="${WORKDIR}/WildKernels/common/ntsync"
+        NTSYNCCOMPATPATCH="ntsync_compat_${KERNELMODULE}.patch"
+        NTSYNCBASEPATCH="ntsync_base.patch"
+        echo "└─ 📂 Patch Directory : $NTSYNCDIR"
+        # Clone Patch Repository if it is Missing
+        if [[ ! -d "$NTSYNCDIR" ]]; then
+          echo "└─ 📥 NT Synchronization Patch Directory Missing, Cloning Repository..."
+          rm -rf "${WORKDIR}/WildKernels"
+          git clone --depth=1 \
+            https://github.com/WildKernels/kernel_patches.git \
+            "${WORKDIR}/WildKernels"
+        fi
+
+        # Verify NT Synchronization Patch Directory After Cloning
+        if [[ ! -d "$NTSYNCDIR" ]]; then
+          echo "└─ ⚠️ Failed to Locate NT Synchronization Patch Directory After Clone..."
+          exit 1
+        fi
+
+        # Display Available NT Synchronization Patches
+        echo "└─ 📄 Available NT Synchronization Patches :"
+        ls -la "$NTSYNCDIR"
+        # Function: Apply an NT Synchronization Patch
+        applyntsyncpatch() {
+          local ntsyncpatchfile="$1"
+          # Skip Patch if it Does Not Exist
+          if [[ ! -f "$NTSYNCDIR/$ntsyncpatchfile" ]]; then
+            echo "└─ ⚠️ Missing Patch : $ntsyncpatchfile"
+            return 0
+          fi
+
+          # Copy Patch Into Kernel Source Directory
+          cp "$NTSYNCDIR/$ntsyncpatchfile" ./
+          echo "└─ ➡️ Applying $ntsyncpatchfile"
+          # Apply the NT Synchronization Patch Forward
+          patchstatus=0
+          patch -p1 --forward < "$ntsyncpatchfile" || patchstatus=$?
+          # Remove Temporary Patch Copy
+          rm -f "$ntsyncpatchfile"
+          echo "└─ 🧹 Cleaned : $ntsyncpatchfile"
+          # Validate Patch Application Result
+          if [[ "$patchstatus" -ne 0 ]]; then
+            echo "└─ ⚠️ Patch Failed : $ntsyncpatchfile"
+            return "$patchstatus"
+          fi
+        }
+        # Apply Kernel-Version-Specific Compatibility Patch
+        applyntsyncpatch "$NTSYNCCOMPATPATCH"
+        # Apply NT Synchronization Base Patch
+        applyntsyncpatch "$NTSYNCBASEPATCH"
+        echo "└─ ☘️ NT Synchronization Patch Process Completed Successfully"
+        # Load Reject Checker and Check For Patch Rejections
+        source "$REJECTCHECKER"
+        checkrejects .
+        # Report Successful Completion
+        echo "└─ 🎉 NT Synchronization Primitives Done!"
