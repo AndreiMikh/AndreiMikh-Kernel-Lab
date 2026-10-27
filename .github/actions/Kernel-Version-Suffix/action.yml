@@ -1,0 +1,383 @@
+name: 📌 Kernel Version Setup
+description: Detect Kernel Version and Configure Suffix
+inputs:
+  SUBLEVEL:
+    required: false
+    default: ""
+  SUFFIX:
+    required: false
+    default: ""
+outputs:
+  androidversion:
+    description: Detected Android kernel module version
+    value: ${{ steps.kernel-version-setup.outputs.androidversion }}
+  kernelversion:
+    description: Detected kernel branch version
+    value: ${{ steps.kernel-version-setup.outputs.kernelversion }}
+  fullversion:
+    description: Final kernel version
+    value: ${{ steps.kernel-version-setup.outputs.fullversion }}
+  suffix:
+    description: Final kernel version suffix
+    value: ${{ steps.configure-kernel-suffix.outputs.suffix }}
+runs:
+  using: composite
+  steps:
+    - name: 📌 Kernel Version Setup
+      id: kernel-version-setup
+      shell: bash
+      env:
+        SUBLVLINPUT: ${{ inputs.SUBLEVEL }}
+      run: |
+        set -Eeuo pipefail
+        : "${KERNELPLATFORM:?directory is not set}"
+        : "${COMMONKERNELFOLDER:?directory is not set}"
+        COMMONMAKEFILE="${COMMONKERNELFOLDER}/Makefile"
+        [[ -d "$KERNELPLATFORM" ]] || {
+          echo "⚠️ Kernel Platform Directory Not Found: $KERNELPLATFORM"
+          exit 1
+        }
+        [[ -f "$COMMONMAKEFILE" ]] || {
+          echo "⚠️ Kernel Makefile Not Found: $COMMONMAKEFILE"
+          exit 1
+        }
+        echo "└─ 📂 Working Directory: $KERNELPLATFORM"
+        echo "└─ 📌 Using Makefile: $COMMONMAKEFILE"
+        # Detect Android Kernel Module Branch
+        KERNELMODULE=""
+        for cfg in \
+          "${COMMONKERNELFOLDER}/build.config.constants" \
+          "${COMMONKERNELFOLDER}/build.config.common"
+        do
+          [[ -f "$cfg" ]] || continue
+          TMPBRANCH="$(
+            sed -n 's/^BRANCH[[:space:]]*=[[:space:]]*//p' "$cfg" |
+              head -n 1 |
+              tr -d '\r'
+          )"
+          if [[ -n "$TMPBRANCH" ]]; then
+            KERNELMODULE="$TMPBRANCH"
+            break
+          fi
+        done
+
+        # Fallback to ACK Metadata to Detect Kernel Module Branch
+        if [[ -z "$KERNELMODULE" && -n "${KERNELREPOSITORY:-}" ]]; then
+          ACKSHA="${KERNELREPOSITORY}/android/ACK_SHA"
+          if [[ "$ACKSHA" != /* ]]; then
+            ACKSHA="${KERNELPLATFORM}/${ACKSHA#./}"
+          fi
+
+          if [[ -f "$ACKSHA" ]]; then
+            KERNELMODULE="$(
+              sed -n '2p' "$ACKSHA" |
+                awk -F'-' 'NF >= 2 { print $1 "-" $2 }'
+            )"
+          fi
+        fi
+
+        # Parse Module Branch Information
+        if [[ "$KERNELMODULE" == *-* ]]; then
+          ANDROIDVERSION="${KERNELMODULE%-*}"
+          KERNELVERSION="${KERNELMODULE#*-}"
+          echo "└─ 🚀 Kernel Module    : $KERNELMODULE"
+          echo "└─ 📌 Android Version  : $ANDROIDVERSION"
+          echo "└─ 📌 Kernel Branch    : $KERNELVERSION"
+        else
+          echo "└─ ⚠️ Unable to Detect Kernel Module"
+          KERNELMODULE="Unknown"
+          ANDROIDVERSION="Unknown"
+          KERNELVERSION="Unknown"
+        fi
+
+        # Read Kernel Version Components
+        readmakevalue() {
+          awk -F'=' -v key="$1" '
+            $1 ~ "^[[:space:]]*" key "[[:space:]]*$" {
+              gsub(/[[:space:]]/, "", $2)
+              print $2
+              exit
+            }
+          ' "$COMMONMAKEFILE"
+        }
+        VERSION="$(readmakevalue VERSION)"
+        PATCHLEVEL="$(readmakevalue PATCHLEVEL)"
+        ORIGINALSUBLEVEL="$(readmakevalue SUBLEVEL)"
+        VERSION="${VERSION:-0}"
+        PATCHLEVEL="${PATCHLEVEL:-0}"
+        ORIGINALSUBLEVEL="${ORIGINALSUBLEVEL:-0}"
+        SUBLEVEL="$ORIGINALSUBLEVEL"
+        # Validate Original Kernel Version
+        for value in "$VERSION" "$PATCHLEVEL" "$ORIGINALSUBLEVEL"; do
+          if [[ ! "$value" =~ ^[0-9]+$ ]]; then
+            echo "└─ ⚠️ Invalid Kernel Version Component: $value"
+            exit 1
+          fi
+        done
+
+        OGVERSION="${VERSION}.${PATCHLEVEL}.${ORIGINALSUBLEVEL}"
+        echo "└─ 📌 Kernel Version           : $VERSION.$PATCHLEVEL"
+        echo "└─ 📌 Kernel Sublevel          : $SUBLEVEL"
+        echo "└─ 📌 Original Kernel Version  : $OGVERSION"
+        # Apply Optional Sublevel Override        
+        if [[ -n "$SUBLVLINPUT" ]]; then
+          if [[ ! "$SUBLVLINPUT" =~ ^[0-9]+$ ]]; then
+            echo "└─ ⚠️ Invalid Custom Sublevel: $SUBLVLINPUT"
+            exit 1
+          fi
+
+          sed -i \
+            "s/^\([[:space:]]*SUBLEVEL[[:space:]]*=[[:space:]]*\).*/\1${SUBLVLINPUT}/" \
+            "$COMMONMAKEFILE"
+          SUBLEVEL="$SUBLVLINPUT"
+          echo "└─ 📌 Kernel Sublevel Updated : $SUBLEVEL"
+        else
+          echo "└─ 📌 No Custom Sublevel Provided"
+        fi
+
+        # Read the Final Version From Makefile
+        NEWVERSION="$(
+          awk -F'=' '
+            /^[[:space:]]*VERSION[[:space:]]*=/ {
+              gsub(/[[:space:]]/, "", $2)
+              v=$2
+            }
+            /^[[:space:]]*PATCHLEVEL[[:space:]]*=/ {
+              gsub(/[[:space:]]/, "", $2)
+              p=$2
+            }
+            /^[[:space:]]*SUBLEVEL[[:space:]]*=/ {
+              gsub(/[[:space:]]/, "", $2)
+              s=$2
+            }
+            END {
+              if (v != "" && p != "" && s != "")
+                print v "." p "." s
+            }
+          ' "$COMMONMAKEFILE"
+        )"
+        if [[ ! "$NEWVERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+          echo "└─ ⚠️ Unable to Determine Final Kernel Version"
+          exit 1
+        fi
+
+        SUBLEVEL="${NEWVERSION##*.}"
+        echo "└─ 📌 Final Kernel Version: $NEWVERSION"
+        if [[ "$OGVERSION" != "$NEWVERSION" ]]; then
+          echo "└─ ⚙️ Kernel Version Modified: $OGVERSION → → → $NEWVERSION"
+        else
+          echo "└─ ⚙️ Kernel Version Unchanged"
+        fi
+
+        # Export Shared Build Variables
+        {
+          echo "SUBLEVEL=$SUBLEVEL"
+          echo "KERNELMODULE=$KERNELMODULE"
+          echo "ANDROIDVERSION=$ANDROIDVERSION"
+          echo "KERNELVERSION=$KERNELVERSION"
+          echo "FULLVERSION=$NEWVERSION"
+          echo "KV1=${KERNELVERSION%%.*}"
+          echo "KV2=${KERNELVERSION//./}"
+          echo "KV3=${NEWVERSION//./}"
+          echo "KSHORTVERSION=${NEWVERSION%.*}"
+          echo "KSHORTPATCHVERSION=$NEWVERSION"
+        } >> "$GITHUB_ENV"
+        # Export Action Outputs
+        {
+          echo "androidversion=$ANDROIDVERSION"
+          echo "kernelversion=$KERNELVERSION"
+          echo "sublevel=$SUBLEVEL"
+          echo "fullversion=$NEWVERSION"
+        } >> "$GITHUB_OUTPUT"
+        echo "└─ 🎉 Kernel Version Setup Complete"
+
+    - name: 🏷️ Configure Kernel Version Suffix
+      shell: bash
+      env:
+        SUFFIX: ${{ inputs.SUFFIX }}
+      run: |
+        set -Eeuo pipefail
+        : "${WORKDIR:?directory is not set}"
+        : "${KERNELPLATFORM:?directory is not set}"
+        : "${COMMONKERNELFOLDER:?directory is not set}"
+        : "${ANDROIDVERSION:?android version is not set}"
+        # Navigate to Kernel Workspace
+        cd "$WORKDIR"
+        # Android Version Is Already Determined by Kernel Version Setup
+        echo "└─ 🔧 Configuring Kernel Version Suffix..."
+        echo "└─ 📌 Android Version: ${ANDROIDVERSION}"
+        # Define Supported 'Set Local Version' Scripts
+        FILES=(
+          "${COMMONKERNELFOLDER}/scripts/setlocalversion"
+          "${MSMKERNELFOLDER}/scripts/setlocalversion"
+          "${KERNELPLATFORM}/external/dtc/scripts/setlocalversion"
+        )
+        # Resolve Custom or Automatic Suffix
+        if [[ -n "$SUFFIX" ]]; then
+          # Custom Suffix Mode
+          SUFFIXMODE="Custom"
+          echo "└─ 🚀 Custom Kernel Suffix Detected"
+          echo "└─ 📌 Suffix : ${SUFFIX}"
+          # Build Final Kernel Local Version
+          FINALSUFFIX="-${ANDROIDVERSION}-${SUFFIX}-4k"
+          echo "└─ 📌 Final Local Version : ${FINALSUFFIX}"          
+          # Track Injection Status
+          INJECTIONSUCCESS=true
+          # Process All Supported 'Set Local Version' Scripts
+          for path in "${FILES[@]}"; do
+            # Skip Missing 'Set Local Version' Scripts
+            [[ -f "$path" ]] || continue
+            echo "└─ 📂 Processing  : ${path}"
+            # Ensure Script Remains Executable
+            chmod +x "$path"
+            # Remove Existing Dirty Tags
+            sed -i 's/ -dirty//g' "$path"
+            # Remove Dirty Tags From Dynamically Generated Res Values
+            if ! grep -q 'res=$(echo "$res" | sed' "$path"; then
+              sed -i '$i res=$(echo "$res" | sed '\''s/-dirty//g'\'')' "$path"
+            fi
+
+            # Detect 'Set Local Version' Scripts Format
+            if grep -q 'KERNELVERSION.*scm_version' "$path"; then
+              # New Format : Replace SCM Version Output Directly
+              echo "└─ 📌 New 'Set Local Version' Scripts Format Detected"
+              if ! sed -i \
+                "s|echo \"\${KERNELVERSION}.*scm_version}\"|echo \"\${KERNELVERSION}-${ANDROIDVERSION}-${SUFFIX}-4k\"|" \
+                "$path"; then
+                echo "└─ ⚠️ Failed to Modify : ${path}"
+                INJECTIONSUCCESS=false
+                break
+              fi              
+            
+            elif grep -q 'echo "\$res"' "$path"; then
+              # Inject Before the Final Result is Printed
+              # Old Format : Use Static Res Value
+              echo "└─ 📌 Old 'Set Local Version' Scripts Format Detected"
+              echo "└─ 📌 Using Static Res Value"
+              if ! sed -i \
+                "s/^res=.*/res=\"-${ANDROIDVERSION}-${SUFFIX}-4k\"/" \
+                "$path"; then
+                echo "└─ ⚠️ Failed to Modify : ${path}"
+                INJECTIONSUCCESS=false
+                break
+              fi              
+            
+            else
+              # Standard Format: Dynamically Inject Suffix
+              echo "🛠️ Standard 'Set Local Version' Scripts Format Detected"
+              # Warn About Bazel Version Handling
+              if [[ -f kernel_platform/build_with_bazel.py ]]; then
+                echo "└─ ⚠️ Bazel Build Detected"
+                echo "└─ 📌 Special Characters in Suffix may Require Adjustment"
+              fi
+      
+              # Inject Custom Suffix Before First Echo 'Res'
+              if ! tac "$path" |
+                sed \
+                  "0,/echo \"\\\$res\"/s//res=\\\$(echo \\\$res | cut -d- -f1-2)-${SUFFIX}-4k; echo \"\\\$res\";/" \
+                | tac > "${path}.tmp"; then
+                echo "└─ ⚠️ Failed to Inject Suffix : ${path}"
+                rm -f "${path}.tmp"
+                INJECTIONSUCCESS=false
+                break
+              fi
+           
+              # Replace Original Script
+              mv "${path}.tmp" "$path"
+            fi
+     
+            # Restore Executable Permission
+            chmod +x "$path"
+            echo "└─ 🎉 Finished : ${path}"
+          done
+   
+          # Handle Custom Suffix Injection Result
+          if [[ "$INJECTIONSUCCESS" == "true" ]]; then
+            echo "└─ 🎉 Custom Kernel Suffix Injection Successful"
+            echo "└─ 📌 Local Version : ${FINALSUFFIX}"
+          else
+            # Custom Injection Failed — Use Environment Fallback
+            echo "└─ ⚠️ Custom Kernel Suffix Injection Failed"
+            echo "└─ 🔄 Activating Local Version Fallback"
+            {
+              echo "LOCALVERSION=${FINALSUFFIX}"
+              echo "KBUILDVERSION=${FINALSUFFIX}"
+            } >> "$GITHUB_ENV"
+            echo "└─ 🎉 Local Version Fallback Enabled"
+            echo "└─ 📌 LOCALVERSION=${FINALSUFFIX}"
+            echo "└─ 📌 KBUILDVERSION=${FINALSUFFIX}"
+          fi
+        else
+          # Automatic Suffix Mode
+          SUFFIXMODE="Automatic"
+          echo "└─ 🎲 No Custom Kernel Suffix Provided"
+          echo "└─ 🚀 Generating Random Kernel Suffix..."
+          # Generate Random Kernel Suffix
+          RANDOMDIGIT=$((RANDOM % 10))
+          RANDOMHASH="$(head -c 7 /dev/urandom | xxd -p)"
+          AUTOSUFFIX="${RANDOMDIGIT}-g${RANDOMHASH}"
+          SUFFIX="$AUTOSUFFIX"
+          FINALSUFFIX="-${ANDROIDVERSION}-${AUTOSUFFIX}-4k"
+          echo "└─ 🧾 Generated Suffix     : ${AUTOSUFFIX}"
+          echo "└─ 📌 Final Local Version  : ${FINALSUFFIX}"
+          # Process All Supported 'Set Local Version' Scripts
+          for path in "${FILES[@]}"; do
+            # Skip Missing 'Set Local Version' Scripts
+            [[ -f "$path" ]] || continue
+            echo "└─ 📂 Processing : ${path}"
+            # Ensure Script Remains Executable
+            chmod +x "$path"
+            # Remove Existing Dirty Markers
+            sed -i 's/ -dirty//g' "$path"
+            # Prevent Duplicate Automatic Injection
+            if grep -q "Kernel Auto Suffix Injection" "$path"; then
+              echo "└─ ℹ️ Auto Suffix Injection Already Present"
+              echo "└─ ⏭️ Skipping : ${path}"
+              continue
+            fi
+
+            # Append Automatic Suffix Logic
+            printf '%s\n' \
+              '' \
+              '# Kernel Auto Suffix Injection' \
+              'if [ -n "$res" ]; then' \
+              '  case "$res" in' \
+              "    *\"-${AUTOSUFFIX}\"*)" \
+              '      ;;' \
+              '    *)' \
+              "      res=\"\$res-${ANDROIDVERSION}-${AUTOSUFFIX}-4k\"" \
+              '      ;;' \
+              '  esac' \
+              'fi' >> "$path"
+            # Restore Executable Permission
+            chmod +x "$path"
+            echo "└─ 🎉 Auto Suffix Injection Applied"
+          done
+        fi
+
+        echo "⚙️ Checking Kernel Version Changes..."
+        # Stage All Modified Files
+        git add -A
+        # Commit Only When Changes Exist
+        if git diff --cached --quiet; then
+          echo "└─ ℹ️ No Kernel Version Changes Detected"
+        else
+          if [[ "$SUFFIXMODE" == "Custom" ]]; then
+            git commit \
+              -m "└─ 🎉 Inject Custom Kernel Version Suffix"
+          else
+            git commit \
+              -m "└─ 🎉 Apply Auto-Generated Kernel Suffix"
+          fi
+
+          echo "└─ 🎉 Kernel Version Changes Committed Successfully"
+        fi
+
+        echo "------------------------------"
+        echo "└─ 🎉 Kernel Version Suffix Configuration Complete"
+        echo "------------------------------"
+        echo "└─ 📌 Mode          : ${SUFFIXMODE}"
+        echo "└─ 📌 Android       : ${ANDROIDVERSION}"
+        echo "└─ 📌 Suffix        : ${SUFFIX}"
+        echo "└─ 📌 Local Version : ${FINALSUFFIX}"
+        echo "------------------------------"
