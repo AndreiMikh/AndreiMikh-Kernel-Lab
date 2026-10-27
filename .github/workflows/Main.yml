@@ -394,37 +394,35 @@ jobs:
       - name: 🌿 Checkout
         uses: actions/checkout@v7
 
-      # Optimize Build Storage by Removing Unnecessary Software
+      # Optimize Build Storage in Background
       - name: 🧹 Optimize Build Storage
         # 🚦 Run Only When Automatic Cleanup Is Disabled
         if: ${{ env.CLEANSPACE == 'Disabled' }}
         shell: bash
         env:
-          # ⚙️ Optional Software Cleanup Toggles
+          # Optional Software Cleanup Toggles
           REMOVEDOTNET: true
           REMOVEANDROID: true
           REMOVEHASKELL: true
           REMOVECODEQL: true
-          # 🐳 Optional Docker Image Cleanup
+          # Enable or Disable Docker Image Cleanup
           REMOVEDOCKERIMAGES: false
-          # 🔍 Enable Detailed Cleanup Logging
+          # Enable Detailed Cleanup Logging
           DEBUG: true
         run: |
           set -Eeuo pipefail
-          # Display Initial Disk Usage
-          echo "└─ 🧹 Optimizing Build Storage..."
-          echo "└─ 📊 Disk Usage Before Cleanup:"
+          # 📊 Display Initial Disk Usage
+          echo "└─ 🧹 Starting Background Storage Cleanup..."
           df -h /
           # 🔧 Enable Safe Wildcard Expansion
           shopt -s nullglob
-          # Initialize Cleanup Path Arrays
+          # Initialize Cleanup Path List
           CLEANUPPATHS=()
-          EXISTINGPATHS=()
           # Add Optional Software Cleanup Paths
-          [[ "${REMOVEDOTNET}" == "true" ]] && CLEANUPPATHS+=(/usr/share/dotnet)
-          [[ "${REMOVEANDROID}" == "true" ]] && CLEANUPPATHS+=(/usr/local/lib/android)
-          [[ "${REMOVEHASKELL}" == "true" ]] && CLEANUPPATHS+=(/opt/ghc)
-          [[ "${REMOVECODEQL}" == "true" ]] && CLEANUPPATHS+=(/opt/hostedtoolcache/CodeQL)
+          [[ "$REMOVEDOTNET" == "true" ]] && CLEANUPPATHS+=(/usr/share/dotnet)
+          [[ "$REMOVEANDROID" == "true" ]] && CLEANUPPATHS+=(/usr/local/lib/android)
+          [[ "$REMOVEHASKELL" == "true" ]] && CLEANUPPATHS+=(/opt/ghc)
+          [[ "$REMOVECODEQL" == "true" ]] && CLEANUPPATHS+=(/opt/hostedtoolcache/CodeQL)
           # Add Additional Unnecessary Software Paths
           CLEANUPPATHS+=(
             /usr/local/aws-sam-cli
@@ -436,15 +434,16 @@ jobs:
             /usr/local/julia*
             /usr/local/bin/pulumi*
           )
-          # Identify Existing Paths Before Removal
+          # Filter List to Include Only Existing Paths
+          EXISTINGPATHS=()
           for CLEANUPPATH in "${CLEANUPPATHS[@]}"; do
             if [[ -e "$CLEANUPPATH" || -L "$CLEANUPPATH" ]]; then
-              # 📝 Display Each Path When Debug Logging is Enabled
-              if [[ "${DEBUG}" == "true" ]]; then
-                echo "└─ 🗑️ Selected For Removal : ${CLEANUPPATH}"
+              # 📝 Log Each Selected Path When Debugging is Enabled
+              if [[ "$DEBUG" == "true" ]]; then
+                echo "└─ 🗑️ Selected For Removal : $CLEANUPPATH"
               fi
 
-              # 📌 Save Existing Paths For Cleanup
+              # 📌 Add Existing Path to Removal List
               EXISTINGPATHS+=("$CLEANUPPATH")
             fi
             
@@ -452,36 +451,34 @@ jobs:
 
           # Start Software Removal Without Waiting For Completion
           if (( ${#EXISTINGPATHS[@]} > 0 )); then
-            echo "└─ 🗑️ Starting Background Removal of ${#EXISTINGPATHS[@]} Software Paths..."
-            # 📄 Define Background Cleanup Log
-            CLEANUPLOG="${RUNNER_TEMP:-/tmp}/storage-cleanup.log"
-            # Run Removal with Elevated Privileges in Background
-            sudo rm -rf -- "${EXISTINGPATHS[@]}" \
+            # Define Background Cleanup Log and PID File
+            CLEANUPLOG="${RUNNER_TEMP}/storage-cleanup.log"
+            CLEANUPPIDFILE="${RUNNER_TEMP}/storage-cleanup.pid"
+            # Launch Removal Through sudo and Detach Standard Input
+            sudo nohup rm -rf -- "${EXISTINGPATHS[@]}" \
               > "$CLEANUPLOG" 2>&1 < /dev/null &
-            # Capture Background Process ID
-            CLEANUP_PID=$!
-            echo "└─ ✔ Background Cleanup Started — PID : ${CLEANUP_PID}"
-            echo "└─ 📄 Cleanup Log : ${CLEANUPLOG}"
+            # Capture and Save Background Process ID
+            CLEANUPPID=$!
+            echo "$CLEANUPPID" > "$CLEANUPPIDFILE"
+            # Export Cleanup Tracking Values to Subsequent Steps
+            {
+              echo "STORAGECLEANUPPID=$CLEANUPPID"
+              echo "STORAGECLEANUPPIDFILE=$CLEANUPPIDFILE"
+              echo "STORAGECLEANUPLOG=$CLEANUPLOG"
+            } >> "$GITHUB_ENV"
+            # Report Background Cleanup Details
+            echo "└─ ✔ Background Cleanup Started — PID : $CLEANUPPID"
+            echo "└─ 📄 Cleanup Log : $CLEANUPLOG"
           else
-            # No Matching Software Paths were Found
+            # Skip Removal When No Matching Paths Exist
             echo "└─ ℹ️ No Software Paths Found"
           fi
 
-          # Optionally Remove Unused Docker Images
-          if [[ "${REMOVEDOCKERIMAGES}" == "true" ]] &&
-             command -v docker >/dev/null 2>&1; then
-            echo "└─ 🐳 Removing Unused Docker Images..."
-            sudo docker image prune --all --force || true
-          fi
-
-          # 🧹 Clean APT Package Cache
+          # Clean APT Package Cache
           echo "└─ 🧹 Cleaning APT Cache..."
           sudo apt-get clean
-          # 📊 Display Disk Usage After Immediate Cleanup Operations
-          echo "└─ 📊 Disk Usage After Cleanup Operations:"
-          df -h /
-          # 🎉 Complete Storage Optimization Step
-          echo "└─ 🎉 Build Storage Optimization Step Completed"
+          # Finish Launching the Cleanup Operations
+          echo "└─ 🎉 Storage Cleanup Launched"
 
       - name: 👤 Git Identity
         shell: bash
