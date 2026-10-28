@@ -369,101 +369,76 @@ runs:
           echo "└─ 🩹 Preparing Android 16 / 6.12 SUSFS Compatibility"
           # Prepare DMA-BUF Header
           if [[ "$SUBLEVEL" -le 58 ]]; then
-            if grep -qFx '#include <linux/dma-buf.h>' "$EXEC"; then
+            if [[ ! -f "$EXEC" ]]; then
+              echo "└─ ⚠️ Cannot Prepare DMA-BUF Header: EXEC File Missing" >&2
+            elif grep -qFx '#include <linux/dma-buf.h>' "$EXEC"; then
               echo "└─ ℹ️ DMA-BUF Header Already Present"
             elif grep -qFx '#include <linux/ksm.h>' "$EXEC"; then
+              echo "└─ 🔧 Adding DMA-BUF Header to EXEC"
               sed -i \
                 '/^#include <linux\/ksm\.h>$/a #include <linux/dma-buf.h>' \
-                "$EXEC"   
+                "$EXEC"
               if grep -qFx '#include <linux/dma-buf.h>' "$EXEC"; then
                 FAKEPATCHEXEC=1
                 echo "└─ 📌 DMA-BUF Header Added"
               else
-                echo "└─ ⚠️ DMA-BUF Header Could Not Be Added" >&2
+                echo "└─ ⚠️ Failed to Add DMA-BUF Header" >&2
               fi
               
             else
-              echo "└─ ⚠️ KSM Include Not Found; Skipping DMA-BUF Preparation" >&2
+              echo "└─ ⚠️ Cannot Locate KSM Header in EXEC" >&2
             fi
             
           else
-            echo "└─ ⏭️ Skipping DMA-BUF Header Preparation"
+            echo "└─ ⏭️ Skipping DMA-BUF Header Preparation For Sublevel $SUBLEVEL"
           fi
-        
-          # Prepare TASK-MMU Source
+
+          # Check TASK-MMU VMA Condition
           if [[ "$SUBLEVEL" -le 92 ]]; then
-            echo "└─ 🔧 Preparing TASK-MMU SUSFS Compatibility"       
-            # Keep the Source's Existing VMA Condition
-            if grep -qF 'if (!vma_data_pages(vma))' "$MMU"; then
-              echo "└─ ℹ️ Using VMA DATA PAGES()"
+            if [[ ! -f "$MMU" ]]; then
+              echo "└─ ⚠️ Cannot Check TASK-MMU: File Missing" >&2
+            elif grep -qF 'if (!vma_data_pages(vma))' "$MMU"; then
+              echo "└─ ℹ️ VMA DATA PAGES() Condition Found"
+              echo "└─ 📌 TASK-MMU VMA Condition Check Passed"
             elif grep -qF 'if (!vma_pages(vma))' "$MMU"; then
-              echo "└─ ℹ️ Using VMA PAGES()"
+              echo "└─ ℹ️ VMA PAGES() Condition Found"
+              echo "└─ 📌 TASK-MMU VMA Condition Check Passed"
+            else
+              echo "└─ ⚠️ TASK-MMU VMA Condition Not Found" >&2
             fi
-        
-            # Create an Idempotent Helper for the SUSFS Patch Stage
-            SUSFSHELPER="${RUNNER_TEMP:-/tmp}/prepare-susfs-task-mmu.py"       
-            cat > "$SUSFSHELPER" <<'PY'
-        import pathlib
-        import re
-        import sys        
-        path = pathlib.Path(sys.argv[1])        
-        if not path.is_file():
-            print(f"└─ ⚠️ TASK-MMU Source Unavailable: {path}", file=sys.stderr)
-            sys.exit(0)        
-        src = path.read_text()        
-        # Add SUSFS Map Check to SHOW SMAP()
-        start = src.find("static int show_smap(")
-        end = src.find("\n}", start) if start >= 0 else -1     
-        if start >= 0 and end >= 0:
-            fn = src[start:end + 2]       
-            if "SUSFS_IS_INODE_SUS_MAP" not in fn:
-                condition = re.search(
-                    r'(?m)^([ \t]*)if \(!vma_(?:data_)?pages\(vma\)\)',
-                    fn
-                )     
-                if condition:
-                    indent = condition.group(1)
-                    hook = (
-                        f"{indent}#ifdef CONFIG_KSU_SUSFS_SUS_MAP\n"
-                        f"{indent}if (vma->vm_file &&\n"
-                        f"{indent}    SUSFS_IS_INODE_SUS_MAP(file_inode(vma->vm_file)))\n"
-                        f"{indent}\treturn 0;\n"
-                        f"{indent}#endif // CONFIG_KSU_SUSFS_SUS_MAP\n"
-                    )
-                    pos = start + condition.start()
-                    src = src[:pos] + hook + src[pos:]
-                    print("└─ 📌 SUSFS SHOW SMAP() Hook Prepared")        
-        # Adapt show_smaps_rollup() Without Changing VMA Iteration
-        start = src.find("static int show_smaps_rollup(")
-        end = src.find("\n}", start) if start >= 0 else -1        
-        if start >= 0 and end >= 0:
-            fn = src[start:end + 2]        
-            # Replace Only Stats Calls; Retain Lock Handling and Iteration
-            if "SUSFS_IS_INODE_SUS_MAP" not in fn:
-                for argument in ("0", "last_vma_end"):
-                    call = f"smap_gather_stats(vma, &mss, {argument});"
-                    replacement = (
-                        "#ifdef CONFIG_KSU_SUSFS_SUS_MAP\n"
-                        "if (!vma->vm_file || "
-                        "!SUSFS_IS_INODE_SUS_MAP(file_inode(vma->vm_file)))\n"
-                        f"\t{call}\n"
-                        "#else\n"
-                        f"{call}\n"
-                        "#endif // CONFIG_KSU_SUSFS_SUS_MAP"
-                    )
-                    fn = fn.replace(call, replacement)    
-                src = src[:start] + fn + src[end + 2:]
-                print("└─ 📌 SUSFS SHOW SMAPS ROLLUP() Hooks Prepared")        
-        path.write_text(src)
-        PY        
-            echo "└─ 📌 TASK-MMU Compatibility Helper Created"
+
+            # Verify SUSFS Target Functions
+            if [[ ! -f "$MMU" ]]; then
+              echo "└─ ⚠️ Cannot Verify TASK-MMU Functions: File Missing" >&2
+            elif grep -Fq 'static int show_smap(' "$MMU" &&
+                 grep -Fq 'static int show_smaps_rollup(' "$MMU"; then
+              echo "└─ 📌 SHOW SMAP() and SMAPS ROLLUP() Found"
+            else
+              echo "└─ ⚠️ SHOW SMAP() or SMAPS ROLLUP() Not Found" >&2
+            fi
+            
           else
-            echo "└─ ⏭️ Skipping TASK-MMU Preparation"
+            echo "└─ ⏭️ Skipping TASK-MMU Context Checks For Sublevel $SUBLEVEL"
           fi
-        
+
+          # Inspect TASK-MMU Source Before SUSFS Core Patch
+          if [[ -f "$MMU" ]]; then
+            echo "└─ 🔎 Inspecting SHOW SMAPS()"
+            sed -n '/^static int show_smap(/,/^}/p' "$MMU"
+            echo "└─ 🔎 Inspecting SHOW SMAPS ROLLUP()"
+            sed -n '/^static int show_smaps_rollup(/,/^}/p' "$MMU"
+            # Check Existing SUSFS Map Hooks
+            echo "└─ 🔎 Checking Existing SUSFS Map Hooks"
+            grep -nE \
+              'SUSFS_IS_INODE_SUS_MAP|bypass_orig_flow|vma_data_pages|vma_pages' \
+              "$MMU" || true
+          else
+            echo "└─ ⚠️ Cannot Inspect TASK-MMU Source: File Missing" >&2
+          fi
+
           echo "└─ 🎉 Android 16 / 6.12 Compatibility Preparation Complete"
         fi
-        
+
         # Export Per-File Fake Patch Flags
         {
           echo "FAKEPATCHBASE=$FAKEPATCHBASE"
@@ -1217,73 +1192,54 @@ runs:
           requirefile "${FAKEPATCHEXEC:-0}" "$EXEC"
           requirefile "${FAKEPATCHTASKMMU:-0}" "$MMU"
           # Revert EXEC DMA-BUF Header
-          if [[ "${FAKEPATCHEXEC:-0}" == "1" && "$SUBLEVEL" -le 58 ]]; then
-            if [[ -f "$EXEC" ]] &&
-               grep -qFx '#include <linux/dma-buf.h>' "$EXEC"; then
-              echo "└─ ♻️ Removing EXEC DMA-BUF Header"
-              sed -i '\|^#include <linux/dma-buf\.h>$|d' "$EXEC"
+          if [[ "${FAKEPATCHEXEC:-0}" == "1" ]]; then
+            if [[ "$SUBLEVEL" -le 58 ]]; then
+              if grep -qFx '#include <linux/dma-buf.h>' "$EXEC"; then
+                echo "└─ ♻️ Reverting EXEC DMA-BUF Header"
+                sed -i '\|^#include <linux/dma-buf\.h>$|d' "$EXEC"
+              else
+                echo "└─ ℹ️ EXEC DMA-BUF Header Already Absent"
+              fi
+              
             else
-              echo "└─ ℹ️ EXEC DMA-BUF Header Already Absent"
+              echo "└─ ℹ️ EXEC DMA-BUF Header Revert Not Required For Sublevel $SUBLEVEL"
             fi
             
           else
-            echo "└─ ⏭️ Skipping EXEC DMA-BUF Header Reversal"
+            echo "└─ ⏭️ Skipping EXEC: Fake Patch Flag is Not 1"
           fi
-        
-          # Revert TASK-MMU SUSFS Compatibility Hooks
-          if [[ "$SUBLEVEL" -le 92 ]]; then
-            python3 - "$MMU" <<'PY'
-        import pathlib
-        import re
-        import sys        
-        path = pathlib.Path(sys.argv[1])        
-        if not path.is_file():
-            print(f"└─ ⚠️ TASK-MMU Source Unavailable: {path}")
-            sys.exit(0)        
-        src = path.read_text()       
-        # Remove SHOW SMAP() Compatibility Hook
-        src, smapcount = re.subn(
-            r'(?m)^[ \t]*#ifdef CONFIG_KSU_SUSFS_SUS_MAP\n'
-            r'[ \t]*if \(vma->vm_file &&\n'
-            r'[ \t]*SUSFS_IS_INODE_SUS_MAP\(file_inode\(vma->vm_file\)\)\)\n'
-            r'[ \t]*return 0;\n'
-            r'[ \t]*#endif // CONFIG_KSU_SUSFS_SUS_MAP\n',
-            '',
-            src,
-            count=1
-        )        
-        # Remove Only Wrappers Added Around Rollup Statistics Calls
-        # Keep Each Original SMAP GATHER STATS() Call Exactly Once
-        start = src.find("static int show_smaps_rollup(")
-        end = src.find("\n}", start) if start >= 0 else -1
-        rollupcount = 0       
-        if start >= 0 and end >= 0:
-            fn = src[start:end + 2]       
-            for argument in ("0", "last_vma_end"):
-                call = f"smap_gather_stats(vma, &mss, {argument});"
-                wrapped = (
-                    "#ifdef CONFIG_KSU_SUSFS_SUS_MAP\n"
-                    "if (!vma->vm_file || "
-                    "!SUSFS_IS_INODE_SUS_MAP(file_inode(vma->vm_file)))\n"
-                    f"\t{call}\n"
-                    "#else\n"
-                    f"{call}\n"
-                    "#endif // CONFIG_KSU_SUSFS_SUS_MAP"
-                )        
-                count = fn.count(wrapped)
-                if count:
-                    fn = fn.replace(wrapped, call)
-                    rollupcount += count        
-            src = src[:start] + fn + src[end + 2:]       
-        path.write_text(src)        
-        print(f"└─ ♻️ Removed SHOW SMAP() Hook: {smapcount}")
-        print(f"└─ ♻️ Removed SHOW SMAPS ROLLUP() Wrappers: {rollupcount}")
-        PY       
-  
+
+          # Revert TASK-MMU VMA Condition
+          if [[ "${FAKEPATCHTASKMMU:-0}" == "1" ]]; then
+            if [[ "$SUBLEVEL" -le 92 ]]; then
+              echo "└─ ℹ️ Checking TASK-MMU VMA Condition"
+              # Restore Only if Preparation Step Changed it
+              if grep -qF 'if (!vma_pages(vma))' "$MMU"; then
+                echo "└─ ♻️ Restoring VMA DATA PAGES() Condition"
+                sed -i 's/if (!vma_pages(vma))/if (!vma_data_pages(vma))/' "$MMU"
+              elif grep -qF 'if (!vma_data_pages(vma))' "$MMU"; then
+                echo "└─ ℹ️ VMA DATA PAGES() Condition Already Restored"
+              else
+                echo "└─ ⚠️ VMA Page Condition Not Found; Skipping" >&2
+              fi
+            else
+              echo "└─ ℹ️ VMA Page Condition Revert Not Required For Sublevel $SUBLEVEL"
+            fi
+
+            # Verify TASK-MMU Compatibility Reversal
+            if [[ "$SUBLEVEL" -le 92 ]]; then
+              if grep -qF 'if (!vma_pages(vma))' "$MMU"; then
+                echo "└─ ⚠️ VMA PAGES() Condition Still Present" >&2
+              elif grep -qF 'if (!vma_data_pages(vma))' "$MMU"; then
+                echo "└─ 🎉 TASK-MMU VMA Condition Verified"
+              else
+                echo "└─ ⚠️ TASK-MMU VMA Condition Verification Failed" >&2
+              fi
+            fi
           else
-            echo "└─ ⏭️ Skipping TASK-MMU Reversal"
-          fi        
-        
+            echo "└─ ⏭️ Skipping TASK-MMU: Fake Patch Flag is Not 1"
+          fi
+
           echo "└─ 🎉 Android 16 / 6.12 Compatibility Reversal Complete"
         fi
     
