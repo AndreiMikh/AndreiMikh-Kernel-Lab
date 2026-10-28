@@ -542,7 +542,7 @@ runs:
         		return 0;
         #endif // #ifdef CONFIG_KSU_SUSFS_SUS_MAP
         """        
-            print("└─ 🔧 Adding show_smap() Hook")
+            print("└─ 🔧 Adding SHOW SMAP() Hook")
             return fn.replace(anchor, replacement, 1)        
         source = edit(source, "static int show_smap(", fixsmap)              
         # Add SUSFS Map Bypass to SHOW SMAPS ROLLUP()
@@ -572,31 +572,51 @@ runs:
                 print("└─ 🔧 Adding SHOW SMAPS ROLLUP() Hook")
             else:
                 print("└─ ℹ️ SUSFS Map Hook Already Present in Rollup")
-            # Ensure Exactly One Bypass Label Exists
+            # Place Bypass Label Inside Statistics Branch it Serves
+            # Avoids Matching an Unrelated VMA-END Assignment Elsewhere
             labels = fn.count("bypass_orig_flow:")
             if labels == 0:
-                # Locate VMA-End Assignment Following Bypass Hook
-                # Multiple Assignments Exist in Some Android 16 / 6.12 Sources
-                assignment = re.compile(
-                    r"(?m)^([ \t]*)last_vma_end[ \t]*=[ \t]*"
-                    r"vma->vm_end;[ \t]*$"
+                branch = re.search(
+                    r'if\s*\(\s*vma->vm_start\s*>=\s*last_vma_end\s*\)\s*\{',
+                    fn
                 )
-                gotopos = fn.find("goto bypass_orig_flow;")
-                if gotopos < 0:
-                    raise RuntimeError("Rollup Bypass Go to is Missing")
-                match = assignment.search(fn, gotopos)
-                if match is None:
+                if not branch:
                     raise RuntimeError(
-                        "Cannot Locate Rollup VMA-End Assignment After Bypass Hook"
+                        "Cannot Locate Rollup Non-Overlapping VMA Branch"
                     )
-                # Preserve the Original Assignment and Its Indentation
-                replacement = (
-                    "#ifdef CONFIG_KSU_SUSFS_SUS_MAP\n"
-                    "        bypass_orig_flow:\n"
-                    "        #endif // #ifdef CONFIG_KSU_SUSFS_SUS_MAP\n"
-                    f"{match.group(0)}"
+                brace = fn.find("{", branch.start())
+                depth = 0
+                branchend = None
+                for i in range(brace, len(fn)):
+                    if fn[i] == "{":
+                        depth += 1
+                    elif fn[i] == "}":
+                        depth -= 1
+                        if depth == 0:
+                            branchend = i
+                            break
+                if branchend is None:
+                    raise RuntimeError("Cannot Match Rollup VMA Branch Braces")
+                body = fn[brace + 1:branchend]
+                call = re.search(
+                    r'smap_gather_stats\s*\(\s*vma\s*,\s*&mss\s*,\s*0\s*\)\s*;',
+                    body
                 )
-                fn = fn[:match.start()] + replacement + fn[match.end():]
+                assignment = re.search(
+                    r'last_vma_end\s*=\s*vma->vm_end\s*;',
+                    body[call.end():] if call else ""
+                )
+                cont = re.search(r'\bcontinue\s*;', body)
+                if not call or not assignment or not cont or call.end() + assignment.end() > cont.start():
+                    raise RuntimeError(
+                        "Cannot Safely Locate Rollup Stats, VMA-END and Continue Sequence"
+                    )
+                abs_assignment = brace + 1 + call.end() + assignment.start()
+                label = """#ifdef CONFIG_KSU_SUSFS_SUS_MAP
+        bypass_orig_flow:
+        #endif // #ifdef CONFIG_KSU_SUSFS_SUS_MAP
+        """
+                fn = fn[:abs_assignment] + label + fn[abs_assignment:]
                 print("└─ 🔧 Adding Rollup Bypass Label")
             elif labels > 1:
                 raise RuntimeError("Duplicate BYPASS ORIG FLOW Labels Found")
@@ -878,11 +898,80 @@ runs:
 
         # Apply SUSFS Core Patch
         echo "└─ ⚙️ Applying SUSFS Core Patch (50 Add SUSFS Patch)"
+        # Remove a Stale TASK-MMU Reject Before Evaluating This Patch Attempt
+        MMU="$COMMONKERNELFOLDER/fs/proc/task_mmu.c"
+        rm -f "$MMU.rej"
         if patch -p1 < "$(basename "$SUSFSPATCH")"; then
           echo "└─ 📌 SUSFS 50 Enable Core Patch Applied"
         else
-          # Preserve Original Behavior: Warn and Continue on Failure
-          echo "└─ ⚠️ SUSFS Core Patch Already Applied or Failed"
+          # Accept Only the Known Android 16 / 6.12 TASK-MMU Context Mismatch
+          # The Compatibility Hooks Must Be Present and Structurally Correct
+          if [[ "$GKIVERSION" == "android16-6.12" && -f "$MMU.rej" ]] && \
+             [[ "$(grep -c '^@@' "$MMU.rej" || true)" -eq 3 ]] && \
+             grep -q 'return 0;' "$MMU.rej" && \
+             [[ "$(grep -c 'bypass_orig_flow' "$MMU.rej" || true)" -ge 2 ]] && \
+             ! find . -type f -name '*.rej' ! -path './fs/proc/task_mmu.c.rej' -print -quit | grep -q . && \
+             python3 - "$MMU" <<'PY'
+        import re
+        import sys
+        from pathlib import Path
+        source = Path(sys.argv[1]).read_text()
+        def function(text, signature):
+            start = text.find(signature)
+            if start < 0:
+                raise SystemExit(1)
+            brace = text.find("{", start)
+            depth = 0
+            for i in range(brace, len(text)):
+                if text[i] == "{":
+                    depth += 1
+                elif text[i] == "}":
+                    depth -= 1
+                    if depth == 0:
+                        return text[start:i + 1]
+            raise SystemExit(1)
+        smap = function(source, "static int show_smap(")
+        rollup = function(source, "static int show_smaps_rollup(")
+        if not re.search(
+            r'if\s*\(\s*vma->vm_file\s*&&\s*SUSFS_IS_INODE_SUS_MAP\s*\(\s*file_inode\s*\(vma->vm_file\)\s*\)\s*\)\s*return\s+0\s*;',
+            smap, re.S
+        ):
+            raise SystemExit(1)
+        branch = re.search(
+            r'if\s*\(\s*vma->vm_start\s*>=\s*last_vma_end\s*\)\s*\{',
+            rollup
+        )
+        if not branch:
+            raise SystemExit(1)
+        brace = rollup.find("{", branch.start())
+        depth = 0
+        end = None
+        for i in range(brace, len(rollup)):
+            if rollup[i] == "{": depth += 1
+            elif rollup[i] == "}":
+                depth -= 1
+                if depth == 0:
+                    end = i
+                    break
+        if end is None: raise SystemExit(1)
+        body = rollup[brace + 1:end]
+        hook = body.find("SUSFS_IS_INODE_SUS_MAP(file_inode(vma->vm_file))")
+        stats = body.find("smap_gather_stats(vma, &mss, 0);")
+        label = body.find("bypass_orig_flow:")
+        assignment = body.find("last_vma_end = vma->vm_end;", label)
+        cont = body.find("continue;", assignment)
+        if not (0 <= hook < stats < label < assignment < cont):
+            raise SystemExit(1)
+        PY
+          then
+            echo "└─ ⚠️ Three SUSFS TASK-MMU Hunks Were Incompatible; Verified Equivalent Hooks Are Active"
+            echo "└─ 📌 Accepting Only the Validated Android 16 / 6.12 Compatibility Case"
+            rm -f "$MMU.rej"
+          else
+            # Do Not Misreport Other Partial Patch Failures as Successful
+            echo "└─ ⚠️ SUSFS Core Patch Already Applied or Failed; Inspect Reject Files"
+            find . -type f -name '*.rej' -print
+          fi
         fi
 
         # Apply SUSFS Enable Patch Only For KernelSU
@@ -1471,20 +1560,19 @@ runs:
               if [[ -f "$MMU" ]]; then
                 echo "└─ ♻️ Reverting TASK-MMU SUSFS Map Hooks"       
                 if python3 - "$MMU" <<'PY'
-        import re
         import sys
-        from pathlib import Path
+        from pathlib import Path        
         path = Path(sys.argv[1])
         source = path.read_text()
-        original = source
+        original = source        
         # Edit Only Selected Function
         def bounds(text, signature):
             start = text.find(signature)
             if start < 0:
-                raise RuntimeError(f"Function Not Found: {signature}")
+                raise RuntimeError(f"Function Not Found: {signature}")       
             brace = text.find("{", start)
             if brace < 0:
-                raise RuntimeError(f"Opening Brace Not Found: {signature}")
+                raise RuntimeError(f"Opening Brace Not Found: {signature}")        
             depth = 0
             for i in range(brace, len(text)):
                 if text[i] == "{":
@@ -1492,60 +1580,54 @@ runs:
                 elif text[i] == "}":
                     depth -= 1
                     if depth == 0:
-                        return start, i + 1
-            raise RuntimeError(f"Closing Brace Not Found: {signature}")
+                        return start, i + 1       
+            raise RuntimeError(f"Closing Brace Not Found: {signature}")        
         def edit(text, signature, fn):
             start, end = bounds(text, signature)
-            return text[:start] + fn(text[start:end]) + text[end:]
+            return text[:start] + fn(text[start:end]) + text[end:]        
         # Remove Temporary Hook From SHOW SMAP()
         def revertsmap(fn):
-            pattern = re.compile(
-                r"(?ms)^[ \t]*#ifdef CONFIG_KSU_SUSFS_SUS_MAP[ \t]*\n"
-                r"(?:(?!^[ \t]*#endif).)*?"
-                r"SUSFS_IS_INODE_SUS_MAP\(file_inode\(vma->vm_file\)\)"
-                r"(?:(?!^[ \t]*#endif).)*?"
-                r"^[ \t]*#endif[ \t]*(?://.*)?\n?"
-            )
-            updated, count = pattern.subn("", fn, count=1)
-            if count:
-                fn = updated
+            hook = """#ifdef CONFIG_KSU_SUSFS_SUS_MAP
+        	if (vma->vm_file &&
+        	    SUSFS_IS_INODE_SUS_MAP(file_inode(vma->vm_file)))
+        		return 0;
+        #endif // #ifdef CONFIG_KSU_SUSFS_SUS_MAP
+        """        
+            if hook in fn:
+                fn = fn.replace(hook, "", 1)
                 print("└─ ♻️ Removed SHOW SMAP() Fake Hook")
             else:
-                print("└─ ℹ️ SHOW SMAP() Fake Hook Not Found")
-            return fn
-        source = edit(source, "static int show_smap(", revertsmap)
-        # Remove Temporary Hook And Label From SHOW SMAPS ROLLUP()
+                print("└─ ℹ️ SHOW SMAP() Fake Hook Not Found")       
+            return fn        
+        source = edit(source, "static int show_smap(", revertsmap)        
+        # Remove Temporary Hook and Label From SHOW SMAPS ROLLUP()
         def revertsmapsrollup(fn):
-            hook_pattern = re.compile(
-                r"(?ms)^[ \t]*#ifdef CONFIG_KSU_SUSFS_SUS_MAP[ \t]*\n"
-                r"(?:(?!^[ \t]*#endif).)*?"
-                r"SUSFS_IS_INODE_SUS_MAP\(file_inode\(vma->vm_file\)\)"
-                r"(?:(?!^[ \t]*#endif).)*?"
-                r"goto[ \t]+bypass_orig_flow;"
-                r"(?:(?!^[ \t]*#endif).)*?"
-                r"^[ \t]*#endif[ \t]*(?://.*)?\n?"
-            )
-            fn, count = hook_pattern.subn("", fn, count=1)
-            if count:
+            hook = """#ifdef CONFIG_KSU_SUSFS_SUS_MAP
+        		if (vma->vm_file &&
+        		    SUSFS_IS_INODE_SUS_MAP(file_inode(vma->vm_file)))
+        			goto bypass_orig_flow;
+        #endif // #ifdef CONFIG_KSU_SUSFS_SUS_MAP
+        """        
+            label = """#ifdef CONFIG_KSU_SUSFS_SUS_MAP
+        bypass_orig_flow:
+        #endif // #ifdef CONFIG_KSU_SUSFS_SUS_MAP
+        """        
+            if hook in fn:
+                fn = fn.replace(hook, "", 1)
                 print("└─ ♻️ Removed SHOW SMAPS ROLLUP() Fake Hook")
             else:
-                print("└─ ℹ️ SHOW SMAPS ROLLUP() Fake Hook Not Found")
-            label_pattern = re.compile(
-                r"(?m)^[ \t]*#ifdef CONFIG_KSU_SUSFS_SUS_MAP[ \t]*\n"
-                r"[ \t]*bypass_orig_flow:[ \t]*\n"
-                r"[ \t]*#endif[ \t]*(?://.*)?\n?"
-            )
-            fn, count = label_pattern.subn("", fn, count=1)
-            if count:
+                print("└─ ℹ️ SHOW SMAPS ROLLUP() Fake Hook Not Found")       
+            if label in fn:
+                fn = fn.replace(label, "", 1)
                 print("└─ ♻️ Removed Rollup Bypass Label")
             else:
-                print("└─ ℹ️ Rollup Bypass Label Not Found")
-            return fn
+                print("└─ ℹ️ Rollup Bypass Label Not Found")        
+            return fn        
         source = edit(
             source,
             "static int show_smaps_rollup(",
             revertsmapsrollup
-        )
+        )       
         # Save Only if Source Changed
         if source != original:
             path.write_text(source)
@@ -1576,4 +1658,3 @@ runs:
   
         # 🎉 Report Completion
         echo "└─ 🎉 Kernel Fake Patch Reversal Complete"
-        
