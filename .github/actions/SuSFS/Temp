@@ -544,66 +544,61 @@ runs:
         """        
             print("└─ 🔧 Adding show_smap() Hook")
             return fn.replace(anchor, replacement, 1)        
-        source = edit(source, "static int show_smap(", fixsmap)        
+        source = edit(source, "static int show_smap(", fixsmap)              
         # Add SUSFS Map Bypass To SHOW SMAPS ROLLUP()
         def fixrollup(fn):
-            marker = "SUSFS_IS_INODE_SUS_MAP(file_inode(vma->vm_file))"        
+            import re
+            marker = "SUSFS_IS_INODE_SUS_MAP(file_inode(vma->vm_file))"
+            pattern = re.compile(
+                r'^[ \t]*smap_gather_stats\s*\(\s*vma\s*,\s*&mss\s*,\s*0\s*\)\s*;',
+                re.MULTILINE
+            )
             if marker not in fn:
-                # Find Rollup Statistics Call Regardless of Indentation
-                import re
-                matches = list(re.finditer(
-                    r'^[ \t]*smap_gather_stats\s*\(\s*vma\s*,\s*&mss\s*,\s*0\s*\)\s*;',
-                    fn,
-                    re.MULTILINE
-                ))
-                if len(matches) != 1:
-                    print(
-                        f"└─ ⚠️ Expected One Rollup Statistics Call, Found: {len(matches)}"
-                    )
-                    for match in matches:
-                        line = fn.count("\n", 0, match.start()) + 1
-                        print(f"└─ 📌 Matching Line: {line}")
+                matches = list(pattern.finditer(fn))
+                if not matches:
                     raise RuntimeError(
-                        "Cannot Uniquely Locate Rollup Statistics Call"
+                        "Cannot Locate Rollup Statistics Call"
                     )
-                anchor = matches[0].group(0)
+                # Use Last Matching Call in Function
+                match = matches[-1]
+                anchor = match.group(0)
                 replacement = """#ifdef CONFIG_KSU_SUSFS_SUS_MAP
-        		if (vma->vm_file &&
-        		    SUSFS_IS_INODE_SUS_MAP(file_inode(vma->vm_file)))
-        			goto bypass_orig_flow;
+        \t\tif (vma->vm_file &&
+        \t\t    SUSFS_IS_INODE_SUS_MAP(file_inode(vma->vm_file)))
+        \t\t\tgoto bypass_orig_flow;
         #endif // #ifdef CONFIG_KSU_SUSFS_SUS_MAP
-        		smap_gather_stats(vma, &mss, 0);"""        
-                fn = fn.replace(anchor, replacement, 1)
+        """ + anchor
+                fn = fn[:match.start()] + replacement + fn[match.end():]
                 print("└─ 🔧 Adding SHOW SMAPS ROLLUP() Hook")
             else:
-                print("└─ ℹ️ SUSFS Map Hook Already Present in Rollup")        
+                print("└─ ℹ️ SUSFS Map Hook Already Present in Rollup")
+
             # Ensure Exactly One Bypass Label Exists
-            labels = fn.count("bypass_orig_flow:")      
+            labels = fn.count("bypass_orig_flow:")
             if labels == 0:
-                anchor = "\t\tlast_vma_end = vma->vm_end;"      
+                anchor = "\t\tlast_vma_end = vma->vm_end;"
                 if fn.count(anchor) != 1:
                     raise RuntimeError(
                         "Cannot Uniquely Locate Rollup VMA-End Assignment"
-                    )      
+                    )
+
                 replacement = """#ifdef CONFIG_KSU_SUSFS_SUS_MAP
         bypass_orig_flow:
         #endif // #ifdef CONFIG_KSU_SUSFS_SUS_MAP
-        		last_vma_end = vma->vm_end;"""        
+        \t\tlast_vma_end = vma->vm_end;"""
                 fn = fn.replace(anchor, replacement, 1)
-                print("└─ 🔧 Adding Rollup Bypass Label")        
+                print("└─ 🔧 Adding Rollup Bypass Label")
             elif labels > 1:
-                raise RuntimeError(
-                    "Duplicate BYPASS ORIG FLOW Labels Found"
-                )        
+                raise RuntimeError("Duplicate BYPASS ORIG FLOW Labels Found")
             if "goto bypass_orig_flow;" not in fn:
-                raise RuntimeError("Rollup Bypass Go to is Missing")        
-            return fn        
+                raise RuntimeError("Rollup Bypass Go to is Missing")
+            return fn
         source = edit(
             source,
             "static int show_smaps_rollup(",
             fixrollup
         )        
-        # Validate Both Hooks Before Writing The Source
+        # Validate Both Hooks Before Writing Source
         start, end = bounds(source, "static int show_smap(")
         smap = source[start:end]        
         start, end = bounds(source, "static int show_smaps_rollup(")
