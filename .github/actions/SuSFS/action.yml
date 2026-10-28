@@ -460,23 +460,25 @@ runs:
           echo "└─ 🎉 Android 15 / 6.6 Fake Patch Preparation Complete"
         fi
                 
-        # Invert Android 16 / 6.12 SUSFS Compatibility Fixes
+        # Prepare Android 16 / 6.12 SUSFS Compatibility Fixes
         if [[ "$KERNELMODULE" == "android16-6.12" ]]; then
           # Define Source File Paths
           EXEC="$COMMONKERNELFOLDER/fs/exec.c"
-          MMU="$COMMONKERNELFOLDER/fs/proc/task_mmu.c"        
-          # Check Required Source Files
+          MMU="$COMMONKERNELFOLDER/fs/proc/task_mmu.c"
+          # Validate Required Source Files
           [[ -f "$EXEC" ]] || echo "└─ ⚠️ Missing EXEC Source: $EXEC"
-          [[ -f "$MMU" ]] || echo "└─ ⚠️ Missing TASK-MMU Source: $MMU"       
-          echo "└─ 🩹 Preparing Android 16 / 6.12 SUSFS Compatibility"        
+          [[ -f "$MMU" ]] || echo "└─ ⚠️ Missing TASK-MMU Source: $MMU"
+          echo "└─ 🩹 Preparing Android 16 / 6.12 SUSFS Compatibility"
           # Apply Compatibility Fixes For Kernel Sublevels 58 and Below
-          if [[ "$SUBLEVEL" -le 58 ]]; then       
-            # Prepare DMA-BUF Header In EXEC
+          if [[ "$SUBLEVEL" -le 58 ]]; then
+
+            # Prepare DMA-BUF Header in EXEC
             if [[ -f "$EXEC" ]]; then
               if grep -qFx '#include <linux/dma-buf.h>' "$EXEC"; then
-                echo "└─ ℹ️ DMA-BUF Header Already Present"       
+                echo "└─ ℹ️ DMA-BUF Header Already Present"
+                FAKEPATCHEXEC=1
               elif grep -qFx '#include <linux/ksm.h>' "$EXEC"; then
-                echo "└─ 🔧 Adding DMA-BUF Header to EXEC"        
+                echo "└─ 🔧 Adding DMA-BUF Header to EXEC"
                 if sed -i \
                   '/^#include <linux\/ksm\.h>$/a #include <linux/dma-buf.h>' \
                   "$EXEC" &&
@@ -484,169 +486,122 @@ runs:
                   FAKEPATCHEXEC=1
                   echo "└─ 📌 DMA-BUF Header Added"
                 else
-                  FAKEPATCHEXEC=0
                   echo "└─ ⚠️ Failed to Add DMA-BUF Header"
                 fi
-                
+
               else
-                FAKEPATCHEXEC=0
                 echo "└─ ⚠️ Cannot Locate KSM Header in EXEC"
               fi
               
             else
-              FAKEPATCHEXEC=0
               echo "└─ ⏭️ Skipping DMA-BUF Preparation: EXEC Source Missing"
             fi
-        
-            # 🩹 Fake-Patch SUSFS Map Hooks Into TASK-MMU
+
+            # Prepare SUSFS Map Hooks in TASK-MMU
             if [[ -f "$MMU" ]]; then
-              if python3 - "$MMU" <<'PY'
-        import sys
-        from pathlib import Path        
-        path = Path(sys.argv[1])
-        source = path.read_text()
-        original = source        
-        # Locate a Function's Opening and Closing Braces
-        def bounds(text, signature):
-            start = text.find(signature)
-            if start < 0:
-                raise RuntimeError(f"Function Not Found: {signature}")       
-            brace = text.find("{", start)
-            if brace < 0:
-                raise RuntimeError(f"Opening Brace Not Found: {signature}")       
-            depth = 0
-            for i in range(brace, len(text)):
-                if text[i] == "{":
-                    depth += 1
-                elif text[i] == "}":
-                    depth -= 1
-                    if depth == 0:
-                        return start, i + 1        
-            raise RuntimeError(f"Closing Brace Not Found: {signature}")        
-        # Edit Only Requested Function
-        def edit(text, signature, fn):
-            start, end = bounds(text, signature)
-            return text[:start] + fn(text[start:end]) + text[end:]        
-        # Add SUSFS Map Hook to SHOW SMAP()
-        def fix_smap(fn):
-            marker = "SUSFS_IS_INODE_SUS_MAP(file_inode(vma->vm_file))"        
-            if marker in fn:
-                print("└─ ℹ️ SHOW SMAP() Hook Already Present")
-                return fn        
-            anchor = "\tstruct mem_size_stats mss = {};"
-            if fn.count(anchor) != 1:
-                raise RuntimeError(
-                    "Cannot Uniquely Locate SHOW SMAP() Initializer"
-                )        
-            replacement = anchor + """        
-        #ifdef CONFIG_KSU_SUSFS_SUS_MAP
-        	if (vma->vm_file &&
-        	    SUSFS_IS_INODE_SUS_MAP(file_inode(vma->vm_file)))
-        		return 0;
-        #endif // #ifdef CONFIG_KSU_SUSFS_SUS_MAP
-        """        
-            print("└─ 🔧 Adding show_smap() Hook")
-            return fn.replace(anchor, replacement, 1)        
-        source = edit(source, "static int show_smap(", fix_smap)        
-        # Add SUSFS Map Bypass To SHOW SMAPS ROLLUP()
-        def fix_rollup(fn):
-            marker = "SUSFS_IS_INODE_SUS_MAP(file_inode(vma->vm_file))"        
-            if marker not in fn:
-                # Find Rollup Statistics Call Regardless of Indentation
-                import re
-                matches = list(re.finditer(
-                    r'^[ \t]*smap_gather_stats\s*\(\s*vma\s*,\s*&mss\s*,\s*0\s*\)\s*;',
-                    fn,
-                    re.MULTILINE
-                ))
-                if len(matches) != 1:
-                    print(
-                        f"└─ ⚠️ Expected One Rollup Statistics Call, Found: {len(matches)}"
-                    )
-                    for match in matches:
-                        line = fn.count("\n", 0, match.start()) + 1
-                        print(f"└─ 📌 Matching Line: {line}")
-                    raise RuntimeError(
-                        "Cannot Uniquely Locate Rollup Statistics Call"
-                    )
-                anchor = matches[0].group(0)
-                replacement = """#ifdef CONFIG_KSU_SUSFS_SUS_MAP
-        		if (vma->vm_file &&
-        		    SUSFS_IS_INODE_SUS_MAP(file_inode(vma->vm_file)))
-        			goto bypass_orig_flow;
-        #endif // #ifdef CONFIG_KSU_SUSFS_SUS_MAP
-        		smap_gather_stats(vma, &mss, 0);"""        
-                fn = fn.replace(anchor, replacement, 1)
-                print("└─ 🔧 Adding SHOW SMAPS ROLLUP() Hook")
-            else:
-                print("└─ ℹ️ SUSFS Map Hook Already Present in Rollup")        
-            # Ensure Exactly One Bypass Label Exists
-            labels = fn.count("bypass_orig_flow:")      
-            if labels == 0:
-                anchor = "\t\tlast_vma_end = vma->vm_end;"      
-                if fn.count(anchor) != 1:
-                    raise RuntimeError(
-                        "Cannot Uniquely Locate Rollup VMA-End Assignment"
-                    )      
-                replacement = """#ifdef CONFIG_KSU_SUSFS_SUS_MAP
-        bypass_orig_flow:
-        #endif // #ifdef CONFIG_KSU_SUSFS_SUS_MAP
-        		last_vma_end = vma->vm_end;"""        
-                fn = fn.replace(anchor, replacement, 1)
-                print("└─ 🔧 Adding Rollup Bypass Label")        
-            elif labels > 1:
-                raise RuntimeError(
-                    "Duplicate BYPASS ORIG FLOW Labels Found"
-                )        
-            if "goto bypass_orig_flow;" not in fn:
-                raise RuntimeError("Rollup Bypass Go to is Missing")        
-            return fn        
-        source = edit(
-            source,
-            "static int show_smaps_rollup(",
-            fix_rollup
-        )        
-        # Validate Both Hooks Before Writing The Source
-        start, end = bounds(source, "static int show_smap(")
-        smap = source[start:end]        
-        start, end = bounds(source, "static int show_smaps_rollup(")
-        rollup = source[start:end]        
-        if "SUSFS_IS_INODE_SUS_MAP" not in smap:
-            raise RuntimeError("SHOW SMAP() Hook Validation Failed")       
-        if (
-            "goto bypass_orig_flow;" not in rollup
-            or rollup.count("bypass_orig_flow:") != 1
-        ):
-            raise RuntimeError("SHOW SMAPS ROLLUP() Hook Validation Failed")        
-        # Save Only After Successful Validation
-        if source != original:
-            path.write_text(source)
-            print("└─ 📌 TASK-MMU Fake-Patch Applied")
-        else:
-            print("└─ ℹ️ TASK-MMU Hooks Already Present")        
-        print("└─ 📌 TASK-MMU Hook Validation Passed")
-        PY
-              then
-                # Record Successful TASK-MMU Preparation
-                FAKEPATCHTASKMMU=1
+              SMAPHOOK='SUSFS_IS_INODE_SUS_MAP(file_inode(vma->vm_file))'
+              # Check SHOW SMAP() Function
+              if sed -n '/^static int show_smap(/,/^}/p' "$MMU" |
+                 grep -Fq "$SMAPHOOK"; then
+                echo "└─ ℹ️ SHOW SMAP() Hook Already Present"
               else
-                # Record Failure Without Explicitly Exiting Step
-                FAKEPATCHTASKMMU=0
-                echo "└─ ⚠️ TASK-MMU Fake-Patch Failed"
+                SMAPINITCOUNT=$(sed -n \
+                  '/^static int show_smap(/,/^}/p' "$MMU" |
+                  grep -Fc 'struct mem_size_stats mss = {};' || true)
+                if [[ "$SMAPINITCOUNT" -eq 1 ]]; then
+                  if sed -i \
+                    '/^static int show_smap(/,/^}/{
+                      /^[[:space:]]*struct mem_size_stats mss = {};/a\
+        #ifdef CONFIG_KSU_SUSFS_SUS_MAP\
+        \tif (vma->vm_file &&\
+        \t    SUSFS_IS_INODE_SUS_MAP(file_inode(vma->vm_file)))\
+        \t\treturn 0;\
+        #endif // #ifdef CONFIG_KSU_SUSFS_SUS_MAP
+                    }' "$MMU"; then
+                    echo "└─ 🔧 Added SHOW SMAP() Hook"
+                  else
+                    echo "└─ ⚠️ Failed to Add SHOW SMAP() Hook"
+                  fi
+                else
+                  echo "└─ ⚠️ Cannot Uniquely Locate SHOW SMAP() Initializer"
+                fi
               fi
+
+              # Check SHOW SMAPS ROLLUP() Function
+              ROLLUP=$(sed -n '/^static int show_smaps_rollup(/,/^}/p' "$MMU")
+              if grep -Fq "$SMAPHOOK" <<< "$ROLLUP"; then
+                echo "└─ ℹ️ SHOW SMAPS ROLLUP() Hook Already Present"
+              else
+                OVERLAPCOUNT=$(grep -Ec \
+                  '^[[:space:]]*if \(vma->vm_start < last_vma_end\) \{' \
+                  <<< "$ROLLUP" || true)
+                if [[ "$OVERLAPCOUNT" -eq 1 ]]; then
+                  # Insert Hook Before VMA Overlap Check
+                  if sed -i \
+                    '/^static int show_smaps_rollup(/,/^}/{
+                      /^[[:space:]]*if (vma->vm_start < last_vma_end) {/i\
+        #ifdef CONFIG_KSU_SUSFS_SUS_MAP\
+        \tif (vma->vm_file && SUSFS_IS_INODE_SUS_MAP(file_inode(vma->vm_file)))\
+        \t\tgoto bypass_orig_flow;\
+        #endif // #ifdef CONFIG_KSU_SUSFS_SUS_MAP
+                    }' "$MMU"; then
+                    echo "└─ 🔧 Added SHOW SMAPS ROLLUP() Hook"
+                  else
+                    echo "└─ ⚠️ Failed to Add SHOW SMAPS ROLLUP() Hook"
+                  fi
+                else
+                  echo "└─ ⚠️ Cannot Uniquely Locate Rollup VMA Overlap Check"
+                fi
+              fi
+
+              # Check Rollup Bypass Label
+              ROLLUP=$(sed -n '/^static int show_smaps_rollup(/,/^}/p' "$MMU")
+              if grep -Fq 'bypass_orig_flow:' <<< "$ROLLUP"; then
+                echo "└─ ℹ️ Rollup Bypass Label Already Present"
+              else
+                ENDCOUNT=$(grep -Ec \
+                  '^[[:space:]]*last_vma_end = vma->vm_end;' \
+                  <<< "$ROLLUP" || true)
+                if [[ "$ENDCOUNT" -eq 1 ]]; then
+                  # Insert Label Before VMA-End Assignment
+                  if sed -i \
+                    '/^static int show_smaps_rollup(/,/^}/{
+                      /^[[:space:]]*last_vma_end = vma->vm_end;/i\
+        #ifdef CONFIG_KSU_SUSFS_SUS_MAP\
+        bypass_orig_flow:\
+        #endif // #ifdef CONFIG_KSU_SUSFS_SUS_MAP
+                    }' "$MMU"; then
+                    echo "└─ 🔧 Added Rollup Bypass Label"
+                  else
+                    echo "└─ ⚠️ Failed to Add Rollup Bypass Label"
+                  fi
+                  
+                else
+                  echo "└─ ⚠️ Cannot Uniquely Locate Rollup VMA-End Assignment"
+                fi
+              fi
+
+              # Validate Hooks Inside Their Intended Functions
+              SMAP=$(sed -n '/^static int show_smap(/,/^}/p' "$MMU")
+              ROLLUP=$(sed -n '/^static int show_smaps_rollup(/,/^}/p' "$MMU")
+              if grep -Fq "$SMAPHOOK" <<< "$SMAP" &&
+                 grep -Fq 'goto bypass_orig_flow;' <<< "$ROLLUP" &&
+                 [[ "$(grep -Fc 'bypass_orig_flow:' <<< "$ROLLUP" || true)" -eq 1 ]]; then
+                FAKEPATCHTASKMMU=1
+                echo "└─ 📌 TASK-MMU Hook Validation Passed"
+              else
+                FAKEPATCHTASKMMU=0
+                echo "└─ ⚠️ TASK-MMU Hook Validation Failed"
+              fi
+
             else
-              # Skip TASK-MMU Preparation When Source is Missing
-              FAKEPATCHTASKMMU=0
               echo "└─ ⏭️ Skipping TASK-MMU Preparation: Source Missing"
             fi
-        
+
           else
-            # Skip Compatibility Fixes For Newer Kernel Sublevels
-            FAKEPATCHEXEC=0
-            FAKEPATCHTASKMMU=0
-            echo "└─ ⏭️ Skipping Compatibility Preparation For Sublevel $SUBLEVEL"
+            echo "└─ ⏭️ Skipping Compatibility Fixes For Sublevel $SUBLEVEL"
           fi
-        
+
           echo "└─ 🎉 Android 16 / 6.12 Compatibility Preparation Complete"
         fi
 
@@ -1417,12 +1372,11 @@ runs:
         if [[ "$KERNELMODULE" == "android16-6.12" ]]; then
           # Define Source File Paths
           EXEC="$COMMONKERNELFOLDER/fs/exec.c"
-          MMU="$COMMONKERNELFOLDER/fs/proc/task_mmu.c"        
+          MMU="$COMMONKERNELFOLDER/fs/proc/task_mmu.c"
           # Revert EXEC DMA-BUF Header
           if [[ "${FAKEPATCHEXEC:-0}" == "1" ]]; then
-            if [[ "$SUBLEVEL" -le 58 ]]; then
-              if [[ -f "$EXEC" ]] &&
-                 grep -qFx '#include <linux/dma-buf.h>' "$EXEC"; then       
+            if [[ "$SUBLEVEL" -le 58 && -f "$EXEC" ]]; then
+              if grep -qFx '#include <linux/dma-buf.h>' "$EXEC"; then
                 echo "└─ ♻️ Reverting EXEC DMA-BUF Header"
                 if sed -i '\|^#include <linux/dma-buf\.h>$|d' "$EXEC"; then
                   echo "└─ 🎉 EXEC DMA-BUF Header Reverted"
@@ -1435,112 +1389,78 @@ runs:
               fi
               
             else
-              echo "└─ ℹ️ EXEC DMA-BUF Header Revert Not Required For Sublevel $SUBLEVEL"
+              echo "└─ ⏭️ EXEC Reversal Not Required or Source Missing"
             fi
             
           else
             echo "└─ ⏭️ Skipping EXEC: Fake Patch Flag is Not 1"
           fi
-        
+
           # Revert TASK-MMU SUSFS Map Hooks
           if [[ "${FAKEPATCHTASKMMU:-0}" == "1" ]]; then
-            if [[ "$SUBLEVEL" -le 58 ]]; then
-              if [[ -f "$MMU" ]]; then
-                echo "└─ ♻️ Reverting TASK-MMU SUSFS Map Hooks"       
-                if python3 - "$MMU" <<'PY'
-        import sys
-        from pathlib import Path        
-        path = Path(sys.argv[1])
-        source = path.read_text()
-        original = source        
-        # Edit Only Selected Function
-        def bounds(text, signature):
-            start = text.find(signature)
-            if start < 0:
-                raise RuntimeError(f"Function Not Found: {signature}")       
-            brace = text.find("{", start)
-            if brace < 0:
-                raise RuntimeError(f"Opening Brace Not Found: {signature}")        
-            depth = 0
-            for i in range(brace, len(text)):
-                if text[i] == "{":
-                    depth += 1
-                elif text[i] == "}":
-                    depth -= 1
-                    if depth == 0:
-                        return start, i + 1       
-            raise RuntimeError(f"Closing Brace Not Found: {signature}")        
-        def edit(text, signature, fn):
-            start, end = bounds(text, signature)
-            return text[:start] + fn(text[start:end]) + text[end:]        
-        # Remove Temporary Hook From SHOW SMAP()
-        def revert_smap(fn):
-            hook = """#ifdef CONFIG_KSU_SUSFS_SUS_MAP
-        	if (vma->vm_file &&
-        	    SUSFS_IS_INODE_SUS_MAP(file_inode(vma->vm_file)))
-        		return 0;
-        #endif // #ifdef CONFIG_KSU_SUSFS_SUS_MAP
-        """        
-            if hook in fn:
-                fn = fn.replace(hook, "", 1)
-                print("└─ ♻️ Removed SHOW SMAP() Fake Hook")
-            else:
-                print("└─ ℹ️ SHOW SMAP() Fake Hook Not Found")       
-            return fn        
-        source = edit(source, "static int show_smap(", revert_smap)        
-        # Remove Temporary Hook And Label From SHOW SMAPS ROLLUP()
-        def revert_smaps_rollup(fn):
-            hook = """#ifdef CONFIG_KSU_SUSFS_SUS_MAP
-        		if (vma->vm_file &&
-        		    SUSFS_IS_INODE_SUS_MAP(file_inode(vma->vm_file)))
-        			goto bypass_orig_flow;
-        #endif // #ifdef CONFIG_KSU_SUSFS_SUS_MAP
-        """        
-            label = """#ifdef CONFIG_KSU_SUSFS_SUS_MAP
-        bypass_orig_flow:
-        #endif // #ifdef CONFIG_KSU_SUSFS_SUS_MAP
-        """        
-            if hook in fn:
-                fn = fn.replace(hook, "", 1)
-                print("└─ ♻️ Removed SHOW SMAPS ROLLUP() Fake Hook")
-            else:
-                print("└─ ℹ️ SHOW SMAPS ROLLUP() Fake Hook Not Found")       
-            if label in fn:
-                fn = fn.replace(label, "", 1)
-                print("└─ ♻️ Removed Rollup Bypass Label")
-            else:
-                print("└─ ℹ️ Rollup Bypass Label Not Found")        
-            return fn        
-        source = edit(
-            source,
-            "static int show_smaps_rollup(",
-            revert_smaps_rollup
-        )       
-        # Save Only if Source Changed
-        if source != original:
-            path.write_text(source)
-            print("└─ 🎉 TASK-MMU Fake Hooks Reverted")
-        else:
-            print("└─ ℹ️ No TASK-MMU Fake Hooks Needed Reverting")
-        PY
-                then
-                  echo "└─ 🎉 TASK-MMU Compatibility Reversal Complete"
-                else
-                  echo "└─ ⚠️ TASK-MMU Compatibility Reversal Failed"
-                fi
-                
+            if [[ "$SUBLEVEL" -le 58 && -f "$MMU" ]]; then
+              echo "└─ ♻️ Reverting TASK-MMU SUSFS Map Hooks"
+              # Remove Temporary SHOW SMAP() Hook
+              if sed -i '/^static int show_smap(/,/^}/{
+                /#ifdef CONFIG_KSU_SUSFS_SUS_MAP/{
+                  N;/\n[[:space:]]*if (vma->vm_file &&/{
+                    N;N;N;N
+                    /SUSFS_IS_INODE_SUS_MAP(file_inode(vma->vm_file))/{
+                      N;/return 0;/{
+                        N;/#endif \/\/ #ifdef CONFIG_KSU_SUSFS_SUS_MAP/d
+                      }
+                    }
+                  }
+                }
+              }' "$MMU"; then
+                echo "└─ 📌 SHOW SMAP() Reversal Attempted"
               else
-                echo "└─ ⏭️ Skipping TASK-MMU: Source File Missing"
+                echo "└─ ⚠️ Failed to Process SHOW SMAP() Hook"
+              fi
+
+              # Remove Temporary ROLLUP Hook
+              if sed -i '/^static int show_smaps_rollup(/,/^}/{
+                /#ifdef CONFIG_KSU_SUSFS_SUS_MAP/{
+                  N;/SUSFS_IS_INODE_SUS_MAP(file_inode(vma->vm_file))/{
+                    N;N;N;/goto bypass_orig_flow/{
+                      N;/#endif \/\/ #ifdef CONFIG_KSU_SUSFS_SUS_MAP/d
+                    }
+                  }
+                }
+              }' "$MMU"; then
+                echo "└─ 📌 SHOW SMAPS ROLLUP() Reversal Attempted"
+              else
+                echo "└─ ⚠️ Failed to Process Rollup Hook"
+              fi
+
+              # Remove Temporary Rollup Bypass Label
+              if sed -i '/^static int show_smaps_rollup(/,/^}/{
+                /bypass_orig_flow:/,/#endif \/\/ #ifdef CONFIG_KSU_SUSFS_SUS_MAP/d
+              }' "$MMU"; then
+                echo "└─ 📌 Rollup Bypass Label Reversal Attempted"
+              else
+                echo "└─ ⚠️ Failed to Process Rollup Bypass Label"
+              fi
+
+              # Verify Temporary Markers are Absent
+              SMAP=$(sed -n '/^static int show_smap(/,/^}/p' "$MMU")
+              ROLLUP=$(sed -n '/^static int show_smaps_rollup(/,/^}/p' "$MMU")
+              if ! grep -Fq 'SUSFS_IS_INODE_SUS_MAP(file_inode(vma->vm_file))' <<< "$SMAP" &&
+                 ! grep -Fq 'goto bypass_orig_flow;' <<< "$ROLLUP" &&
+                 ! grep -Fq 'bypass_orig_flow:' <<< "$ROLLUP"; then
+                echo "└─ 🎉 TASK-MMU Temporary Hook Reversal Verified"
+              else
+                echo "└─ ⚠️ TASK-MMU Temporary Markers Remain"
               fi
               
             else
-              echo "└─ ℹ️ TASK-MMU Hook Revert Not Required For Sublevel $SUBLEVEL"
+              echo "└─ ⏭️ TASK-MMU Reversal Not Required or Source Missing"
             fi
             
           else
             echo "└─ ⏭️ Skipping TASK-MMU: Fake Patch Flag is Not 1"
           fi
-        
+
           echo "└─ 🎉 Android 16 / 6.12 Compatibility Reversal Complete"
         fi
   
