@@ -38,23 +38,27 @@ runs:
       if: ${{ inputs.SUSFSREPOSITORY != '-1' }}
       shell: bash
       env:
+        COMMONKERNELFOLDER: ${{ env.COMMONKERNELFOLDER }}
         SCRIPTSDIR: ${{ env.SCRIPTSDIR }}
       run: |
-        set -Eeuo pipefail
-        # Paths
-        FAKESCRIPT="${SCRIPTSDIR}/FakePatches.kts"         
-        # Kotlin Environment
+        set -e
+        # Define FakePatches Script Path
+        FAKESCRIPT="${SCRIPTSDIR}/FakePatches.kts"
+        # Configure Kotlin Compiler Environment
         KOTLINHOME="${KOTLINHOME:-$HOME/kotlinc}"
         KOTLINC="${KOTLINHOME}/bin/kotlinc"
+        # Display Script and Compiler Paths
         echo "└─ 📌 Script   : $FAKESCRIPT"
         echo "└─ 📌 Compiler : $KOTLINC"
-        # Verify Kotlin
-        echo "└─ ☕ Kotlin Compiler:"
+        # Verify Kotlin Compiler Availability and Version
+        echo "└─ ☕ Kotlin Compiler :"
         "$KOTLINC" -version
+        # Apply Fake Patches to Prepare For SUSFS Integration
         echo "└─ 🔧 Applying Fake Patches..."
         "$KOTLINC" -script "$FAKESCRIPT" Apply "$COMMONKERNELFOLDER"
+        # Confirm Fake Patches were Applied Successfully
         echo "🎉 Fake Patches Applied Successfully"
-
+   
     # Clone SUSFS and Apply Patches
     - name: 🩹 SUSFS Integration
       id: susfs
@@ -82,6 +86,10 @@ runs:
         set -euo pipefail
         # Construct Android and Kernel Version Identifier
         GKIVERSION="${ANDROIDVERSION}-${KERNELVERSION}"
+        # Kotlin Environment
+        FAKESCRIPT="${SCRIPTSDIR}/FakePatches.kts"
+        KOTLINHOME="${KOTLINHOME:-$HOME/kotlinc}"
+        KOTLINC="${KOTLINHOME}/bin/kotlinc"
         # Navigate to Kernel Working Directory
         cd "$WORKDIR"
         # Display Kernel Environment Information
@@ -89,6 +97,8 @@ runs:
         echo "└─ 🧾 Kernel Version        : $KERNELVERSION"
         echo "└─ 🔎 Detected Kernel Base  : $GKIVERSION"
         echo "└─ 📁 Kernel Directory      : $COMMONKERNELFOLDER"
+        echo "└─ 📌 Script                : $FAKESCRIPT"
+        echo "└─ 📌 Compiler              : $KOTLINC"
         # Select SUSFS Repository, Branch and Optional Fallback
         echo "└─ 📥 Cloning SUSFS..."
         if [[ "$SUSFSVARIANT" == "OGKI" ]]; then
@@ -233,16 +243,33 @@ runs:
 
         # Enter Common Kernel Source Directory
         cd "$COMMONKERNELFOLDER"
-        kotlin "$SCRIPTSDIR/FakePatches.kts" \
-        Context "$COMMONKERNELFOLDER" \
-        "$COMMONKERNELFOLDER/50_add_susfs_in_gki-${ANDROIDVERSION}-${KERNELVERSION}.patch"
-        # Apply SUSFS Core Patch
-        echo "└─ ⚙️ Applying SUSFS Core Patch (50 Add SUSFS Patch)"
-        if patch -p1 < "$(basename "$SUSFSPATCH")"; then
-          echo "└─ 📌 SUSFS 50 Enable Core Patch Applied"
-        else          
-          echo "└─ ⚠️ SUSFS Core Patch Already Applied or Failed; Inspect Reject Files"
-          find . -type f -name '*.rej' -print      
+        # Resolve Exact Selected SUSFS Patch File Name
+        SUSFSPATCHNAME="$(basename "$SUSFSPATCH")"
+        LOCALSUSFSPATCH="${COMMONKERNELFOLDER}/${SUSFSPATCHNAME}"
+        # Verify Selected SUSFS Patch was Copied
+        if [[ ! -f "$LOCALSUSFSPATCH" ]]; then
+          echo "└─ ⚠️ SUSFS Patch Not Found : $LOCALSUSFSPATCH"
+          exit 1
+        fi
+
+        # Detect Whether SUSFS Core Patch is Already Applied
+        echo "└─ 🔎 Checking SUSFS Core Patch Status..."
+        if patch -R -p1 --dry-run < "$LOCALSUSFSPATCH" >/dev/null 2>&1; then
+          echo "└─ ℹ️ SUSFS Core Patch Already Applied; Skipping"
+        else
+          # Restore Missing Include Context Before Applying SUSFS
+          echo "└─ 🧩 Restoring SUSFS Patch Context..."
+          "$KOTLINC" -script "$FAKESCRIPT" \
+            Context "$COMMONKERNELFOLDER" "$LOCALSUSFSPATCH"
+          # Apply SUSFS Core Patch
+          echo "└─ ⚙️ Applying SUSFS Core Patch (50 Add SUSFS Patch)"
+          if patch -p1 < "$LOCALSUSFSPATCH"; then
+            echo "└─ 📌 SUSFS Core Patch Applied Successfully"
+          else
+            echo "└─ ⚠️ SUSFS Core Patch Failed"
+            find . -type f -name '*.rej' -print
+            exit 1
+          fi
         fi
 
         # Apply SUSFS Enable Patch Only For KernelSU
@@ -369,18 +396,23 @@ runs:
       if: ${{ inputs.SUSFSREPOSITORY != '-1' }}
       shell: bash
       env:
+        COMMONKERNELFOLDER: ${{ env.COMMONKERNELFOLDER }}
         SCRIPTSDIR: ${{ env.SCRIPTSDIR }}
       run: |
-        set -Eeuo pipefail
-        # Paths
-        FAKESCRIPT="${SCRIPTSDIR}/FakePatches.kts"         
-        # Kotlin Environment
+        set -e
+        # Define FakePatches Script Path
+        FAKESCRIPT="${SCRIPTSDIR}/FakePatches.kts"
+        # Configure Kotlin Compiler Environment
         KOTLINHOME="${KOTLINHOME:-$HOME/kotlinc}"
         KOTLINC="${KOTLINHOME}/bin/kotlinc"
+        # Display Script and Compiler Paths
         echo "└─ 📌 Script   : $FAKESCRIPT"
         echo "└─ 📌 Compiler : $KOTLINC"
-        echo "└─ 🔧 Reverting Fake Patches..."
+        # Apply Post-Fix Adjustments Before Reverting Fake Patches
+        echo "└─ 🔧 Running Fake Patches PostFix..."
         "$KOTLINC" -script "$FAKESCRIPT" PostFix "$COMMONKERNELFOLDER"
+        # Revert Fake Patches and Restore Original Kernel Source
+        echo "└─ 🔄 Reverting Fake Patches..."
         "$KOTLINC" -script "$FAKESCRIPT" Revert "$COMMONKERNELFOLDER"
-        echo "🎉 Fake Patches Reverted"
-        
+        # Confirm Fake Patches were Reverted Successfully
+        echo "🎉 Fake Patches Reverted Successfully"
