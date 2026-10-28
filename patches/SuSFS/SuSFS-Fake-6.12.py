@@ -28,7 +28,7 @@ Usage: susfs_fake_612.py <task_mmu.c> apply|revert
 """
 import sys
 
-MARK = "/* Fake-patch marker for 6.12 sublevel 92+ show_smaps_rollup reshape. */"
+MARK = "/* Fake-Patch Marker For Kernel 6.12 Sublevel 92 and Below SHOW-SMAPS-ROLLUP Reshape */"
 
 # --- APPLY: 92 form -> pre-refactor form -------------------------------
 
