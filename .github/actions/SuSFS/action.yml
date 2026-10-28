@@ -367,9 +367,11 @@ runs:
           [[ -f "$EXEC" ]] || { echo "└─ ⚠️ Missing: $EXEC" >&2; exit 1; }
           [[ -f "$MMU" ]] || { echo "└─ ⚠️ Missing: $MMU" >&2; exit 1; }
           echo "└─ 🩹 Preparing Android 16 / 6.12 SUSFS Compatibility"
-          # 📌 Prepare DMA-BUF Header
+          # Prepare DMA-BUF Header
           if [[ "$SUBLEVEL" -le 58 ]]; then
-            if grep -qFx '#include <linux/dma-buf.h>' "$EXEC"; then
+            if [[ ! -f "$EXEC" ]]; then
+              echo "└─ ⚠️ Cannot Prepare DMA-BUF Header: EXEC File Missing" >&2
+            elif grep -qFx '#include <linux/dma-buf.h>' "$EXEC"; then
               echo "└─ ℹ️ DMA-BUF Header Already Present"
             elif grep -qFx '#include <linux/ksm.h>' "$EXEC"; then
               echo "└─ 🔧 Adding DMA-BUF Header to EXEC"
@@ -384,27 +386,54 @@ runs:
               fi
               
             else
-              echo "└─ ⚠️ Cannot Locate KSM Header In EXEC" >&2
+              echo "└─ ⚠️ Cannot Locate KSM Header in EXEC" >&2
             fi
+            
+          else
+            echo "└─ ⏭️ Skipping DMA-BUF Header Preparation For Sublevel $SUBLEVEL"
           fi
 
-          # Check TASK-MMU Patch Context
+          # Check TASK-MMU VMA Condition
           if [[ "$SUBLEVEL" -le 92 ]]; then
-            if grep -qF 'if (!vma_data_pages(vma))' "$MMU"; then
-              echo "└─ ℹ️ VMA DATA PAGES() Condition Already Present"
+            if [[ ! -f "$MMU" ]]; then
+              echo "└─ ⚠️ Cannot Check TASK-MMU: File Missing" >&2
+            elif grep -qF 'if (!vma_data_pages(vma))' "$MMU"; then
+              echo "└─ ℹ️ VMA DATA PAGES() Condition Found"
+              echo "└─ 📌 TASK-MMU VMA Condition Check Passed"
             elif grep -qF 'if (!vma_pages(vma))' "$MMU"; then
-              echo "└─ ℹ️ VMA PAGES() Condition Already Present"
+              echo "└─ ℹ️ VMA PAGES() Condition Found"
+              echo "└─ 📌 TASK-MMU VMA Condition Check Passed"
             else
               echo "└─ ⚠️ TASK-MMU VMA Condition Not Found" >&2
             fi
 
-            echo "└─ 📌 TASK-MMU VMA Condition Check Passed"
-            if grep -Fq 'static int show_smap(' "$MMU" &&
-               grep -Fq 'static int show_smaps_rollup(' "$MMU"; then
+            # Verify SUSFS Target Functions
+            if [[ ! -f "$MMU" ]]; then
+              echo "└─ ⚠️ Cannot Verify TASK-MMU Functions: File Missing" >&2
+            elif grep -Fq 'static int show_smap(' "$MMU" &&
+                 grep -Fq 'static int show_smaps_rollup(' "$MMU"; then
               echo "└─ 📌 SHOW SMAP() and SMAPS ROLLUP() Found"
             else
               echo "└─ ⚠️ SHOW SMAP() or SMAPS ROLLUP() Not Found" >&2
             fi
+            
+          else
+            echo "└─ ⏭️ Skipping TASK-MMU Context Checks For Sublevel $SUBLEVEL"
+          fi
+
+          # Inspect TASK-MMU Source Before SUSFS Core Patch
+          if [[ -f "$MMU" ]]; then
+            echo "└─ 🔎 Inspecting SHOW SMAPS()"
+            sed -n '/^static int show_smap(/,/^}/p' "$MMU"
+            echo "└─ 🔎 Inspecting SHOW SMAPS ROLLUP()"
+            sed -n '/^static int show_smaps_rollup(/,/^}/p' "$MMU"
+            # Check Existing SUSFS Map Hooks
+            echo "└─ 🔎 Checking Existing SUSFS Map Hooks"
+            grep -nE \
+              'SUSFS_IS_INODE_SUS_MAP|bypass_orig_flow|vma_data_pages|vma_pages' \
+              "$MMU" || true
+          else
+            echo "└─ ⚠️ Cannot Inspect TASK-MMU Source: File Missing" >&2
           fi
 
           echo "└─ 🎉 Android 16 / 6.12 Compatibility Preparation Complete"
