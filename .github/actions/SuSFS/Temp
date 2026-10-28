@@ -370,7 +370,7 @@ runs:
               echo "└─ ⚠️ Cannot Locate VMA Tracking Insertion Point" >&2
             fi
 
-            # Add FILE SYSTEM Trace Hook to NAMESPACE
+            # Add File System Trace Hook to NAMESPACE
             # Insert FS Hook After Existing BLK Hook
             if grep -Fq '#include <trace/hooks/fs.h>' "$NAMESPACE"; then
               echo "└─ ℹ️ File System Trace Hook Already Present"
@@ -464,110 +464,182 @@ runs:
         if [[ "$KERNELMODULE" == "android16-6.12" ]]; then
           # Define Source File Paths
           EXEC="$COMMONKERNELFOLDER/fs/exec.c"
-          MMU="$COMMONKERNELFOLDER/fs/proc/task_mmu.c"
-          # Check Required Source Files Exist
-          [[ -f "$EXEC" ]] || { echo "└─ ⚠️ Missing: $EXEC" >&2; exit 1; }
-          [[ -f "$MMU" ]] || { echo "└─ ⚠️ Missing: $MMU" >&2; exit 1; }
-          echo "└─ 🩹 Preparing Android 16 / 6.12 SUSFS Compatibility"
-          # Prepare DMA-BUF Header in EXEC C Source
-          # Add Header Only For Kernel Sublevels 58 and Below
-          if [[ "$SUBLEVEL" -le 58 ]]; then
-            if grep -qFx '#include <linux/dma-buf.h>' "$EXEC"; then
-              echo "└─ ℹ️ DMA-BUF Header Already Present"
-            elif grep -qFx '#include <linux/ksm.h>' "$EXEC"; then
-              echo "└─ 🔧 Adding DMA-BUF Header to EXEC"
-              sed -i \
-                '/^#include <linux\/ksm\.h>$/a #include <linux/dma-buf.h>' \
-                "$EXEC"
+          MMU="$COMMONKERNELFOLDER/fs/proc/task_mmu.c"        
+          # Check Required Source Files
+          [[ -f "$EXEC" ]] || echo "└─ ⚠️ Missing EXEC Source: $EXEC"
+          [[ -f "$MMU" ]] || echo "└─ ⚠️ Missing TASK-MMU Source: $MMU"       
+          echo "└─ 🩹 Preparing Android 16 / 6.12 SUSFS Compatibility"        
+          # Apply Compatibility Fixes For Kernel Sublevels 58 and Below
+          if [[ "$SUBLEVEL" -le 58 ]]; then       
+            # Prepare DMA-BUF Header In EXEC
+            if [[ -f "$EXEC" ]]; then
               if grep -qFx '#include <linux/dma-buf.h>' "$EXEC"; then
-                FAKEPATCHEXEC=1
-                echo "└─ 📌 DMA-BUF Header Added"
+                echo "└─ ℹ️ DMA-BUF Header Already Present"       
+              elif grep -qFx '#include <linux/ksm.h>' "$EXEC"; then
+                echo "└─ 🔧 Adding DMA-BUF Header to EXEC"        
+                if sed -i \
+                  '/^#include <linux\/ksm\.h>$/a #include <linux/dma-buf.h>' \
+                  "$EXEC" &&
+                  grep -qFx '#include <linux/dma-buf.h>' "$EXEC"; then
+                  FAKEPATCHEXEC=1
+                  echo "└─ 📌 DMA-BUF Header Added"
+                else
+                  echo "└─ ⚠️ Failed to Add DMA-BUF Header"
+                fi
+                
               else
-                echo "└─ ⚠️ Failed to Add DMA-BUF Header" >&2
+                echo "└─ ⚠️ Cannot Locate KSM Header in EXEC"
+              fi
+              
+            else
+              echo "└─ ⏭️ Skipping DMA-BUF Preparation: EXEC Source Missing"
+            fi
+        
+            # Fake Patch SUSFS Map Hooks Into TASK-MMU
+            if [[ -f "$MMU" ]]; then
+              if python3 - "$MMU" <<'PY'
+        import sys
+        from pathlib import Path        
+        path = Path(sys.argv[1])
+        source = path.read_text()
+        original = source        
+        # Locate a Function's Opening and Closing Braces
+        def bounds(text, signature):
+            start = text.find(signature)
+            if start < 0:
+                raise RuntimeError(f"Function Not Found: {signature}")       
+            brace = text.find("{", start)
+            if brace < 0:
+                raise RuntimeError(f"Opening Brace Not Found: {signature}")       
+            depth = 0
+            for i in range(brace, len(text)):
+                if text[i] == "{":
+                    depth += 1
+                elif text[i] == "}":
+                    depth -= 1
+                    if depth == 0:
+                        return start, i + 1        
+            raise RuntimeError(f"Closing Brace Not Found: {signature}")        
+        # Edit Only Requested Function
+        def edit(text, signature, fn):
+            start, end = bounds(text, signature)
+            return text[:start] + fn(text[start:end]) + text[end:]        
+        # Add SUSFS Map Hook to SHOW SMAP()
+        def fixsmap(fn):
+            marker = "SUSFS_IS_INODE_SUS_MAP(file_inode(vma->vm_file))"        
+            if marker in fn:
+                print("└─ ℹ️ SHOW SMAP() Hook Already Present")
+                return fn        
+            anchor = "\tstruct mem_size_stats mss = {};"
+            if fn.count(anchor) != 1:
+                raise RuntimeError(
+                    "Cannot Uniquely Locate SHOW SMAP() Initializer"
+                )        
+            replacement = anchor + """        
+        #ifdef CONFIG_KSU_SUSFS_SUS_MAP
+        	if (vma->vm_file &&
+        	    SUSFS_IS_INODE_SUS_MAP(file_inode(vma->vm_file)))
+        		return 0;
+        #endif // #ifdef CONFIG_KSU_SUSFS_SUS_MAP
+        """        
+            print("└─ 🔧 Adding show_smap() Hook")
+            return fn.replace(anchor, replacement, 1)        
+        source = edit(source, "static int show_smap(", fixsmap)        
+        # Add SUSFS Map Bypass To SHOW SMAPS ROLLUP()
+        def fixrollup(fn):
+            marker = "SUSFS_IS_INODE_SUS_MAP(file_inode(vma->vm_file))"        
+            if marker not in fn:
+                # Find Rollup Statistics Call Regardless of Indentation
+                import re
+                matches = list(re.finditer(
+                    r'^[ \t]*smap_gather_stats\s*\(\s*vma\s*,\s*&mss\s*,\s*0\s*\)\s*;',
+                    fn,
+                    re.MULTILINE
+                ))
+                if len(matches) != 1:
+                    print(
+                        f"└─ ⚠️ Expected One Rollup Statistics Call, Found: {len(matches)}"
+                    )
+                    for match in matches:
+                        line = fn.count("\n", 0, match.start()) + 1
+                        print(f"└─ 📌 Matching Line: {line}")
+                    raise RuntimeError(
+                        "Cannot Uniquely Locate Rollup Statistics Call"
+                    )
+                anchor = matches[0].group(0)
+                replacement = """#ifdef CONFIG_KSU_SUSFS_SUS_MAP
+        		if (vma->vm_file &&
+        		    SUSFS_IS_INODE_SUS_MAP(file_inode(vma->vm_file)))
+        			goto bypass_orig_flow;
+        #endif // #ifdef CONFIG_KSU_SUSFS_SUS_MAP
+        		smap_gather_stats(vma, &mss, 0);"""        
+                fn = fn.replace(anchor, replacement, 1)
+                print("└─ 🔧 Adding SHOW SMAPS ROLLUP() Hook")
+            else:
+                print("└─ ℹ️ SUSFS Map Hook Already Present in Rollup")        
+            # Ensure Exactly One Bypass Label Exists
+            labels = fn.count("bypass_orig_flow:")      
+            if labels == 0:
+                anchor = "\t\tlast_vma_end = vma->vm_end;"      
+                if fn.count(anchor) != 1:
+                    raise RuntimeError(
+                        "Cannot Uniquely Locate Rollup VMA-End Assignment"
+                    )      
+                replacement = """#ifdef CONFIG_KSU_SUSFS_SUS_MAP
+        bypass_orig_flow:
+        #endif // #ifdef CONFIG_KSU_SUSFS_SUS_MAP
+        		last_vma_end = vma->vm_end;"""        
+                fn = fn.replace(anchor, replacement, 1)
+                print("└─ 🔧 Adding Rollup Bypass Label")        
+            elif labels > 1:
+                raise RuntimeError(
+                    "Duplicate BYPASS ORIG FLOW Labels Found"
+                )        
+            if "goto bypass_orig_flow;" not in fn:
+                raise RuntimeError("Rollup Bypass Go to is Missing")        
+            return fn        
+        source = edit(
+            source,
+            "static int show_smaps_rollup(",
+            fixrollup
+        )        
+        # Validate Both Hooks Before Writing The Source
+        start, end = bounds(source, "static int show_smap(")
+        smap = source[start:end]        
+        start, end = bounds(source, "static int show_smaps_rollup(")
+        rollup = source[start:end]        
+        if "SUSFS_IS_INODE_SUS_MAP" not in smap:
+            raise RuntimeError("SHOW SMAP() Hook Validation Failed")       
+        if (
+            "goto bypass_orig_flow;" not in rollup
+            or rollup.count("bypass_orig_flow:") != 1
+        ):
+            raise RuntimeError("SHOW SMAPS ROLLUP() Hook Validation Failed")        
+        # Save Only After Successful Validation
+        if source != original:
+            path.write_text(source)
+            print("└─ 📌 TASK-MMU Fake-Patch Applied")
+        else:
+            print("└─ ℹ️ TASK-MMU Hooks Already Present")        
+        print("└─ 📌 TASK-MMU Hook Validation Passed")
+        PY
+              then
+                # Record Successful TASK-MMU Preparation
+                FAKEPATCHTASKMMU=1
+              else
+                # Record Failure Without Explicitly Exiting Step
+                echo "└─ ⚠️ TASK-MMU Fake-Patch Failed"
               fi
             else
-              echo "└─ ⚠️ Cannot Locate KSM Header in EXEC" >&2
+              # Skip TASK-MMU Preparation When Source is Missing
+              echo "└─ ⏭️ Skipping TASK-MMU Preparation: Source Missing"
             fi
-
-            # Prepare SUSFS Map Hook in SHOW SMAP()
-            if ! perl -0777 -ne '
-              if (/(static int show_smap\(.*?^\})/ms) {
-                exit(index($1, "SUSFS_IS_INODE_SUS_MAP(file_inode(vma->vm_file))") >= 0 ? 0 : 1);
-              }
-              exit 1;
-            ' "$MMU"; then
-              echo "└─ 🔧 Preparing SHOW SMAP() Hook"
-              sed -i '/^static int show_smap(/,/^}/ {
-                /struct mem_size_stats mss = {};/a\
-            #ifdef CONFIG_KSU_SUSFS_SUS_MAP\
-                if (vma->vm_file) {\
-                    if (SUSFS_IS_INODE_SUS_MAP(file_inode(vma->vm_file)))\
-                        return 0;\
-                }\
-            #endif // #ifdef CONFIG_KSU_SUSFS_SUS_MAP
-              }' "$MMU"
-              echo "└─ 📌 SHOW SMAP() Hook Prepared"
-            else
-              echo "└─ ℹ️ SHOW SMAP() Hook Already Present"
-            fi
-
-            # Prepare SHOW SMAPS ROLLUP() Bypass
-            if ! perl -0777 -ne '
-              if (/(static int show_smaps_rollup\(.*?^\})/ms) {
-                exit(index($1, "goto bypass_orig_flow;") >= 0 ? 0 : 1);
-              }
-              exit 1;
-            ' "$MMU"; then
-              echo "└─ 🔧 Preparing SHOW SMAPS ROLLUP() Bypass"
-              perl -0777 -i -pe '
-                s/(static int show_smaps_rollup\(.*?)(^[ \t]*if \(vma->vm_start < last_vma_end\) \{)/$1#ifdef CONFIG_KSU_SUSFS_SUS_MAP\n\t\tif (vma->vm_file && SUSFS_IS_INODE_SUS_MAP(file_inode(vma->vm_file)))\n\t\t\tgoto bypass_orig_flow;\n#endif \/\/ #ifdef CONFIG_KSU_SUSFS_SUS_MAP\n\n$2/ms;
-              ' "$MMU"
-              echo "└─ 📌 SHOW SMAPS ROLLUP() Bypass Prepared"
-            else
-              echo "└─ ℹ️ SHOW SMAPS ROLLUP() Bypass Already Present"
-            fi
-
-            # Remove Duplicate Labels and Rebuild One Label Inside SHOW SMAPS ROLLUP()
-            perl -0777 -i -pe '
-              if (/(static int show_smaps_rollup\(.*?^\})/ms) {
-                my $fn = $1;
-                # Remove Existing SUSFS Label Blocks Within Function
-                $fn =~ s/^[ \t]*#ifdef CONFIG_KSU_SUSFS_SUS_MAP\n[ \t]*bypass_orig_flow:\n[ \t]*#endif[^\n]*\n//mg;
-                # Insert Exactly One Label Before First VMA-End Update
-                if ($fn =~ /(^[ \t]*last_vma_end = vma->vm_end;)/m) {
-                  my $line = $1;
-                  $fn =~ s/\Q$line\E/#ifdef CONFIG_KSU_SUSFS_SUS_MAP\nbypass_orig_flow:\n#endif \/\/ #ifdef CONFIG_KSU_SUSFS_SUS_MAP\n$line/;
-                } else {
-                  warn "WARNING: Could Not Locate LAST VMA END in SHOW SMAPS ROLLUP()\n";
-                }
-                s/\Q$1\E/$fn/;
-              } else {
-                warn "WARNING: Could Not Locate SHOW SMAPS ROLLUP()\n";
-              }
-            ' "$MMU"
-            # Verify Bypass and Label are Present in SHOW SMAPS ROLLUP()
-            if perl -0777 -ne '
-              if (/(static int show_smaps_rollup\(.*?^\})/ms) {
-                my $fn = $1;
-                my $gotos = () = $fn =~ /goto bypass_orig_flow;/g;
-                my $labels = () = $fn =~ /^[ \t]*bypass_orig_flow:/mg;
-                exit($gotos >= 1 && $labels == 1 ? 0 : 1);
-              }
-              exit 1;
-            ' "$MMU"; then
-              echo "└─ 📌 SHOW SMAPS ROLLUP() Label Verified"
-            else
-              echo "└─ ⚠️ SHOW SMAPS ROLLUP() Bypass/Label Validation Failed" >&2
-              exit 1
-            fi
-
-            # Record TASK MMU Compatibility Preparation
-            FAKEPATCHTASKMMU=1
+        
           else
-            # Skip DMA-BUF and TASK MMU Compatibility For Newer Sublevels
+            # Skip Compatibility Fixes For Newer Kernel Sublevels
             echo "└─ ⏭️ Skipping Compatibility Preparation For Sublevel $SUBLEVEL"
           fi
-
+        
           echo "└─ 🎉 Android 16 / 6.12 Compatibility Preparation Complete"
         fi
 
@@ -604,7 +676,7 @@ runs:
       shell: bash
       # Export Composite Action Inputs and Import Environment Variables
       env:
-        # Kernel Build Paths From the Caller Environment
+        # Kernel Build Paths From Caller Environment
         WORKDIR: ${{ env.WORKDIR }}
         COMMONKERNELFOLDER: ${{ env.COMMONKERNELFOLDER }}
         PATCHDIR: ${{ env.PATCHDIR }}
@@ -621,7 +693,7 @@ runs:
         SUBLEVEL: ${{ env.SUBLEVEL }}
       run: |
         set -euo pipefail
-        # Construct the Android and Kernel Version Identifier
+        # Construct Android and Kernel Version Identifier
         GKIVERSION="${ANDROIDVERSION}-${KERNELVERSION}"
         # Navigate to the Kernel Working Directory
         cd "$WORKDIR"
@@ -630,31 +702,31 @@ runs:
         echo "└─ 🧾 Kernel Version        : $KERNELVERSION"
         echo "└─ 🔎 Detected Kernel Base  : $GKIVERSION"
         echo "└─ 📁 Kernel Directory      : $COMMONKERNELFOLDER"
-        # Select the SUSFS Repository, Branch and Optional Fallback
+        # Select SUSFS Repository, Branch and Optional Fallback
         echo "└─ 📥 Cloning SUSFS..."
         if [[ "$SUSFSVARIANT" == "OGKI" ]]; then
-          # Select the OGKI Repository and Branch
+          # Select OGKI Repository and Branch
           BRANCH="oki-${ANDROIDVERSION}-${KERNELVERSION}"
           REPOURL="https://github.com/cctv18/susfs4oki.git"
           FALLBACKURL=""
         else
-          # Select the GKI Repository and GitHub Mirror
+          # Select GKI Repository and GitHub Mirror
           BRANCH="gki-${ANDROIDVERSION}-${KERNELVERSION}"
           REPOURL="https://gitlab.com/simonpunk/susfs4ksu.git"
           FALLBACKURL="https://github.com/AndreiMikh/susfs4ksu.git"
         fi
 
-        # Append the Development Suffix When Enabled
+        # Append Development Suffix When Enabled
         if [[ "$SUSFSBRANCHDEV" == "true" ]]; then
           BRANCH="${BRANCH}-dev"
         fi
 
-        # Attempt to Clone the Selected Branch up to Three Times
+        # Attempt to Clone Selected Branch up to Three Times
         CLONED=false
         for attempt in {1..3}; do
           # Remove Any Previous Failed Clone
           rm -rf susfs4ksu
-          # Clone the Requested Branch With Shallow History
+          # Clone Requested Branch with Shallow History
           if git clone --depth=1 --single-branch \
             --branch "$BRANCH" \
             "$REPOURL" susfs4ksu; then
@@ -673,7 +745,7 @@ runs:
 
         done
 
-        # Try the GitHub Mirror if the Primary Clone Failed
+        # Try GitHub Mirror if Primary Clone Failed
         if [[ "$CLONED" != "true" && -n "$FALLBACKURL" ]]; then
           echo "└─ ⚠️ GitLab Unavailable, Trying GitHub Mirror..."
           if git clone --depth=1 --single-branch \
@@ -684,7 +756,7 @@ runs:
           fi
         fi
 
-        # Stop the Build if No Repository Could Be Cloned
+        # Stop Build if No Repository Could be Cloned
         if [[ "$CLONED" != "true" ]]; then
           echo "└─ ⚠️ SUSFS Clone Failed"
           echo "└─ 📦 Repository : $REPOURL"
@@ -693,32 +765,32 @@ runs:
           exit 1
         fi
 
-        # Display the Selected SUSFS Branch
+        # Display Selected SUSFS Branch
         echo "└─ 📌 SUSFS Branch : $BRANCH"
-        # Enter the Cloned SUSFS Repository
+        # Enter Cloned SUSFS Repository
         cd susfs4ksu || exit 1
-        # Check Whether a Specific SUSFS Revision Was Requested
+        # Check Whether a Specific SUSFS Revision was Requested
         if [[ -n "${SUSFSREPOSITORY:-}" && "$SUSFSREPOSITORY" != "-1" ]]; then
           echo "└─ 🔎 SUSFS Revision : $SUSFSREPOSITORY"
           # Numeric Values Select a Previous Commit Relative to HEAD
           if [[ "$SUSFSREPOSITORY" =~ ^[0-9]+$ ]]; then
             echo "└─ 📦 Fetching Additional Git History..."
-            # Expand the Shallow Clone or Fetch Additional History
+            # Expand Shallow Clone or Fetch Additional History
             git fetch --unshallow || git fetch --depth=1000 origin "$BRANCH"
-            # Check Out the Requested Historical Commit
+            # Check Out Requested Historical Commit
             git checkout "HEAD~$SUSFSREPOSITORY" || {
               echo "└─ ⚠️ Failed Checkout HEAD~$SUSFSREPOSITORY"
               exit 1
             }
           else
-            # Expand History When a Commit Hash Is Supplied
+            # Expand History When a Commit Hash is Supplied
             if [[ "$SUSFSREPOSITORY" =~ ^[0-9a-fA-F]{7,40}$ ]]; then
               echo "└─ 📦 Expanding Shallow Clone History..."
               git fetch --unshallow origin || \
                 git fetch --deepen=200 origin "$BRANCH"
             fi
 
-            # Check Out the Requested Commit, Tag or Branch
+            # Check Out Requested Commit, Tag or Branch
             git checkout "$SUSFSREPOSITORY" || {
               echo "└─ ⚠️ Invalid SUSFS Revision"
               exit 1
@@ -726,9 +798,9 @@ runs:
           fi
         fi
 
-        # Display the Active SUSFS Commit
+        # Display Active SUSFS Commit
         echo "└─ 📌 Active SUSFS Commit : $(git rev-parse --short HEAD)"
-        # Detect the SUSFS Version From Its Header
+        # Detect SUSFS Version From its Header
         SUSFSVER="Unknown"
         SUSFSHEADER="./kernel_patches/include/linux/susfs.h"
         if [[ -f "$SUSFSHEADER" ]]; then
@@ -738,13 +810,13 @@ runs:
           SUSFSVER="${SUSFSVER:-Unknown}"
         fi
 
-        # Export the SUSFS Version to the Workflow Environment and Step Output
+        # Export SUSFS Version to Workflow Environment and Step Output
         echo "└─ 📦 SUSFS Version : $SUSFSVER"
         echo "SUSFSVER=$SUSFSVER" >> "$GITHUB_ENV"
         echo "susfsver=$SUSFSVER" >> "$GITHUB_OUTPUT"
         # Return to the Working Directory
         cd ..
-        # Find SUSFS Core Patch Files Matching the Current Kernel Base
+        # Find SUSFS Core Patch Files Matching Current Kernel Base
         echo "└─ 🔎 Searching SUSFS Patches..."
         shopt -s nullglob
         SUSFSPATCHLIST=(./susfs4ksu/kernel_patches/50_add_susfs_in_gki-"${ANDROIDVERSION}"-"${KERNELVERSION}"*.patch)
@@ -755,47 +827,72 @@ runs:
           exit 1
         fi
 
-        # Select the Last Matching Patch from the Sorted Array
+        # Select Last Matching Patch From Sorted Array
         SUSFSPATCH="${SUSFSPATCHLIST[-1]}"
-        # Copy SUSFS Patch Files into the Common Kernel Source Tree
+        # Copy SUSFS Patch Files Into Common Kernel Source Tree
         echo "└─ 🧾 SUSFS Patch Directory : $SUSFSPATCH"
         if [[ "$SUSFSREPOSITORY" != "-1" ]]; then
           echo "└─ 📥 Copying SUSFS Patches..."
-          # Copy the Main SUSFS Patch
+          # Copy Main SUSFS Patch
           cp "$SUSFSPATCH" "${COMMONKERNELFOLDER}/" 2>/dev/null || \
             echo "└─ ⚠️ Failed to Copy SUSFS Patches"
-          # Copy SUSFS Filesystem Changes
+          # Copy SUSFS File System Changes
           cp -r ./susfs4ksu/kernel_patches/fs/* "${COMMONKERNELFOLDER}/fs/" 2>/dev/null || \
-            echo "└─ ⚠️ Failed to Copy SUSFS Filesystem"
+            echo "└─ ⚠️ Failed to Copy SUSFS File System"
           # Copy SUSFS Linux Header Changes
           cp -r ./susfs4ksu/kernel_patches/include/linux/* "${COMMONKERNELFOLDER}/include/linux/" 2>/dev/null || \
             echo "└─ ⚠️ Failed to Copy SUSFS Linux Header"
         fi
 
-        # Enter the Common Kernel Source Directory
+        # Enter Common Kernel Source Directory
         cd "$COMMONKERNELFOLDER"
-        # Apply the SUSFS Core Patch
+        # Diagnose SUSFS TASK-MMU Patch Mismatch For Android 16 GKI 6.12
+        if [[ "$GKIVERSION" == "android16-6.12" ]]; then
+          # 🔎 Diagnose SUSFS TASK-MMU Patch Mismatch
+          MMU="$COMMONKERNELFOLDER/fs/proc/task_mmu.c"
+          PATCHFILE="$(basename "$SUSFSPATCH")"
+          # Display SHOW SMAP() Source Before Applying SUSFS
+          echo "└─ 🔎 SHOW SMAP() Source"
+          sed -n '/^static int show_smap(/,/^}/p' "$MMU"
+          # Display SHOW SMAPS ROLLUP() Source Before Applying SUSFS
+          echo "└─ 🔎 SHOW SMAPS ROLLUP() Source"
+          sed -n '/^static int show_smaps_rollup(/,/^}/p' "$MMU"
+          # Display Relevant SUSFS Patch Hunks
+          echo "└─ 🔎 SUSFS TASK-MMU Patch Context"
+          grep -n -A 35 -B 5 -E \
+            '^@@ .*show_smap|^@@ .*show_smaps_rollup' \
+            "$PATCHFILE" || true
+          # Display Any Existing Reject File
+          echo "└─ 🔎 Existing TASK-MMU Reject File"
+          if [[ -f "$MMU.rej" ]]; then
+            cat "$MMU.rej"
+          else
+            echo "└─ ℹ️ No TASK-MMU Reject File Found"
+          fi
+        fi
+
+        # Apply SUSFS Core Patch
         echo "└─ ⚙️ Applying SUSFS Core Patch (50 Add SUSFS Patch)"
         if patch -p1 < "$(basename "$SUSFSPATCH")"; then
           echo "└─ 📌 SUSFS 50 Enable Core Patch Applied"
         else
-          # Preserve the Original Behavior: Warn and Continue on Failure
+          # Preserve Original Behavior: Warn and Continue on Failure
           echo "└─ ⚠️ SUSFS Core Patch Already Applied or Failed"
         fi
 
-        # Apply the SUSFS Enable Patch Only for KernelSU
+        # Apply SUSFS Enable Patch Only For KernelSU
         if [[ "$ROOTENGINE" == "KernelSU" ]]; then
-          echo "⚙️ Applying KernelSU SUSFS enable patch"
-          # Select the Branch for the SUSFS Enable Patch
+          echo "⚙️ Applying KernelSU SUSFS Enable Patch"
+          # Select Branch For SUSFS Enable Patch
           if [[ "$SUSFSVARIANT" == "OGKI" ]]; then
             PATCHBRANCH="oki-${ANDROIDVERSION}-${KERNELVERSION}"
           else
             PATCHBRANCH="gki-${ANDROIDVERSION}-${KERNELVERSION}"
           fi
 
-          # Append the Development Suffix When Enabled
+          # Append Development Suffix When Enabled
           [[ "${SUSFSBRANCHDEV}" == "true" ]] && PATCHBRANCH="${PATCHBRANCH}-dev"
-          # Build the SUSFS Enable Patch URL Based on the Variant
+          # Build SUSFS Enable Patch URL Based on Variant
           case "$SUSFSVARIANT" in
             GKI)
               SUSFS10URL="https://gitlab.com/simonpunk/susfs4ksu/-/raw/${PATCHBRANCH}/kernel_patches/${ROOTENGINE}/10_enable_susfs_for_ksu.patch"
@@ -809,7 +906,7 @@ runs:
               exit 1
               ;;
           esac
-          # Verify That the SUSFS Enable Patch URL Is Reachable
+          # Verify SUSFS Enable Patch URL is Reachable
           echo "🔍 Checking Patch URL..."
           if ! wget --spider "$SUSFS10URL"; then
             echo "└─ ⚠️ Patch Does Not Exist :"
@@ -817,22 +914,22 @@ runs:
             exit 1
           fi
 
-          # Download the SUSFS Enable Patch
+          # Download SUSFS Enable Patch
           echo "🌐 Downloading Patch : $SUSFS10URL"
           if ! wget "$SUSFS10URL" -O enable.patch; then
             echo "└─ ⚠️ Failed to Download SUSFS Enable Patch"
             exit 1
           fi
 
-          # Track Whether the Enable Patch Was Applied Successfully
+          # Track Whether Enable Patch was Applied Successfully
           APPLIED=false
-          # Save the Current Directory for Cleanup and Return
+          # Save Current Directory For Cleanup and Return
           ORIGDIR="$(pwd)"
-          # Resolve the KernelSU Source Directory
+          # Resolve KernelSU Source Directory
           KSUDIR="$(dirname "$COMMONKERNELFOLDER")/KernelSU"
           echo "└─ 📂 Current Directory : $(pwd)"
           echo "└─ 🔧 Applying SUSFS Enable Patch..."
-          # Stop if the KernelSU Source Directory Is Missing
+          # Stop if KernelSU Source Directory is Missing
           if [[ ! -d "$KSUDIR" ]]; then
             echo "└─ ⚠️ KernelSU Directory Not Found :"
             echo "└─ $KSUDIR"
@@ -840,26 +937,26 @@ runs:
             exit 1
           fi
 
-          # Enter the KernelSU Source Directory
+          # Enter KernelSU Source Directory
           echo "└─ 📂 Entering KernelSU Directory..."
           cd "$KSUDIR" || exit 1
           echo "└─ 📂 Current Directory : $(pwd)"
           echo "└─ 🔧 Applying SUSFS Enable Patch..."
-          # Apply the SUSFS Enable Patch
+          # Apply SUSFS Enable Patch
           if patch -p1 < "$ORIGDIR/enable.patch"; then
             APPLIED=true
             echo "📌 SUSFS Enable Patch Applied Successfully"
           else
-            # Preserve the Original Behavior: Warn and Skip on Failure
+            # Preserve Original Behavior: Warn and Skip on Failure
             echo "└─ ⚠️ SUSFS Enable Patch is Not Compatible with KernelSU Source Tree"
             echo "└─ ℹ️ Skipping SUSFS Enable Patch"
           fi
 
-          # Return to the Original Directory and Remove the Temporary Patch
+          # Return to Original Directory and Remove Temporary Patch
           echo "└─ 📂 Returning to Original Directory..."
           cd "$ORIGDIR" || exit 1
           rm -f "$ORIGDIR/enable.patch"
-          # Report the Final Enable Patch Status
+          # Report Final Enable Patch Status
           if [[ "$APPLIED" == "true" ]]; then
             echo "└─ 📌 KernelSU SUSFS Enable Patch Completed"
           else
@@ -867,27 +964,27 @@ runs:
           fi
 
         else
-          # Skip the KernelSU Enable Patch for Other Root Engines
+          # Skip KernelSU Enable Patch For Other Root Engines
           echo "└─ ♻️ Skipping KernelSU SUSFS Enable Patch (Root = $ROOTENGINE)"
         fi
 
         echo "🎉 SUSFS Patches Complete"
-        # Apply the Legacy Compatibility Fix for Older Android 13 Kernel 5.15 Builds
+        # Apply Legacy Compatibility Fix For Older Android 13 Kernel 5.15 Builds
         if [[ "$GKIVERSION" == "android13-5.15" && "$SUBLEVEL" -lt 123 ]]; then
-          # Resolve the Legacy Compatibility Patch Path
+          # Resolve Legacy Compatibility Patch Path
           LEGACYPATCH="${PATCHDIR}/Legacy-5.15-Fix.patch"
-          # Stop if the Required Legacy Patch Is Missing
+          # Stop if Required Legacy Patch is Missing
           if [[ ! -f "$LEGACYPATCH" ]]; then
             echo "└─ ⚠️ Patch Not Found : $LEGACYPATCH"
             exit 1
           fi
 
           echo "└─ 🚀 Applying Legacy Fix (Kernel 5.15.0–5.15.123)"
-          # Skip the Patch if It Is Already Applied
+          # Skip Patch if it is Already Applied
           if patch -R -p1 --dry-run < "$LEGACYPATCH" >/dev/null 2>&1; then
             echo "└─ ⚠️ Patch Already Applied — Skipping"
           else
-            # Apply the Legacy Fix
+            # Apply Legacy Fix
             if patch -p1 < "$LEGACYPATCH"; then
               echo "📌 Legacy 5.15 Fix Applied"
             else
@@ -897,7 +994,7 @@ runs:
           fi
         fi
 
-        # Load the Reject Checker and Check for Patch Rejects
+        # Load Reject Checker and Check For Patch Rejects
         source "$REJECTCHECKER"
         checkrejects .
         echo "└─ 🎉 Kernel Compatibility Fix Stage Completed"
@@ -1338,14 +1435,19 @@ runs:
         if [[ "$KERNELMODULE" == "android16-6.12" ]]; then
           # Define Source File Paths
           EXEC="$COMMONKERNELFOLDER/fs/exec.c"
-          MMU="$COMMONKERNELFOLDER/fs/proc/task_mmu.c"
+          MMU="$COMMONKERNELFOLDER/fs/proc/task_mmu.c"        
           # Revert EXEC DMA-BUF Header
           if [[ "${FAKEPATCHEXEC:-0}" == "1" ]]; then
             if [[ "$SUBLEVEL" -le 58 ]]; then
-              if [[ -f "$EXEC" ]] && grep -qFx '#include <linux/dma-buf.h>' "$EXEC"; then
+              if [[ -f "$EXEC" ]] &&
+                 grep -qFx '#include <linux/dma-buf.h>' "$EXEC"; then       
                 echo "└─ ♻️ Reverting EXEC DMA-BUF Header"
-                sed -i '\|^#include <linux/dma-buf\.h>$|d' "$EXEC"
-                echo "└─ 🎉 EXEC DMA-BUF Header Reverted"
+                if sed -i '\|^#include <linux/dma-buf\.h>$|d' "$EXEC"; then
+                  echo "└─ 🎉 EXEC DMA-BUF Header Reverted"
+                else
+                  echo "└─ ⚠️ Failed to Revert EXEC DMA-BUF Header"
+                fi
+                
               else
                 echo "└─ ℹ️ EXEC DMA-BUF Header Already Absent"
               fi
@@ -1357,64 +1459,108 @@ runs:
           else
             echo "└─ ⏭️ Skipping EXEC: Fake Patch Flag is Not 1"
           fi
-
-          # Revert TASK MMU SUSFS MAP Hooks
+        
+          # Revert TASK-MMU SUSFS Map Hooks
           if [[ "${FAKEPATCHTASKMMU:-0}" == "1" ]]; then
             if [[ "$SUBLEVEL" -le 58 ]]; then
               if [[ -f "$MMU" ]]; then
-                echo "└─ ♻️ Reverting TASK MMU SUSFS Map Hooks"
-                # Remove SHOW SMAP() Hook Only Within its Function
-                perl -0777 -i -pe '
-                  s/(static int show_smap\(.*?^\})/
-                    my $fn = $1;
-                    $fn =~ s/^[ \t]*#ifdef CONFIG_KSU_SUSFS_SUS_MAP\n[ \t]*if \(vma->vm_file\) \{\n[ \t]*if \(SUSFS_IS_INODE_SUS_MAP\(file_inode\(vma->vm_file\)\)\)\n[ \t]*return 0;\n[ \t]*\}\n[ \t]*#endif[^\n]*\n?//m;
-                    $fn
-                  /mse;
-                ' "$MMU"
-                # Remove SHOW SMAPS ROLLUP() Bypass Only Within its Function
-                # Remove All Duplicate Labels From Earlier Preparations
-                perl -0777 -i -pe '
-                  s/(static int show_smaps_rollup\(.*?^\})/
-                    my $fn = $1;
-                    # Remove SUSFS MAP Bypass Statement
-                    $fn =~ s/^[ \t]*#ifdef CONFIG_KSU_SUSFS_SUS_MAP\n[ \t]*if \(vma->vm_file && SUSFS_IS_INODE_SUS_MAP\(file_inode\(vma->vm_file\)\)\)\n[ \t]*goto bypass_orig_flow;\n[ \t]*#endif[^\n]*\n?//mg;
-                    # Remove Every SUSFS Bypass Label Block, Including Duplicates
-                    $fn =~ s/^[ \t]*#ifdef CONFIG_KSU_SUSFS_SUS_MAP\n[ \t]*bypass_orig_flow:\n[ \t]*#endif[^\n]*\n?//mg;
-                    $fn
-                  /mse;
-                ' "$MMU"
-                # Verify No Compatibility Hooks Remain in Target Functions
-                if perl -0777 -ne '
-                  my $smap = /(static int show_smap\(.*?^\})/ms ? $1 : "";
-                  my $rollup = /(static int show_smaps_rollup\(.*?^\})/ms ? $1 : "";
-                  exit(
-                    $smap !~ /SUSFS_IS_INODE_SUS_MAP\(file_inode\(vma->vm_file\)\)/ &&
-                    $rollup !~ /goto bypass_orig_flow;/ &&
-                    $rollup !~ /^[ \t]*bypass_orig_flow:/m
-                    ? 0 : 1
-                  );
-                ' "$MMU"; then
-                  echo "└─ 🎉 TASK MMU SUSFS Map Hooks Reverted"
+                echo "└─ ♻️ Reverting TASK-MMU SUSFS Map Hooks"       
+                if python3 - "$MMU" <<'PY'
+        import sys
+        from pathlib import Path        
+        path = Path(sys.argv[1])
+        source = path.read_text()
+        original = source        
+        # Edit Only Selected Function
+        def bounds(text, signature):
+            start = text.find(signature)
+            if start < 0:
+                raise RuntimeError(f"Function Not Found: {signature}")       
+            brace = text.find("{", start)
+            if brace < 0:
+                raise RuntimeError(f"Opening Brace Not Found: {signature}")        
+            depth = 0
+            for i in range(brace, len(text)):
+                if text[i] == "{":
+                    depth += 1
+                elif text[i] == "}":
+                    depth -= 1
+                    if depth == 0:
+                        return start, i + 1       
+            raise RuntimeError(f"Closing Brace Not Found: {signature}")        
+        def edit(text, signature, fn):
+            start, end = bounds(text, signature)
+            return text[:start] + fn(text[start:end]) + text[end:]        
+        # Remove Temporary Hook From SHOW SMAP()
+        def revertsmap(fn):
+            hook = """#ifdef CONFIG_KSU_SUSFS_SUS_MAP
+        	if (vma->vm_file &&
+        	    SUSFS_IS_INODE_SUS_MAP(file_inode(vma->vm_file)))
+        		return 0;
+        #endif // #ifdef CONFIG_KSU_SUSFS_SUS_MAP
+        """        
+            if hook in fn:
+                fn = fn.replace(hook, "", 1)
+                print("└─ ♻️ Removed SHOW SMAP() Fake Hook")
+            else:
+                print("└─ ℹ️ SHOW SMAP() Fake Hook Not Found")       
+            return fn        
+        source = edit(source, "static int show_smap(", revertsmap)        
+        # Remove Temporary Hook And Label From SHOW SMAPS ROLLUP()
+        def revertsmapsrollup(fn):
+            hook = """#ifdef CONFIG_KSU_SUSFS_SUS_MAP
+        		if (vma->vm_file &&
+        		    SUSFS_IS_INODE_SUS_MAP(file_inode(vma->vm_file)))
+        			goto bypass_orig_flow;
+        #endif // #ifdef CONFIG_KSU_SUSFS_SUS_MAP
+        """        
+            label = """#ifdef CONFIG_KSU_SUSFS_SUS_MAP
+        bypass_orig_flow:
+        #endif // #ifdef CONFIG_KSU_SUSFS_SUS_MAP
+        """        
+            if hook in fn:
+                fn = fn.replace(hook, "", 1)
+                print("└─ ♻️ Removed SHOW SMAPS ROLLUP() Fake Hook")
+            else:
+                print("└─ ℹ️ SHOW SMAPS ROLLUP() Fake Hook Not Found")       
+            if label in fn:
+                fn = fn.replace(label, "", 1)
+                print("└─ ♻️ Removed Rollup Bypass Label")
+            else:
+                print("└─ ℹ️ Rollup Bypass Label Not Found")        
+            return fn        
+        source = edit(
+            source,
+            "static int show_smaps_rollup(",
+            revertsmapsrollup
+        )       
+        # Save Only if Source Changed
+        if source != original:
+            path.write_text(source)
+            print("└─ 🎉 TASK-MMU Fake Hooks Reverted")
+        else:
+            print("└─ ℹ️ No TASK-MMU Fake Hooks Needed Reverting")
+        PY
+                then
+                  echo "└─ 🎉 TASK-MMU Compatibility Reversal Complete"
                 else
-                  echo "└─ ⚠️ TASK MMU SUSFS Hook Reversal Verification Failed" >&2
-                  exit 1
+                  echo "└─ ⚠️ TASK-MMU Compatibility Reversal Failed"
                 fi
                 
               else
-                echo "└─ ⚠️ TASK MMU Source File Not Found: $MMU" >&2
-                exit 1
+                echo "└─ ⏭️ Skipping TASK-MMU: Source File Missing"
               fi
               
             else
-              echo "└─ ℹ️ TASK MMU Hook Revert Not Required For Sublevel $SUBLEVEL"
+              echo "└─ ℹ️ TASK-MMU Hook Revert Not Required For Sublevel $SUBLEVEL"
             fi
             
           else
-            echo "└─ ⏭️ Skipping TASK MMU: Fake Patch Flag is Not 1"
+            echo "└─ ⏭️ Skipping TASK-MMU: Fake Patch Flag is Not 1"
           fi
-
+        
           echo "└─ 🎉 Android 16 / 6.12 Compatibility Reversal Complete"
         fi
-    
+  
         # 🎉 Report Completion
         echo "└─ 🎉 Kernel Fake Patch Reversal Complete"
