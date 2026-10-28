@@ -465,7 +465,7 @@ runs:
           # Define Source File Paths
           EXEC="$COMMONKERNELFOLDER/fs/exec.c"
           MMU="$COMMONKERNELFOLDER/fs/proc/task_mmu.c"
-          # Check That Required Source Files Exist
+          # Check Required Source Files Exist
           [[ -f "$EXEC" ]] || { echo "└─ ⚠️ Missing: $EXEC" >&2; exit 1; }
           [[ -f "$MMU" ]] || { echo "└─ ⚠️ Missing: $MMU" >&2; exit 1; }
           echo "└─ 🩹 Preparing Android 16 / 6.12 SUSFS Compatibility"
@@ -473,15 +473,12 @@ runs:
           # Add Header Only For Kernel Sublevels 58 and Below
           if [[ "$SUBLEVEL" -le 58 ]]; then
             if grep -qFx '#include <linux/dma-buf.h>' "$EXEC"; then
-              # Avoid inserting a duplicate include.
               echo "└─ ℹ️ DMA-BUF Header Already Present"
             elif grep -qFx '#include <linux/ksm.h>' "$EXEC"; then
-              # Insert DMA-BUF Immediately After Existing KSM Header
               echo "└─ 🔧 Adding DMA-BUF Header to EXEC"
               sed -i \
                 '/^#include <linux\/ksm\.h>$/a #include <linux/dma-buf.h>' \
                 "$EXEC"
-              # Record Successful Preparation For Later Workflow Steps
               if grep -qFx '#include <linux/dma-buf.h>' "$EXEC"; then
                 FAKEPATCHEXEC=1
                 echo "└─ 📌 DMA-BUF Header Added"
@@ -489,19 +486,17 @@ runs:
                 echo "└─ ⚠️ Failed to Add DMA-BUF Header" >&2
               fi
             else
-              # Report When Expected Insertion Point is Unavailable
               echo "└─ ⚠️ Cannot Locate KSM Header in EXEC" >&2
             fi
 
-            # Prepare SUSFS Map Hooks in TASK MMU C Source
-            echo "└─ 🔧 Preparing SUSFS Map Hooks in TASK MMU"
-            # Prepare SHOW SMAP() Hook
-            # Search Within SHOW SMAP() to Avoid Matching Unrelated Functions
-            # Read Complete File For Multi-Line Pattern Matching
-            if ! perl -0777 -ne 'print $1 if /(static int show_smap\(.*?^\})/ms' "$MMU" |
-              grep -qF 'SUSFS_IS_INODE_SUS_MAP(file_inode(vma->vm_file))'; then
-              # Insert SUSFS Map Check After MEM SIZE STATS Initialization
-              # Skip Insertion When Hook is Already Present
+            # Prepare SUSFS Map Hook in SHOW SMAP()
+            if ! perl -0777 -ne '
+              if (/(static int show_smap\(.*?^\})/ms) {
+                exit(index($1, "SUSFS_IS_INODE_SUS_MAP(file_inode(vma->vm_file))") >= 0 ? 0 : 1);
+              }
+              exit 1;
+            ' "$MMU"; then
+              echo "└─ 🔧 Preparing SHOW SMAP() Hook"
               sed -i '/^static int show_smap(/,/^}/ {
                 /struct mem_size_stats mss = {};/a\
             #ifdef CONFIG_KSU_SUSFS_SUS_MAP\
@@ -513,41 +508,57 @@ runs:
               }' "$MMU"
               echo "└─ 📌 SHOW SMAP() Hook Prepared"
             else
-              # Keep Existing SUSFS Map Logic Without Duplicating it
               echo "└─ ℹ️ SHOW SMAP() Hook Already Present"
             fi
 
-            # Prepare SHOW SMAPS ROLLUP() Bypass Hook
-            # Check Whether Function Already Contains Bypass Statement
-            if ! perl -0777 -ne 'print $1 if /(static int show_smaps_rollup\(.*?^\})/ms' "$MMU" |
-              grep -qF 'goto bypass_orig_flow;'; then
-              # Insert Bypass Before Original VMA Ordering Check
-              # Preserve Surrounding Source Code
+            # Prepare SHOW SMAPS ROLLUP() Bypass
+            if ! perl -0777 -ne '
+              if (/(static int show_smaps_rollup\(.*?^\})/ms) {
+                exit(index($1, "goto bypass_orig_flow;") >= 0 ? 0 : 1);
+              }
+              exit 1;
+            ' "$MMU"; then
+              echo "└─ 🔧 Preparing SHOW SMAPS ROLLUP() Bypass"
               perl -0777 -i -pe '
-                s/(static int show_smaps_rollup\(.*?)(^[ \t]*if \(vma->vm_start < last_vma_end\) \{)/$1#ifdef CONFIG_KSU_SUSFS_SUS_MAP\n        if (vma->vm_file && SUSFS_IS_INODE_SUS_MAP(file_inode(vma->vm_file)))\n            goto bypass_orig_flow;\n#endif \/\/ #ifdef CONFIG_KSU_SUSFS_SUS_MAP\n$2/ms;
+                s/(static int show_smaps_rollup\(.*?)(^[ \t]*if \(vma->vm_start < last_vma_end\) \{)/$1#ifdef CONFIG_KSU_SUSFS_SUS_MAP\n\t\tif (vma->vm_file && SUSFS_IS_INODE_SUS_MAP(file_inode(vma->vm_file)))\n\t\t\tgoto bypass_orig_flow;\n#endif \/\/ #ifdef CONFIG_KSU_SUSFS_SUS_MAP\n\n$2/ms;
               ' "$MMU"
               echo "└─ 📌 SHOW SMAPS ROLLUP() Bypass Prepared"
             else
-              # Avoid Inserting the Same Bypass Statement Twice
               echo "└─ ℹ️ SHOW SMAPS ROLLUP() Bypass Already Present"
             fi
 
-            # Prepare BYPASS ORIG FLOW Label
-            # Search Within SHOW SMAPS ROLLUP() For an Existing Label
-            if ! perl -0777 -ne 'print $1 if /(static int show_smaps_rollup\(.*?^\})/ms' "$MMU" |
-              grep -qF 'bypass_orig_flow:'; then
-              # Insert Label Before LAST VMA END is Updated
-              # Allow the Bypass to Continue Through Intended Rollup Flow
-              sed -i '/^static int show_smaps_rollup(/,/^}/ {
-                /last_vma_end = vma->vm_end;/i\
-            #ifdef CONFIG_KSU_SUSFS_SUS_MAP\
-            bypass_orig_flow:\
-            #endif // #ifdef CONFIG_KSU_SUSFS_SUS_MAP
-              }' "$MMU"
-              echo "└─ 📌 BYPASS ORIG FLOW Label Prepared"
+            # Remove Duplicate Labels and Rebuild One Label Inside SHOW SMAPS ROLLUP()
+            perl -0777 -i -pe '
+              if (/(static int show_smaps_rollup\(.*?^\})/ms) {
+                my $fn = $1;
+                # Remove Existing SUSFS Label Blocks Within Function
+                $fn =~ s/^[ \t]*#ifdef CONFIG_KSU_SUSFS_SUS_MAP\n[ \t]*bypass_orig_flow:\n[ \t]*#endif[^\n]*\n//mg;
+                # Insert Exactly One Label Before First VMA-End Update
+                if ($fn =~ /(^[ \t]*last_vma_end = vma->vm_end;)/m) {
+                  my $line = $1;
+                  $fn =~ s/\Q$line\E/#ifdef CONFIG_KSU_SUSFS_SUS_MAP\nbypass_orig_flow:\n#endif \/\/ #ifdef CONFIG_KSU_SUSFS_SUS_MAP\n$line/;
+                } else {
+                  warn "WARNING: Could Not Locate LAST VMA END in SHOW SMAPS ROLLUP()\n";
+                }
+                s/\Q$1\E/$fn/;
+              } else {
+                warn "WARNING: Could Not Locate SHOW SMAPS ROLLUP()\n";
+              }
+            ' "$MMU"
+            # Verify Bypass and Label are Present in SHOW SMAPS ROLLUP()
+            if perl -0777 -ne '
+              if (/(static int show_smaps_rollup\(.*?^\})/ms) {
+                my $fn = $1;
+                my $gotos = () = $fn =~ /goto bypass_orig_flow;/g;
+                my $labels = () = $fn =~ /^[ \t]*bypass_orig_flow:/mg;
+                exit($gotos >= 1 && $labels == 1 ? 0 : 1);
+              }
+              exit 1;
+            ' "$MMU"; then
+              echo "└─ 📌 SHOW SMAPS ROLLUP() Label Verified"
             else
-              # Preserve Existing Label Without Creating a Duplicate
-              echo "└─ ℹ️ BYPASS ORIG FLOW Label Already Present"
+              echo "└─ ⚠️ SHOW SMAPS ROLLUP() Bypass/Label Validation Failed" >&2
+              exit 1
             fi
 
             # Record TASK MMU Compatibility Preparation
@@ -1347,28 +1358,51 @@ runs:
             echo "└─ ⏭️ Skipping EXEC: Fake Patch Flag is Not 1"
           fi
 
-          # Revert TASK MMU SUSFS Map Hooks
+          # Revert TASK MMU SUSFS MAP Hooks
           if [[ "${FAKEPATCHTASKMMU:-0}" == "1" ]]; then
             if [[ "$SUBLEVEL" -le 58 ]]; then
               if [[ -f "$MMU" ]]; then
                 echo "└─ ♻️ Reverting TASK MMU SUSFS Map Hooks"
-                # Remove SHOW SMAP() SUSFS Map Hook
-                sed -i '/^static int show_smap(/,/^}/{
-                  /#ifdef CONFIG_KSU_SUSFS_SUS_MAP/,+5d
-                }' "$MMU"
-                # Remove SHOW SMAPS ROLLUP() SUSFS Bypass Hook
+                # Remove SHOW SMAP() Hook Only Within its Function
                 perl -0777 -i -pe '
-                  s/^#ifdef CONFIG_KSU_SUSFS_SUS_MAP\n[ \t]*if \(vma->vm_file && SUSFS_IS_INODE_SUS_MAP\(file_inode\(vma->vm_file\)\)\)\n[ \t]*goto bypass_orig_flow;\n#endif \/\/ #ifdef CONFIG_KSU_SUSFS_SUS_MAP\n//m;
+                  s/(static int show_smap\(.*?^\})/
+                    my $fn = $1;
+                    $fn =~ s/^[ \t]*#ifdef CONFIG_KSU_SUSFS_SUS_MAP\n[ \t]*if \(vma->vm_file\) \{\n[ \t]*if \(SUSFS_IS_INODE_SUS_MAP\(file_inode\(vma->vm_file\)\)\)\n[ \t]*return 0;\n[ \t]*\}\n[ \t]*#endif[^\n]*\n?//m;
+                    $fn
+                  /mse;
                 ' "$MMU"
-                # Remove BYPASS ORIG FLOW Label
-                sed -i '/^#ifdef CONFIG_KSU_SUSFS_SUS_MAP$/,/^#endif \/\/ #ifdef CONFIG_KSU_SUSFS_SUS_MAP$/{
-                  /bypass_orig_flow:/d
-                  /^#ifdef CONFIG_KSU_SUSFS_SUS_MAP$/d
-                  /^#endif \/\/ #ifdef CONFIG_KSU_SUSFS_SUS_MAP$/d
-                }' "$MMU"
-                echo "└─ 🎉 TASK MMU SUSFS Map Hooks Reverted"
+                # Remove SHOW SMAPS ROLLUP() Bypass Only Within its Function
+                # Remove All Duplicate Labels From Earlier Preparations
+                perl -0777 -i -pe '
+                  s/(static int show_smaps_rollup\(.*?^\})/
+                    my $fn = $1;
+                    # Remove SUSFS MAP Bypass Statement
+                    $fn =~ s/^[ \t]*#ifdef CONFIG_KSU_SUSFS_SUS_MAP\n[ \t]*if \(vma->vm_file && SUSFS_IS_INODE_SUS_MAP\(file_inode\(vma->vm_file\)\)\)\n[ \t]*goto bypass_orig_flow;\n[ \t]*#endif[^\n]*\n?//mg;
+                    # Remove Every SUSFS Bypass Label Block, Including Duplicates
+                    $fn =~ s/^[ \t]*#ifdef CONFIG_KSU_SUSFS_SUS_MAP\n[ \t]*bypass_orig_flow:\n[ \t]*#endif[^\n]*\n?//mg;
+                    $fn
+                  /mse;
+                ' "$MMU"
+                # Verify No Compatibility Hooks Remain in Target Functions
+                if perl -0777 -ne '
+                  my $smap = /(static int show_smap\(.*?^\})/ms ? $1 : "";
+                  my $rollup = /(static int show_smaps_rollup\(.*?^\})/ms ? $1 : "";
+                  exit(
+                    $smap !~ /SUSFS_IS_INODE_SUS_MAP\(file_inode\(vma->vm_file\)\)/ &&
+                    $rollup !~ /goto bypass_orig_flow;/ &&
+                    $rollup !~ /^[ \t]*bypass_orig_flow:/m
+                    ? 0 : 1
+                  );
+                ' "$MMU"; then
+                  echo "└─ 🎉 TASK MMU SUSFS Map Hooks Reverted"
+                else
+                  echo "└─ ⚠️ TASK MMU SUSFS Hook Reversal Verification Failed" >&2
+                  exit 1
+                fi
+                
               else
                 echo "└─ ⚠️ TASK MMU Source File Not Found: $MMU" >&2
+                exit 1
               fi
               
             else
@@ -1376,7 +1410,7 @@ runs:
             fi
             
           else
-            echo "└─ ⏭️ Skipping TASK MMU: Fake Patch Flag Is Not 1"
+            echo "└─ ⏭️ Skipping TASK MMU: Fake Patch Flag is Not 1"
           fi
 
           echo "└─ 🎉 Android 16 / 6.12 Compatibility Reversal Complete"
