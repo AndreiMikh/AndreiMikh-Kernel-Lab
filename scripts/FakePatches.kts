@@ -200,15 +200,15 @@ fun File.replaceWholeLine(
 // Logging
 // ==========================
 fun logApply(file: File, detail: String) =
-    println("[APPLY]   ${file.rel()} | $detail")
+    println("[Apply]   ${file.rel()} | $detail")
 fun logPostfix(file: File, detail: String) =
-    println("[POSTFIX] ${file.rel()} | $detail")
+    println("[PostFix] ${file.rel()} | $detail")
 fun logRevert(file: File, detail: String) =
-    println("[REVERT]  ${file.rel()} | $detail")
+    println("[Revert]  ${file.rel()} | $detail")
 fun logSkip(file: File, detail: String) =
-    println("[SKIP]    ${file.rel()} | $detail")
+    println("[Skip]    ${file.rel()} | $detail")
 fun logContext(file: File, detail: String) =
-    println("[CONTEXT] ${file.rel()} | $detail")
+    println("[Context] ${file.rel()} | $detail")
 
 // ==========================
 // Environment
@@ -251,7 +251,7 @@ val inotifyHelper =
 // ==========================
 fun addInotifyMarkUserMaskFunction(file: File) {
     if (file.readText().contains("inotify_mark_user_mask(")) {
-        logSkip(file, "INOTIFY-MARK-USER-MASK() Already Present")
+        logSkip(file, "INOTIFY MARK USER MASK() Already Present")
         return
     }
     file.insertBeforeFirst(
@@ -260,7 +260,7 @@ fun addInotifyMarkUserMaskFunction(file: File) {
     )
     logApply(
         file,
-        "Inserted INOTIFY-MARK-USER-MASK() Helper Before INOTIFY-FDINFO()"
+        "Inserted INOTIFY MARK USER MASK() Helper Before INOTIFY FDINFO()"
     )
 }
 fun applyFdinfo(file: File) {
@@ -289,7 +289,7 @@ fun applyFdinfo(file: File) {
     )
     logApply(
         file,
-        "Replaced Mask Argument With INOTIFY-MARK-USER-MASK(MARK)"
+        "Replaced Mask Argument With INOTIFY MARK USER MASK(MARK)"
     )
     file.replaceEachLine(
         Regex("""ignored_mask:%x"""),
@@ -297,7 +297,7 @@ fun applyFdinfo(file: File) {
     )
     logApply(
         file,
-        "Replaced IGNORED-MASK:%X With IGNORED-MASK:0"
+        "Replaced IGNORED MASK:%X With IGNORED MASK:0"
     )
     addInotifyMarkUserMaskFunction(file)
 }
@@ -357,7 +357,7 @@ fun applyAndroid15VmaBlock(
     )
     logApply(
         taskMmu,
-        "Inserted LAST-VMA-END Update After SMAPGATHERSTATS()"
+        "Inserted LAST VMA END Update After SMAP GATHER STATS()"
     )
     val lines = taskMmu.lines()
     val updateIndex =
@@ -365,7 +365,7 @@ fun applyAndroid15VmaBlock(
             it.contains("last_vma_end = vma->vm_end;")
         }
     check(updateIndex >= 0) {
-        "Unable to Locate Inserted LAST-VMA-END Assignment"
+        "Unable to Locate Inserted LAST VMA END Assignment"
     }
     val ifIndex =
         (updateIndex - 1 downTo 0)
@@ -374,7 +374,7 @@ fun applyAndroid15VmaBlock(
                     .containsMatchIn(lines[it])
             }
     check(ifIndex != null) {
-        "Unable to Locate VMA-END Comparison"
+        "Unable to Locate VMA END Comparison"
     }
     lines[ifIndex!!] =
         lines[ifIndex].replace(
@@ -390,7 +390,7 @@ fun applyAndroid15VmaBlock(
     taskMmu.writeLines(lines)
     logApply(
         taskMmu,
-        "Wrapped LAST-VMA-END Update in Conditional Block"
+        "Wrapped LAST VMA END Update in Conditional Block"
     )
     namespace.insertAfterFirst(
         Regex("""#include <trace/hooks/blk\.h>"""),
@@ -398,7 +398,7 @@ fun applyAndroid15VmaBlock(
     )
     logApply(
         namespace,
-        "Added TRACE/HOOKS/FS.H Include"
+        "Added TRACE/HOOKS/FS Headers Include"
     )
     taskMmu.insertAfterFirst(
         Regex("""int ret = 0, copied = 0;"""),
@@ -407,7 +407,7 @@ fun applyAndroid15VmaBlock(
     )
     logApply(
         taskMmu,
-        "Added NR-SUBPAGES and PAGEMAP-ENTRY-T Declarations"
+        "Added NR SUBPAGES and PAGEMAP ENTRY T Declarations"
     )
 }
 fun revertAndroid15VmaBlock(
@@ -467,13 +467,12 @@ fun revertAndroid15VmaBlock(
     )
     logRevert(
         namespace,
-        "Removed TRACE/HOOKS/FS.H Include"
+        "Removed TRACE/HOOKS/FS Headers Include"
     )
 }
 
 // ==========================
-// ==========================
- // SUSFS Patch Context Restoration
+// SUSFS Patch Context Restoration
 // ==========================
 val traceHookInclude = Regex("""^#include\s+(<trace/hooks/[^>]+>)\s*$""")
 val anyInclude = Regex("""^#include\s+([<"][^>"]+[>"])\s*$""")
@@ -481,14 +480,12 @@ val contextManifest = File(
     (File(workDir).absoluteFile.parentFile ?: File(workDir).absoluteFile),
     ".fakepatches-context-manifest"
 )
-
 fun parsePatchContext(patchLines: List<String>): Map<String, List<String>> {
     val result = linkedMapOf<String, List<String>>()
     var currentFile: String? = null
     var inFirstHunk = false
     var firstHunkSeen = false
     var hunkLines = mutableListOf<String>()
-
     fun flushHunk() {
         val path = currentFile
         if (path != null && inFirstHunk) {
@@ -526,61 +523,50 @@ fun parsePatchContext(patchLines: List<String>): Map<String, List<String>> {
     flushHunk()
     return result
 }
-
 fun ensureContextStub(include: String): File? {
     val relativeHeader = include.removePrefix("<").removeSuffix(">")
     if (!relativeHeader.startsWith("trace/hooks/")) return null
-
     val header = f("include/$relativeHeader")
     if (header.exists()) return null
-
     header.parentFile.mkdirs()
     val guard = "_FAKEPATCHES_CONTEXT_" +
         relativeHeader.replace(Regex("""\W"""), "_").uppercase()
     header.writeText(
-        "/* Generated by FakePatches for SUSFS patch context only. */\n" +
+        "/* Generated by Fake Patches For SUSFS Patch Context */\n" +
         "#ifndef $guard\n#define $guard\n#endif\n"
     )
-    logContext(header, "Created guarded context-only stub")
+    logContext(header, "Created Guarded Context-Only Stub")
     return header
 }
 
 fun restorePatchContext(patch: File) {
-    check(patch.isFile) { "SUSFS patch file does not exist: ${patch.path}" }
-
+    check(patch.isFile) { "SUSFS Patch File Does Not Exist: ${patch.path}" }
     val plan = parsePatchContext(patch.readLines())
     check(plan.isNotEmpty()) {
-        "No include context could be parsed from SUSFS patch: ${patch.path}"
+        "No Include Context Could be Parsed From SUSFS Patch: ${patch.path}"
     }
-
     val manifestEntries = mutableListOf<String>()
     var restoredCount = 0
     var stubCount = 0
-
     for ((relativePath, includes) in plan) {
         if (includes.none { traceHookInclude.matches("#include $it") }) continue
-
         val target = f(relativePath)
         if (!target.isFile) {
-            logContext(target, "Skipped because patched source file does not exist")
+            logContext(target, "Skipped Because Patched Source File Does Not Exist")
             continue
         }
-
         val lines = target.readLines().toMutableList()
         var cursor = 0
         var changed = false
-
         for (include in includes) {
             val expected = "#include $include"
             val found = (cursor until lines.size).firstOrNull {
                 lines[it].trim() == expected
             }
-
             if (!traceHookInclude.matches(expected)) {
                 if (found != null) cursor = found + 1
                 continue
             }
-
             if (found != null) {
                 cursor = found + 1
             } else {
@@ -590,53 +576,45 @@ fun restorePatchContext(patch: File) {
                 manifestEntries.add("I\t${target.absolutePath}\t$expected")
                 restoredCount++
                 changed = true
-                logContext(target, "Restored missing patch context: $expected")
+                logContext(target, "Restored Missing Patch Context: $expected")
             }
-
             val stub = ensureContextStub(include)
             if (stub != null) {
                 manifestEntries.add("S\t${stub.absolutePath}")
                 stubCount++
             }
         }
-
         if (changed) target.writeLines(lines)
     }
-
     if (kernelModule == "android13-5.15" && sublevel <= 41) {
         val idmap = f("include/linux/mnt_idmapping.h")
         if (!idmap.exists()) {
             idmap.parentFile.mkdirs()
             idmap.writeText(
-                "/* Generated by FakePatches: mnt idmap helpers are provided elsewhere on this baseline. */\n"
+                "/* Generated by Fake Patches: Mount ID MAP Helpers are Provided Elsewhere on Baseline */\n"
             )
             manifestEntries.add("S\t${idmap.absolutePath}")
             stubCount++
-            logContext(idmap, "Created compatibility stub for missing mnt_idmapping.h")
+            logContext(idmap, "Created Compatibility Stub For Missing MNT IDMAPPING Headers")
         }
     }
-
     if (manifestEntries.isNotEmpty()) {
         val previous = if (contextManifest.isFile) contextManifest.readLines() else emptyList()
         contextManifest.writeLines((previous + manifestEntries).distinct())
     }
-
-    println("[CONTEXT] Restored $restoredCount include(s), created $stubCount stub header(s)")
+    println("[Context] Restored $restoredCount Include(s), Created $stubCount Stub Header(s)")
     if (restoredCount == 0 && stubCount == 0) {
-        println("[CONTEXT] Patch context already complete; nothing changed")
+        println("[Context] Patch Context Already Completed; Nothing Changed")
     }
 }
-
 fun revertPatchContext() {
     if (!contextManifest.isFile) {
-        println("[CONTEXT] No generated context files to revert")
+        println("[Context] No Generated Context Files to Revert")
         return
     }
-
     val entries = contextManifest.readLines()
     var removedIncludes = 0
     var removedStubs = 0
-
     for (entry in entries.asReversed()) {
         val parts = entry.split("\t", limit = 3)
         when (parts.firstOrNull()) {
@@ -645,7 +623,7 @@ fun revertPatchContext() {
                 val target = File(parts[1])
                 if (target.isFile && target.deleteLine(Regex(Regex.escape(parts[2])))) {
                     removedIncludes++
-                    logContext(target, "Removed generated context include: ${parts[2]}")
+                    logContext(target, "Removed Generated Context Include: ${parts[2]}")
                 }
             }
             "S" -> {
@@ -653,24 +631,23 @@ fun revertPatchContext() {
                 val stub = File(path)
                 if (stub.isFile && stub.delete()) {
                     removedStubs++
-                    logContext(stub, "Removed generated stub header")
+                    logContext(stub, "Removed Generated Stub Header")
                 }
             }
         }
     }
-
     contextManifest.delete()
-    println("[CONTEXT] Reverted $removedIncludes include(s), removed $removedStubs stub header(s)")
+    println("[Context] Reverted $removedIncludes Include(s), Removed $removedStubs Stub Header(s)")
 }
 
+// ==========================
 // Postfix Fixups
 // ==========================
 fun applyPostPatchFixups() {
     val taskMmu =
         f("fs/proc/task_mmu.c")
     if (taskMmu.exists()) {
-        var content = taskMmu.readText()
-     
+        var content = taskMmu.readText()     
         // VMA-PAD-START Fallback
         if (
             content.contains("VMA_PAD_START(") &&
@@ -693,11 +670,10 @@ fun applyPostPatchFixups() {
             taskMmu.writeLines(lines)
             logPostfix(
                 taskMmu,
-                "Inserted VMA-PAD-START() Fallback"
+                "Inserted VMA PAD START() Fallback"
             )
         }
-
-        // FOLD-FILEMAP-FIXUP-ENTRY Compatibility
+        // FOLD FILEMAP FIXUP ENTRY Compatibility
         content = taskMmu.readText()
         if (
             content.contains("__fold_filemap_fixup_entry(") &&
@@ -723,7 +699,7 @@ fun applyPostPatchFixups() {
                     )
                     logPostfix(
                         taskMmu,
-                        "Added PAGE-SIZE-COMPAT.H Include"
+                        "Added PAGE SIZE COMPAT Headers Include"
                     )
                 }
             } else {
@@ -748,12 +724,11 @@ fun applyPostPatchFixups() {
                 taskMmu.writeLines(lines)
                 logPostfix(
                     taskMmu,
-                    "Inserted FOLD-FILEMAP-FIXUP-ENTRY() Stub"
+                    "Inserted FOLD FILEMAP FIXUP ENTRY() Stub"
                 )
             }
         }
     }
-
     // Android 12 / 13 Nameidata Compatibility
     if (
         kernelModule == "android12-5.10" ||
@@ -775,11 +750,10 @@ fun applyPostPatchFixups() {
             )
             logPostfix(
                 namei,
-                "Rewrote 4-Arg SET-NAMEIDATA() to 3-Arg Form"
+                "Rewrote 4-Arg SET NAMEIDATA() to 3-Arg Form"
             )
         }
     }
-
     // Android 16 Getname-Flags Compatibility
     if (kernelModule == "android16-6.12") {
         val openC = f("fs/open.c")
@@ -798,7 +772,7 @@ fun applyPostPatchFixups() {
             )
             logPostfix(
                 openC,
-                "Rewrote 3-Arg GETNAME-FLAGS() to 2-Arg Form"
+                "Rewrote 3-Arg GETNAME FLAGS() to 2-Arg Form"
             )
         }
     }
@@ -820,7 +794,7 @@ fun apply() {
             )
             logApply(
                 file,
-                "Normalized THIS-LEN/MIN-T() to SIZE-T"
+                "Normalized THIS LEN/MIN T() to SIZE T"
             )
         }
         if (sublevel <= 117) {
@@ -829,7 +803,6 @@ fun apply() {
             )
         }
     }
-
     // Android 13 / 5.10 Apply Compatibility Patches
     if (kernelModule == "android13-5.10") {
         if (sublevel <= 107) {
@@ -838,7 +811,6 @@ fun apply() {
             )
         }
     }
-
     // Android 13 / 5.15 Apply Compatibility Patches
     if (kernelModule == "android13-5.15") {
         if (sublevel <= 41) {
@@ -850,7 +822,7 @@ fun apply() {
             )
             logApply(
                 namespace,
-                "Added LINUX/MNT-IDMAPPING.H Include"
+                "Added LINUX/MNT IDMAPPING Headers Include"
             )
             val openC =
                 f("fs/open.c")
@@ -860,7 +832,7 @@ fun apply() {
             )
             logApply(
                 openC,
-                "Added LINUX/MNT-IDMAPPING.H Include"
+                "Added LINUX/MNT IDMAPPING Headers Include"
             )
             applyFdinfo(
                 f("fs/notify/fdinfo.c")
@@ -881,7 +853,6 @@ fun apply() {
             }
         }
     }
-
     // Android 14 / 6.1 Apply Compatibility Patches
     if (kernelModule == "android14-6.1") {
         if (sublevel <= 25) {
@@ -893,7 +864,7 @@ fun apply() {
             )
             logApply(
                 base,
-                "Added TRACE/HOOKS/SCHED.H"
+                "Added TRACE/HOOKS/SCHED Headers"
             )
         }
         if (sublevel <= 141) {
@@ -905,11 +876,10 @@ fun apply() {
             )
             logApply(
                 base,
-                "Added LINUX/DMA-BUF.H"
+                "Added LINUX/DMA BUF Headers"
             )
         }
     }
-
     // Android 15 / 6.6 Apply Compatibility Patches
     if (kernelModule == "android15-6.6") {
         if (sublevel <= 30) {
@@ -927,7 +897,7 @@ fun apply() {
             )
             logApply(
                 memory,
-                "Added LINUX/ZSWAP.H"
+                "Added LINUX/ZSWAP Headers"
             )
         }
         if (sublevel <= 92) {
@@ -939,11 +909,10 @@ fun apply() {
             )
             logApply(
                 base,
-                "Added LINUX/DMA-BUF.H"
+                "Added LINUX/DMA BUF Headers"
             )
         }
     }
-
     // Android 16 / 6.12 Apply Compatibility Patches
     if (kernelModule == "android16-6.12") {
         if (sublevel >= 58) {
@@ -956,7 +925,7 @@ fun apply() {
             ) {
                 logApply(
                     exec,
-                    "Removed LINUX/DMA-BUF.H"
+                    "Removed LINUX/DMA BUF Headers"
                 )
             }
         }
@@ -971,7 +940,7 @@ fun apply() {
             ) {
                 logApply(
                     taskMmu,
-                    "Renamed VMA-DATA-PAGES To VMA-PAGES"
+                    "Renamed VMA DATA PAGES to VMA PAGES"
                 )
             }
         }
@@ -1002,7 +971,7 @@ fun revert() {
             ) {
                 logRevert(
                     file,
-                    "Restored INT THIS-LEN/MIN-T(INT)"
+                    "Restored INT THIS LEN/MIN T(INT)"
                 )
             }
         }
@@ -1012,7 +981,6 @@ fun revert() {
             )
         }
     }
-
     // Android 13 / 5.10 Revert Compatibility Patches
     if (kernelModule == "android13-5.10") {
         if (sublevel <= 107) {
@@ -1021,7 +989,6 @@ fun revert() {
             )
         }
     }
-
     // Android 13 / 5.15 Revert Compatibility Patches
     if (kernelModule == "android13-5.15") {
         if (sublevel <= 41) {
@@ -1032,7 +999,7 @@ fun revert() {
             )
             logRevert(
                 namespace,
-                "Removed LINUX/MNT-ID-MAPPING.H"
+                "Removed LINUX/MNT ID MAPPING Headers"
             )
             val openC =
                 f("fs/open.c")
@@ -1041,7 +1008,7 @@ fun revert() {
             )
             logRevert(
                 openC,
-                "Removed LINUX/MNT-ID-MAPPING.H"
+                "Removed LINUX/MNT ID MAPPING Headers"
             )
             val susfs =
                 f("fs/susfs.c")
@@ -1060,7 +1027,7 @@ fun revert() {
                 )
                 logRevert(
                     susfs,
-                    "Restored SUSFS IUID-INTO-MNT() Form"
+                    "Restored SUSFS IUID INTO MNT() Form"
                 )
             }
             revertFdinfo(
@@ -1080,12 +1047,11 @@ fun revert() {
                 )
                 logRevert(
                     memory,
-                    "Restored LINUX/SWAP-SLOTS.H"
+                    "Restored LINUX/SWAP SLOTS Headers"
                 )
             }
         }
     }
-
     // Android 14 / 6.1 Revert Compatibility Patches
     if (kernelModule == "android14-6.1") {
         if (sublevel <= 25) {
@@ -1096,7 +1062,7 @@ fun revert() {
             )
             logRevert(
                 base,
-                "Removed TRACE/HOOKS/SCHED.H"
+                "Removed TRACE/HOOKS/SCHED Headers"
             )
         }
         if (sublevel <= 141) {
@@ -1107,11 +1073,10 @@ fun revert() {
             )
             logRevert(
                 base,
-                "Removed LINUX/DMA-BUF.H"
+                "Removed LINUX/DMA BUF Headers"
             )
         }
     }
-
     // Android 15 / 6.6 Revert Compatibility Patches
     if (kernelModule == "android15-6.6") {
         if (sublevel <= 30) {
@@ -1128,7 +1093,7 @@ fun revert() {
             )
             logRevert(
                 memory,
-                "Removed LINUX/ZSWAP.H"
+                "Removed LINUX/ZSWAP Headers"
             )
         }
         if (sublevel <= 92) {
@@ -1139,11 +1104,10 @@ fun revert() {
             )
             logRevert(
                 base,
-                "Removed LINUX/DMABUF.H"
+                "Removed LINUX/DMA BUF Headers"
             )
         }
     }
-
     // Android 16 / 6.12 Revert Compatibility Patches
     if (kernelModule == "android16-6.12") {
         if (sublevel >= 58) {
@@ -1159,7 +1123,7 @@ fun revert() {
                 )
                 logRevert(
                     exec,
-                    "Restored LINUX/DMABUF.H"
+                    "Restored LINUX/DMA BUF Headers"
                 )
             }
         }
@@ -1176,7 +1140,7 @@ fun revert() {
                 )
                 logRevert(
                     taskMmu,
-                    "Restored VMADATAPAGES"
+                    "Restored VMA DATA PAGES"
                 )
             }
         }
