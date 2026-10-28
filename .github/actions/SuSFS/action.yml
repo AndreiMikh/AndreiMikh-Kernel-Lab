@@ -871,107 +871,13 @@ runs:
 
         # Enter Common Kernel Source Directory
         cd "$COMMONKERNELFOLDER"
-        # Diagnose SUSFS TASK-MMU Patch Mismatch For Android 16 GKI 6.12
-        if [[ "$GKIVERSION" == "android16-6.12" ]]; then
-          # 🔎 Diagnose SUSFS TASK-MMU Patch Mismatch
-          MMU="$COMMONKERNELFOLDER/fs/proc/task_mmu.c"
-          PATCHFILE="$(basename "$SUSFSPATCH")"
-          # Display SHOW SMAP() Source Before Applying SUSFS
-          echo "└─ 🔎 SHOW SMAP() Source"
-          sed -n '/^static int show_smap(/,/^}/p' "$MMU"
-          # Display SHOW SMAPS ROLLUP() Source Before Applying SUSFS
-          echo "└─ 🔎 SHOW SMAPS ROLLUP() Source"
-          sed -n '/^static int show_smaps_rollup(/,/^}/p' "$MMU"
-          # Display Relevant SUSFS Patch Hunks
-          echo "└─ 🔎 SUSFS TASK-MMU Patch Context"
-          grep -n -A 35 -B 5 -E \
-            '^@@ .*show_smap|^@@ .*show_smaps_rollup' \
-            "$PATCHFILE" || true
-          # Display Any Existing Reject File
-          echo "└─ 🔎 Existing TASK-MMU Reject File"
-          if [[ -f "$MMU.rej" ]]; then
-            cat "$MMU.rej"
-          else
-            echo "└─ ℹ️ No TASK-MMU Reject File Found"
-          fi
-        fi
-
         # Apply SUSFS Core Patch
         echo "└─ ⚙️ Applying SUSFS Core Patch (50 Add SUSFS Patch)"
-        # Remove a Stale TASK-MMU Reject Before Evaluating This Patch Attempt
-        MMU="$COMMONKERNELFOLDER/fs/proc/task_mmu.c"
-        rm -f "$MMU.rej"
         if patch -p1 < "$(basename "$SUSFSPATCH")"; then
           echo "└─ 📌 SUSFS 50 Enable Core Patch Applied"
-        else
-          # Accept Only the Known Android 16 / 6.12 TASK-MMU Context Mismatch
-          # The Compatibility Hooks Must Be Present and Structurally Correct
-          if [[ "$GKIVERSION" == "android16-6.12" && -f "$MMU.rej" ]] && \
-             [[ "$(grep -c '^@@' "$MMU.rej" || true)" -eq 3 ]] && \
-             grep -q 'return 0;' "$MMU.rej" && \
-             [[ "$(grep -c 'bypass_orig_flow' "$MMU.rej" || true)" -ge 2 ]] && \
-             ! find . -type f -name '*.rej' ! -path './fs/proc/task_mmu.c.rej' -print -quit | grep -q . && \
-             python3 - "$MMU" <<'PY'
-        import re
-        import sys
-        from pathlib import Path
-        source = Path(sys.argv[1]).read_text()
-        def function(text, signature):
-            start = text.find(signature)
-            if start < 0:
-                raise SystemExit(1)
-            brace = text.find("{", start)
-            depth = 0
-            for i in range(brace, len(text)):
-                if text[i] == "{":
-                    depth += 1
-                elif text[i] == "}":
-                    depth -= 1
-                    if depth == 0:
-                        return text[start:i + 1]
-            raise SystemExit(1)
-        smap = function(source, "static int show_smap(")
-        rollup = function(source, "static int show_smaps_rollup(")
-        if not re.search(
-            r'if\s*\(\s*vma->vm_file\s*&&\s*SUSFS_IS_INODE_SUS_MAP\s*\(\s*file_inode\s*\(vma->vm_file\)\s*\)\s*\)\s*return\s+0\s*;',
-            smap, re.S
-        ):
-            raise SystemExit(1)
-        branch = re.search(
-            r'if\s*\(\s*vma->vm_start\s*>=\s*last_vma_end\s*\)\s*\{',
-            rollup
-        )
-        if not branch:
-            raise SystemExit(1)
-        brace = rollup.find("{", branch.start())
-        depth = 0
-        end = None
-        for i in range(brace, len(rollup)):
-            if rollup[i] == "{": depth += 1
-            elif rollup[i] == "}":
-                depth -= 1
-                if depth == 0:
-                    end = i
-                    break
-        if end is None: raise SystemExit(1)
-        body = rollup[brace + 1:end]
-        hook = body.find("SUSFS_IS_INODE_SUS_MAP(file_inode(vma->vm_file))")
-        stats = body.find("smap_gather_stats(vma, &mss, 0);")
-        label = body.find("bypass_orig_flow:")
-        assignment = body.find("last_vma_end = vma->vm_end;", label)
-        cont = body.find("continue;", assignment)
-        if not (0 <= hook < stats < label < assignment < cont):
-            raise SystemExit(1)
-        PY
-          then
-            echo "└─ ⚠️ Three SUSFS TASK-MMU Hunks Were Incompatible; Verified Equivalent Hooks Are Active"
-            echo "└─ 📌 Accepting Only the Validated Android 16 / 6.12 Compatibility Case"
-            rm -f "$MMU.rej"
-          else
-            # Do Not Misreport Other Partial Patch Failures as Successful
-            echo "└─ ⚠️ SUSFS Core Patch Already Applied or Failed; Inspect Reject Files"
-            find . -type f -name '*.rej' -print
-          fi
+        else          
+          echo "└─ ⚠️ SUSFS Core Patch Already Applied or Failed; Inspect Reject Files"
+          find . -type f -name '*.rej' -print      
         fi
 
         # Apply SUSFS Enable Patch Only For KernelSU
