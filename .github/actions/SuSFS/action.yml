@@ -204,17 +204,19 @@ runs:
           echo "└─ 🎉 Android 13 / 5.15 Fake Patch Preparation Complete"
         fi
        
+
         # Invert Android 14 6.1 Compatibility Fixes
         if [[ "$KERNELMODULE" == "android14-6.1" ]]; then
           BASE="$COMMONKERNELFOLDER/fs/proc/base.c"
           NAMESPACE="$COMMONKERNELFOLDER/fs/namespace.c"
-          SUPER="$COMMONKERNELFOLDER/fs/super.c"
+          SUPER="$COMMONKERNELFOLDER/fs/super.c"  
+          # Validate Required Source Files
           [[ -f "$BASE" ]] || { echo "└─ ⚠️ Missing: $BASE" >&2; exit 1; }
           [[ -f "$NAMESPACE" ]] || { echo "└─ ⚠️ Missing: $NAMESPACE" >&2; exit 1; }
-          [[ -f "$SUPER" ]] || { echo "└─ ⚠️ Missing: $SUPER" >&2; exit 1; }
+          [[ -f "$SUPER" ]] || { echo "└─ ⚠️ Missing: $SUPER" >&2; exit 1; }  
           # Add DMA-BUF Header to File System / PROC / BASE
           if [[ "$SUBLEVEL" -le 141 && "$FAKEPATCHBASE" -eq 0 ]]; then
-            if grep -qF '#include <linux/dma-buf.h>' "$BASE"; then
+            if grep -qFx '#include <linux/dma-buf.h>' "$BASE"; then
               echo "└─ ℹ️ DMA-BUF Header Already Present"
             elif grep -qFx '#include <linux/cpufreq_times.h>' "$BASE"; then
               echo "└─ 🔧 Applying BASE Android 14 6.1 Fake Patch"
@@ -227,18 +229,25 @@ runs:
           else
             echo "└─ ⏭️ Skipping BASE Fake Patch For Sublevel $SUBLEVEL"
           fi
-
-          # Remove Block Trace Hook Header
-          if [[ "$SUBLEVEL" -ge 157 ]]; then
-            if [[ "$FAKEPATCHNAMESPACE" -eq 0 ]] && grep -qFx '#include <trace/hooks/blk.h>' "$NAMESPACE"; then
+  
+          # Add Block Trace Hook Header Below Sublevel 157
+          if [[ "$SUBLEVEL" -lt 157 ]]; then
+            if grep -qFx '#include <trace/hooks/blk.h>' "$NAMESPACE"; then
+              echo "└─ ℹ️ Block Trace Hook Header Already Present"
+            elif grep -qFx '#include "internal.h"' "$NAMESPACE"; then
               echo "└─ 🔧 Applying NAMESPACE Android 14 6.1 Fake Patch"
-              sed -i '/^#include <trace\/hooks\/blk\.h>$/d' "$NAMESPACE"
+              sed -i '/^#include "internal\.h"$/a #include <trace/hooks/blk.h>' "$NAMESPACE"
               FAKEPATCHNAMESPACE=1
             else
-              echo "└─ ℹ️ Block Trace Hook Header Already Absent"
+              echo "└─ ⚠️ Cannot Locate NAMESPACE Header Insertion Point; Skipping" >&2
             fi
-
-            # Remove File System Trace Hook Header From File System / SUPER
+            
+          else
+            echo "└─ ⏭️ Skipping NAMESPACE Fake Patch For Sublevel $SUBLEVEL"
+          fi
+  
+          # Remove File System Trace Hook Header From File System / SUPER
+          if [[ "$SUBLEVEL" -ge 157 ]]; then
             if [[ "$FAKEPATCHSUPER" -eq 0 ]] && grep -qFx '#include <trace/hooks/fs.h>' "$SUPER"; then
               echo "└─ 🔧 Applying SUPER Android 14 6.1 Fake Patch"
               sed -i '/^#include <trace\/hooks\/fs\.h>$/d' "$SUPER"
@@ -248,9 +257,9 @@ runs:
             fi
             
           else
-            echo "└─ ⏭️ Skipping NAMESPACE and SUPER Fake Patches For Sublevel $SUBLEVEL"
+            echo "└─ ⏭️ Skipping SUPER Fake Patch For Sublevel $SUBLEVEL"
           fi
-
+  
           echo "└─ 🎉 Android 14 / 6.1 Fake Patch Preparation Complete"
         fi
         
@@ -1020,16 +1029,18 @@ runs:
         if [[ "$KERNELMODULE" == "android14-6.1" ]]; then
           BASE="$COMMONKERNELFOLDER/fs/proc/base.c"
           NAMESPACE="$COMMONKERNELFOLDER/fs/namespace.c"
-          SUPER="$COMMONKERNELFOLDER/fs/super.c"    
+          SUPER="$COMMONKERNELFOLDER/fs/super.c"
+          NAMESPACEBLKMARKER="$(dirname "$(dirname "$COMMONKERNELFOLDER")")/.fake_namespace_blk"
+          # Validate Required Source Files
           requirefile "$FAKEPATCHBASE" "$BASE"
           requirefile "$FAKEPATCHNAMESPACE" "$NAMESPACE"
-          requirefile "$FAKEPATCHSUPER" "$SUPER"   
+          requirefile "$FAKEPATCHSUPER" "$SUPER"
           # Revert BASE DMA-BUF Header
           if [[ "$FAKEPATCHBASE" == "1" ]]; then
             if [[ "$SUBLEVEL" -le 141 ]]; then
               if grep -qFx '#include <linux/dma-buf.h>' "$BASE"; then
                 echo "└─ ♻️ Reverting BASE Android 14 6.1 Fake Patch"
-                sed -i '/^#include <linux\/dma-buf.h>$/d' "$BASE"
+                sed -i '/^#include <linux\/dma-buf\.h>$/d' "$BASE"
               else
                 echo "└─ ℹ️ DMA-BUF Header Already Absent"
               fi
@@ -1041,29 +1052,42 @@ runs:
           else
             echo "└─ ⏭️ Skipping BASE: Fake Patch Flag is Not 1"
           fi
-    
+  
           # Revert NAMESPACE Block Trace Hook Header
-          if [[ "$FAKEPATCHNAMESPACE" == "1" ]]; then
-            if [[ "$SUBLEVEL" -ge 157 ]]; then
+          if [[ "$SUBLEVEL" -lt 157 ]]; then
+            if [[ -f "$NAMESPACEBLKMARKER" ]]; then
+              if grep -qFx '#include <trace/hooks/blk.h>' "$NAMESPACE"; then
+                echo "└─ ♻️ Reverting NAMESPACE Android 14 6.1 Fake Patch"
+                sed -i '/^#include <trace\/hooks\/blk\.h>$/d' "$NAMESPACE"
+              else
+                echo "└─ ℹ️ Block Trace Hook Header Already Absent"
+              fi
+  
+              rm -f "$NAMESPACEBLKMARKER"
+            else
+              echo "└─ ⏭️ Skipping NAMESPACE Revert: Marker Not Found"
+            fi
+            
+          else
+            # Restore Header Removed During Preparation
+            if [[ "$FAKEPATCHNAMESPACE" == "1" ]]; then
               if ! grep -qFx '#include <trace/hooks/blk.h>' "$NAMESPACE"; then
                 if grep -qFx '#include "internal.h"' "$NAMESPACE"; then
-                  echo "└─ ♻️ Reverting NAMESPACE Android 14 6.1 Fake Patch"
+                  echo "└─ ♻️ Restoring NAMESPACE Android 14 6.1 Fake Patch"
                   sed -i '/^#include "internal\.h"$/a #include <trace/hooks/blk.h>' "$NAMESPACE"
                 else
                   echo "└─ ⚠️ Cannot Locate NAMESPACE Header Insertion Point; Skipping" >&2
                 fi
+                
               else
                 echo "└─ ℹ️ Block Trace Hook Header Already Restored"
               fi
               
             else
-              echo "└─ ⏭️ Skipping NAMESPACE Revert For Sublevel $SUBLEVEL"
+              echo "└─ ⏭️ Skipping NAMESPACE: Fake Patch Flag is Not 1"
             fi
-            
-          else
-            echo "└─ ⏭️ Skipping NAMESPACE: Fake Patch Flag is Not 1"
           fi
-    
+  
           # Revert SUPER File System Trace Hook Header
           if [[ "$FAKEPATCHSUPER" == "1" ]]; then
             if [[ "$SUBLEVEL" -ge 157 ]]; then
@@ -1074,6 +1098,7 @@ runs:
                 else
                   echo "└─ ⚠️ Cannot Locate SUPER Header Insertion Point; Skipping" >&2
                 fi
+                
               else
                 echo "└─ ℹ️ File System Trace Hook Header Already Restored"
               fi
@@ -1085,9 +1110,10 @@ runs:
           else
             echo "└─ ⏭️ Skipping SUPER: Fake Patch Flag is Not 1"
           fi
-    
+  
           echo "└─ 🎉 Android 14 / 6.1 Fake Patch Reversal Complete"
         fi
+
     
         # Revert Android 15 / 6.6 Compatibility Fixes
         if [[ "$KERNELMODULE" == "android15-6.6" ]]; then
