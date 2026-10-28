@@ -42,6 +42,7 @@ runs:
         KERNELMODULE: ${{ env.ANDROIDVERSION }}-${{ env.KERNELVERSION }}
         SUBLEVEL: ${{ env.SUBLEVEL }}
         COMMONKERNELFOLDER: ${{ env.COMMONKERNELFOLDER }}
+        PATCHDIR: ${{ env.PATCHDIR }}
       run: |
         set -e
         # Validate Common Kernel Source Directory
@@ -362,22 +363,23 @@ runs:
                 
         # Prepare Android 16 / 6.12 SUSFS Compatibility
         if [[ "$KERNELMODULE" == "android16-6.12" ]]; then
+          # Define Source and Script Paths
           EXEC="$COMMONKERNELFOLDER/fs/exec.c"
           MMU="$COMMONKERNELFOLDER/fs/proc/task_mmu.c"
+          SUSFSFAKE="$PATCHDIR/SuSFS-Fake-6.12.py"        
+          # Validate Required Source Files
           [[ -f "$EXEC" ]] || { echo "└─ ⚠️ Missing: $EXEC" >&2; exit 1; }
-          [[ -f "$MMU" ]] || { echo "└─ ⚠️ Missing: $MMU" >&2; exit 1; }
-          echo "└─ 🩹 Preparing Android 16 / 6.12 SUSFS Compatibility"
+          [[ -f "$MMU" ]] || { echo "└─ ⚠️ Missing: $MMU" >&2; exit 1; }      
+          echo "└─ 🩹 Preparing Android 16 / 6.12 SUSFS Compatibility"        
           # Prepare DMA-BUF Header
           if [[ "$SUBLEVEL" -le 58 ]]; then
-            if [[ ! -f "$EXEC" ]]; then
-              echo "└─ ⚠️ Cannot Prepare DMA-BUF Header: EXEC File Missing" >&2
-            elif grep -qFx '#include <linux/dma-buf.h>' "$EXEC"; then
+            if grep -qFx '#include <linux/dma-buf.h>' "$EXEC"; then
               echo "└─ ℹ️ DMA-BUF Header Already Present"
             elif grep -qFx '#include <linux/ksm.h>' "$EXEC"; then
-              echo "└─ 🔧 Adding DMA-BUF Header to EXEC"
+              echo "└─ 🔧 Adding DMA-BUF Header to EXEC"       
               sed -i \
                 '/^#include <linux\/ksm\.h>$/a #include <linux/dma-buf.h>' \
-                "$EXEC"
+                "$EXEC"        
               if grep -qFx '#include <linux/dma-buf.h>' "$EXEC"; then
                 FAKEPATCHEXEC=1
                 echo "└─ 📌 DMA-BUF Header Added"
@@ -392,50 +394,22 @@ runs:
           else
             echo "└─ ⏭️ Skipping DMA-BUF Header Preparation For Sublevel $SUBLEVEL"
           fi
-
-          # Check TASK-MMU VMA Condition
-          if [[ "$SUBLEVEL" -le 92 ]]; then
-            if [[ ! -f "$MMU" ]]; then
-              echo "└─ ⚠️ Cannot Check TASK-MMU: File Missing" >&2
-            elif grep -qF 'if (!vma_data_pages(vma))' "$MMU"; then
-              echo "└─ ℹ️ VMA DATA PAGES() Condition Found"
-              echo "└─ 📌 TASK-MMU VMA Condition Check Passed"
-            elif grep -qF 'if (!vma_pages(vma))' "$MMU"; then
-              echo "└─ ℹ️ VMA PAGES() Condition Found"
-              echo "└─ 📌 TASK-MMU VMA Condition Check Passed"
+        
+          # Apply Python SUSFS Fake-Patch For Sublevel 92+
+          if [[ "$SUBLEVEL" -ge 92 ]]; then
+            if [[ -f "$SUSFSFAKE" ]]; then
+              echo "└─ 🩹 Applying SUSFS 6.12 Sublevel 92+ Fake-Patch"        
+              python3 "$SUSFSFAKE" "$MMU" apply     
+              echo "└─ 🎉 SUSFS Fake-Patch Applied"
             else
-              echo "└─ ⚠️ TASK-MMU VMA Condition Not Found" >&2
-            fi
-
-            # Verify SUSFS Target Functions
-            if [[ ! -f "$MMU" ]]; then
-              echo "└─ ⚠️ Cannot Verify TASK-MMU Functions: File Missing" >&2
-            elif grep -Fq 'static int show_smap(' "$MMU" &&
-                 grep -Fq 'static int show_smaps_rollup(' "$MMU"; then
-              echo "└─ 📌 SHOW SMAP() and SMAPS ROLLUP() Found"
-            else
-              echo "└─ ⚠️ SHOW SMAP() or SMAPS ROLLUP() Not Found" >&2
+              echo "└─ ⚠️ Python Script Not Found: $SUSFSFAKE" >&2
+              exit 1
             fi
             
           else
-            echo "└─ ⏭️ Skipping TASK-MMU Context Checks For Sublevel $SUBLEVEL"
+            echo "└─ ⏭️ SUSFS Fake-Patch Not Required For Sublevel $SUBLEVEL"
           fi
-
-          # Inspect TASK-MMU Source Before SUSFS Core Patch
-          if [[ -f "$MMU" ]]; then
-            echo "└─ 🔎 Inspecting SHOW SMAPS()"
-            sed -n '/^static int show_smap(/,/^}/p' "$MMU"
-            echo "└─ 🔎 Inspecting SHOW SMAPS ROLLUP()"
-            sed -n '/^static int show_smaps_rollup(/,/^}/p' "$MMU"
-            # Check Existing SUSFS Map Hooks
-            echo "└─ 🔎 Checking Existing SUSFS Map Hooks"
-            grep -nE \
-              'SUSFS_IS_INODE_SUS_MAP|bypass_orig_flow|vma_data_pages|vma_pages' \
-              "$MMU" || true
-          else
-            echo "└─ ⚠️ Cannot Inspect TASK-MMU Source: File Missing" >&2
-          fi
-
+        
           echo "└─ 🎉 Android 16 / 6.12 Compatibility Preparation Complete"
         fi
 
@@ -778,7 +752,8 @@ runs:
       env:
         KERNELMODULE: ${{ env.ANDROIDVERSION }}-${{ env.KERNELVERSION }}
         SUBLEVEL: ${{ env.SUBLEVEL }}
-        COMMONKERNELFOLDER: ${{ env.COMMONKERNELFOLDER }}    
+        COMMONKERNELFOLDER: ${{ env.COMMONKERNELFOLDER }}
+        PATCHDIR: ${{ env.PATCHDIR }}
         # Import Per-File Fake Patch Flags
         FAKEPATCHBASE: ${{ env.FAKEPATCHBASE }}
         FAKEPATCHFDINFO: ${{ env.FAKEPATCHFDINFO }}
@@ -1186,60 +1161,48 @@ runs:
     
         # Revert Android 16 / 6.12 Compatibility Fixes
         if [[ "$KERNELMODULE" == "android16-6.12" ]]; then
+          # Define Source and Script Paths
           EXEC="$COMMONKERNELFOLDER/fs/exec.c"
           MMU="$COMMONKERNELFOLDER/fs/proc/task_mmu.c"
-          # Validate Required Source Files For Recorded Changes
-          requirefile "${FAKEPATCHEXEC:-0}" "$EXEC"
-          requirefile "${FAKEPATCHTASKMMU:-0}" "$MMU"
+          SUSFSFAKE="$PATCHDIR/SuSFS-Fake-6.12.py"
           # Revert EXEC DMA-BUF Header
           if [[ "${FAKEPATCHEXEC:-0}" == "1" ]]; then
             if [[ "$SUBLEVEL" -le 58 ]]; then
-              if grep -qFx '#include <linux/dma-buf.h>' "$EXEC"; then
+              if [[ -f "$EXEC" ]] && grep -qFx '#include <linux/dma-buf.h>' "$EXEC"; then
                 echo "└─ ♻️ Reverting EXEC DMA-BUF Header"
                 sed -i '\|^#include <linux/dma-buf\.h>$|d' "$EXEC"
+                echo "└─ 🎉 EXEC DMA-BUF Header Reverted"
               else
                 echo "└─ ℹ️ EXEC DMA-BUF Header Already Absent"
               fi
-              
             else
               echo "└─ ℹ️ EXEC DMA-BUF Header Revert Not Required For Sublevel $SUBLEVEL"
             fi
-            
           else
             echo "└─ ⏭️ Skipping EXEC: Fake Patch Flag is Not 1"
           fi
-
-          # Revert TASK-MMU VMA Condition
-          if [[ "${FAKEPATCHTASKMMU:-0}" == "1" ]]; then
-            if [[ "$SUBLEVEL" -le 92 ]]; then
-              echo "└─ ℹ️ Checking TASK-MMU VMA Condition"
-              # Restore Only if Preparation Step Changed it
-              if grep -qF 'if (!vma_pages(vma))' "$MMU"; then
-                echo "└─ ♻️ Restoring VMA DATA PAGES() Condition"
-                sed -i 's/if (!vma_pages(vma))/if (!vma_data_pages(vma))/' "$MMU"
-              elif grep -qF 'if (!vma_data_pages(vma))' "$MMU"; then
-                echo "└─ ℹ️ VMA DATA PAGES() Condition Already Restored"
+        
+          # Revert Python SUSFS Fake-Patch For Sublevel 92+
+          if [[ "$SUBLEVEL" -ge 92 ]]; then
+            if [[ -f "$MMU" ]] &&
+               grep -qF 'Fake-patch marker for 6.12 sublevel 92+ show_smaps_rollup reshape.' "$MMU"; then
+              if [[ -f "$SUSFSFAKE" ]]; then
+                echo "└─ 🔄 Reverting SUSFS 6.12 Sublevel 92+ Fake-Patch"
+                python3 "$SUSFSFAKE" "$MMU" revert
+                echo "└─ 🎉 SUSFS Fake-Patch Reverted"
               else
-                echo "└─ ⚠️ VMA Page Condition Not Found; Skipping" >&2
+                echo "└─ ⚠️ Python Script Not Found: $SUSFSFAKE" >&2
+                exit 1
               fi
+              
             else
-              echo "└─ ℹ️ VMA Page Condition Revert Not Required For Sublevel $SUBLEVEL"
+              echo "└─ ⏭️ No SUSFS Fake-Patch Marker Found"
             fi
-
-            # Verify TASK-MMU Compatibility Reversal
-            if [[ "$SUBLEVEL" -le 92 ]]; then
-              if grep -qF 'if (!vma_pages(vma))' "$MMU"; then
-                echo "└─ ⚠️ VMA PAGES() Condition Still Present" >&2
-              elif grep -qF 'if (!vma_data_pages(vma))' "$MMU"; then
-                echo "└─ 🎉 TASK-MMU VMA Condition Verified"
-              else
-                echo "└─ ⚠️ TASK-MMU VMA Condition Verification Failed" >&2
-              fi
-            fi
+            
           else
-            echo "└─ ⏭️ Skipping TASK-MMU: Fake Patch Flag is Not 1"
+            echo "└─ ⏭️ SUSFS Fake-Patch Revert Not Required For Sublevel $SUBLEVEL"
           fi
-
+        
           echo "└─ 🎉 Android 16 / 6.12 Compatibility Reversal Complete"
         fi
     
