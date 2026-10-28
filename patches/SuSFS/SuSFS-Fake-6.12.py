@@ -24,7 +24,7 @@ between the two, so the old 3-arg smap_gather_stats(vma, &mss, start) call that
 patch introduces is never built or executed - it only has to satisfy patch's
 context matching. The guard the patch adds is preserved across the revert.
 
-Usage: susfs_fake_612.py <task_mmu.c> apply|revert
+Usage: SuSFS-Fake-6.12.py <task_mmu.c> apply|revert
 """
 import sys
 
