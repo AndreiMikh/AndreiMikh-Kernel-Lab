@@ -253,43 +253,60 @@ runs:
           echo "└─ 🎉 Android 14 / 6.1 Fake Patch Preparation Complete"
         fi
         
-        # Apply Android 15 6.6 Compatibility Fixes
+        # Apply Android 15 / 6.6 Compatibility Fixes
         if [[ "$KERNELMODULE" == "android15-6.6" ]]; then
           MMU="$COMMONKERNELFOLDER/fs/proc/task_mmu.c"
           NAMESPACE="$COMMONKERNELFOLDER/fs/namespace.c"
           MEMORY="$COMMONKERNELFOLDER/mm/memory.c"
           BASE="$COMMONKERNELFOLDER/fs/proc/base.c"
+          # Validate Required Source Files
           [[ -f "$MMU" ]] || { echo "└─ ⚠️ Missing: $MMU" >&2; exit 1; }
           [[ -f "$NAMESPACE" ]] || { echo "└─ ⚠️ Missing: $NAMESPACE" >&2; exit 1; }
           [[ -f "$MEMORY" ]] || { echo "└─ ⚠️ Missing: $MEMORY" >&2; exit 1; }
           [[ -f "$BASE" ]] || { echo "└─ ⚠️ Missing: $BASE" >&2; exit 1; }
-          # Fix VMA Tracking and Add Required Declarations and Trace Hook
+          # Prepare TASK-MMU and NAMESPACE
           if [[ "$SUBLEVEL" -le 30 ]]; then
-            echo "└─ 🔧 Applying TASK-MMU and NAMESPACE Android 15 6.6 Fake Patches"
+            echo "└─ 🔧 Applying TASK-MMU and NAMESPACE Fake Patches"
             # Add VMA End Tracking
             if grep -Fq 'last_vma_end = vma->vm_end;' "$MMU"; then
               echo "└─ ℹ️ VMA End Tracking Already Present"
             elif grep -Fq 'smap_gather_stats(vma, &mss, last_vma_end);' "$MMU"; then
               sed -i '/smap_gather_stats(vma, &mss, last_vma_end);/a\last_vma_end = vma->vm_end;' "$MMU"
-              perl -0777 -i -pe '@l=split/\n/;for($i=$#l;$i>=0;$i--){if($l[$i]=~/last_vma_end = vma->vm_end;/){$l[$i]="\t\t\t\t".$l[$i];splice(@l,$i+1,0,"\t\t\t}");for($j=$i;$j>=0;$j--){if($l[$j]=~/if\s*\(vma->vm_end > last_vma_end\)/){$l[$j]=~s/\)\s*$/) {/;last}}last}}$_=join"\n",@l' "$MMU"
+              perl -0777 -i -pe '
+                @l = split /\n/;
+                for ($i = $#l; $i >= 0; $i--) {
+                  if ($l[$i] =~ /last_vma_end = vma->vm_end;/) {
+                    $l[$i] = "\t\t\t\t" . $l[$i];
+                    splice(@l, $i + 1, 0, "\t\t\t}");
+                    for ($j = $i; $j >= 0; $j--) {
+                      if ($l[$j] =~ /if\s*\(vma->vm_end > last_vma_end\)/) {
+                        $l[$j] =~ s/\)\s*$/) {/;
+                        last;
+                      }
+                    }
+                    last;
+                  }
+                }
+                $_ = join "\n", @l;
+              ' "$MMU"
               FAKEPATCHTASKMMU=1
               echo "└─ 📌 Added VMA End Tracking"
             else
               echo "└─ ⚠️ Cannot Locate VMA Tracking Insertion Point" >&2
             fi
 
-            # Add File System Trace Hook Header
+            # Add File System Trace Hook
             if grep -Fq '#include <trace/hooks/fs.h>' "$NAMESPACE"; then
-              echo "└─ ℹ️ File System Trace Hook Header Already Present"
+              echo "└─ ℹ️ File System Trace Hook Already Present"
             elif grep -Fq '#include <trace/hooks/blk.h>' "$NAMESPACE"; then
               sed -i '/#include <trace\/hooks\/blk\.h>/a #include <trace/hooks/fs.h>' "$NAMESPACE"
               FAKEPATCHNAMESPACE=1
-              echo "└─ 📌 Added File System Trace Hook Header"
+              echo "└─ 📌 Added File System Trace Hook"
             else
               echo "└─ ⚠️ Cannot Locate BLK Trace Hook in NAMESPACE" >&2
             fi
 
-            # Add Required TASK-MMU Declarations
+            # Add TASK-MMU Declarations
             if grep -Fq 'unsigned int nr_subpages = __PAGE_SIZE / PAGE_SIZE;' "$MMU" &&
                grep -Fq 'pagemap_entry_t *res = NULL;' "$MMU"; then
               echo "└─ ℹ️ TASK-MMU Declarations Already Present"
@@ -308,23 +325,24 @@ runs:
             echo "└─ ℹ️ TASK-MMU and NAMESPACE Fixes Not Required For Sublevel $SUBLEVEL"
           fi
 
-          # Add ZSWAP Header to MM / MEMORY
-          if [[ "$SUBLEVEL" -le 57 && "$FAKEPATCHMEMORY" -eq 0 ]]; then
+          # Add ZSWAP Header
+          if [[ "$SUBLEVEL" -le 57 && "${FAKEPATCHMEMORY:-0}" -eq 0 ]]; then
             if grep -Fq '#include <linux/zswap.h>' "$MEMORY"; then
               echo "└─ ℹ️ ZSWAP Header Already Present"
             elif grep -Fq '#include <linux/sched/sysctl.h>' "$MEMORY"; then
               sed -i '/^#include <linux\/sched\/sysctl.h>$/a #include <linux/zswap.h>' "$MEMORY"
+              FAKEPATCHMEMORY=1
               echo "└─ 📌 Added ZSWAP Header"
             else
-              echo "└─ ⚠️ Cannot Locate SCHED / SYSCTL Header in MEMORY" >&2
+              echo "└─ ⚠️ Cannot Locate SCHED / SYSCTL Header In MEMORY" >&2
             fi
             
           else
-            echo "└─ ℹ️ ZSWAP Header Not Required For Sublevel $SUBLEVEL"
+            echo "└─ ℹ️ ZSWAP Header Not Required For Sublevel $SUBLEVEL or Already Prepared"
           fi
 
-          # Add DMA-BUF Header to File System / PROC / BASE
-          if [[ "$SUBLEVEL" -le 92 && "$FAKEPATCHBASE" -eq 0 ]]; then
+          # Add DMA-BUF Header
+          if [[ "$SUBLEVEL" -le 92 && "${FAKEPATCHBASE:-0}" -eq 0 ]]; then
             if grep -Fq '#include <linux/dma-buf.h>' "$BASE"; then
               echo "└─ ℹ️ DMA-BUF Header Already Present"
             elif grep -Fq '#include <linux/cpufreq_times.h>' "$BASE"; then
@@ -336,7 +354,7 @@ runs:
             fi
             
           else
-            echo "└─ ℹ️ DMA-BUF Header Not Required For Sublevel $SUBLEVEL"
+            echo "└─ ℹ️ DMA-BUF Header Not Required For Sublevel $SUBLEVEL or Already Prepared"
           fi
 
           echo "└─ 🎉 Android 15 / 6.6 Fake Patch Preparation Complete"
@@ -1062,19 +1080,20 @@ runs:
           NAMESPACE="$COMMONKERNELFOLDER/fs/namespace.c"
           MMU="$COMMONKERNELFOLDER/fs/proc/task_mmu.c"
           MEMORY="$COMMONKERNELFOLDER/mm/memory.c"
-          BASE="$COMMONKERNELFOLDER/fs/proc/base.c"    
-          requirefile "$FAKEPATCHNAMESPACE" "$NAMESPACE"
-          requirefile "$FAKEPATCHTASKMMU" "$MMU"
-          requirefile "$FAKEPATCHMEMORY" "$MEMORY"
-          requirefile "$FAKEPATCHBASE" "$BASE"    
-          # ♻️ Revert NAMESPACE FS Trace Hook Header
-          if [[ "$FAKEPATCHNAMESPACE" == "1" ]]; then
+          BASE="$COMMONKERNELFOLDER/fs/proc/base.c"
+          # Validate Files for Applied Fake Patches
+          requirefile "${FAKEPATCHNAMESPACE:-0}" "$NAMESPACE"
+          requirefile "${FAKEPATCHTASKMMU:-0}" "$MMU"
+          requirefile "${FAKEPATCHMEMORY:-0}" "$MEMORY"
+          requirefile "${FAKEPATCHBASE:-0}" "$BASE"
+          # Revert NAMESPACE File System Trace Hook Header
+          if [[ "${FAKEPATCHNAMESPACE:-0}" == "1" ]]; then
             if [[ "$SUBLEVEL" -le 30 ]]; then
               if grep -qF '#include <trace/hooks/fs.h>' "$NAMESPACE"; then
                 sed -i '\|^#include <trace/hooks/fs\.h>$|d' "$NAMESPACE"
-                echo "└─ ♻️ Removed NAMESPACE FS Trace Hook Header"
+                echo "└─ ♻️ Removed NAMESPACE File System Trace Hook Header"
               else
-                echo "└─ ℹ️ NAMESPACE FS Trace Hook Header Not Present"
+                echo "└─ ℹ️ NAMESPACE File System Trace Hook Header Not Present"
               fi
               
             else
@@ -1084,9 +1103,9 @@ runs:
           else
             echo "└─ ⏭️ Skipping NAMESPACE: Fake Patch Flag is Not 1"
           fi
-    
+
           # Revert TASK-MMU Declarations
-          if [[ "$FAKEPATCHTASKMMU" == "1" ]]; then
+          if [[ "${FAKEPATCHTASKMMU:-0}" == "1" ]]; then
             if [[ "$SUBLEVEL" -le 30 ]]; then
               if grep -qF 'unsigned int nr_subpages = __PAGE_SIZE / PAGE_SIZE;' "$MMU" ||
                  grep -qF 'pagemap_entry_t *res = NULL;' "$MMU"; then
@@ -1106,9 +1125,9 @@ runs:
           else
             echo "└─ ⏭️ Skipping TASK-MMU: Fake Patch Flag is Not 1"
           fi
-    
+
           # Revert MEMORY ZSWAP Header
-          if [[ "$FAKEPATCHMEMORY" == "1" ]]; then
+          if [[ "${FAKEPATCHMEMORY:-0}" == "1" ]]; then
             if [[ "$SUBLEVEL" -le 57 ]]; then
               if grep -qF '#include <linux/zswap.h>' "$MEMORY"; then
                 sed -i '\|^#include <linux/zswap\.h>$|d' "$MEMORY"
@@ -1116,6 +1135,7 @@ runs:
               else
                 echo "└─ ℹ️ MEMORY ZSWAP Header Not Present"
               fi
+              
             else
               echo "└─ ⏭️ MEMORY ZSWAP Header Revert Not Required For Sublevel $SUBLEVEL"
             fi
@@ -1123,9 +1143,9 @@ runs:
           else
             echo "└─ ⏭️ Skipping MEMORY: Fake Patch Flag is Not 1"
           fi
-    
+
           # Revert BASE DMA-BUF Header
-          if [[ "$FAKEPATCHBASE" == "1" ]]; then
+          if [[ "${FAKEPATCHBASE:-0}" == "1" ]]; then
             if [[ "$SUBLEVEL" -le 92 ]]; then
               if grep -qF '#include <linux/dma-buf.h>' "$BASE"; then
                 sed -i '\|^#include <linux/dma-buf\.h>$|d' "$BASE"
@@ -1135,12 +1155,13 @@ runs:
               fi
               
             else
-              echo "└─ ⏭️ BASE DMA-BUF Header Revert Not Required For Sublevel $SUBLEVEL"
+              echo "└─ ⏭️ DMA-BUF Header Revert Not Required For Sublevel $SUBLEVEL"
             fi
+            
           else
             echo "└─ ⏭️ Skipping BASE: Fake Patch Flag is Not 1"
           fi
-    
+
           echo "└─ 🎉 Android 15 / 6.6 Fake Patch Reversal Complete"
         fi
     
