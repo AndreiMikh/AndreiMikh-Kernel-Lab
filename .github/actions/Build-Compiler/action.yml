@@ -1,8 +1,9 @@
 name: ⚙️ Setup Build Toolchains
-description: Setup Zig and Kotlin Compiler, Clean Previous Zig Caches
+description: Setup Zig and Kotlin Compilers, Clean Previous Zig Caches
 runs:
   using: composite
   steps:
+    # Install Zig 0.16.0 and Enable Its Built-In GitHub Actions Cache
     - name: ⚙️ Setup Zig Toolchain
       uses: mlugg/setup-zig@v2
       with:
@@ -10,98 +11,113 @@ runs:
         use-cache: true
         cache-size-limit: 2048
 
-      - name: 🧰 Kotlin Compiler
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          # Kotlin Installation Directory
-          KOTLINHOME="$HOME/kotlinc"
-          # Resolve Latest Stable Kotlin Compiler Eelease
-          KOTLINVER="$(
-            curl \
-              --fail \
-              --location \
-              --silent \
-              --show-error \
-              --retry 8 \
-              --retry-all-errors \
-              --retry-delay 5 \
-              --connect-timeout 30 \
-              --max-time 60 \
-              -H "Accept: application/vnd.github+json" \
-              -H "Authorization: Bearer ${GH_TOKEN}" \
-              -H "X-GitHub-Api-Version: 2022-11-28" \
-              "https://api.github.com/repos/JetBrains/kotlin/releases/latest" |
-            jq -r '.tag_name' |
-            sed 's/^v//'
-          )"
-          # Make Sure a Valid Kotlin Version Was Detected
-          [[ -n "$KOTLINVER" && "$KOTLINVER" != "null" ]] || {
-            echo "└─ ⚠️ Failed to Determine Latest Kotlin Version"
+    # Resolve and Install Latest Stable Kotlin Compiler
+    - name: 🧰 Setup Kotlin Compiler
+      shell: bash
+      env:
+        GH_TOKEN: ${{ github.token }}
+      run: |
+        set -euo pipefail
+        # Define the Kotlin Installation Directory and Download Archive
+        KOTLINHOME="$HOME/kotlinc"
+        KOTLINZIP="$RUNNER_TEMP/kotlinc.zip"
+        # Query GitHub for the Latest Published Kotlin Release
+        echo "🔎 Resolving Latest Stable Kotlin Compiler..."
+        KOTLINVER="$(
+          curl \
+            --fail \
+            --location \
+            --silent \
+            --show-error \
+            --retry 8 \
+            --retry-all-errors \
+            --retry-delay 5 \
+            --connect-timeout 30 \
+            --max-time 60 \
+            -H "Accept: application/vnd.github+json" \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "https://api.github.com/repos/JetBrains/kotlin/releases/latest" |
+          jq -er '
+            .tag_name
+            | select(type == "string" and length > 0)
+            | sub("^v"; "")
+            | select(test("^[0-9]+\\.[0-9]+\\.[0-9]+$"))
+          '
+        )"
+        # Construct Kotlin Compiler Release Download URL
+        KOTLINURL="https://github.com/JetBrains/kotlin/releases/download/v${KOTLINVER}/kotlin-compiler-${KOTLINVER}.zip"
+        echo "└─ 📦 Kotlin Compiler Version: ${KOTLINVER}"
+        # Reuse the Existing Compiler Only When Its Version Matches
+        if [[ -x "$KOTLINHOME/bin/kotlinc" ]] &&
+          "$KOTLINHOME/bin/kotlinc" -version 2>&1 |
+            grep -Fq "kotlinc-jvm ${KOTLINVER}"; then
+          echo "└─ ✔️ Kotlin ${KOTLINVER} Is Already Installed"
+        else
+          # Remove Previous Installation and Any Stale Archive
+          echo "└─ ⚙️ Installing Kotlin ${KOTLINVER}..."
+          rm -rf "$KOTLINHOME"
+          rm -f "$KOTLINZIP"
+          # Download Kotlin Compiler Distribution
+          curl \
+            --fail \
+            --location \
+            --silent \
+            --show-error \
+            --retry 8 \
+            --retry-all-errors \
+            --retry-delay 5 \
+            --connect-timeout 30 \
+            --max-time 600 \
+            "$KOTLINURL" \
+            --output "$KOTLINZIP"
+          # Reject an Empty or Missing Compiler Archive
+          [[ -s "$KOTLINZIP" ]] || {
+            echo "└─ ⛔ Kotlin Compiler Archive is Missing or Empty"
             exit 1
           }
-          # Build Download URL for the Resolved Kotlin Compiler Version
-          KOTLINURL="https://github.com/JetBrains/kotlin/releases/download/v${KOTLINVER}/kotlin-compiler-${KOTLINVER}.zip"
-          echo "└─ 📦 Latest Stable Kotlin: ${KOTLINVER}"
-          # Reuse Existing Compiler when the Requested Version is Already Installed
-          if [[ -x "$KOTLINHOME/bin/kotlinc" ]] && \
-            "$KOTLINHOME/bin/kotlinc" -version 2>&1 | grep -q "$KOTLINVER"; then
-            echo "└─ ✔️ Kotlin ${KOTLINVER} is Already Installed"
-          else
-            # Remove Any Previous Installation Before Installing Resolved Version
-            echo "⚙️ Installing Kotlin Compiler ${KOTLINVER}..."
-            rm -rf "$KOTLINHOME"
-            rm -f "$RUNNER_TEMP/kotlinc.zip"
-            # Download Kotlin Compiler Archive
-            curl \
-              --fail \
-              --location \
-              --silent \
-              --show-error \
-              --retry 8 \
-              --retry-all-errors \
-              --retry-delay 5 \
-              --connect-timeout 30 \
-              --max-time 600 \
-              -H "Accept: application/octet-stream" \
-              -H "Authorization: Bearer ${GH_TOKEN}" \
-              "$KOTLINURL" \
-              -o "$RUNNER_TEMP/kotlinc.zip"
-            [[ -s "$RUNNER_TEMP/kotlinc.zip" ]] || {
-              echo "└─ ⛔ Kotlin Compiler Archive Is Empty"
+          # Verify Download is a Valid ZIP Archive
+          unzip -tq "$KOTLINZIP" >/dev/null
+          # Extract Distribution Into HOME Directory
+          unzip -q "$KOTLINZIP" -d "$HOME"
+          # Remove the Temporary Archive After Extraction
+          rm -f "$KOTLINZIP"
+          # Verify Kotlin Compiler Executable Exists
+          [[ -x "$KOTLINHOME/bin/kotlinc" ]] || {
+            echo "└─ ⛔ Kotlin Compiler Installation Failed"
+            exit 1
+          }
+          # Confirm Installed Compiler Matches Requested Version
+          "$KOTLINHOME/bin/kotlinc" -version 2>&1 |
+            grep -Fq "kotlinc-jvm ${KOTLINVER}" || {
+              echo "└─ ⛔ Installed Kotlin Version Does Not Match"
               exit 1
             }
-            # Extract Compiler Into HOME/KotlinCompiler
-            unzip -q "$RUNNER_TEMP/kotlinc.zip" -d "$HOME"
-            rm -f "$RUNNER_TEMP/kotlinc.zip"
-            # Verify Kotlin Compiler was Installed Successfully
-            [[ -x "$KOTLINHOME/bin/kotlinc" ]] || {
-              echo "└─ ⚠️ Kotlin Compiler Installation Failed"
-              exit 1
-            }
-          fi
+        fi
 
-          # Add Kotlin to Path for Subsequent GitHub Actions Steps
-          echo "$KOTLINHOME/bin" >> "$GITHUB_PATH"
-          # Export Kotlin installation path for subsequent GitHub Actions steps
-          echo "KOTLINHOME=$KOTLINHOME" >> "$GITHUB_ENV"
-          # Final Installation and Version Verification
-          echo "🎉 Kotlin Installation Completed Successfully"
-          "$KOTLINHOME/bin/kotlinc" -version
+        # Add Kotlin to PATH For All Subsequent Workflow Steps
+        echo "$KOTLINHOME/bin" >> "$GITHUB_PATH"
+        # Export Kotlin Installation Directory to Workflow Environment
+        echo "KOTLINHOME=$KOTLINHOME" >> "$GITHUB_ENV"
+        # Display Final Compiler Version For Build Logs
+        echo "└─ 🎉 Kotlin Compiler Setup Completed"
+        "$KOTLINHOME/bin/kotlinc" -version
 
+    # Remove Old Zig Caches to Reclaim Repository Cache Storage
     - name: 🧹 Clean Previous Zig Caches
       uses: actions/github-script@v9
       continue-on-error: true
+      env:
+        ZIG_VERSION: 0.16.0
       with:
         script: |
-          // Get Current Workflow Run ID
+          // Identify Current Workflow Run and Repository
           const currentRunId = String(context.runId);
           const { owner, repo } = context.repo;
-          // Match Zig Caches Created by Setup-Zig V2 For Zig 0.16.0
-          const prefix = "setup-zig-cache-v2-kernel_build-zig-x86_64-linux-0.16.0--";
-          // Retrieve All Available Actions Caches in Repository
+          // Match Caches Created by Setup-Zig V2 For Build Configuration
+          const prefix =
+            `setup-zig-cache-v2-kernel_build-zig-x86_64-linux-${process.env.ZIG_VERSION}--`;
+          // Retrieve Repository's Available Actions Caches
           const caches = await github.paginate(
             github.rest.actions.getActionsCacheList,
             {
@@ -110,32 +126,35 @@ runs:
               per_page: 100
             }
           );
-          // Select Matching Zig Caches While Excluding Current Run's Cache
+          // Select Matching Caches Without Deleting Current Run's Cache
           const previousCaches = caches.filter(cache =>
             cache.key.startsWith(prefix) &&
             !cache.key.includes(`--${currentRunId}-`)
           );
-          // Delete Previous Caches
+          // Report When No Previous Zig Caches Need to Be Removed
+          if (previousCaches.length === 0) {
+            console.log("ℹ️ No Previous Zig Caches Found");
+          }
+          // Delete Each Matching Cache and Handle Already-Removed Entries
           for (const cache of previousCaches) {
-            console.log(`🧹 Deleting Previous Zig Cache : ${cache.key}`);
+            console.log(`🧹 Deleting Previous Zig Cache: ${cache.key}`);
             try {
               await github.rest.actions.deleteActionsCacheById({
                 owner,
                 repo,
                 cache_id: cache.id
               });
-
-              // Confirm Successful Cache Deletion
-              console.log(`📍 Deleted : ${cache.key}`);
+              // Confirm Successful Cache Removal
+              console.log(`└─ 📌 Deleted: ${cache.key}`);
             } catch (error) {
-              // Ignore 404 Errors When Cache Has Been Already Deleted
+              // Ignore Caches That were Already Deleted by Another Process
               if (error.status === 404) {
-                console.log(`ℹ️ Cache Already Missing: ${cache.key}`);
+                console.log(`└─ ℹ️ Cache Already Missing: ${cache.key}`);
                 continue;
               }
-              // Fail Step For Other Unexpected API Errors
+              // Propagate Other API Errors to Action's Error Handler
               throw error;
             }
           }
-          // Report Completion After Processing All Matching Caches
-          console.log("🎉 Previous Zig Build Caches Cleaned");
+          // Report the Final Cache Cleanup Status
+          console.log("🎉 Previous Zig Cache Cleanup Completed");
