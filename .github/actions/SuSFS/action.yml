@@ -263,7 +263,7 @@ runs:
           echo "└─ 🎉 Android 14 / 6.1 Fake Patch Preparation Complete"
         fi
         
-        # Apply Android 15 / 6.6 Compatibility Fixes
+        # Invert Android 15 / 6.6 Compatibility Fixes
         if [[ "$KERNELMODULE" == "android15-6.6" ]]; then
           MMU="$COMMONKERNELFOLDER/fs/proc/task_mmu.c"
           NAMESPACE="$COMMONKERNELFOLDER/fs/namespace.c"
@@ -370,75 +370,103 @@ runs:
           echo "└─ 🎉 Android 15 / 6.6 Fake Patch Preparation Complete"
         fi
                 
-        # Prepare Android 16 / 6.12 SUSFS Compatibility
+        # Invert Android 16 / 6.12 SUSFS Compatibility Fixes
         if [[ "$KERNELMODULE" == "android16-6.12" ]]; then
-          # Define Source Paths
+          # Define Source File Paths
           EXEC="$COMMONKERNELFOLDER/fs/exec.c"
-          MMU="$COMMONKERNELFOLDER/fs/proc/task_mmu.c"        
-          # Validate Required Source Files
+          MMU="$COMMONKERNELFOLDER/fs/proc/task_mmu.c"
+          # Check That Required Source Files Exist
           [[ -f "$EXEC" ]] || { echo "└─ ⚠️ Missing: $EXEC" >&2; exit 1; }
-          [[ -f "$MMU" ]] || { echo "└─ ⚠️ Missing: $MMU" >&2; exit 1; }      
-          echo "└─ 🩹 Preparing Android 16 / 6.12 SUSFS Compatibility"        
-          # Prepare DMA-BUF Header
+          [[ -f "$MMU" ]] || { echo "└─ ⚠️ Missing: $MMU" >&2; exit 1; }
+          echo "└─ 🩹 Preparing Android 16 / 6.12 SUSFS Compatibility"
+          # Prepare DMA-BUF Header in EXEC C Source
+          # Add Header Only For Kernel Sublevels 58 and Below
           if [[ "$SUBLEVEL" -le 58 ]]; then
             if grep -qFx '#include <linux/dma-buf.h>' "$EXEC"; then
+              # Avoid inserting a duplicate include.
               echo "└─ ℹ️ DMA-BUF Header Already Present"
             elif grep -qFx '#include <linux/ksm.h>' "$EXEC"; then
+              # Insert DMA-BUF Immediately After Existing KSM Header
               echo "└─ 🔧 Adding DMA-BUF Header to EXEC"
               sed -i \
                 '/^#include <linux\/ksm\.h>$/a #include <linux/dma-buf.h>' \
-                "$EXEC"       
+                "$EXEC"
+              # Record Successful Preparation For Later Workflow Steps
               if grep -qFx '#include <linux/dma-buf.h>' "$EXEC"; then
                 FAKEPATCHEXEC=1
                 echo "└─ 📌 DMA-BUF Header Added"
               else
                 echo "└─ ⚠️ Failed to Add DMA-BUF Header" >&2
               fi
-              
             else
+              # Report When Expected Insertion Point is Unavailable
               echo "└─ ⚠️ Cannot Locate KSM Header in EXEC" >&2
             fi
-            
-          else
-            echo "└─ ⏭️ Skipping DMA-BUF Header Preparation For Sublevel $SUBLEVEL"
-          fi
-        
-          # Apply SUSFS Fake Patch For Sublevel 92 and Above
-          if [[ "$SUBLEVEL" -ge 92 ]]; then
-            echo "└─ 🩹 Applying SUSFS 6.12 Sublevel ${SUBLEVEL}+ Fake Patch"      
-            # Verify Required Source Anchors
-            if ! grep -qF 'proc_get_vma(m, &pos)' "$MMU" ||
-               ! grep -qF 'smap_gather_stats_range(priv, vma, &mss, last_vma_end)' "$MMU"; then
-              echo "└─ ⚠️ Expected Sublevel 92+ Source Anchors Not Found" >&2
-              echo "└─ ⚠️ The Inline Transformation Does Not Match This Source Layout" >&2
-              exit 1
+
+            # Prepare SUSFS Map Hooks in TASK MMU C Source
+            echo "└─ 🔧 Preparing SUSFS Map Hooks in TASK MMU"
+            # Prepare SHOW SMAP() Hook
+            # Search Within SHOW SMAP() to Avoid Matching Unrelated Functions
+            # Read Complete File For Multi-Line Pattern Matching
+            if ! perl -0777 -ne 'print $1 if /(static int show_smap\(.*?^\})/ms' "$MMU" |
+              grep -qF 'SUSFS_IS_INODE_SUS_MAP(file_inode(vma->vm_file))'; then
+              # Insert SUSFS Map Check After MEM SIZE STATS Initialization
+              # Skip Insertion When Hook is Already Present
+              sed -i '/^static int show_smap(/,/^}/ {
+                /struct mem_size_stats mss = {};/a\
+            #ifdef CONFIG_KSU_SUSFS_SUS_MAP\
+                if (vma->vm_file) {\
+                    if (SUSFS_IS_INODE_SUS_MAP(file_inode(vma->vm_file)))\
+                        return 0;\
+                }\
+            #endif // #ifdef CONFIG_KSU_SUSFS_SUS_MAP
+              }' "$MMU"
+              echo "└─ 📌 SHOW SMAP() Hook Prepared"
+            else
+              # Keep Existing SUSFS Map Logic Without Duplicating it
+              echo "└─ ℹ️ SHOW SMAP() Hook Already Present"
             fi
-        
-            # Apply Inline Source Transformation
-            perl -0pi -e '
-              BEGIN {
-                $mark = "/* Fake Patch Marker For Kernel 6.12 Sublevel 92 and Below SHOW-SMAPS-ROLLUP Reshape */";
-              }      
-              $OLDLOOP = qq{\tvma_start = vma->vm_start;\n\tdo {\n\t\tsmap_gather_stats(vma, &mss, 0);\n\t\tlast_vma_end = vma->vm_end;\n};       
-              $NEWLOOP = qq{\tif (!IS_ERR(vma))\n\t\tvma_start = vma->vm_start;\n\n\twhile (vma) {\n\t\tif (IS_ERR(vma)) {\n\t\t\tret = PTR_ERR(vma);\n\t\t\tgoto out_unlock;\n\t\t}\n\n\t\tif (vma->vm_start < last_vma_end) {\n\t\t\t/*\n\t\t\t * After retaking the lock, already reported VMA grew\n\t\t\t * or got merged with the next one and we found it\n\t\t\t * again. Gather stats for the remaining portion by\n\t\t\t * starting at last_vma_end.\n\t\t\t */\n\t\t\tsmap_gather_stats_range(priv, vma, &mss, last_vma_end);\n\t\t} else {\n\t\t\t/* Found next unreported VMA, start from its beginning */\n\t\t\tsmap_gather_stats(priv, vma, &mss);\n\t\t}\n\t\tlast_vma_end = vma->vm_end;\n};      
-              $OLDTAIL = qq{\t\t\tpos = last_vma_end;\n\t\t\tvma_iter_init(&priv->iter, mm, pos);\n\t\t}\n\t\t\t/* Case 4 above */\n\t\t\tif (vma->vm_end > last_vma_end) {\n\t\t\t\tsmap_gather_stats(vma, &mss, last_vma_end);\n\t\t\t\tlast_vma_end = vma->vm_end;\n\t\t\t}\n\t\t\tvma = proc_get_vma(m, &pos);\n\t} for_each_vma(vmi, vma);\n};        
-              $NEWTAIL = qq{\t\t\tpos = last_vma_end;\n\t\t\tvma_iter_init(&priv->iter, mm, pos);\n\t\t}\n\t\tvma = proc_get_vma(m, &pos);\n\t}\n};       
-              if (index($_, $mark) >= 0) {
-                print STDERR "└─ ℹ️ SUSFS Fake Patch Marker Already Present\n";
-                exit 0;
-              }       
-              $n1 = s/\Q$NEWLOOP\E/$OLDLOOP . $mark . "\n"/;
-              $n2 = s/\Q$NEWTAIL\E/$OLDTAIL/;      
-              if (!$n1 || !$n2) {
-                print STDERR "└─ ⚠️ SUSFS Fake Patch Anchors Did Not Match\n";
-                exit 1;
-              }
-            ' "$MMU"       
-            echo "└─ 🎉 SUSFS Fake Patch Applied"
+
+            # Prepare SHOW SMAPS ROLLUP() Bypass Hook
+            # Check Whether Function Already Contains Bypass Statement
+            if ! perl -0777 -ne 'print $1 if /(static int show_smaps_rollup\(.*?^\})/ms' "$MMU" |
+              grep -qF 'goto bypass_orig_flow;'; then
+              # Insert Bypass Before Original VMA Ordering Check
+              # Preserve Surrounding Source Code
+              perl -0777 -i -pe '
+                s/(static int show_smaps_rollup\(.*?)(^[ \t]*if \(vma->vm_start < last_vma_end\) \{)/$1#ifdef CONFIG_KSU_SUSFS_SUS_MAP\n        if (vma->vm_file && SUSFS_IS_INODE_SUS_MAP(file_inode(vma->vm_file)))\n            goto bypass_orig_flow;\n#endif \/\/ #ifdef CONFIG_KSU_SUSFS_SUS_MAP\n$2/ms;
+              ' "$MMU"
+              echo "└─ 📌 SHOW SMAPS ROLLUP() Bypass Prepared"
+            else
+              # Avoid Inserting the Same Bypass Statement Twice
+              echo "└─ ℹ️ SHOW SMAPS ROLLUP() Bypass Already Present"
+            fi
+
+            # Prepare BYPASS ORIG FLOW Label
+            # Search Within SHOW SMAPS ROLLUP() For an Existing Label
+            if ! perl -0777 -ne 'print $1 if /(static int show_smaps_rollup\(.*?^\})/ms' "$MMU" |
+              grep -qF 'bypass_orig_flow:'; then
+              # Insert Label Before LAST VMA END is Updated
+              # Allow the Bypass to Continue Through Intended Rollup Flow
+              sed -i '/^static int show_smaps_rollup(/,/^}/ {
+                /last_vma_end = vma->vm_end;/i\
+            #ifdef CONFIG_KSU_SUSFS_SUS_MAP\
+            bypass_orig_flow:\
+            #endif // #ifdef CONFIG_KSU_SUSFS_SUS_MAP
+              }' "$MMU"
+              echo "└─ 📌 BYPASS ORIG FLOW Label Prepared"
+            else
+              # Preserve Existing Label Without Creating a Duplicate
+              echo "└─ ℹ️ BYPASS ORIG FLOW Label Already Present"
+            fi
+
+            # Record TASK MMU Compatibility Preparation
+            FAKEPATCHTASKMMU=1
           else
-            echo "└─ ⏭️ SUSFS Fake Patch Not Required For Sublevel $SUBLEVEL"
+            # Skip DMA-BUF and TASK MMU Compatibility For Newer Sublevels
+            echo "└─ ⏭️ Skipping Compatibility Preparation For Sublevel $SUBLEVEL"
           fi
-        
+
           echo "└─ 🎉 Android 16 / 6.12 Compatibility Preparation Complete"
         fi
 
@@ -1207,9 +1235,9 @@ runs:
     
         # Revert Android 16 / 6.12 Compatibility Fixes
         if [[ "$KERNELMODULE" == "android16-6.12" ]]; then
-          # Define Source Paths
+          # Define Source File Paths
           EXEC="$COMMONKERNELFOLDER/fs/exec.c"
-          MMU="$COMMONKERNELFOLDER/fs/proc/task_mmu.c"        
+          MMU="$COMMONKERNELFOLDER/fs/proc/task_mmu.c"
           # Revert EXEC DMA-BUF Header
           if [[ "${FAKEPATCHEXEC:-0}" == "1" ]]; then
             if [[ "$SUBLEVEL" -le 58 ]]; then
@@ -1226,42 +1254,41 @@ runs:
             fi
             
           else
-            echo "└─ ⏭️ Skipping EXEC: Fake Patch Flag Is Not 1"
+            echo "└─ ⏭️ Skipping EXEC: Fake Patch Flag is Not 1"
           fi
-        
-          # Revert Inline SUSFS Fake Patch For Sublevel 92 and Above
-          if [[ "$SUBLEVEL" -ge 92 ]]; then
-            if [[ -f "$MMU" ]] &&
-               grep -qF 'Fake Patch Marker For Kernel 6.12 Sublevel 92 and Above SHOW-SMAPS-ROLLUP Reshape' "$MMU"; then
-              echo "└─ ♻️ Reverting SUSFS 6.12 Sublevel ${SUBLEVEL}+ Fake Patch"        
-              perl -0pi -e '
-                BEGIN {
-                  $mark = "/* Fake Patch Marker For Kernel 6.12 Sublevel 92 and Above SHOW-SMAPS-ROLLUP Reshape */";
-                }      
-                $OLDLOOP = qq{\tvma_start = vma->vm_start;\n\tdo {\n#ifdef CONFIG_KSU_SUSFS_SUS_MAP\n\t\tif (vma->vm_file && SUSFS_IS_INODE_SUS_MAP(file_inode(vma->vm_file)))\n\t\t\tgoto bypass_orig_flow;\n#endif // #ifdef CONFIG_KSU_SUSFS_SUS_MAP\n\t\tsmap_gather_stats(vma, &mss, 0);\n#ifdef CONFIG_KSU_SUSFS_SUS_MAP\nbypass_orig_flow:\n#endif // #ifdef CONFIG_KSU_SUSFS_SUS_MAP\n\t\tlast_vma_end = vma->vm_end;\n} . $mark . "\n";        
-                $NEWLOOP = qq{\tif (!IS_ERR(vma))\n\t\tvma_start = vma->vm_start;\n\n\twhile (vma) {\n\t\tif (IS_ERR(vma)) {\n\t\t\tret = PTR_ERR(vma);\n\t\t\tgoto out_unlock;\n\t\t}\n\n#ifdef CONFIG_KSU_SUSFS_SUS_MAP\n\t\tif (vma->vm_file && SUSFS_IS_INODE_SUS_MAP(file_inode(vma->vm_file)))\n\t\t\tgoto bypass_orig_flow_rollup;\n#endif // #ifdef CONFIG_KSU_SUSFS_SUS_MAP\n\t\tif (vma->vm_start < last_vma_end) {\n\t\t\t/*\n\t\t\t * After retaking the lock, already reported VMA grew\n\t\t\t * or got merged with the next one and we found it\n\t\t\t * again. Gather stats for the remaining portion by\n\t\t\t * starting at last_vma_end.\n\t\t\t */\n\t\t\tsmap_gather_stats_range(priv, vma, &mss, last_vma_end);\n\t\t} else {\n\t\t\t/* Found next unreported VMA, start from its beginning */\n\t\t\tsmap_gather_stats(priv, vma, &mss);\n\t\t}\n#ifdef CONFIG_KSU_SUSFS_SUS_MAP\nbypass_orig_flow_rollup:\n#endif // #ifdef CONFIG_KSU_SUSFS_SUS_MAP\n\t\tlast_vma_end = vma->vm_end;\n};       
-                $OLDTAIL = qq{\t\t\t/* Case 4 above */\n\t\t\tif (vma->vm_end > last_vma_end) {\n#ifdef CONFIG_KSU_SUSFS_SUS_MAP\n\t\t\t\tif (!vma->vm_file || !(SUSFS_IS_INODE_SUS_MAP(file_inode(vma->vm_file)))) {\n\t\t\t\t\tsmap_gather_stats(vma, &mss, last_vma_end);\n\t\t\t\t\tlast_vma_end = vma->vm_end;\n\t\t\t\t}\n#else\n\t\t\t\tsmap_gather_stats(vma, &mss, last_vma_end);\n\t\t\t\tlast_vma_end = vma->vm_end;\n#endif // #ifdef CONFIG_KSU_SUSFS_SUS_MAP\n\t\t\t}\n\t\t\tvma = proc_get_vma(m, &pos);\n\t} for_each_vma(vmi, vma);\n};       
-                $NEWTAIL = qq{\t\t\tpos = last_vma_end;\n\t\t\tvma_iter_init(&priv->iter, mm, pos);\n\t\t}\n\t\tvma = proc_get_vma(m, &pos);\n\t}\n};        
-                if (index($_, $mark) < 0) {
-                  print STDERR "└─ ℹ️ SUSFS Fake Patch Marker Not Found\n";
-                  exit 0;
-                }       
-                $n1 = s/\Q$OLDLOOP\E/$NEWLOOP/;
-                $n2 = s/\Q$OLDTAIL\E/$NEWTAIL/;        
-                if (!$n1 || !$n2) {
-                  print STDERR "└─ ⚠️ SUSFS Fake Patch Revert Anchors Did Not Match\n";
-                  exit 1;
-                }        
-                s/\Q$mark\E\n//;
-              ' "$MMU"      
-              echo "└─ 🎉 SUSFS Fake Patch Reverted"
+
+          # Revert TASK MMU SUSFS Map Hooks
+          if [[ "${FAKEPATCHTASKMMU:-0}" == "1" ]]; then
+            if [[ "$SUBLEVEL" -le 58 ]]; then
+              if [[ -f "$MMU" ]]; then
+                echo "└─ ♻️ Reverting TASK MMU SUSFS Map Hooks"
+                # Remove SHOW SMAP() SUSFS Map Hook
+                sed -i '/^static int show_smap(/,/^}/{
+                  /#ifdef CONFIG_KSU_SUSFS_SUS_MAP/,+5d
+                }' "$MMU"
+                # Remove SHOW SMAPS ROLLUP() SUSFS Bypass Hook
+                perl -0777 -i -pe '
+                  s/^#ifdef CONFIG_KSU_SUSFS_SUS_MAP\n[ \t]*if \(vma->vm_file && SUSFS_IS_INODE_SUS_MAP\(file_inode\(vma->vm_file\)\)\)\n[ \t]*goto bypass_orig_flow;\n#endif \/\/ #ifdef CONFIG_KSU_SUSFS_SUS_MAP\n//m;
+                ' "$MMU"
+                # Remove BYPASS ORIG FLOW Label
+                sed -i '/^#ifdef CONFIG_KSU_SUSFS_SUS_MAP$/,/^#endif \/\/ #ifdef CONFIG_KSU_SUSFS_SUS_MAP$/{
+                  /bypass_orig_flow:/d
+                  /^#ifdef CONFIG_KSU_SUSFS_SUS_MAP$/d
+                  /^#endif \/\/ #ifdef CONFIG_KSU_SUSFS_SUS_MAP$/d
+                }' "$MMU"
+                echo "└─ 🎉 TASK MMU SUSFS Map Hooks Reverted"
+              else
+                echo "└─ ⚠️ TASK MMU Source File Not Found: $MMU" >&2
+              fi
+              
             else
-              echo "└─ ⏭️ No SUSFS Fake Patch Marker Found"
+              echo "└─ ℹ️ TASK MMU Hook Revert Not Required For Sublevel $SUBLEVEL"
             fi
+            
           else
-            echo "└─ ⏭️ SUSFS Fake Patch Revert Not Required For Sublevel $SUBLEVEL"
+            echo "└─ ⏭️ Skipping TASK MMU: Fake Patch Flag Is Not 1"
           fi
-        
+
           echo "└─ 🎉 Android 16 / 6.12 Compatibility Reversal Complete"
         fi
     
