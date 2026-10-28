@@ -1,6 +1,6 @@
 # SUSFS and Kernel Compatibility Patches Composite Action
 name: 🩹 SUSFS and Kernel Compatibility Patches
-description: Apply SUSFS Patches, Kernel Compatibility Fixes and Fake-Patch Handling
+description: Apply SUSFS Patches, Kernel Compatibility Fixes and Fake Patch Handling
 # Define Inputs Required by Composite Action
 inputs:
   # Select Root Engine Used by the Kernel Build
@@ -363,10 +363,9 @@ runs:
                 
         # Prepare Android 16 / 6.12 SUSFS Compatibility
         if [[ "$KERNELMODULE" == "android16-6.12" ]]; then
-          # Define Source and Script Paths
+          # Define Source Paths
           EXEC="$COMMONKERNELFOLDER/fs/exec.c"
-          MMU="$COMMONKERNELFOLDER/fs/proc/task_mmu.c"
-          SUSFSFAKE="$PATCHDIR/SuSFS/SuSFS-Fake-6.12.py"        
+          MMU="$COMMONKERNELFOLDER/fs/proc/task_mmu.c"        
           # Validate Required Source Files
           [[ -f "$EXEC" ]] || { echo "└─ ⚠️ Missing: $EXEC" >&2; exit 1; }
           [[ -f "$MMU" ]] || { echo "└─ ⚠️ Missing: $MMU" >&2; exit 1; }      
@@ -376,10 +375,10 @@ runs:
             if grep -qFx '#include <linux/dma-buf.h>' "$EXEC"; then
               echo "└─ ℹ️ DMA-BUF Header Already Present"
             elif grep -qFx '#include <linux/ksm.h>' "$EXEC"; then
-              echo "└─ 🔧 Adding DMA-BUF Header to EXEC"       
+              echo "└─ 🔧 Adding DMA-BUF Header to EXEC"
               sed -i \
                 '/^#include <linux\/ksm\.h>$/a #include <linux/dma-buf.h>' \
-                "$EXEC"        
+                "$EXEC"       
               if grep -qFx '#include <linux/dma-buf.h>' "$EXEC"; then
                 FAKEPATCHEXEC=1
                 echo "└─ 📌 DMA-BUF Header Added"
@@ -395,19 +394,40 @@ runs:
             echo "└─ ⏭️ Skipping DMA-BUF Header Preparation For Sublevel $SUBLEVEL"
           fi
         
-          # Apply Python SUSFS Fake-Patch For Sublevel 92+
+          # Apply SUSFS Fake Patch For Sublevel 92 And Below
           if [[ "$SUBLEVEL" -le 92 ]]; then
-            if [[ -f "$SUSFSFAKE" ]]; then
-              echo "└─ 🩹 Applying SUSFS 6.12 Sublevel 92 and Below Fake-Patch"        
-              python3 "$SUSFSFAKE" "$MMU" apply     
-              echo "└─ 🎉 SUSFS Fake-Patch Applied"
-            else
-              echo "└─ ⚠️ Python Script Not Found: $SUSFSFAKE" >&2
+            echo "└─ 🩹 Applying SUSFS 6.12 Sublevel $SUBLEVEL Fake Patch"      
+            # Verify Required Source Anchors
+            if ! grep -qF 'proc_get_vma(m, &pos)' "$MMU" ||
+               ! grep -qF 'smap_gather_stats_range(priv, vma, &mss, last_vma_end)' "$MMU"; then
+              echo "└─ ⚠️ Expected Sublevel 92+ Source Anchors Not Found" >&2
+              echo "└─ ⚠️ The Inline Transformation Does Not Match This Source Layout" >&2
               exit 1
             fi
-            
+        
+            # Apply Inline Source Transformation
+            perl -0pi -e '
+              BEGIN {
+                $mark = "/* Fake Patch Marker For Kernel 6.12 Sublevel 92 and Below SHOW-SMAPS-ROLLUP Reshape */";
+              }      
+              $OLDLOOP = qq{\tvma_start = vma->vm_start;\n\tdo {\n\t\tsmap_gather_stats(vma, &mss, 0);\n\t\tlast_vma_end = vma->vm_end;\n};       
+              $NEWLOOP = qq{\tif (!IS_ERR(vma))\n\t\tvma_start = vma->vm_start;\n\n\twhile (vma) {\n\t\tif (IS_ERR(vma)) {\n\t\t\tret = PTR_ERR(vma);\n\t\t\tgoto out_unlock;\n\t\t}\n\n\t\tif (vma->vm_start < last_vma_end) {\n\t\t\t/*\n\t\t\t * After retaking the lock, already reported VMA grew\n\t\t\t * or got merged with the next one and we found it\n\t\t\t * again. Gather stats for the remaining portion by\n\t\t\t * starting at last_vma_end.\n\t\t\t */\n\t\t\tsmap_gather_stats_range(priv, vma, &mss, last_vma_end);\n\t\t} else {\n\t\t\t/* Found next unreported VMA, start from its beginning */\n\t\t\tsmap_gather_stats(priv, vma, &mss);\n\t\t}\n\t\tlast_vma_end = vma->vm_end;\n};      
+              $OLDTAIL = qq{\t\t\tpos = last_vma_end;\n\t\t\tvma_iter_init(&priv->iter, mm, pos);\n\t\t}\n\t\t\t/* Case 4 above */\n\t\t\tif (vma->vm_end > last_vma_end) {\n\t\t\t\tsmap_gather_stats(vma, &mss, last_vma_end);\n\t\t\t\tlast_vma_end = vma->vm_end;\n\t\t\t}\n\t\t\tvma = proc_get_vma(m, &pos);\n\t} for_each_vma(vmi, vma);\n};        
+              $NEWTAIL = qq{\t\t\tpos = last_vma_end;\n\t\t\tvma_iter_init(&priv->iter, mm, pos);\n\t\t}\n\t\tvma = proc_get_vma(m, &pos);\n\t}\n};       
+              if (index($_, $mark) >= 0) {
+                print STDERR "└─ ℹ️ SUSFS Fake Patch Marker Already Present\n";
+                exit 0;
+              }       
+              $n1 = s/\Q$NEWLOOP\E/$OLDLOOP . $mark . "\n"/;
+              $n2 = s/\Q$NEWTAIL\E/$OLDTAIL/;      
+              if (!$n1 || !$n2) {
+                print STDERR "└─ ⚠️ SUSFS Fake Patch Anchors Did Not Match\n";
+                exit 1;
+              }
+            ' "$MMU"       
+            echo "└─ 🎉 SUSFS Fake Patch Applied"
           else
-            echo "└─ ⏭️ SUSFS Fake-Patch Not Required For Sublevel $SUBLEVEL"
+            echo "└─ ⏭️ SUSFS Fake Patch Not Required For Sublevel $SUBLEVEL"
           fi
         
           echo "└─ 🎉 Android 16 / 6.12 Compatibility Preparation Complete"
@@ -1161,10 +1181,9 @@ runs:
     
         # Revert Android 16 / 6.12 Compatibility Fixes
         if [[ "$KERNELMODULE" == "android16-6.12" ]]; then
-          # Define Source and Script Paths
+          # Define Source Paths
           EXEC="$COMMONKERNELFOLDER/fs/exec.c"
-          MMU="$COMMONKERNELFOLDER/fs/proc/task_mmu.c"
-          SUSFSFAKE="$PATCHDIR/SuSFS/SuSFS-Fake-6.12.py"
+          MMU="$COMMONKERNELFOLDER/fs/proc/task_mmu.c"        
           # Revert EXEC DMA-BUF Header
           if [[ "${FAKEPATCHEXEC:-0}" == "1" ]]; then
             if [[ "$SUBLEVEL" -le 58 ]]; then
@@ -1175,32 +1194,46 @@ runs:
               else
                 echo "└─ ℹ️ EXEC DMA-BUF Header Already Absent"
               fi
+              
             else
               echo "└─ ℹ️ EXEC DMA-BUF Header Revert Not Required For Sublevel $SUBLEVEL"
             fi
-          else
-            echo "└─ ⏭️ Skipping EXEC: Fake Patch Flag is Not 1"
-          fi
-        
-          # Revert Python SUSFS Fake-Patch For Sublevel 92+
-          if [[ "$SUBLEVEL" -le 92 ]]; then
-            if [[ -f "$MMU" ]] &&
-               grep -qF 'Fake-Patch Marker For Kernel 6.12 Sublevel 92 and Below SHOW-SMAPS-ROLLUP Reshape' "$MMU"; then
-              if [[ -f "$SUSFSFAKE" ]]; then
-                echo "└─ 🔄 Reverting SUSFS 6.12 Sublevel 92 and Below Fake-Patch"
-                python3 "$SUSFSFAKE" "$MMU" revert
-                echo "└─ 🎉 SUSFS Fake-Patch Reverted"
-              else
-                echo "└─ ⚠️ Python Script Not Found: $SUSFSFAKE" >&2
-                exit 1
-              fi
-              
-            else
-              echo "└─ ⏭️ No SUSFS Fake-Patch Marker Found"
-            fi
             
           else
-            echo "└─ ⏭️ SUSFS Fake-Patch Revert Not Required For Sublevel $SUBLEVEL"
+            echo "└─ ⏭️ Skipping EXEC: Fake Patch Flag Is Not 1"
+          fi
+        
+          # Revert Inline SUSFS Fake Patch For Sublevel 92 And Below
+          if [[ "$SUBLEVEL" -le 92 ]]; then
+            if [[ -f "$MMU" ]] &&
+               grep -qF 'Fake Patch Marker For Kernel 6.12 Sublevel 92 and Below SHOW-SMAPS-ROLLUP Reshape' "$MMU"; then
+              echo "└─ ♻️ Reverting SUSFS 6.12 Sublevel $SUBLEVEL Fake Patch"        
+              perl -0pi -e '
+                BEGIN {
+                  $mark = "/* Fake Patch Marker For Kernel 6.12 Sublevel 92 and Below SHOW-SMAPS-ROLLUP Reshape */";
+                }      
+                $OLDLOOP = qq{\tvma_start = vma->vm_start;\n\tdo {\n#ifdef CONFIG_KSU_SUSFS_SUS_MAP\n\t\tif (vma->vm_file && SUSFS_IS_INODE_SUS_MAP(file_inode(vma->vm_file)))\n\t\t\tgoto bypass_orig_flow;\n#endif // #ifdef CONFIG_KSU_SUSFS_SUS_MAP\n\t\tsmap_gather_stats(vma, &mss, 0);\n#ifdef CONFIG_KSU_SUSFS_SUS_MAP\nbypass_orig_flow:\n#endif // #ifdef CONFIG_KSU_SUSFS_SUS_MAP\n\t\tlast_vma_end = vma->vm_end;\n} . $mark . "\n";        
+                $NEWLOOP = qq{\tif (!IS_ERR(vma))\n\t\tvma_start = vma->vm_start;\n\n\twhile (vma) {\n\t\tif (IS_ERR(vma)) {\n\t\t\tret = PTR_ERR(vma);\n\t\t\tgoto out_unlock;\n\t\t}\n\n#ifdef CONFIG_KSU_SUSFS_SUS_MAP\n\t\tif (vma->vm_file && SUSFS_IS_INODE_SUS_MAP(file_inode(vma->vm_file)))\n\t\t\tgoto bypass_orig_flow_rollup;\n#endif // #ifdef CONFIG_KSU_SUSFS_SUS_MAP\n\t\tif (vma->vm_start < last_vma_end) {\n\t\t\t/*\n\t\t\t * After retaking the lock, already reported VMA grew\n\t\t\t * or got merged with the next one and we found it\n\t\t\t * again. Gather stats for the remaining portion by\n\t\t\t * starting at last_vma_end.\n\t\t\t */\n\t\t\tsmap_gather_stats_range(priv, vma, &mss, last_vma_end);\n\t\t} else {\n\t\t\t/* Found next unreported VMA, start from its beginning */\n\t\t\tsmap_gather_stats(priv, vma, &mss);\n\t\t}\n#ifdef CONFIG_KSU_SUSFS_SUS_MAP\nbypass_orig_flow_rollup:\n#endif // #ifdef CONFIG_KSU_SUSFS_SUS_MAP\n\t\tlast_vma_end = vma->vm_end;\n};       
+                $OLDTAIL = qq{\t\t\t/* Case 4 above */\n\t\t\tif (vma->vm_end > last_vma_end) {\n#ifdef CONFIG_KSU_SUSFS_SUS_MAP\n\t\t\t\tif (!vma->vm_file || !(SUSFS_IS_INODE_SUS_MAP(file_inode(vma->vm_file)))) {\n\t\t\t\t\tsmap_gather_stats(vma, &mss, last_vma_end);\n\t\t\t\t\tlast_vma_end = vma->vm_end;\n\t\t\t\t}\n#else\n\t\t\t\tsmap_gather_stats(vma, &mss, last_vma_end);\n\t\t\t\tlast_vma_end = vma->vm_end;\n#endif // #ifdef CONFIG_KSU_SUSFS_SUS_MAP\n\t\t\t}\n\t\t\tvma = proc_get_vma(m, &pos);\n\t} for_each_vma(vmi, vma);\n};       
+                $NEWTAIL = qq{\t\t\tpos = last_vma_end;\n\t\t\tvma_iter_init(&priv->iter, mm, pos);\n\t\t}\n\t\tvma = proc_get_vma(m, &pos);\n\t}\n};        
+                if (index($_, $mark) < 0) {
+                  print STDERR "└─ ℹ️ SUSFS Fake Patch Marker Not Found\n";
+                  exit 0;
+                }       
+                $n1 = s/\Q$OLDLOOP\E/$NEWLOOP/;
+                $n2 = s/\Q$OLDTAIL\E/$NEWTAIL/;        
+                if (!$n1 || !$n2) {
+                  print STDERR "└─ ⚠️ SUSFS Fake Patch Revert Anchors Did Not Match\n";
+                  exit 1;
+                }        
+                s/\Q$mark\E\n//;
+              ' "$MMU"      
+              echo "└─ 🎉 SUSFS Fake Patch Reverted"
+            else
+              echo "└─ ⏭️ No SUSFS Fake Patch Marker Found"
+            fi
+          else
+            echo "└─ ⏭️ SUSFS Fake Patch Revert Not Required For Sublevel $SUBLEVEL"
           fi
         
           echo "└─ 🎉 Android 16 / 6.12 Compatibility Reversal Complete"
