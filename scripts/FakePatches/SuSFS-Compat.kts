@@ -101,7 +101,7 @@ fun File.deleteLine(pattern: Regex): Boolean {
     writeLines(filtered)
     return true
 }
-// Remove Each Matching Line Plus the Requested Number of Following Lines
+// Remove Each Matching Line Plus Requested Number of Following Lines
 fun File.deleteLineAndFollowing(
     pattern: Regex,
     extraLines: Int
@@ -165,7 +165,7 @@ fun File.deleteBlock(
 // ====================================================
 // Replace Helpers
 // ====================================================
-// Apply a Regex Replacement to Every Line and Write Only When a Change Occurred
+// Apply Regex Replacement to Every Line and Write Only When Change Occurred
 fun File.replaceEachLine(
     pattern: Regex,
     replacement: String
@@ -266,7 +266,7 @@ val inotifyHelper =
 // Add Helper Only When it is Not Already Present, Making Operation Repeatable
 fun addInotifyMarkUserMaskFunction(file: File) {
     if (file.readText().contains("inotify_mark_user_mask(")) {
-        logSkip(file, "INOTIFY MARK USER MASK() Already Present")
+        logSkip(file, "Inotify Mark User Mask() Already Present")
         return
     }
     file.insertBeforeFirst(
@@ -579,7 +579,7 @@ fun applyPostPatchFixups() {
             )
             logPostfix(
                 namei,
-                "Rewrote 4-Arg Set Nameidata() to 3-Arg Form"
+                "Rewrote 4-Arguments Set Nameidata() to 3-Arguments Form"
             )
         }
     }
