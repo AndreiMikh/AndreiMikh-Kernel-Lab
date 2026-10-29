@@ -1,0 +1,363 @@
+name: ⚙️ Configure Root Engine
+description: Configure Root Engine and Export Build Metadata
+inputs:
+  ROOTENGINE:
+    description: Selected Root Engine
+    required: true
+  ROOTCOMMIT:
+    description: Full 40-character Root Engine Commit SHA
+    required: true
+  ROOTCOMMITSHORT:
+    description: Short Root Engine Commit SHA
+    required: false
+    default: ""
+  KSUREPO:
+    description: Root Engine Repository in Owner / Repository Format
+    required: true
+  MANAGERBRANCH:
+    description: Resolved Root Engine Manager Branch
+    required: true
+  BRANCHPATH:
+    description: Root Engine Setup Script Argument
+    required: false
+    default: ""
+  KSUVERSION:
+    description: Resolved KernelSU Version
+    required: true
+  MANAGERTAG:
+    description: Resolved Root Engine Manager Tag
+    required: true
+  SUSFS:
+    description: SUSFS Repository Selection
+    required: false
+    default: "-1"
+outputs:
+  ksuversion:
+    description: Configured KernelSU Version
+    value: ${{ steps.rootengine.outputs.ksuversion }}
+  managertag:
+    description: Resolved Manager Tag
+    value: ${{ steps.rootengine.outputs.managertag }}
+runs:
+  using: composite
+  steps:
+    - name: ⚙️ Configure Root Engine
+      id: rootengine
+      shell: bash
+      env:
+        GITHUB_TOKEN: ${{ github.token }}
+        SOURCEDIR: ${{ env.SOURCEDIR }}
+        DEFCONFIG: ${{ env.DEFCONFIG }}
+        ROOTENGINE: ${{ inputs.ROOTENGINE }}
+        ROOTCOMMIT: ${{ inputs.ROOTCOMMIT }}
+        ROOTCOMMITSHORT: ${{ inputs.ROOTCOMMITSHORT }}
+        KSUREPO: ${{ inputs.KSUREPO }}
+        MANAGERBRANCH: ${{ inputs.MANAGERBRANCH }}
+        BRANCHPATH: ${{ inputs.BRANCHPATH }}
+        KSUVERSION: ${{ inputs.KSUVERSION }}
+        MANAGERTAG: ${{ inputs.MANAGERTAG }}
+        SUSFS: ${{ inputs.SUSFS }}
+      run: |
+        set -Eeuo pipefail
+        cd "$SOURCEDIR"
+        # Validate Resolved Root Engine Metadata
+        if [[ -z "$KSUVERSION" || -z "$MANAGERTAG" ]]; then
+          echo "└─ ⚠️ [Error] Root Engine Metadata was Not Resolved"
+          exit 1
+        fi
+
+        if [[ ! "$ROOTCOMMIT" =~ ^[a-fA-F0-9]{40}$ ]]; then
+          echo "└─ ⚠️ [Error] Invalid Full Root Engine Commit : $ROOTCOMMIT"
+          echo "└─ Check and Ensure Prepare Exports"
+          exit 1
+        fi
+
+        echo "------------------------------"
+        echo "└─ 🔎 [Info] Resolved Root Engine Metadata"
+        echo "└─ 📦 [Info] Engine           : $ROOTENGINE"
+        echo "└─ 🏷️ [Info] Manager Tag      : $MANAGERTAG"
+        echo "└─ 🔢 [Info] KSU Version      : $KSUVERSION"
+        echo "└─ 🔖 [Info] Requested Commit : ${ROOTCOMMITSHORT:-${ROOTCOMMIT:0:7}}"
+        echo "└─ 🔖 [Info] Full Commit      : $ROOTCOMMIT"
+        echo "------------------------------"
+        # Download and Execute Setup Script From Exact Commit
+        setupengine() {
+          local repo="${1:?Missing Repository}"
+          local branch="${2:?Missing Branch}"
+          local argument="${3-}"
+          local commit="${4:-}"
+          local sourcedir="${RUNNER_TEMP:-/tmp}/RootSource-${ROOTENGINE:-Unknown}"
+          local setupscript="$sourcedir/setup.sh"
+          # Validate Requested Setup Script Commit
+          if [[ ! "$commit" =~ ^[a-fA-F0-9]{40}$ ]]; then
+            echo "└─ ⚠️ [Error] Invalid Setup Commit : ${Commit:-Missing}"
+            return 1
+          fi
+
+          echo "└─ 🔗 [Info] Setup Repository : $repo"
+          echo "└─ 🌿 [Info] Setup Branch     : $branch"
+          echo "└─ 📌 [Info] Setup Argument   : ${argument:-None}"
+          echo "└─ 🔖 [Info] Setup Commit     : $commit"
+          # Prepare Clean Directory For Setup Script
+          rm -rf -- "$sourcedir"
+          mkdir -p "$sourcedir"
+          # Download Setup Script From Immutable Commit URL
+          echo "└─ 📥 [Info] Downloading Setup Script..."
+          if ! curl -fsSL --retry 3 --retry-all-errors \
+            "https://raw.githubusercontent.com/${repo}/${commit}/kernel/setup.sh" \
+            -o "$setupscript"; then
+            echo "└─ ⚠️ [Error] Failed to Download Setup Script"
+            echo "└─ [Info] Repository : $repo"
+            echo "└─ [Info] Commit     : $commit"
+            return 1
+          fi
+
+          # Reject Missing or Empty Setup Scripts
+          if [[ ! -s "$setupscript" ]]; then
+            echo "└─ ⚠️ [Error] Downloaded Setup Script is Empty"
+            return 1
+          fi
+
+          # Preserve Original Setup Script Argument Behavior
+          echo "└─ 🚀 Executing Setup Script..."
+          if [[ -n "$argument" ]]; then
+            bash "$setupscript" "$argument"
+          else
+            bash "$setupscript"
+          fi
+        }
+        # Verify and Install Exact Root Engine Commit
+        checkoutrootcommit() {
+          local dir="$1"
+          local commit="$2"
+          local branch="$3"
+          local actual=""
+          local archive=""
+          local tempdir=""
+          # Validate Source Directory and Requested Commit
+          if [[ ! -d "$dir" ]]; then
+            echo "└─ ⚠️ [Error] Root Engine Directory Not Found : $dir"
+            return 1
+          fi
+
+          if [[ ! "$commit" =~ ^[a-fA-F0-9]{40}$ ]]; then
+            echo "└─ ⚠️ [Error] Invalid Requested Commit : $commit"
+            return 1
+          fi
+
+          echo "└─ 🔎 [Info] Verifying Root Engine Commit..."
+          echo "└─ 📂 [Info] Directory  : $dir"
+          echo "└─ 📦 [Info] Repository : $KSUREPO"
+          echo "└─ 🌿 [Info] Branch     : $branch"
+          echo "└─ 🔖 [Info] Requested  : $commit"
+          # Verify Requested Commit Against GitHub API
+          actual="$(
+            curl -fsSL --retry 3 --retry-all-errors \
+              -H "Accept: application/vnd.github+json" \
+              -H "Authorization: Bearer $GITHUB_TOKEN" \
+              "https://api.github.com/repos/${KSUREPO}/commits/${commit}" |
+              jq -r '.sha // empty'
+          )" || {
+            echo "└─ ⚠️ [Error] Failed to Verify Remote Commit"
+            return 1
+          }
+          # Reject Remote Commit that Does Not Match Requested SHA
+          if [[ "${actual,,}" != "${commit,,}" ]]; then
+            echo "└─ ⚠️ [Error] Remote Commit Verification Failed"
+            echo "└─ [Info] Requested : $commit"
+            echo "└─ [Info] Actual    : ${actual:-Not Found}"
+            return 1
+          fi
+
+          # Download Verified Commit as Source Archive
+          archive="https://api.github.com/repos/${KSUREPO}/tarball/${commit}"
+          tempdir="$(mktemp -d)"
+          # Remove Temporary Archive and Extraction Files on Every Exit Path
+          trap 'rm -rf -- "$tempdir"' RETURN
+          echo "└─ 📥 [Info] Downloading Exact Root Engine Commit..."
+          if ! curl -fsSL --retry 3 --retry-all-errors \
+            -H "Accept: application/vnd.github+json" \
+            -H "Authorization: Bearer $GITHUB_TOKEN" \
+            "$archive" \
+            -o "$tempdir/source.tar.gz"; then
+            echo "└─ ⚠️ [Error] Failed to Download Requested Commit"
+            return 1
+          fi
+
+          # Extract Source Archive Without its Top-Level Directory
+          echo "└─ 📦 [Info] Extracting Requested Source..."
+          mkdir -p "$tempdir/extracted"
+          if ! tar -xzf "$tempdir/source.tar.gz" \
+            -C "$tempdir/extracted" \
+            --strip-components=1; then
+            echo "└─ ⚠️ [Error] Failed to Extract Requested Source"
+            return 1
+          fi
+
+          # Validate Extracted Root Engine Source Layout
+          if [[ ! -f "$tempdir/extracted/Kbuild" &&
+                ! -f "$tempdir/extracted/kernel/Kbuild" ]]; then
+            echo "└─ ⚠️ [Error] Downloaded Source Does Not Match Expected Layout"
+            return 1
+          fi
+
+          # Replace Existing Source Files While Preserving Git Directory
+          echo "└─ 🔄 [Info] Replacing Root Engine Source..."
+          if ! find "$dir" -mindepth 1 -maxdepth 1 \
+            ! -name ".git" -exec rm -rf -- {} +; then
+            echo "└─ ⚠️ [Error] Failed to Clean Existing Source"
+            return 1
+          fi
+
+          # Install Verified Source Into Existing Directory
+          if ! cp -a "$tempdir/extracted/." "$dir/"; then
+            echo "└─ ⚠️ [Error] Failed to Install Requested Source"
+            return 1
+          fi
+
+          # Validate Installed Source Layout
+          if [[ ! -f "$dir/Kbuild" &&
+                ! -f "$dir/kernel/Kbuild" ]]; then
+            echo "└─ ⚠️ [Error] Installed Root Engine Source is Invalid"
+            return 1
+          fi
+
+          echo "└─ 📌 [Info] Remote Commit Verified : $actual"
+          echo "└─ 📌 [Info] Exact Source Installed : $commit"
+        }
+        # Record Root Engine Version and Export Build Metadata
+        recordrootversion() {
+          local GITCOMMITHASH="${ROOTCOMMIT:0:7}"
+          echo "└─ 🔖 [Info] Current Commit : $GITCOMMITHASH"
+          echo "└─ 🏷️ [Info] Manager Tag    : $MANAGERTAG"
+          echo "└─ 🔢 [Info] KSU Version    : $KSUVERSION"
+          # Export Bersion Variables For Subsequent Workflow Steps
+          {
+            echo "KSUVERSION=$KSUVERSION"
+            echo "KSUVER=$KSUVERSION"
+            echo "GITCOMMITHASH=$GITCOMMITHASH"
+          } >> "$GITHUB_ENV"
+        }
+        # Update Version Fallback When Source Defines it
+        configureksuversionfallback() {
+          if [[ -f kernel/Kbuild ]] &&
+             grep -q '^KSU_VERSION_FALLBACK := ' kernel/Kbuild; then
+            sed -i \
+              "s/^KSU_VERSION_FALLBACK := .*/KSU_VERSION_FALLBACK := $KSUVERSION/" \
+              kernel/Kbuild
+            echo "└─ 📌 [Info] KSU Version Fallback : $KSUVERSION"
+          fi
+        }
+        # Configure Selected Root Engine
+        case "$ROOTENGINE" in
+          SukiSU-Ultra)
+            echo "└─ 🚀 [Info] Setting Up SukiSU-Ultra..."
+            setupengine "$KSUREPO" "$MANAGERBRANCH" "$BRANCHPATH" "$ROOTCOMMIT"
+            cd KernelSU || {
+              echo "└─ ⚠️ [Error] SukiSU-Ultra Directory Not Found"
+              exit 1
+            }
+            # Locate Makefile or Kbuild Defining Full Version
+            KVERSIONFILE=""
+            for file in kernel/Makefile kernel/Kbuild Makefile Kbuild; do
+              if [[ -f "$file" ]] &&
+                 grep -qE '^[[:space:]]*KSU_VERSION_FULL[[:space:]]*:=' "$file"; then
+                KVERSIONFILE="$file"
+                break
+              fi
+              
+            done
+
+            # Apply Custom Manager Tag and Kernel Display Name
+            if [[ -n "$KVERSIONFILE" ]]; then
+              sed -i -E \
+                "s|^[[:space:]]*KSU_VERSION_FULL[[:space:]]*:=.*|KSU_VERSION_FULL := ${MANAGERTAG}-Crimson|" \
+                "$KVERSIONFILE"
+              echo "└─ 📌 [Info] Modified File       : $KVERSIONFILE"
+              echo "└─ 📌 [Info] Kernel Full Version : ${MANAGERTAG}-⚡Andrei⚡"
+            else
+              echo "└─ ⚠️ [Warn] Kernel Full Version Not Found"
+              echo "└─ 📂 [Info] Current Directory : $PWD"
+              grep -n 'KSU_VERSION_FULL' \
+                Makefile Kbuild kernel/Makefile kernel/Kbuild 2>/dev/null || true
+            fi
+
+            recordrootversion
+            configureksuversionfallback
+            echo "└─ 🎉 SukiSU-Ultra Setup Complete"
+            ;;
+          BakaSU)
+            echo "└─ 🚀 [Info] Setting Up ReSukiSU (BakaSU)..."
+            setupengine "$KSUREPO" "$MANAGERBRANCH" "$MANAGERBRANCH" "$ROOTCOMMIT"
+            cd KernelSU || {
+              echo "└─ ⚠️ [Error] ReSukiSU Directory Not Found"
+              exit 1
+            }
+            checkoutrootcommit "$PWD" "$ROOTCOMMIT" "$MANAGERBRANCH"
+            recordrootversion
+            configureksuversionfallback
+            # Set Manager Version Format in the Selected defconfig.
+            if [[ -n "${DEFCONFIG:-}" && -f "$DEFCONFIG" ]]; then
+              sed -i '/^CONFIG_KSU_FULL_NAME_FORMAT=/d' "$DEFCONFIG"
+              printf 'CONFIG_KSU_FULL_NAME_FORMAT="%%TAG_NAME%%"\n' >> "$DEFCONFIG"
+            fi
+
+            echo "└─ 🎉 ReSukiSU (BakaSU) Setup Complete"
+            ;;
+          KernelSU-Next)
+            echo "└─ 🚀 [Info] Setting Up KernelSU-Next..."
+            setupengine "$KSUREPO" "$BRANCHPATH" "$BRANCHPATH" "$ROOTCOMMIT"
+            cd KernelSU-Next || {
+              echo "└─ ⚠️ [Error] KernelSU-Next Directory Not Found"
+              exit 1
+            }
+            checkoutrootcommit "$PWD" "$ROOTCOMMIT" "$MANAGERBRANCH"
+            recordrootversion
+            configureksuversionfallback
+            # Select inline SUSFS hook mode when SUSFS is enabled.
+            if [[ "$SUSFS" != "-1" ]] &&
+               [[ -f kernel/supercall/dispatch.c ]]; then
+              perl -0777 -i -pe '
+                s/#ifdef CONFIG_HAVE_SYSCALL_TRACEPOINTS.*?#endif/
+                strscpy(cmd.mode, "Inline", sizeof(cmd.mode));
+                /s
+              ' kernel/supercall/dispatch.c
+
+              echo "└─ 📌 [Info] SUSFS Hook Mode Set to Inline"
+            fi
+
+            echo "└─ 🎉 KernelSU-Next Setup Complete"
+            ;;
+          KernelSU)
+            echo "└─ 🚀 [Info] Setting Up KernelSU..."
+            setupengine "$KSUREPO" "$MANAGERBRANCH" "$MANAGERBRANCH" "$ROOTCOMMIT"
+            cd KernelSU || {
+              echo "└─ ⚠️ [Error] KernelSU Directory Not Found"
+              exit 1
+            }
+            checkoutrootcommit "$PWD" "$ROOTCOMMIT" "$MANAGERBRANCH"
+            recordrootversion
+            configureksuversionfallback
+            echo "└─ 🎉 KernelSU Setup Complete"
+            ;;
+          *)
+            echo "└─ ⚠️ [Error] Unsupported Root Engine : $ROOTENGINE"
+            exit 1
+            ;;
+        esac
+        # Export Composite Action Outputs For Calling Workflow
+        {
+          echo "ksuversion=$KSUVERSION"
+          echo "managertag=$MANAGERTAG"
+        } >> "$GITHUB_OUTPUT"
+        echo "------------------------------"
+        echo "└─ 🎉 [Info] Root Engine Configuration Complete"
+        echo "└─ 📦 [Info] Engine            : $ROOTENGINE"
+        echo "└─ 📂 [Info] Setup Repository  : $KSUREPO"
+        echo "└─ 🌿 [Info] Setup Branch      : $MANAGERBRANCH"
+        echo "└─ 🔖 [Info] Requested Commit  : ${ROOTCOMMITSHORT:-${ROOTCOMMIT:0:7}}"
+        echo "└─ 🔖 [Info] Full Commit SHA   : $ROOTCOMMIT"
+        echo "└─ 🏷️ [Info] Manager Tag       : $MANAGERTAG"
+        echo "└─ 🔢 [Info] KSU Version       : $KSUVERSION"
+        echo "└─ 📁 [Info] Setup Argument    : ${BRANCHPATH:-None}"
+        echo "------------------------------"
