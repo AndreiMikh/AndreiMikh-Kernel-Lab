@@ -575,49 +575,71 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           OWNER: ${{ github.repository }}
         run: |
-          set -Eeuo pipefail      
+          set -Eeuo pipefail
           # Default Cache Restoration State
-          echo "cache-restored=false" >> "$GITHUB_OUTPUT"      
+          echo "cache-restored=false" >> "$GITHUB_OUTPUT"
           # Define Release and Cache Paths
           TAG="${{ steps.extract-info.outputs.cpu }}"
           FILE="Cache-${{ inputs.FILE }}-${{ inputs.ROOTENGINE }}-${{ github.ref_name }}.tar.zst"
           CACHEDIR="${{ env.CCACHE_DIR }}"
           ARCHIVE="${RUNNER_TEMP}/${FILE}"
-          RESTOREDIR="${CACHEDIR}.restore"      
+          RESTOREDIR="${CACHEDIR}.restore"
           echo "└─ 📦 Release Tag : $TAG"
           echo "└─ 📁 Cache File  : $FILE"
-          echo "└─ 📂 Cache Path  : $CACHEDIR"      
+          echo "└─ 📂 Cache Path  : $CACHEDIR"
           # Prepare Cache Directory
           mkdir -p "$CACHEDIR"
-          chmod 775 "$CACHEDIR"      
+          chmod 775 "$CACHEDIR"
           # Fetch GitHub Release Metadata
-          echo "└─ 📩 Fetching Release Metadata..."      
-          ASSETJSON=$(curl -fsSL \
+          echo "└─ 📩 Fetching Release Metadata..."
+          HTTP_CODE=$(curl -sSL \
             --retry 3 \
             --retry-delay 2 \
+            --connect-timeout 30 \
+            -o "${RUNNER_TEMP}/ccache-release.json" \
+            -w '%{http_code}' \
             -H "Authorization: Bearer $GH_TOKEN" \
             -H "Accept: application/vnd.github+json" \
-            "https://api.github.com/repos/${OWNER}/releases/tags/${TAG}") || {
-              echo "└─ ⚠️ Release Metadata Unavailable"
+            "https://api.github.com/repos/${OWNER}/releases/tags/${TAG}")
+          # Handle GitHub Release Response
+          case "$HTTP_CODE" in
+            200)
+              echo "└─ 📌 Release Metadata Retrieved"
+              ASSETJSON=$(cat "${RUNNER_TEMP}/ccache-release.json")
+              ;;
+            404)
+              echo "└─ ℹ️ GitHub Release Not Found : $TAG"
+              echo "└─ ➡️ No Release Cache Available Yet"
+              echo "└─ ⏭️ Continuing Without Release Cache"
+              rm -f "${RUNNER_TEMP}/ccache-release.json"
               exit 0
-          }      
+              ;;
+            *)
+              echo "└─ ⚠️ Release Metadata Unavailable : HTTP $HTTP_CODE"
+              echo "└─ ⏭️ Continuing Without Release Cache"
+              rm -f "${RUNNER_TEMP}/ccache-release.json"
+              exit 0
+              ;;
+          esac
           # Locate Matching Cache Asset
           ASSETURL=$(jq -r \
             --arg FILE "$FILE" \
-            '.assets[] | select(.name == $FILE) | .url' \
-            <<< "$ASSETJSON")      
+            '.assets[]? | select(.name == $FILE) | .url' \
+            <<< "$ASSETJSON" | head -n 1)
           # Continue Without Cache if Asset Does Not Exist
           if [[ -z "$ASSETURL" || "$ASSETURL" == "null" ]]; then
-            echo "└─ ⚠️ Cache Asset Not Found"
-            echo "└─ ➡️ Continuing Without Release Cache"
+            echo "└─ ℹ️ Cache Asset Not Found : $FILE"
+            echo "└─ ➡️ No Cache Available Yet"
+            echo "└─ ⏭️ Continuing Without Release Cache"
+            rm -f "${RUNNER_TEMP}/ccache-release.json"
             exit 0
           fi
-      
-          echo "└─ 🚀 Cache Asset Located"      
-          # Remove Any Previous Temporary Archive
-          rm -f "$ARCHIVE"      
+
+          echo "└─ 🚀 Cache Asset Located"
+          # Remove Previous Temporary Files
+          rm -f "$ARCHIVE"
           # Download Cache Archive
-          echo "└─ 🌐 Downloading Cache Archive..."      
+          echo "└─ 🌐 Downloading Cache Archive..."
           if ! curl -fL \
             --retry 5 \
             --retry-delay 3 \
@@ -627,53 +649,54 @@ jobs:
             -H "Accept: application/octet-stream" \
             -A "Mozilla/5.0" \
             "$ASSETURL" \
-            -o "$ARCHIVE"; then      
+            -o "$ARCHIVE"; then
             echo "└─ ⚠️ Cache Download Failed"
-            rm -f "$ARCHIVE"
+            rm -f "$ARCHIVE" "${RUNNER_TEMP}/ccache-release.json"
             exit 0
           fi
-      
+
           # Verify Downloaded Archive Exists and is Not Empty
-          [[ -s "$ARCHIVE" ]] || {
+          if [[ ! -s "$ARCHIVE" ]]; then
             echo "└─ ⚠️ Cache Archive is Empty"
-            rm -f "$ARCHIVE"
+            rm -f "$ARCHIVE" "${RUNNER_TEMP}/ccache-release.json"
             exit 0
-          }      
+          fi
+
           # Display Archive Information
           echo "└─ 📊 Archive Information :"
-          ls -lh "$ARCHIVE"      
+          ls -lh "$ARCHIVE"
           # Verify ZStandard Archive Integrity
-          echo "└─ 🔍 Testing Archive Integrity..."   
+          echo "└─ 🔍 Testing Archive Integrity..."
           if ! zstd -t "$ARCHIVE"; then
             echo "└─ ⚠️ Archive Integrity Test Failed"
-            rm -f "$ARCHIVE"
+            rm -f "$ARCHIVE" "${RUNNER_TEMP}/ccache-release.json"
             exit 0
           fi
-      
-          echo "└─ 🚀 Archive Integrity Verified"    
+
+          echo "└─ 📌 Archive Integrity Verified"
           # Prepare Temporary Restoration Directory
           rm -rf "$RESTOREDIR"
-          mkdir -p "$RESTOREDIR"     
+          mkdir -p "$RESTOREDIR"
           # Extract Cache Into Temporary Directory
-          echo "└─ 📦 Extracting Cache Archive..."      
+          echo "└─ 📦 Extracting Cache Archive..."
           if ! tar \
             --use-compress-program=unzstd \
             -xf "$ARCHIVE" \
-            -C "$RESTOREDIR"; then    
+            -C "$RESTOREDIR"; then
             echo "└─ ⚠️ Cache Extraction Failed"
             rm -rf "$RESTOREDIR"
-            rm -f "$ARCHIVE"
+            rm -f "$ARCHIVE" "${RUNNER_TEMP}/ccache-release.json"
             exit 0
           fi
-      
-          # Replace Existing Cache Only After Successful Extraction
+
+          # Replace Existing Cache After Successful Extraction
           rm -rf "$CACHEDIR"
-          mv "$RESTOREDIR" "$CACHEDIR"      
-          # Ensure Cache Files Are Accessible by Build
-          chmod -R 775 "$CACHEDIR"      
-          # Remove Temporary Archive
-          rm -f "$ARCHIVE"      
-          echo "└─ 🚀 Cache Restoration Completed"      
+          mv "$RESTOREDIR" "$CACHEDIR"
+          # Ensure Cache Files are Accessible by Build
+          chmod -R 775 "$CACHEDIR"
+          # Remove Temporary Files
+          rm -f "$ARCHIVE" "${RUNNER_TEMP}/ccache-release.json"
+          echo "└─ 🎉 Cache Restoration Completed"
           # Report Successful Cache Restoration
           echo "cache-restored=true" >> "$GITHUB_OUTPUT"
     
