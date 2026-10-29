@@ -817,23 +817,28 @@ jobs:
       # Install Android Repository Tool
       - name: 🧰 Install Repository Tool
         uses: ./kernel_workspace/AndreiMikh-Kernel-Lab/.github/actions/Repo-Tool
-   
+
+      # Initialize the Selected Manifest, Enforce Fallback Configuration and Sync Sources
       - name: 🔄 Initialize and Sync Repository
         env:
+          # 📌 Selected Kernel Manifest Configuration
           FILE: ${{ steps.resolve-file.outputs.file }}
+        shell: bash
         run: |
-          set -euo pipefail
-          # Set Timezone (UTC+0800)
+          set -Eeuo pipefail
+          # 🕒 Configure Runner Timezone (UTC+0800)
           export TZ='Etc/GMT-8'
-          timezone() { date '+%Y-%m-%d %H:%M:%S UTC%z'; }
+          timezone() {
+            date '+%Y-%m-%d %H:%M:%S UTC%z'
+          }
           echo "🕒 Start Time : $(timezone)"
-          # Configure Git For Faster and More Reliable Repository Sync
+          # ⚙️ Optimize Git for Faster and More Reliable Repository Synchronization
           echo "⚙️ Applying Git Performance Tweaks..."
-          # Increase Parallel Fetch Operations
+          # Increase Number of Parallel Git Fetch Operations
           git config --global fetch.parallel 16
-          # Disable Git Compression to Reduce CPU Overhead
+          # Disable Git Compression to Reduce CPU Overhead During Fetching
           git config --global core.compression 0
-          # Use Git Protocol Version 2 For More Efficient Fetching
+          # Use Git Protocol Version 2 For More Efficient Communication
           git config --global protocol.version 2
           # Disable Interactive Authentication Prompts
           export GIT_TERMINAL_PROMPT=0
@@ -842,14 +847,30 @@ jobs:
           export GIT_HTTP_LOW_SPEED_TIME=999999
           # Move to Kernel Workspace
           cd "$WORKDIR"
-          # Manifest Preparation
+          # Validate the Selected Manifest Name Before Accessing Files
+          if [[ -z "${FILE:-}" || "$FILE" == */* || "$FILE" == *..* ]]; then
+            echo "└─ ⚠️ Invalid Manifest Configuration : ${FILE:-<empty>}"
+            exit 1
+          fi
+
+          # Define Manifest Repository and File Paths
           MANIFESTBASE="https://github.com/${MANIFESTREPO}/${MANIFESTREPONAME}.git"
-          # Repository Initialize
-          echo "└─ 🚀 Initializing Repository..."         
-          if [[ ! -d ".repo" ]] || \
-             [[ ! -f ".repo/manifests/${FILE}.xml" ]]; then        
+          MANIFESTFILE=".repo/manifests/${FILE}.xml"
+          FALLBACKMANIFEST="$GITHUB_WORKSPACE/.repo/fallbackmanifests/${FILE}.xml"
+          # Validate Required Fallback Manifest
+          if [[ ! -f "$FALLBACKMANIFEST" ]]; then
+            echo "└─ ⚠️ Fallback Manifest Not Found : $FALLBACKMANIFEST"
+            exit 1
+          fi
+
+          # Initialize Repository Only When Required
+          echo "└─ 🚀 Initializing Repository..."
+          if [[ ! -d ".repo" || ! -f "$MANIFESTFILE" ]]; then
             echo "└─ 🔄 Running Repository Init (Missing or New Manifest)..."
-            repo init -u "$MANIFESTBASE" -b "$MANIFESTBRANCH" -m "${FILE}.xml" \
+            repo init \
+              -u "$MANIFESTBASE" \
+              -b "$MANIFESTBRANCH" \
+              -m "${FILE}.xml" \
               --depth=1 \
               --no-clone-bundle \
               --no-tags
@@ -857,27 +878,35 @@ jobs:
             echo "└─ ⚡ Repository Initialized, Skipping Init"
           fi
 
-          # Fallback Manifest Injection
-          echo "└─ 📥 Enforcing Fallback Manifest..."
+          # Enforce Fallback Manifest Only When its Contents Differ
+          # Keeps Fallback Manifest as the Source of Truth Without Repeatedly Copying an Identical File
+          echo "└─ 📥 Checking Fallback Manifest..."
           mkdir -p .repo/manifests
-          cp "$GITHUB_WORKSPACE/.repo/fallbackmanifests/${FILE}.xml" \
-             ".repo/manifests/${FILE}.xml"
-          # Remove 'KS-Kernel.LNX.5.0.R3-Rel' Prebuilts Entries
-          echo "└─ 🧹 Removing ks-kernel.lnx.5.0.r3-rel manifest entries..."
+          if ! cmp -s "$FALLBACKMANIFEST" "$MANIFESTFILE"; then
+            echo "└─ 🔄 Updating Fallback Manifest..."
+            cp "$FALLBACKMANIFEST" "$MANIFESTFILE"
+          else
+            echo "└─ ⚡ Fallback Manifest Unchanged, Skipping Copy"
+          fi
+
+          # Remove Unwanted KS-Kernel.LNX.5.0.R3-Rel Manifest Prebuilt Entries
+          # Apply Cleanup After Copying so Fallback Manifest is Always the Baseline Configuration
+          echo "└─ 🧹 Removing Unwanted KS-Kernel.LNX.5.0.R3-Rel Manifest Prebuilt Entries..."
           sed -i \
             -e '/prebuilts\/asuite"/{/ks-kernel\.lnx\.5\.0\.r3-rel/d}' \
             -e '/tools\/tradefederation\/prebuilts"/{/ks-kernel\.lnx\.5\.0\.r3-rel/d}' \
-            ".repo/manifests/${FILE}.xml"  
+            "$MANIFESTFILE"
+          # 📃 Display Configured Repository Projects
           echo "📃 Repository List :"
           repo list || true
-          # CodeLinaro Connectivity Check
-          echo "└─ 🔎 Testing CodeLinaro Repository..."          
+          # Check Whether CodeLinaro Build-Tools Repository is Reachable
+          echo "└─ 🔎 Testing CodeLinaro Repository..."
           if timeout 15s git ls-remote \
             https://git.codelinaro.org/clo/la/kernel/prebuilts/build-tools \
             >/dev/null 2>&1; then
             echo "└─ CodeLinaro Repository : 🟢 Online"
           else
-            STATUS=$?         
+            STATUS=$?
             if [[ "$STATUS" -eq 124 ]]; then
               echo "└─ CodeLinaro Repository : 🟠 Not Responsive"
             else
@@ -885,61 +914,92 @@ jobs:
             fi
           fi
 
-          # Sync Jobs Control      
-          echo "└─ 📁 Syncing Repository..."          
-          SYNCFLAGS="-c --force-sync --no-clone-bundle --no-tags \
-          --optimized-fetch --prune --retry-fetches=5 --verbose \
-          -j$(nproc)"          
-          echo "└─ ⚡ Using $(nproc) Parallel Jobs"     
-          # Watchdog
+          # Prepare Repository Synchronization Options
+          echo "└─ 📁 Syncing Repository..."
+          # Use an Array to Preserve Each Repo Sync Argument
+          SYNCFLAGS=(
+            -c
+            --force-sync
+            --no-clone-bundle
+            --no-tags
+            --optimized-fetch
+            --prune
+            --retry-fetches=5
+            --verbose
+            "-j$(nproc)"
+          )
+          echo "└─ ⚡ Using $(nproc) Parallel Jobs"
+          # ⏱️ Start Watchdog to Report Synchronization Progress
           (
             while true; do
-              echo "└─ ⏳ Sync Alive... $(timezone)"
               sleep 60
+              echo "└─ ⏳ Sync Alive... $(timezone)"
             done
           ) &
-          WATCHDOGPID=$!              
-          if timeout 25m repo sync $SYNCFLAGS; then
+          WATCHDOGPID=$!
+          # Ensure Watchdog is Stopped When Step Exits
+          cleanupwatchdog() {
+            if [[ -n "${WATCHDOGPID:-}" ]]; then
+              kill "$WATCHDOGPID" >/dev/null 2>&1 || true
+              wait "$WATCHDOGPID" 2>/dev/null || true
+            fi
+          }
+          trap cleanupwatchdog EXIT
+          # Synchronize All Projects With a 25-Minute Timeout
+          if timeout 25m repo sync "${SYNCFLAGS[@]}"; then
             SYNCSTATUS=0
           else
             SYNCSTATUS=$?
           fi
-       
-          # Cleanup Watchdog
-          kill "$WATCHDOGPID" >/dev/null 2>&1 || true
-          wait "$WATCHDOGPID" 2>/dev/null || true
-          # Final Check
-          if [[ $SYNCSTATUS -ne 0 ]]; then
-            echo "└─ ⚠️ Repository Sync Failed"
+
+          # Stop Watchdog After Synchronization Finishes
+          cleanupwatchdog
+          trap - EXIT
+          # Stop Workflow if Repository Synchronization Fails
+          if [[ "$SYNCSTATUS" -ne 0 ]]; then
+            if [[ "$SYNCSTATUS" -eq 124 ]]; then
+              echo "└─ ⚠️ Repository Sync Timed Out After 25 Minutes"
+            else
+              echo "└─ ⚠️ Repository Sync Failed (Exit Code : $SYNCSTATUS)"
+            fi
             exit 1
           fi
-      
+
           echo "└─ ⚡ Repository Sync Completed"
-          # Inspection
+          # Inspect Repository Metadata and Directory Sizes
           echo "└─ 📂 Inspecting Repository Directory..."
           echo "------------ Root ------------"
-          ls -la .repo/ || true          
+          ls -la .repo/ || true
           echo "---------- Manifest ----------"
-          ls -la .repo/manifests* || true          
+          ls -la .repo/manifests/ || true
           echo "------------ Tool ------------"
-          ls -la .repo/repo || true          
-          echo "└─ 📊 Repository Breakdown        :"
+          ls -la .repo/repo || true
+          # Display Sizes of Individual Repository Metadata Directories
+          echo "└─ 📊 Repository Breakdown    :"
           du -sh .repo/* 2>/dev/null || true
-          echo "└─ 📊 Repository Size Summary     :"
-          du -sh .repo || true         
-          # Kernel Repository Detection
+          # Display the Total Repository Metadata Size
+          echo "└─ 📊 Repository Size Summary :"
+          du -sh .repo || true
+          # Locate a Build Configuration to Identify the Kernel Repository
           echo "└─ 🔎 Detecting Kernel Repository..."
-          KREPOSPATH=$(find . -type f -name "build.config*" \
-            -not -path "*/.repo/*" \
-            -print -quit)      
+          KREPOSPATH=$(
+            find . \
+              -type f \
+              -name "build.config*" \
+              -not -path "*/.repo/*" \
+              -print -quit
+          )
+          # Fail if No Kernel Build Configuration was Found
           if [[ -z "$KREPOSPATH" ]]; then
             echo "└─ ⚠️ No Build Configuration Found"
             exit 1
           fi
-      
-          echo "└─ 📌 Build Configuration Found  : $KREPOSPATH"      
-          KERNELREPOSITORY=$(dirname "${KREPOSPATH#./}")      
-          echo "└─ 🔎 Detected Kernel Repository : $KERNELREPOSITORY"      
+
+          # Derive Kernel Repository Path From Build Configuration
+          echo "└─ 📌 Build Configuration Found : $KREPOSPATH"
+          KERNELREPOSITORY=$(dirname "${KREPOSPATH#./}")
+          echo "└─ 🔎 Detected Kernel Repository : $KERNELREPOSITORY"
+          # Export Detected Kernel Repository For Subsequent Workflow Steps
           echo "KERNELREPOSITORY=$KERNELREPOSITORY" >> "$GITHUB_ENV"
           echo "🎉 Kernel Repository Pipeline Complete"
 
