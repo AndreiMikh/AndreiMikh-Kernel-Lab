@@ -7,7 +7,7 @@ import kotlin.system.exitProcess
 // ==========================
 fun File.requireExists() {
     check(exists()) {
-        "Required file does not exist: $path"
+        "Required File Does Not Exist: $path"
     }
 }
 fun File.lines(): MutableList<String> =
@@ -145,7 +145,7 @@ fun File.deleteBlock(
         out.add(line)
     }
     check(!inBlock) {
-        "Unterminated Delete Block In $path: ${start.pattern}"
+        "Unterminated Delete Block in $path: ${start.pattern}"
     }
     if (changed) {
         writeLines(out)
@@ -260,7 +260,7 @@ fun addInotifyMarkUserMaskFunction(file: File) {
     )
     logApply(
         file,
-        "Inserted INOTIFY MARK USER MASK() Helper Before INOTIFY FDINFO()"
+        "Inserted Inotify Mark User Mask() Helper Before Inotify FDINFO()"
     )
 }
 fun applyFdinfo(file: File) {
@@ -297,7 +297,7 @@ fun applyFdinfo(file: File) {
     )
     logApply(
         file,
-        "Replaced IGNORED MASK:%X With IGNORED MASK:0"
+        "Replaced Ignored Mask:%X With Ignored Mask:0"
     )
     addInotifyMarkUserMaskFunction(file)
 }
@@ -374,7 +374,7 @@ fun applyAndroid15VmaBlock(
                     .containsMatchIn(lines[it])
             }
     check(ifIndex != null) {
-        "Unable to Locate VMA END Comparison"
+        "Unable to Locate VMA End Comparison"
     }
     lines[ifIndex!!] =
         lines[ifIndex].replace(
@@ -398,7 +398,7 @@ fun applyAndroid15VmaBlock(
     )
     logApply(
         namespace,
-        "Added TRACE/HOOKS/FS Headers Include"
+        "Added Trace/Hooks/Filesystem Headers Include"
     )
     taskMmu.insertAfterFirst(
         Regex("""int ret = 0, copied = 0;"""),
@@ -467,7 +467,7 @@ fun revertAndroid15VmaBlock(
     )
     logRevert(
         namespace,
-        "Removed TRACE/HOOKS/FS Headers Include"
+        "Removed Trace/Hooks/Filesystem Headers Include"
     )
 }
 
@@ -595,7 +595,7 @@ fun restorePatchContext(patch: File) {
             )
             manifestEntries.add("S\t${idmap.absolutePath}")
             stubCount++
-            logContext(idmap, "Created Compatibility Stub For Missing MNT IDMAPPING Headers")
+            logContext(idmap, "Created Compatibility Stub For Missing Mount ID Mapping Headers")
         }
     }
     if (manifestEntries.isNotEmpty()) {
@@ -670,10 +670,10 @@ fun applyPostPatchFixups() {
             taskMmu.writeLines(lines)
             logPostfix(
                 taskMmu,
-                "Inserted VMA PAD START() Fallback"
+                "Inserted VMA Pad Start() Fallback"
             )
         }
-        // FOLD FILEMAP FIXUP ENTRY Compatibility
+        // Fold File Map Fixup Entry Compatibility
         content = taskMmu.readText()
         if (
             content.contains("__fold_filemap_fixup_entry(") &&
@@ -699,7 +699,7 @@ fun applyPostPatchFixups() {
                     )
                     logPostfix(
                         taskMmu,
-                        "Added PAGE SIZE COMPAT Headers Include"
+                        "Added Page Size Compat Headers Include"
                     )
                 }
             } else {
@@ -724,7 +724,7 @@ fun applyPostPatchFixups() {
                 taskMmu.writeLines(lines)
                 logPostfix(
                     taskMmu,
-                    "Inserted FOLD FILEMAP FIXUP ENTRY() Stub"
+                    "Inserted Fold File Map Fixup Entry() Stub"
                 )
             }
         }
@@ -750,7 +750,7 @@ fun applyPostPatchFixups() {
             )
             logPostfix(
                 namei,
-                "Rewrote 4-Arg SET NAMEIDATA() to 3-Arg Form"
+                "Rewrote 4-Arg Set Nameidata() to 3-Arg Form"
             )
         }
     }
@@ -772,7 +772,7 @@ fun applyPostPatchFixups() {
             )
             logPostfix(
                 openC,
-                "Rewrote 3-Arg GETNAME FLAGS() to 2-Arg Form"
+                "Rewrote 3-Arg Getname Flags() to 2-Arg Form"
             )
         }
     }
@@ -794,7 +794,7 @@ fun apply() {
             )
             logApply(
                 file,
-                "Normalized THIS LEN/MIN T() to SIZE T"
+                "Normalized This LEN/MIN T() to Size T"
             )
         }
         if (sublevel <= 117) {
@@ -822,7 +822,7 @@ fun apply() {
             )
             logApply(
                 namespace,
-                "Added LINUX/MNT IDMAPPING Headers Include"
+                "Added Linux/Mount ID Mapping Headers Include"
             )
             val openC =
                 f("fs/open.c")
@@ -832,7 +832,7 @@ fun apply() {
             )
             logApply(
                 openC,
-                "Added LINUX/MNT IDMAPPING Headers Include"
+                "Added Linux/Mount ID Mapping Headers Include"
             )
             applyFdinfo(
                 f("fs/notify/fdinfo.c")
@@ -848,7 +848,7 @@ fun apply() {
             ) {
                 logApply(
                     memory,
-                    "Removed LINUX/SWAP-SLOTS.H"
+                    "Removed Linux/Swap Slots Headers"
                 )
             }
         }
@@ -864,7 +864,7 @@ fun apply() {
             )
             logApply(
                 base,
-                "Added TRACE/HOOKS/SCHED Headers"
+                "Added Trace/Hooks/Sched Headers"
             )
         }
         if (sublevel <= 141) {
@@ -876,7 +876,7 @@ fun apply() {
             )
             logApply(
                 base,
-                "Added LINUX/DMA BUF Headers"
+                "Added Linux/DMA BUF Headers"
             )
         }
     }
@@ -897,7 +897,7 @@ fun apply() {
             )
             logApply(
                 memory,
-                "Added LINUX/ZSWAP Headers"
+                "Added Linux/Zswap Headers"
             )
         }
         if (sublevel <= 92) {
@@ -909,7 +909,7 @@ fun apply() {
             )
             logApply(
                 base,
-                "Added LINUX/DMA BUF Headers"
+                "Added Linux/DMA BUF Headers"
             )
         }
     }
@@ -925,7 +925,7 @@ fun apply() {
             ) {
                 logApply(
                     exec,
-                    "Removed LINUX/DMA BUF Headers"
+                    "Removed Linux/DMA BUF Headers"
                 )
             }
         }
@@ -940,7 +940,7 @@ fun apply() {
             ) {
                 logApply(
                     taskMmu,
-                    "Renamed VMA DATA PAGES to VMA PAGES"
+                    "Renamed VMA Data Pages to VMA Pages"
                 )
             }
         }
@@ -971,7 +971,7 @@ fun revert() {
             ) {
                 logRevert(
                     file,
-                    "Restored INT THIS LEN/MIN T(INT)"
+                    "Restored Int This LEN/MIN T(Int)"
                 )
             }
         }
@@ -999,7 +999,7 @@ fun revert() {
             )
             logRevert(
                 namespace,
-                "Removed LINUX/MNT ID MAPPING Headers"
+                "Removed Linux/Mount ID Mapping Headers"
             )
             val openC =
                 f("fs/open.c")
@@ -1008,7 +1008,7 @@ fun revert() {
             )
             logRevert(
                 openC,
-                "Removed LINUX/MNT ID MAPPING Headers"
+                "Removed Linux/Mount ID Mapping Headers"
             )
             val susfs =
                 f("fs/susfs.c")
@@ -1027,7 +1027,7 @@ fun revert() {
                 )
                 logRevert(
                     susfs,
-                    "Restored SUSFS IUID INTO MNT() Form"
+                    "Restored SuSFS IUID Into Mount() Form"
                 )
             }
             revertFdinfo(
@@ -1047,7 +1047,7 @@ fun revert() {
                 )
                 logRevert(
                     memory,
-                    "Restored LINUX/SWAP SLOTS Headers"
+                    "Restored Linux/Swap Slots Headers"
                 )
             }
         }
@@ -1062,7 +1062,7 @@ fun revert() {
             )
             logRevert(
                 base,
-                "Removed TRACE/HOOKS/SCHED Headers"
+                "Removed Trace/Hooks/Sched Headers"
             )
         }
         if (sublevel <= 141) {
@@ -1073,7 +1073,7 @@ fun revert() {
             )
             logRevert(
                 base,
-                "Removed LINUX/DMA BUF Headers"
+                "Removed Linux/DMA BUF Headers"
             )
         }
     }
@@ -1093,7 +1093,7 @@ fun revert() {
             )
             logRevert(
                 memory,
-                "Removed LINUX/ZSWAP Headers"
+                "Removed Linux/Zswap Headers"
             )
         }
         if (sublevel <= 92) {
@@ -1104,7 +1104,7 @@ fun revert() {
             )
             logRevert(
                 base,
-                "Removed LINUX/DMA BUF Headers"
+                "Removed Linux/DMA BUF Headers"
             )
         }
     }
@@ -1123,7 +1123,7 @@ fun revert() {
                 )
                 logRevert(
                     exec,
-                    "Restored LINUX/DMA BUF Headers"
+                    "Restored Linux/DMA BUF Headers"
                 )
             }
         }
@@ -1140,7 +1140,7 @@ fun revert() {
                 )
                 logRevert(
                     taskMmu,
-                    "Restored VMA DATA PAGES"
+                    "Restored VMA Data Pages"
                 )
             }
         }
