@@ -5,22 +5,26 @@ import kotlin.system.exitProcess
 // ====================================================
 // Basic File Helpers
 // ====================================================
+// Stop Immediately When Required Source or Header File is Missing
 fun File.requireExists() {
     check(exists()) {
         "Required File Does Not Exist: $path"
     }
 }
+// Read File Into Mutable List so Patch Helpers can Edit Individual Lines
 fun File.lines(): MutableList<String> =
     readLines().toMutableList()
 fun File.writeLines(lines: List<String>) {
     writeText(lines.joinToString("\n") + "\n")
 }
+// Shorten Log Paths by Removing Configured Kernel Work-Directory Prefix
 fun File.rel(): String =
     path.removePrefix("$workDir/").removePrefix("$workDir\\")
 
 // ====================================================
 // Safe Insert Helpers
 // ====================================================
+// Insert New Lines After First Matching Anchor; Avoid Duplicate Insertions
 fun File.insertAfterFirst(
     anchor: Regex,
     vararg newLines: String
@@ -38,6 +42,7 @@ fun File.insertAfterFirst(
     writeLines(lines)
     return true
 }
+// Insert After Every Matching Anchor, Processing From Bottom to Top so Earlier Indexes Remain Valid
 fun File.insertAfter(
     anchor: Regex,
     vararg newLines: String
@@ -63,6 +68,7 @@ fun File.insertAfter(
     }
     return changed
 }
+// Insert New Lines Immediately Before First Matching Anchor
 fun File.insertBeforeFirst(
     anchor: Regex,
     vararg newLines: String
@@ -84,6 +90,7 @@ fun File.insertBeforeFirst(
 // ====================================================
 // Safe Delete Helpers
 // ====================================================
+// Remove Every Line Matching the Pattern and Report Whether the File Changed
 fun File.deleteLine(pattern: Regex): Boolean {
     requireExists()
     val lines = lines()
@@ -94,6 +101,7 @@ fun File.deleteLine(pattern: Regex): Boolean {
     writeLines(filtered)
     return true
 }
+// Remove Each Matching Line Plus the Requested Number of Following Lines
 fun File.deleteLineAndFollowing(
     pattern: Regex,
     extraLines: Int
@@ -121,6 +129,7 @@ fun File.deleteLineAndFollowing(
     }
     return changed
 }
+// Remove Delimited Block, Including its Start and End Marker Lines
 fun File.deleteBlock(
     start: Regex,
     end: Regex
@@ -156,6 +165,7 @@ fun File.deleteBlock(
 // ====================================================
 // Replace Helpers
 // ====================================================
+// Apply a Regex Replacement to Every Line and Write Only When a Change Occurred
 fun File.replaceEachLine(
     pattern: Regex,
     replacement: String
@@ -175,6 +185,7 @@ fun File.replaceEachLine(
     }
     return changed
 }
+// Replace Exact Whole-Line Matches; Unrelated Lines are Preserved Unchanged
 fun File.replaceWholeLine(
     oldLine: String,
     newLine: String
@@ -213,13 +224,17 @@ fun logContext(file: File, detail: String) =
 // ====================================================
 // Environment
 // ====================================================
+// Select Compatibility Rules Using Kernel Branch Name Supplied by Workflow
 val kernelModule =
     System.getenv("KERNELMODULE") ?: ""
+// Parse Kernel Patch Sublevel; Use 0 if Environment Value is Absent or Invalid
 val sublevel =
     (System.getenv("SUBLEVEL") ?: "0")
         .toIntOrNull() ?: 0
+// First CLI Argument Selects Apply, Context, PostFix, or Revert Mode
 val mode =
     args.getOrNull(0) ?: "Apply"
+// Second CLI Argument Selects Kernel Source Tree, with Common GKI Path as Default
 val workDir =
     args.getOrNull(1)
         ?: "kernel_workspace/kernel_platform/common"
@@ -229,6 +244,7 @@ fun f(relPath: String) =
 // ====================================================
 // Common Anchors
 // ====================================================
+// Anchors Used to Identify Inline FDINFO Comment Block that Compatibility Patch Removes
 val fdinfoCommentStart =
     Regex("""^[ \t]*/\*$""")
 val fdinfoCommentEnd =
@@ -249,6 +265,7 @@ val inotifyHelper =
 // ====================================================
 // Inotify FDInfo
 // ====================================================
+// Add Helper Only When it is Not Already Present, Making Operation Repeatable
 fun addInotifyMarkUserMaskFunction(file: File) {
     if (file.readText().contains("inotify_mark_user_mask(")) {
         logSkip(file, "INOTIFY MARK USER MASK() Already Present")
@@ -263,6 +280,7 @@ fun addInotifyMarkUserMaskFunction(file: File) {
         "Inserted Inotify Mark User Mask() Helper Before Inotify FDINFO()"
     )
 }
+// Adapt Inotify FDINFO Output to Expected SuSFS-Compatible Mask Representation
 fun applyFdinfo(file: File) {
     file.requireExists()
     val content = file.readText()
@@ -301,6 +319,7 @@ fun applyFdinfo(file: File) {
     )
     addInotifyMarkUserMaskFunction(file)
 }
+// Restore Original FDINFO Mask Expression and Remove Helper Introduced by applyFdinfo()
 fun revertFdinfo(file: File) {
     if (!file.exists()) {
         logSkip(file, "FDINFO File Does Not Exist")
@@ -337,6 +356,7 @@ fun revertFdinfo(file: File) {
 // ====================================================
 // Android 15 VMA Compatibility Fixes
 // ====================================================
+// Apply Android 15 / 6.6 VMA Compatibility Edits to Task MMU and Namespace C Source
 fun applyAndroid15VmaBlock(
     taskMmu: File,
     namespace: File
@@ -410,6 +430,7 @@ fun applyAndroid15VmaBlock(
         "Added NR Subpages and Page Map Entry T Declarations"
     )
 }
+// Undo Android 15 VMA Edits, Including Inserted Declaration, Include, Assignment and Brace
 fun revertAndroid15VmaBlock(
     taskMmu: File,
     namespace: File
@@ -429,13 +450,11 @@ fun revertAndroid15VmaBlock(
         Regex(
             """^\s*pagemap_entry_t \*res = NULL;$"""
         )
-    )
-    
+    )    
     // Restore Inserted Assignment Safely
     taskMmu.deleteLine(
         Regex("""^\s*last_vma_end = vma->vm_end;$""")
     )
-
     // Restore Conditional Form if Added Brace Remains
     taskMmu.replaceEachLine(
         Regex(
@@ -474,12 +493,14 @@ fun revertAndroid15VmaBlock(
 // ====================================================
 // SUSFS Patch Context Restoration
 // ====================================================
+// Recognize Trace-Hook Includes and General C/C++ Include Directives While Parsing Patch Context
 val traceHookInclude = Regex("""^#include\s+(<trace/hooks/[^>]+>)\s*$""")
 val anyInclude = Regex("""^#include\s+([<"][^>"]+[>"])\s*$""")
 val contextManifest = File(
     (File(workDir).absoluteFile.parentFile ?: File(workDir).absoluteFile),
     ".fakepatches-context-manifest"
 )
+// Collect Include Lines From First Hunk of Each Diff so Missing SuSFS Patch Context can be Restored
 fun parsePatchContext(patchLines: List<String>): Map<String, List<String>> {
     val result = linkedMapOf<String, List<String>>()
     var currentFile: String? = null
@@ -523,6 +544,7 @@ fun parsePatchContext(patchLines: List<String>): Map<String, List<String>> {
     flushHunk()
     return result
 }
+// Create a Guarded Placeholder Only For a Missing Trace/Hooks Header Needed as Patch Context
 fun ensureContextStub(include: String): File? {
     val relativeHeader = include.removePrefix("<").removeSuffix(">")
     if (!relativeHeader.startsWith("trace/hooks/")) return null
@@ -538,7 +560,7 @@ fun ensureContextStub(include: String): File? {
     logContext(header, "Created Guarded Context-Only Stub")
     return header
 }
-
+// Restore Required Trace-Hook Include Context and Record Every Generated Change in a Manifest For Reversal
 fun restorePatchContext(patch: File) {
     check(patch.isFile) { "SUSFS Patch File Does Not Exist: ${patch.path}" }
     val plan = parsePatchContext(patch.readLines())
@@ -586,6 +608,7 @@ fun restorePatchContext(patch: File) {
         }
         if (changed) target.writeLines(lines)
     }
+    // Older Android 13 / 5.15 Baselines may Lack Mount ID Mapping Header; Create a Context-Only Stub
     if (kernelModule == "android13-5.15" && sublevel <= 41) {
         val idmap = f("include/linux/mnt_idmapping.h")
         if (!idmap.exists()) {
@@ -607,6 +630,7 @@ fun restorePatchContext(patch: File) {
         println("[Context] Patch Context Already Completed; Nothing Changed")
     }
 }
+// Use Manifest to Remove Only Context Includes and Stub Files Created by Script
 fun revertPatchContext() {
     if (!contextManifest.isFile) {
         println("[Context] No Generated Context Files to Revert")
@@ -643,6 +667,7 @@ fun revertPatchContext() {
 // ====================================================
 // Postfix Fixups
 // ====================================================
+// Apply Small Source-Level Compatibility Fixups After SuSFS Patch has been Applied
 fun applyPostPatchFixups() {
     val taskMmu =
         f("fs/proc/task_mmu.c")
@@ -781,6 +806,7 @@ fun applyPostPatchFixups() {
 // ====================================================
 // Apply Compatibility Patches
 // ====================================================
+// Apply Version-Specific Compatibility Changes Based on Kernel Base and Sublevel
 fun apply() {
     // Android 12 / 5.10 Apply Compatibility Patches
     if (kernelModule == "android12-5.10") {
@@ -950,6 +976,7 @@ fun apply() {
 // ====================================================
 // PostFix Compatibility Patches
 // ====================================================
+// Run Post-Patch Compatibility Adjustments Without Reapplying Patch Set
 fun postfix() {
     applyPostPatchFixups()
 }
@@ -957,6 +984,7 @@ fun postfix() {
 // ====================================================
 // Revert Compatibility Patches
 // ====================================================
+// Reverse Compatibility Edits Supported by Script and Remove Generated Context Files
 fun revert() {
     // Android 12 / 5.10 Revert Compatibility Patches
     if (kernelModule == "android12-5.10") {
@@ -1149,8 +1177,9 @@ fun revert() {
 }
 
 // ====================================================
-// Main
+// Execution
 // ====================================================
+// Dispatch Requested Operation and Convert Failures Into Non-Zero Process Exit
 try {
     when (mode) {
         "Apply" -> apply()
