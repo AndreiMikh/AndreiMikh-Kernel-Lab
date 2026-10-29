@@ -18,7 +18,7 @@ val workDir =
         ?: "kernel_workspace/kernel_platform/common"
 val patchFile =
     args.getOrNull(1) ?: run {
-        println("Usage: kotlin SusfsContext.kts <WorkDir> <PatchFile>")
+        println("Usage: kotlin SuSFS-Context.kts <WorkDir> <PatchFile>")
         exitProcess(1)
     }
 fun f(relPath: String) =
@@ -32,7 +32,6 @@ fun logContext(file: File, detail: String) =
 // Recognize Trace-Hook Includes and General C/C++ Include Directives While Parsing Patch Context
 val traceHookInclude = Regex("""^#include\s+(<trace/hooks/[^>]+>)\s*$""")
 val anyInclude = Regex("""^#include\s+([<"][^>"]+[>"])\s*$""")
-
 // Collect Include Lines From First Hunk of Each Diff so Missing SuSFS Patch Context can be Restored
 fun parsePatchContext(patchLines: List<String>): Map<String, List<String>> {
     val result = linkedMapOf<String, List<String>>()
@@ -53,7 +52,6 @@ fun parsePatchContext(patchLines: List<String>): Map<String, List<String>> {
         hunkLines = mutableListOf()
         inFirstHunk = false
     }
-
     for (line in patchLines) {
         if (line.startsWith("diff --git ")) {
             flushHunk()
@@ -77,7 +75,6 @@ fun parsePatchContext(patchLines: List<String>): Map<String, List<String>> {
     flushHunk()
     return result
 }
-
 // Create a Guarded Placeholder Only For a Missing Trace/Hooks Header Needed as Patch Context
 fun ensureContextStub(include: String): File? {
     val relativeHeader = include.removePrefix("<").removeSuffix(">")
@@ -94,7 +91,6 @@ fun ensureContextStub(include: String): File? {
     logContext(header, "Created Guarded Context-Only Stub")
     return header
 }
-
 // Restore Required Trace-Hook Include Context and Create Any Required Context-Only Stub Headers
 fun restorePatchContext(patch: File) {
     check(patch.isFile) { "SUSFS Patch File Does Not Exist: ${patch.path}" }
@@ -155,5 +151,4 @@ fun restorePatchContext(patch: File) {
         println("[Context] Patch Context Already Completed; Nothing Changed")
     }
 }
-
 restorePatchContext(File(patchFile))
