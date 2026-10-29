@@ -622,7 +622,7 @@ fun restorePatchContext(patch: File) {
         }
     }
     // Android 16 / 6.12 Task MMU Context Compatibility
-    if (kernelModule == "android16-6.12" && sublevel >= 69) {
+    if (kernelModule == "android16-6.12") {
         val taskMmu = f("fs/proc/task_mmu.c")
         if (taskMmu.isFile && taskMmu.readText().contains("vma_data_pages")) {
             if (taskMmu.replaceEachLine(Regex("""vma_data_pages"""), "vma_pages")) {
@@ -966,7 +966,7 @@ fun apply() {
     }
     // Android 16 / 6.12 Apply Compatibility Patches
     if (kernelModule == "android16-6.12") {
-        if (sublevel >= 58) {
+        if (sublevel <= 58) {
             val exec =
                 f("fs/exec.c")
             if (
@@ -980,20 +980,20 @@ fun apply() {
                 )
             }
         }
-        if (sublevel >= 69) {
-            val taskMmu =
-                f("fs/proc/task_mmu.c")
-            if (
-                taskMmu.replaceEachLine(
-                    Regex("""vma_data_pages"""),
-                    "vma_pages"
-                )
-            ) {
-                logApply(
-                    taskMmu,
-                    "Renamed VMA Data Pages to VMA Pages"
-                )
-            }
+        // Apply VMA Helper Compatibility Across Android 16 / 6.12 Sublevels
+        val taskMmu =
+            f("fs/proc/task_mmu.c")        
+        if (
+            taskMmu.exists() &&
+            taskMmu.replaceEachLine(
+                Regex("""vma_data_pages"""),
+                "vma_pages"
+            )
+        ) {
+            logApply(
+                taskMmu,
+                "Renamed VMA Data Pages to VMA Pages"
+            )
         }
     }
 }
@@ -1163,7 +1163,7 @@ fun revert() {
     }
     // Android 16 / 6.12 Revert Compatibility Patches
     if (kernelModule == "android16-6.12") {
-        if (sublevel >= 58) {
+        if (sublevel <= 58) {
             val exec =
                 f("fs/exec.c")
             if (
@@ -1180,23 +1180,27 @@ fun revert() {
                 )
             }
         }
-        if (sublevel >= 69) {
-            val taskMmu =
-                f("fs/proc/task_mmu.c")
-            val contextReplacementTracked =
-                contextManifest.isFile &&
-                contextManifest.readLines().any {
-                    it.startsWith("R\t${taskMmu.absolutePath}\t")
-                }
+        // Android 16 / 6.12 Revert VMA Helper Name
+        val taskMmu =
+            f("fs/proc/task_mmu.c")
+        // Check Whether Context Manifest Tracks Replacement
+        val contextReplacementTracked =
+            contextManifest.isFile &&
+            contextManifest.readLines().any {
+                it.startsWith("R\t${taskMmu.absolutePath}\t")
+            }   
+        // Restore Original VMA Helper Name When Not Context-Tracked
+        if (
+            !contextReplacementTracked &&
+            taskMmu.isFile &&
+            taskMmu.readText().contains("vma_pages")
+        ) {
             if (
-                !contextReplacementTracked &&
-                taskMmu.exists() &&
-                taskMmu.readText().contains("vma_pages")
-            ) {
                 taskMmu.replaceEachLine(
                     Regex("""vma_pages"""),
                     "vma_data_pages"
                 )
+            ) {
                 logRevert(
                     taskMmu,
                     "Restored VMA Data Pages"
@@ -1204,6 +1208,7 @@ fun revert() {
             }
         }
     }
+    // Revert Remaining Tracked Patch Context
     revertPatchContext()
 }
 
