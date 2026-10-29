@@ -2,9 +2,9 @@
 import java.io.File
 import kotlin.system.exitProcess
 
-// ==========================
+// ====================================================
 // Basic File Helpers
-// ==========================
+// ====================================================
 fun File.requireExists() {
     check(exists()) {
         "Required File Does Not Exist: $path"
@@ -18,9 +18,9 @@ fun File.writeLines(lines: List<String>) {
 fun File.rel(): String =
     path.removePrefix("$workDir/").removePrefix("$workDir\\")
 
-// ==========================
+// ====================================================
 // Safe Insert Helpers
-// ==========================
+// ====================================================
 fun File.insertAfterFirst(
     anchor: Regex,
     vararg newLines: String
@@ -81,9 +81,9 @@ fun File.insertBeforeFirst(
     return true
 }
 
-// ==========================
+// ====================================================
 // Safe Delete Helpers
-// ==========================
+// ====================================================
 fun File.deleteLine(pattern: Regex): Boolean {
     requireExists()
     val lines = lines()
@@ -153,9 +153,9 @@ fun File.deleteBlock(
     return changed
 }
 
-// ==========================
+// ====================================================
 // Replace Helpers
-// ==========================
+// ====================================================
 fun File.replaceEachLine(
     pattern: Regex,
     replacement: String
@@ -196,9 +196,9 @@ fun File.replaceWholeLine(
     return changed
 }
 
-// ==========================
+// ====================================================
 // Logging
-// ==========================
+// ====================================================
 fun logApply(file: File, detail: String) =
     println("[Apply]   ${file.rel()} | $detail")
 fun logPostfix(file: File, detail: String) =
@@ -210,9 +210,9 @@ fun logSkip(file: File, detail: String) =
 fun logContext(file: File, detail: String) =
     println("[Context] ${file.rel()} | $detail")
 
-// ==========================
+// ====================================================
 // Environment
-// ==========================
+// ====================================================
 val kernelModule =
     System.getenv("KERNELMODULE") ?: ""
 val sublevel =
@@ -226,9 +226,9 @@ val workDir =
 fun f(relPath: String) =
     File(workDir, relPath)
 
-// ==========================
+// ====================================================
 // Common Anchors
-// ==========================
+// ====================================================
 val fdinfoCommentStart =
     Regex("""^[ \t]*/\*$""")
 val fdinfoCommentEnd =
@@ -246,9 +246,9 @@ val inotifyHelper =
         ""
     )
 
-// ==========================
+// ====================================================
 // Inotify FDInfo
-// ==========================
+// ====================================================
 fun addInotifyMarkUserMaskFunction(file: File) {
     if (file.readText().contains("inotify_mark_user_mask(")) {
         logSkip(file, "INOTIFY MARK USER MASK() Already Present")
@@ -334,9 +334,9 @@ fun revertFdinfo(file: File) {
     )
 }
 
-// ==========================
-// Android 15 VMA Compatibility
-// ==========================
+// ====================================================
+// Android 15 VMA Compatibility Fixes
+// ====================================================
 fun applyAndroid15VmaBlock(
     taskMmu: File,
     namespace: File
@@ -357,7 +357,7 @@ fun applyAndroid15VmaBlock(
     )
     logApply(
         taskMmu,
-        "Inserted LAST VMA END Update After SMAP GATHER STATS()"
+        "Inserted Last VMA End Update After SMAP Gather Stats()"
     )
     val lines = taskMmu.lines()
     val updateIndex =
@@ -365,7 +365,7 @@ fun applyAndroid15VmaBlock(
             it.contains("last_vma_end = vma->vm_end;")
         }
     check(updateIndex >= 0) {
-        "Unable to Locate Inserted LAST VMA END Assignment"
+        "Unable to Locate Inserted Last VMA End Assignment"
     }
     val ifIndex =
         (updateIndex - 1 downTo 0)
@@ -390,7 +390,7 @@ fun applyAndroid15VmaBlock(
     taskMmu.writeLines(lines)
     logApply(
         taskMmu,
-        "Wrapped LAST VMA END Update in Conditional Block"
+        "Wrapped Last VMA End Update in Conditional Block"
     )
     namespace.insertAfterFirst(
         Regex("""#include <trace/hooks/blk\.h>"""),
@@ -407,7 +407,7 @@ fun applyAndroid15VmaBlock(
     )
     logApply(
         taskMmu,
-        "Added NR SUBPAGES and PAGEMAP ENTRY T Declarations"
+        "Added NR Subpages and Page Map Entry T Declarations"
     )
 }
 fun revertAndroid15VmaBlock(
@@ -430,7 +430,7 @@ fun revertAndroid15VmaBlock(
             """^\s*pagemap_entry_t \*res = NULL;$"""
         )
     )
-
+    
     // Restore Inserted Assignment Safely
     taskMmu.deleteLine(
         Regex("""^\s*last_vma_end = vma->vm_end;$""")
@@ -471,9 +471,9 @@ fun revertAndroid15VmaBlock(
     )
 }
 
-// ==========================
+// ====================================================
 // SUSFS Patch Context Restoration
-// ==========================
+// ====================================================
 val traceHookInclude = Regex("""^#include\s+(<trace/hooks/[^>]+>)\s*$""")
 val anyInclude = Regex("""^#include\s+([<"][^>"]+[>"])\s*$""")
 val contextManifest = File(
@@ -640,9 +640,9 @@ fun revertPatchContext() {
     println("[Context] Reverted $removedIncludes Include(s), Removed $removedStubs Stub Header(s)")
 }
 
-// ==========================
+// ====================================================
 // Postfix Fixups
-// ==========================
+// ====================================================
 fun applyPostPatchFixups() {
     val taskMmu =
         f("fs/proc/task_mmu.c")
@@ -778,9 +778,9 @@ fun applyPostPatchFixups() {
     }
 }
 
-// ==========================
+// ====================================================
 // Apply Compatibility Patches
-// ==========================
+// ====================================================
 fun apply() {
     // Android 12 / 5.10 Apply Compatibility Patches
     if (kernelModule == "android12-5.10") {
@@ -947,16 +947,16 @@ fun apply() {
     }
 }
 
-// ==========================
+// ====================================================
 // PostFix Compatibility Patches
-// ==========================
+// ====================================================
 fun postfix() {
     applyPostPatchFixups()
 }
 
-// ==========================
+// ====================================================
 // Revert Compatibility Patches
-// ==========================
+// ====================================================
 fun revert() {
     // Android 12 / 5.10 Revert Compatibility Patches
     if (kernelModule == "android12-5.10") {
@@ -1148,9 +1148,9 @@ fun revert() {
     revertPatchContext()
 }
 
-// ==========================
+// ====================================================
 // Main
-// ==========================
+// ====================================================
 try {
     when (mode) {
         "Apply" -> apply()
