@@ -4,7 +4,7 @@ import kotlin.system.exitProcess
 
 val workDir = args.getOrNull(0) ?: "kernel_workspace/kernel_platform/common"
 val patchPath = args.getOrNull(1) ?: run {
-    println("Usage: kotlin SusfsContext.kts <workDir> <patchFile>")
+    println("Usage: Kotlin SuSFS-Context.kts <workDir> <patchFile>")
     exitProcess(1)
 }
 
