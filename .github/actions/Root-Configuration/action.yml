@@ -1,6 +1,6 @@
 name: Configure Root Engine
 description: Configure and Install Selected Kernel Root Engine
-# Define Inputs Passed From the Calling Workflow
+# Define Inputs Passed From Calling Workflow
 inputs:
   ROOTENGINE:
     description: Selected Root Engine
@@ -61,10 +61,11 @@ runs:
         MANAGERTAG: ${{ inputs.MANAGERTAG }}
         SUSFS: ${{ inputs.SUSFS }}
       run: |
+        # Enable Strict Bash Error Handling
         set -Eeuo pipefail
-        # Enter Kernel Source Directory
+        # Enter Kernel Platform Directory
         cd "$KERNELPLATFORM"
-        # Validate Resolved Root Engine Metadata
+        # Ensure Root Engine Version and Manager Tag were Resolved
         if [[ -z "$KSUVERSION" || -z "$MANAGERTAG" ]]; then
           echo "└─ ⚠️ [Error] Root Engine Metadata Was Not Resolved"
           exit 1
@@ -77,7 +78,7 @@ runs:
           exit 1
         fi
 
-        # Print Resolved Root Engine Metadata
+        # Display Selected Engine, Manager Tag, Version and Commit
         echo "------------------------------"
         echo "└─ 🔎 [Info] Resolved Root Engine Metadata"
         echo "└─ 📦 [Info] Engine           : $ROOTENGINE"
@@ -86,7 +87,7 @@ runs:
         echo "└─ 🔖 [Info] Requested Commit : ${ROOTCOMMITSHORT:-${ROOTCOMMIT:0:7}}"
         echo "└─ 🔖 [Info] Full Commit      : $ROOTCOMMIT"
         echo "------------------------------"
-        # Download and Execute Root Engine Setup Script From Exact Commit
+        # Download Setup Script From Exact Requested Commit
         setupengine() {
           local repo="${1:?Missing Repository}"
           local branch="${2:?Missing Branch}"
@@ -94,20 +95,21 @@ runs:
           local commit="${4:-}"
           local sourcedir="${RUNNER_TEMP:-/tmp}/RootSource-${ROOTENGINE:-Unknown}"
           local setupscript="$sourcedir/setup.sh"
-          # Validate Requested Full Commit Hash
+          # Validate Full Commit SHA Before Downloading the Script
           if [[ ! "$commit" =~ ^[a-fA-F0-9]{40}$ ]]; then
             echo "└─ ⚠️ [Error] Invalid Setup Commit : ${commit:-Missing}"
             return 1
           fi
 
+          # Display Setup Script Source and Execution Parameters
           echo "└─ 🔗 [Info] Setup Repository : $repo"
           echo "└─ 🌿 [Info] Setup Branch     : $branch"
           echo "└─ 📌 [Info] Setup Argument   : ${argument:-None}"
           echo "└─ 🔖 [Info] Setup Commit     : $commit"
-          # Prepare Clean Setup Directory
+          # Recreate Clean Directory For Setup Script
           rm -rf "$sourcedir"
           mkdir -p "$sourcedir"
-          # Download Setup Script From Exact Commit
+          # Download Setup Script From Pinned Commit
           echo "└─ 📥 [Info] Downloading Setup Script..."
           if ! curl -fsSL --retry 3 --retry-all-errors \
             "https://raw.githubusercontent.com/${repo}/${commit}/kernel/setup.sh" \
@@ -124,33 +126,34 @@ runs:
             return 1
           fi
 
+           Execute Downloaded Setup Script with its Original Argument Behavior
           echo "└─ 🚀 Executing Setup Script..."
-          # Preserve Original Setup Script Argument Behavior
           if [[ -n "$argument" ]]; then
             bash "$setupscript" "$argument"
           else
             bash "$setupscript"
           fi
         }
-        # Verify and Install Exact Root Engine Commit
+        # Verify Remote Commit and Replace Existing Source
         checkoutrootcommit() {
           local dir="$1"
           local commit="$2"
           local branch="$3"
           local actual=""
           local archive=""
-          # Validate Root Engine Source Directory
+          # Ensure Root Engine Source Directory Exists
           if [[ ! -d "$dir" ]]; then
             echo "└─ ⚠️ [Error] Root Engine Directory Not Found : $dir"
             return 1
           fi
 
-          # Validate Requested Full Commit Hash
+          # Validate Requested Full Commit SHA
           if [[ ! "$commit" =~ ^[a-fA-F0-9]{40}$ ]]; then
             echo "└─ ⚠️ [Error] Invalid Requested Commit : $commit"
             return 1
           fi
 
+          # Display Commit Verification Details
           echo "└─ 🔎 [Info] Verifying Root Engine Commit..."
           echo "└─ 📂 [Info] Directory  : $dir"
           echo "└─ 📦 [Info] Repository : $KSUREPO"
@@ -167,7 +170,7 @@ runs:
             echo "└─ ⚠️ [Error] Failed to Verify Remote Commit"
             return 1
           }
-          # Reject Any Commit That Does Not Match Requested Hash
+          # Reject Commit if Returned SHA Does Not Match
           if [[ "${actual,,}" != "${commit,,}" ]]; then
             echo "└─ ⚠️ [Error] Remote Commit Verification Failed"
             echo "└─ [Info] Requested : $commit"
@@ -175,8 +178,9 @@ runs:
             return 1
           fi
 
-          # Download Verified Commit as Source Archive
+          # Build GitHub API URL For Exact Commit Archive
           archive="https://api.github.com/repos/${KSUREPO}/tarball/${commit}"
+          # Download Verified Commit Into a Temporary Directory
           echo "└─ 📥 [Info] Downloading Exact Root Engine Commit..."
           local tempdir
           tempdir="$(mktemp -d)"
@@ -207,7 +211,7 @@ runs:
             return 1
           fi
 
-          # Replace Existing Source While Preserving Git Directory
+          # Remove Existing Source Files While Preserving the Git Directory
           echo "└─ 🔄 [Info] Replacing Root Engine Source..."
           find "$dir" -mindepth 1 -maxdepth 1 \
             ! -name ".git" -exec rm -rf -- {} + || {
@@ -215,13 +219,13 @@ runs:
               rm -rf "$tempdir"
               return 1
             }
-          # Install Verified Source Into Existing Directory
+          # Copy Verified Source Into Existing Root Engine Directory
           cp -a "$tempdir/extracted/." "$dir/" || {
             echo "└─ ⚠️ [Error] Failed to Install Requested Source"
             rm -rf "$tempdir"
             return 1
           }
-          # Validate Installed Root Engine Source
+          # Validate Installed Source Layout
           if [[ ! -f "$dir/Kbuild" && ! -f "$dir/kernel/Kbuild" ]]; then
             echo "└─ ⚠️ [Error] Installed Root Engine Source is Invalid"
             rm -rf "$tempdir"
@@ -230,6 +234,7 @@ runs:
 
           # Remove Temporary Download and Extraction Files
           rm -rf "$tempdir"
+          # Report Successful Commit Verification and Source Installation
           echo "└─ 📌 [Info] Remote Commit Verified : $actual"
           echo "└─ 📌 [Info] Exact Source Installed : $commit"
         }
@@ -239,14 +244,14 @@ runs:
           echo "└─ 🔖 [Info] Current Commit : $GITCOMMITHASH"
           echo "└─ 🏷️ [Info] Manager Tag    : $MANAGERTAG"
           echo "└─ 🔢 [Info] KSU Version    : $KSUVERSION"
-          # Export Version Variables to Subsequent GitHub Actions Steps
+          # Make Root Engine Version Variables Available to Later Steps
           {
             echo "KSUVERSION=$KSUVERSION"
             echo "KSUVER=$KSUVERSION"
             echo "GITCOMMITHASH=$GITCOMMITHASH"
           } >> "$GITHUB_ENV"
         }
-        # Configure Root Engine Version Fallback
+        # Update Fallback Version in Kernel / Kbuild When Present
         configureksuversionfallback() {
           if [[ -f kernel/Kbuild ]] &&
              grep -q '^KSU_VERSION_FALLBACK := ' kernel/Kbuild; then
@@ -256,18 +261,19 @@ runs:
             echo "└─ 📌 [Info] KSU Version Fallback : $KSUVERSION"
           fi
         }
-        # Configure Selected Root Engine
+        # Execute Setup and Configuration Steps For Selected Engine
         case "$ROOTENGINE" in
           SukiSU-Ultra)
-            # Install SukiSU-Ultra and Apply the Custom Manager Version Format           
+            # Install SukiSU-Ultra Using Pinned Commit  
             echo "└─ 🚀 [Info] Setting Up SukiSU-Ultra..."
             setupengine "$KSUREPO" "$MANAGERBRANCH" "$BRANCHPATH" "$ROOTCOMMIT"
+            # Enter Installed SukiSU-Ultra Directory
             cd KernelSU || {
               echo "└─ ⚠️ [Error] SukiSU-Ultra Directory Not Found"
               exit 1
             }
             # Remove Commit Hash and Branch From SukiSU-Ultra Full Version
-            # Customize SukiSU-Ultra Full Version
+            # Initialize Kernel Version Definition File Variable
             KVERSIONFILE=""
             # Locate Makefile or Kbuild Containing Kernel Full Version
             for file in kernel/Makefile kernel/Kbuild Makefile Kbuild; do
@@ -281,56 +287,63 @@ runs:
 
             # Apply Custom SukiSU-Ultra Kernel Full Version
             if [[ -n "$KVERSIONFILE" ]]; then
-              # Set Displayed Version to Version Tag and Custom Name
+              # Use the Resolved Manager Tag and Custom Crimson Branding
               sed -i -E \
-                "s|^[[:space:]]*KSU_VERSION_FULL[[:space:]]*:=.*|KSU_VERSION_FULL := ${MANAGERTAG}-⚡Andrei⚡|" \
+                "s|^[[:space:]]*KSU_VERSION_FULL[[:space:]]*:=.*|KSU_VERSION_FULL := ${MANAGERTAG}-Crimson|" \
                 "$KVERSIONFILE"
               echo "└─ 📌 [Info] Modified File       : $KVERSIONFILE"
-              echo "└─ 📌 [Info] Kernel Full Version : ${MANAGERTAG}-⚡Andrei⚡"
+              echo "└─ 📌 [Info] Kernel Full Version : ${MANAGERTAG}-Crimson"
             else
-              # Warn if SukiSU-Ultra Kernel Full Version Definition Cannot Be Found
+              # Warn if Full Version Definition Cannot be Located
               echo "└─ ⚠️ [Warn] Kernel Full Version Not Found"
               echo "└─ 📂 [Info] Current Directory : $PWD"
-
-              # Print Any Existing Definitions for Troubleshooting
+              # Display Existing Definitions to Help Diagnose Missing Entry
               grep -n 'KSU_VERSION_FULL' Makefile Kbuild kernel/Makefile kernel/Kbuild 2>/dev/null || true
             fi
 
+            # Export Version Metadata and Configure Fallback Version
             recordrootversion
             configureksuversionfallback
             echo "└─ 🎉 SukiSU-Ultra Setup Complete"
             ;;
           BakaSU)
-            # Install BakaSU and Apply the Custom Manager Version Format           
+            # Install BakaSU Using the Pinned Commit    
             echo "└─ 🚀 [Info] Setting Up ReSukiSU (BakaSU)..."
             setupengine "$KSUREPO" "$MANAGERBRANCH" "$MANAGERBRANCH" "$ROOTCOMMIT"
+            # Enter Installed BakaSU Directory
             cd KernelSU || {
               echo "└─ ⚠️ [Error] ReSukiSU Directory Not Found"
               exit 1
             }
+            # Replace Existing Files with Exact Verified Commit
             checkoutrootcommit "$PWD" "$ROOTCOMMIT" "$MANAGERBRANCH"
+            # Export Version Metadata and Configure Fallback Version
             recordrootversion
             configureksuversionfallback
-            # Manager Version Format
+            # Configure Custom BakaSU Manager Version Format
             if [[ -n "${DEFCONFIG:-}" && -f "$DEFCONFIG" ]]; then
               sed -i '/^CONFIG_KSU_FULL_NAME_FORMAT=/d' "$DEFCONFIG"
-              printf 'CONFIG_KSU_FULL_NAME_FORMAT="crimson-%%TAG_NAME%%"\n' >> "$DEFCONFIG"
+              # Prefix Manager Tag
+              printf 'CONFIG_KSU_FULL_NAME_FORMAT="Crimson-%%TAG_NAME%%"\n' >> "$DEFCONFIG"
             fi
 
             echo "└─ 🎉 ReSukiSU (BakaSU) Setup Complete"
             ;;
           KernelSU-Next)
-            # Install KernelSU-Next and Apply the Custom Hook Mode
+            # Install KernelSU-Next Using Requested Setup Argument
             echo "└─ 🚀 [Info] Setting Up KernelSU-Next..."
             setupengine "$KSUREPO" "$BRANCHPATH" "$BRANCHPATH" "$ROOTCOMMIT"
+            # Enter Installed KernelSU-Next Directory
             cd KernelSU-Next || {
               echo "└─ ⚠️ [Error] KernelSU-Next Directory Not Found"
               exit 1
             }
+            # Replace Existing Files with Exact Verified Commit
             checkoutrootcommit "$PWD" "$ROOTCOMMIT" "$MANAGERBRANCH"
+            # Export Version Metadata and Configure Fallback Version
             recordrootversion
             configureksuversionfallback
-            # SUSFS Inline Hook Mode
+            # Apply SUSFS Inline Hook Mode When SUSFS is Enabled
             if [[ "$SUSFS" != "-1" ]] &&
                [[ -f kernel/supercall/dispatch.c ]]; then
               perl -0777 -i -pe '
@@ -344,30 +357,33 @@ runs:
             echo "└─ 🎉 KernelSU-Next Setup Complete"
             ;;
           KernelSU)
-            # Install KernelSU
+            # Install KernelSU Using the Pinned Commit
             echo "└─ 🚀 [Info] Setting Up KernelSU..."
             setupengine "$KSUREPO" "$MANAGERBRANCH" "$MANAGERBRANCH" "$ROOTCOMMIT"
+            # Enter Installed KernelSU Directory
             cd KernelSU || {
               echo "└─ ⚠️ [Error] KernelSU Directory Not Found"
               exit 1
             }
+            # Replace Existing Files with Exact Verified Commit
             checkoutrootcommit "$PWD" "$ROOTCOMMIT" "$MANAGERBRANCH"
+            # Export Version Metadata and Configure Fallback Version
             recordrootversion
             configureksuversionfallback
             echo "└─ 🎉 KernelSU Setup Complete"
             ;;
           *)
-            # Reject Unsupported Root Engine Selections
+            # Reject Any Root Engine That is Not Explicitly Supported
             echo "└─ ⚠️ [Error] Unsupported Root Engine : $ROOTENGINE"
             exit 1
             ;;
         esac
-        # Export Root Engine Outputs to Calling Workflow
+        # Publish Resolved Version and Manager Tag as Composite Outputs
         {
           echo "ksuversion=$KSUVERSION"
           echo "managertag=$MANAGERTAG"
         } >> "$GITHUB_OUTPUT"
-        # Print Final Root Engine Configuration Summary
+        # Display Final Root Engine Configuration and Version Metadata
         echo "------------------------------"
         echo "└─ 🎉 [Info] Root Engine Configuration Complete"
         echo "└─ 📦 [Info] Engine            : $ROOTENGINE"
