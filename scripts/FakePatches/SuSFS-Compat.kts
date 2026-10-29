@@ -475,7 +475,7 @@ when (mode) {
     "postfix" -> postfix()
     "revert" -> revert()
     else -> {
-        println("Usage: kotlin SusfsCompat.kts <apply|postfix|revert> [workDir]")
+        println("Usage: Kotlin SuSFS-Compat.kts <apply|postfix|revert> [workDir]")
         exitProcess(1)
     }
 }
