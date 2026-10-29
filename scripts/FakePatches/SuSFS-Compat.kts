@@ -988,7 +988,7 @@ try {
         "Revert" -> revert()
         else -> {
             println(
-                "Usage: Kotlin SusfsCompat.kts <Apply|PostFix|Revert> [WorkDir]"
+                "Usage: Kotlin SuSFS-Compat.kts <Apply|PostFix|Revert> [WorkDir]"
             )
             exitProcess(1)
         }
