@@ -102,7 +102,7 @@ fun File.replaceWholeLine(oldLine: String, newLine: String) {
     writeText(out.joinToString("\n") + "\n")
 }
 
-val kmi = System.getenv("KMI") ?: ""
+val kmi = System.getenv("KERNELMODULE") ?: ""
 val sublevel = (System.getenv("SUBLEVEL") ?: "0").toIntOrNull() ?: 0
 val mode = args.getOrNull(0) ?: "apply" // apply | postfix | revert
 val workDir = args.getOrNull(1) ?: "kernel_workspace/kernel_platform/common"
