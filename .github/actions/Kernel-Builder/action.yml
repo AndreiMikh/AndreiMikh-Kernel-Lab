@@ -14,10 +14,9 @@ inputs:
     default: "-1"
   # Enable or Disable Rust Compiler
   ENABLERUSTC:
-    description: Enable or disable Rust compiler and Bindgen
+    description: Enable or Disable Rust Compiler and Bindgen
     required: false
     default: "false"
-
 # Define Outputs Available to Calling Workflow
 outputs:
   # Report Kernel Build Status
@@ -32,6 +31,10 @@ outputs:
   fastbuildtime:
     description: Kernel Build Duration in Seconds
     value: ${{ steps.kernelbuild.outputs.fastbuildtime }}
+  # Report Whether Fast Build Fallback was Triggered
+  fallback:
+    description: Fast Build Fallback Status
+    value: ${{ steps.kernelbuild.outputs.fallback }}
 # Define Composite Action Execution Steps
 runs:
   using: composite
@@ -42,6 +45,7 @@ runs:
       env:
         FILE: ${{ inputs.FILE }}
         SUSFS: ${{ inputs.SUSFSREPOSITORY }}
+        WORKDIR: ${{ env.WORKDIR }}
         WORKSPACEDIR: ${{ env.WORKSPACEDIR }}
         KERNELPLATFORM: ${{ env.KERNELPLATFORM }}
         COMMONKERNELFOLDER: ${{ env.COMMONKERNELFOLDER }}
@@ -64,6 +68,7 @@ runs:
           echo "└─ [Info] 📌 Reason : $reason"
           echo "fastbuildstatus=failed" >> "$GITHUB_OUTPUT"
           echo "fallbackreason=$reason" >> "$GITHUB_OUTPUT"
+          echo "fallback=true" >> "$GITHUB_OUTPUT"
           exit 1
         }
         # Route Unexpected Errors Through Failure Handler
@@ -242,8 +247,15 @@ runs:
           echo "└─ ⚠️ [Warn] Clang++ Not Found"
           fallback "missingclangxx"
         }
+        # Validate CCache Before Creating Compiler Wrappers
+        if ! command -v ccache >/dev/null 2>&1; then
+          echo "└─ ⚠️ [Warn] Compiler Cache is Not Installed"
+          fallback "missingccache"   
+        fi
+      
         CCACHEWRAPPER="${WORKDIR}/cc-wrapper"
         CCACHECXXWRAPPER="${WORKDIR}/cxx-wrapper"
+        mkdir -p "$WORKDIR"
         printf '%s\n' \
           '#!/usr/bin/env bash' \
           'exec ccache "'"${REALCLANGBIN}"'" "$@"' \
@@ -263,7 +275,7 @@ runs:
         # Display Compiler Cache Diagnostics
         if command -v ccache >/dev/null 2>&1; then
           echo "└─ 📊 Compiler Cache Version :"
-          ccache --version | head -n1
+          ccache --version | head -n 1
           echo "└─ 📍 Compiler Cache Binary :"
           command -v ccache
           echo "└─ ⚙️ Compiler Cache Configuration :"
@@ -303,7 +315,7 @@ runs:
             echo "└─ 💾 Cache   : 3GiB"
             echo "└─ ⚙️ Jobs    : $(nproc --all)"
           fi
-          
+
         else
           echo "└─ 📊 ThinLTO Linker Cache : Disabled"
         fi
@@ -353,8 +365,8 @@ runs:
         fi
 
         # Pass Optional Fake Configuration Setting
-        if [[ -n "${CONFIG_FAKE_DISABLE:-}" ]]; then
-          MAKE_ARGS+=(CONFIG_FAKE_DISABLE="$CONFIG_FAKE_DISABLE")
+        if [[ -n "${CONFIG_FAKEINJECTION:-}" ]]; then
+          MAKE_ARGS+=(CONFIG_FAKEINJECTION="$CONFIG_FAKEINJECTION")
           echo "└─ 🧩 Fake Configuration Override : Enabled"
         fi
 
@@ -378,7 +390,7 @@ runs:
             CONFIGTOOL="$path"
             break
           fi
-          
+
         done
 
         # Search Source Tree When No Standard Path Exists
@@ -389,7 +401,7 @@ runs:
               -path '*/scripts/config' \
               -executable \
               -print 2>/dev/null |
-            head -n1
+            head -n 1
           )"
         fi
 
@@ -404,7 +416,7 @@ runs:
           fallback "missingconfigtool"
         fi
 
-        echo "└─ 🧰 Config Tool : $CONFIGTOOL"
+        echo "└─ 🧰 Configuration Tool : $CONFIGTOOL"
         # Configure ThinLTO For Supported 5.x Kernels
         echo "🧾 Configuring Link Time Optimization (LTO) For Kernel $KERNELVERSION"
         if [[ ! -s "$OUTDIR/.config" ]]; then
@@ -456,7 +468,7 @@ runs:
           else
             echo "└─ Not Available : $configsymbol"
           fi
-          
+
         done
 
         # Generate Final Kernel Configuration
@@ -468,21 +480,21 @@ runs:
           fallback "olddefconfigfailed"
         fi
 
-        # Verify Required KSU Configuration
+        # Verify Required KernelSU Configuration
         if [[ "$SUSFS" != "-1" ]]; then
-          echo "🔐 Verifying Required KSU Configuration"
+          echo "└─ 🔐 Verifying Required KernelSU Configuration"
           for configsymbol in \
             CONFIG_KSU_SUSFS
           do
-            if grep -q "^${configsymbol}=y$" out/.config; then
+            if grep -q "^${configsymbol}=y$" "$OUTDIR/.config"; then
               echo "└─ Enabled : $configsymbol"
             else
-              echo "⚠️ Required KSU Option Missing After Old Default Configuration : $configsymbol"
+              echo "└─ ⚠️ Required KernelSU Option Missing After Old Default Configuration : $configsymbol"
               fallback "ksuconfigmissing"
             fi
-            
+
           done
-          
+
         fi
 
         # Save Important Build Outputs For Fast Build Cache
@@ -556,22 +568,23 @@ runs:
         FASTBUILDTIME=$((FASTBUILDEND - FASTBUILDSTART))
         echo "fastbuildtime=$FASTBUILDTIME" >> "$GITHUB_OUTPUT"
         echo "fastbuildstatus=success" >> "$GITHUB_OUTPUT"
-        echo "└─⏱️ Build Time : ${FASTBUILDTIME}s"
+        echo "fallback=false" >> "$GITHUB_OUTPUT"
+        echo "└─ ⏱️ Build Time : ${FASTBUILDTIME}s"
         # Generate GitHub Actions Build Summary
         CCACHESUMMARY="$(ccache -s 2>&1)"
         {
           echo "## 🧠 Compiler Cache Performance Summary"
           echo "| Metric | Result |"
           echo "|---|---:|"
-          echo "| Build Status | 🚀 Success |"
-          echo "| Fast Build Time | **${FASTBUILDTIME}s** |"
-          echo "| Cacheable Calls | $(echo "$CCACHESUMMARY" | grep "Cacheable calls:" | sed 's/.*Cacheable calls:[[:space:]]*//') |"
-          echo "| Cache Hits | $(echo "$CCACHESUMMARY" | grep -E "^[[:space:]]*Hits:" | head -n1 | sed 's/.*Hits:[[:space:]]*//') |"
-          echo "| Direct Hits | $(echo "$CCACHESUMMARY" | grep "Direct:" | sed 's/.*Direct:[[:space:]]*//') |"
-          echo "| Preprocessed Hits | $(echo "$CCACHESUMMARY" | grep "Preprocessed:" | sed 's/.*Preprocessed:[[:space:]]*//') |"
-          echo "| Cache Misses | $(echo "$CCACHESUMMARY" | grep -E "^[[:space:]]*Misses:" | head -n1 | sed 's/.*Misses:[[:space:]]*//') |"
-          echo "| Uncacheable Calls | $(echo "$CCACHESUMMARY" | grep "Uncacheable calls:" | sed 's/.*Uncacheable calls:[[:space:]]*//') |"
-          echo "| Cache Size | $(echo "$CCACHESUMMARY" | grep "Cache size" | sed 's/.*Cache size (GB):[[:space:]]*//') |"
+          echo "| └─ Build Status | 🚀 Success |"
+          echo "| └─ Fast Build Time | **${FASTBUILDTIME}s** |"
+          echo "| └─ Cacheable Calls | $(echo "$CCACHESUMMARY" | grep "Cacheable calls:" | sed 's/.*Cacheable calls:[[:space:]]*//') |"
+          echo "| └─ Cache Hits | $(echo "$CCACHESUMMARY" | grep -E "^[[:space:]]*Hits:" | head -n 1 | sed 's/.*Hits:[[:space:]]*//') |"
+          echo "| └─ Direct Hits | $(echo "$CCACHESUMMARY" | grep "Direct:" | sed 's/.*Direct:[[:space:]]*//') |"
+          echo "| └─ Preprocessed Hits | $(echo "$CCACHESUMMARY" | grep "Preprocessed:" | sed 's/.*Preprocessed:[[:space:]]*//') |"
+          echo "| └─ Cache Misses | $(echo "$CCACHESUMMARY" | grep -E "^[[:space:]]*Misses:" | head -n 1 | sed 's/.*Misses:[[:space:]]*//') |"
+          echo "| └─ Uncacheable Calls | $(echo "$CCACHESUMMARY" | grep "Uncacheable calls:" | sed 's/.*Uncacheable calls:[[:space:]]*//') |"
+          echo "| └─ Cache Size | $(echo "$CCACHESUMMARY" | grep "Cache size" | sed 's/.*Cache size (GB):[[:space:]]*//') |"
           echo "### ⚡ Build Result"
           echo "**🎉 Build Completed Successfully**"
         } >> "$GITHUB_STEP_SUMMARY"
