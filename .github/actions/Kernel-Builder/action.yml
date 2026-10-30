@@ -1,0 +1,578 @@
+# GitHub Actions Composite Action: Kernel Build
+name: 🏗️ Kernel Build
+description: Configure, Compile and Validate Android Kernel with CCache, ThinLTO and Optional Rust Support
+# Define Inputs Required by Composite Action
+inputs:
+  # Specify Kernel Manifest Configuration File
+  FILE:
+    description: Kernel Manifest Configuration File
+    required: true
+  # Specify SUSFS Repository Configuration
+  SUSFSREPOSITORY:
+    description: SUSFS Repository Commit, Tag or Branch
+    required: false
+    default: "-1"
+  # Enable or Disable Rust Compiler
+  ENABLERUSTC:
+    description: Enable or disable Rust compiler and Bindgen
+    required: false
+    default: "false"
+
+# Define Outputs Available to Calling Workflow
+outputs:
+  # Report Kernel Build Status
+  fastbuildstatus:
+    description: Kernel Build Status
+    value: ${{ steps.kernelbuild.outputs.fastbuildstatus }}
+  # Report Kernel Build Failure Reason
+  fallbackreason:
+    description: Kernel Build Failure Reason
+    value: ${{ steps.kernelbuild.outputs.fallbackreason }}
+  # Report Kernel Build Duration
+  fastbuildtime:
+    description: Kernel Build Duration in Seconds
+    value: ${{ steps.kernelbuild.outputs.fastbuildtime }}
+# Define Composite Action Execution Steps
+runs:
+  using: composite
+  steps:
+    # Configure and Compile Android Kernel
+    - name: 🏗️ Kernel Build
+      id: kernelbuild
+      env:
+        FILE: ${{ inputs.FILE }}
+        SUSFS: ${{ inputs.SUSFSREPOSITORY }}
+        WORKSPACEDIR: ${{ env.WORKSPACEDIR }}
+        KERNELPLATFORM: ${{ env.KERNELPLATFORM }}
+        COMMONKERNELFOLDER: ${{ env.COMMONKERNELFOLDER }}
+        OUTDIR: ${{ env.OUTDIR }}
+        MANIFESTBRANCH: ${{ env.MANIFESTBRANCH }}
+        CPU: ${{ env.CPU }}
+        KERNELVERSION: ${{ env.KERNELVERSION }}
+        FULLVERSION: ${{ env.FULLVERSION }}
+        BUILDMETHOD: ${{ env.BUILDMETHOD }}
+        ENABLERUSTC: ${{ inputs.ENABLERUSTC }}
+        PYTHONWARNINGS: "ignore:invalid escape sequence"
+      shell: bash
+      run: |
+        # Enable Bash Strict Error Handling
+        set -Eeuo pipefail
+        # Handle Fast Build Failures
+        fallback() {
+          local reason="$1"
+          echo "└─ [Info] ⚠️ Kernel Build Failed"
+          echo "└─ [Info] 📌 Reason : $reason"
+          echo "fastbuildstatus=failed" >> "$GITHUB_OUTPUT"
+          echo "fallbackreason=$reason" >> "$GITHUB_OUTPUT"
+          exit 1
+        }
+        # Route Unexpected Errors Through Failure Handler
+        trap 'rc=$?; trap - ERR; echo "└─ [Info] ⚠️ Unexpected Error on Line $LINENO (Exit Code $rc)"; fallback "unexpectederror"' ERR
+        # Load Build Metadata From Workflow Environment
+        echo "------------------------------"
+        echo "└─ 🚀 Kernel Build Metadata"
+        echo "------------------------------"
+        echo "└─ 📂 File    : ${FILE:-Unknown}"
+        echo "└─ 🌿 Branch  : ${MANIFESTBRANCH:-Unknown}"
+        echo "└─ 📱 CPU     : ${CPU:-Unknown}"
+        echo "└─ ⚙️ Method  : ${BUILDMETHOD:-Perf}"
+        echo "└─ 📦 Version : ${FULLVERSION:-Unknown}"
+        echo "------------------------------"
+        # Record Fast Build Start Time For Final Summary
+        FASTBUILDSTART=$(date +%s)
+        # Validate Clang Toolchain
+        # Clang is Prepared by Dedicated Clang Setup Step
+        # CLANGFULLPATH is Persisted
+        [[ -x "${CLANGFULLPATH:-}" ]] || {
+          echo "└─ ⚠️ [Warn] Clang Toolchain is Not Available"
+          fallback "missingclang"
+        }
+        # Validate Rust Compiler And Bindgen
+        # Rust and Bindgen are Only Required When Kernel Source Requires Rust Support
+        if [[ "${ENABLERUSTC:-false}" == "true" ]]; then
+          # Rustc Must be Available Before Attempting to Use Bindgen
+          [[ -x "${RUSTCPATH:-}" ]] || {
+            echo "└─ ⚠️ [Warn] Rust Compiler is Not Available"
+            fallback "missingrustc"
+          }
+          # Bindgen is Required Together with Rust Toolchain
+          [[ -x "${BINDGEN:-}" ]] || {
+            echo "└─ ⚠️ [Warn] Bindgen is Not Available"
+            fallback "missingbindgen"
+          }
+        fi
+
+        # Detect Prebuilt Pahole Binary Dynamically
+        PAHOLEBIN="$(
+          find "$KERNELPLATFORM" \
+            -type f \
+            -path '*/kernel-build-tools/linux-x86/bin/pahole' \
+            -executable \
+            -print 2>/dev/null |
+          head -n1
+        )"
+        # Fallback to System Pahole When Necessary
+        if [[ -z "$PAHOLEBIN" ]]; then
+          PAHOLEBIN="$(command -v pahole 2>/dev/null || true)"
+          if [[ -x "$PAHOLEBIN" ]]; then
+            echo "└─ ⚠️ [Warn] Using Pahole From System Path"
+          fi
+        fi
+
+        # Validate Pahole and LLVM Tools
+        if [[ -x "$PAHOLEBIN" ]]; then
+          export PAHOLE="$PAHOLEBIN"
+          echo "└─ 📌 Pahole Detected"
+          echo "└─ 📦 Binary  : $PAHOLEBIN"
+          echo "└─ 📦 Version : $("$PAHOLEBIN" --version | head -n1)"
+        else
+          echo "└─ ⚠️ [Warn] Pahole Not Found"
+          echo "└─ ⚠️ [Warn] BTF Generation Cannot Continue"
+          fallback "missingpahole"
+        fi
+
+        # Enter Common Kernel Source Directory
+        if [[ -f "${COMMONKERNELFOLDER}/Makefile" ]]; then
+          cd "$COMMONKERNELFOLDER"
+        else
+          echo "└─ ⚠️ [Warn] Common Directory Not Found!"
+          echo "└─ 📂 Expected : $COMMONKERNELFOLDER"
+          fallback "missingcommon"
+        fi
+
+        # Create Kernel Build Output Directory
+        mkdir -p "$OUTDIR"
+        # Load Android Kernel Build Environment
+        SETUPENVSH="${KERNELPLATFORM}/build/kernel/_setup_env.sh"
+        if [[ -f "$SETUPENVSH" ]]; then
+          echo "└─ 🔧 Loading Android Kernel Build Environment"
+          set +u
+          source "$SETUPENVSH" 2>/dev/null || true
+          set -u
+          # Restore Explicitly Selected Clang After Sourcing Android Build Environment
+          if [[ -n "${CLANGBIN:-}" ]]; then
+            export PATH="${CLANGBIN}:${PATH}"
+          fi
+        fi
+
+        # Physical Kernel Source Root
+        # Resolve For Reproducible Compiler Prefix Mapping
+        ROOTREALPATH="$(realpath "${WORKSPACEDIR:-}")" ||
+          fallback "realpathfailed"
+        ROOTREALPATH="${ROOTREALPATH%/}"
+        # Read Git Metadata For Reproducible Builds
+        COMMITDATE="$(
+          git log -1 \
+            --format=%cd \
+            --date=format:'%Y-%m-%d %H:%M:%S' \
+            2>/dev/null ||
+          date -u '+%Y-%m-%d %H:%M:%S'
+        )"
+        COMMITHASH="$(
+          git rev-parse --short=8 HEAD 2>/dev/null ||
+          echo unknown
+        )"
+        COMMITSUBJECT="$(
+          git log -1 --format=%s 2>/dev/null ||
+          echo unknown
+        )"
+        echo "└─ 📝 Commit Hash    : ${COMMITHASH}"
+        echo "└─ 📝 Commit Date    : ${COMMITDATE}"
+        echo "└─ 📝 Commit Subject : ${COMMITSUBJECT}"
+        # Configure Compiler Path Mapping and Warning Flags
+        MAP="-fdebug-prefix-map=${ROOTREALPATH}=."
+        MPMAP="-fmacro-prefix-map=${ROOTREALPATH}=."
+        FPMAP="-ffile-prefix-map=${ROOTREALPATH}=."
+        # Common Optimization and Reproducibility Flags
+        KCFLAGS=(
+          "$MAP"
+          "$FPMAP"
+          -no-canonical-prefixes
+          -O2
+          -pipe
+          -Wno-error
+          -fno-stack-protector
+          -D__ANDROID_COMMON_KERNEL__
+        )
+        # Apply Macro Prefix Mapping
+        KCPPFLAGS="$MPMAP"
+        # Qualcomm Oryon CPU Targeting
+        KCFLAGSEXTRA=()
+        case "$CPU" in
+          sm8750|sm8850|sm8845)
+            echo "└─ 🔍 Checking Clang Oryon CPU Target Support..."
+            echo "└─ 🛠️ Clang Version :"
+            "$CLANGFULLPATH" --version | head -n 1
+            if printf 'int main(void){return 0;}\n' |
+              "$CLANGFULLPATH" \
+                -mcpu=oryon-1 \
+                --target=aarch64-linux-gnu \
+                -fsyntax-only -x c - \
+                >/dev/null 2>&1; then
+              KCFLAGSEXTRA+=(-mcpu=oryon-1)
+              echo "└─ 🧠 Oryon CPU Targeting Enabled"
+              echo "└─ 📱 Target : $CPU"
+              echo "└─ ⚙️ Flag   : -MCPU=Oryon-1"
+            else
+              echo "└─ ⚠️ [Warn] Clang Does Not Support -MCPU=Oryon-1"
+              echo "└─ ℹ️ Keeping Existing Compiler Target Defaults"
+            fi
+            ;;
+          *)
+            echo "└─ ℹ️ Oryon Targeting Skipped For $CPU"
+            ;;
+        esac
+        # Append Extra Flags Without Replacing Existing Flags
+        KCFLAGS+=("${KCFLAGSEXTRA[@]}")
+        # Convert KCFLAGS Array to Make-Compatible String
+        KCFLAGSSTRING="${KCFLAGS[*]}"
+        # Create Compiler Cache Wrappers Around Exact Selected Clang
+        REALCLANGBIN="${CLANGFULLPATH}"
+        CLANGXXBIN="$(
+          dirname "$REALCLANGBIN"
+        )/clang++"
+        if [[ ! -x "$CLANGXXBIN" ]]; then
+          CLANGXXBIN="$(
+            command -v clang++ 2>/dev/null ||
+            true
+          )"
+        fi
+
+        [[ -x "${CLANGXXBIN:-}" ]] || {
+          echo "└─ ⚠️ [Warn] Clang++ Not Found"
+          fallback "missingclangxx"
+        }
+        CCACHEWRAPPER="${WORKDIR}/cc-wrapper"
+        CCACHECXXWRAPPER="${WORKDIR}/cxx-wrapper"
+        printf '%s\n' \
+          '#!/usr/bin/env bash' \
+          'exec ccache "'"${REALCLANGBIN}"'" "$@"' \
+          > "$CCACHEWRAPPER"
+        printf '%s\n' \
+          '#!/usr/bin/env bash' \
+          'exec ccache "'"${CLANGXXBIN}"'" "$@"' \
+          > "$CCACHECXXWRAPPER"
+        chmod +x \
+          "$CCACHEWRAPPER" \
+          "$CCACHECXXWRAPPER"
+        echo "└─ 🎉 CCache Compiler Wrappers Created"
+        echo "└─ 📦 C Wrapper   : ${CCACHEWRAPPER}"
+        echo "└─ 📦 C++ Wrapper : ${CCACHECXXWRAPPER}"
+        echo "└─ 📦 Clang       : ${REALCLANGBIN}"
+        echo "└─ 📦 Clang++     : ${CLANGXXBIN}"
+        # Display Compiler Cache Diagnostics
+        if command -v ccache >/dev/null 2>&1; then
+          echo "└─ 📊 Compiler Cache Version :"
+          ccache --version | head -n1
+          echo "└─ 📍 Compiler Cache Binary :"
+          command -v ccache
+          echo "└─ ⚙️ Compiler Cache Configuration :"
+          ccache -p 2>/dev/null |
+            grep -E \
+              'compression|direct_mode|readonly_direct|depend_mode|sloppiness|base_dir|compiler_check' ||
+            true
+          echo "└─ 📊 Compiler Cache Statistics Before Build :"
+          ccache -s || true
+        else
+          echo "└─ ⚠️ [Warn] Compiler Cache is Not Installed"
+        fi
+
+        # Configure ThinLTO Linker Cache Only For Supported 5.x Builds
+        LDLLDWRAPPER=""
+        if [[ "${BUILDCCACHE:-Disabled}" != "Disabled" ]] &&
+           [[ "$KERNELVERSION" == 5.* ]]
+        then
+          LDCACHEDIR="${WORKDIR}/.thinlto-cache"
+          LDLLDWRAPPER="${WORKDIR}/ld-wrapper"
+          mkdir -p "$LDCACHEDIR"
+          LLDBIN="$(command -v ld.lld 2>/dev/null || true)"
+          if [[ -z "$LLDBIN" ]]; then
+            echo "└─ ⚠️ [Warn] LD.LLD Not Found"
+            echo "└─ 📊 ThinLTO Linker Cache : Disabled"
+            LDLLDWRAPPER=""
+          else
+            printf '%s\n' \
+              '#!/usr/bin/env bash' \
+              'exec "'"${LLDBIN}"'" "$@" --thinlto-cache-dir="'"${LDCACHEDIR}"'" --thinlto-cache-policy=cache_size_bytes=3g --thinlto-jobs='"$(nproc --all)" \
+              > "$LDLLDWRAPPER"
+            chmod +x "$LDLLDWRAPPER"
+            echo "└─ 🎉 ThinLTO Linker Wrapper Created"
+            echo "└─ 📦 Wrapper : ${LDLLDWRAPPER}"
+            echo "└─ 📦 LLD     : ${LLDBIN}"
+            echo "└─ 📂 Cache   : ${LDCACHEDIR}"
+            echo "└─ 💾 Cache   : 3GiB"
+            echo "└─ ⚙️ Jobs    : $(nproc --all)"
+          fi
+          
+        else
+          echo "└─ 📊 ThinLTO Linker Cache : Disabled"
+        fi
+
+        # Prepare Common Kernel Build Arguments
+        MAKE_ARGS=(
+          LLVM=1
+          ARCH=arm64
+          CROSS_COMPILE=aarch64-linux-gnu-
+          CC="$CCACHEWRAPPER"
+          CXX="$CCACHECXXWRAPPER"
+          HOSTCC="$CCACHEWRAPPER"
+          HOSTCXX="$CCACHECXXWRAPPER"
+          HOSTLD="${LDLLDWRAPPER:-ld.lld}"
+          PAHOLE="$PAHOLEBIN"
+          KCFLAGS="$KCFLAGSSTRING"
+          KCPPFLAGS="$KCPPFLAGS"
+        )
+        # Enable LLVM Integrated Assembler When Requested
+        if [[ "${LLVMENABLED:-false}" == "true" ]]; then
+          MAKE_ARGS+=(LLVM_IAS=1)
+          echo "└─ 🛠️ LLVM Integrated Assembler : Enabled"
+        else
+          echo "└─ 🛠️ LLVM Integrated Assembler : Disabled"
+        fi
+
+        # Pass Rust Compiler to Kernel Build
+        if [[ "$ENABLERUSTC" == "true" ]]; then
+          MAKE_ARGS+=(
+            RUSTC="$RUSTCPATH"
+            BINDGEN="$BINDGEN"
+          )
+          echo "└─ 🦀 Rust Compiler : Enabled"
+          echo "└─ 📦 Rustc         : $RUSTCPATH"
+          echo "└─ 📦 Bindgen       : $BINDGEN"
+        else
+          echo "└─ 🦀 Rust Compiler : Disabled"
+        fi
+
+        # Configure ThinLTO Linker
+        if [[ -n "$LDLLDWRAPPER" ]]; then
+          MAKE_ARGS+=(LD="$LDLLDWRAPPER")
+          echo "└─ 🔗 Kernel Linker : ThinLTO Wrapper"
+        else
+          MAKE_ARGS+=(LD=ld.lld)
+          echo "└─ 🔗 Kernel Linker : LLVM LLD"
+        fi
+
+        # Pass Optional Fake Configuration Setting
+        if [[ -n "${CONFIG_FAKE_DISABLE:-}" ]]; then
+          MAKE_ARGS+=(CONFIG_FAKE_DISABLE="$CONFIG_FAKE_DISABLE")
+          echo "└─ 🧩 Fake Configuration Override : Enabled"
+        fi
+
+        # Generate Initial GKI Configuration
+        echo "└─ 🚀 Running GKI Default Configuration"
+        if ! make O="$OUTDIR" \
+          "${MAKE_ARGS[@]}" \
+          gki_defconfig; then
+          echo "└─ ⚠️ [Warn] GKI Default Configuration Failed"
+          fallback "gkidefconfigfailed"
+        fi
+
+        # Locate Scripts / Configuration
+        CONFIGTOOL=""
+        for path in \
+          ../scripts/config \
+          ./scripts/config \
+          ../../scripts/config
+        do
+          if [[ -x "$path" ]]; then
+            CONFIGTOOL="$path"
+            break
+          fi
+          
+        done
+
+        # Search Source Tree When No Standard Path Exists
+        if [[ -z "$CONFIGTOOL" ]]; then
+          CONFIGTOOL="$(
+            find .. \
+              -type f \
+              -path '*/scripts/config' \
+              -executable \
+              -print 2>/dev/null |
+            head -n1
+          )"
+        fi
+
+        # Validate Configuration Tool
+        if [[ -n "$CONFIGTOOL" ]] &&
+           [[ ! -x "$CONFIGTOOL" ]]; then
+          CONFIGTOOL=""
+        fi
+
+        if [[ -z "$CONFIGTOOL" ]]; then
+          echo "└─ ⚠️ [Warn] Scripts / Configuration Tool Not Found"
+          fallback "missingconfigtool"
+        fi
+
+        echo "└─ 🧰 Config Tool : $CONFIGTOOL"
+        # Configure ThinLTO For Supported 5.x Kernels
+        echo "🧾 Configuring Link Time Optimization (LTO) For Kernel $KERNELVERSION"
+        if [[ ! -s "$OUTDIR/.config" ]]; then
+          echo "└─ ⚠️ [Warn] Configuration Not Found"
+          echo "└─ 📊 LTO Status : Skipped (Missing Configuration)"
+        else
+          case "$KERNELVERSION" in
+            5.*)
+              echo "└─ 🚀 LTO : Thin"
+              if "$CONFIGTOOL" \
+                --file "$OUTDIR/.config" \
+                -e LTO_CLANG \
+                -e LTO_CLANG_THIN \
+                -d LTO_CLANG_NONE \
+                -d LTO_CLANG_FULL; then
+                echo "└─ 📊 LTO Status : Applied (Thin)"
+              else
+                echo "└─ ⚠️ [Warn] LTO Configuration Apply Failed"
+                fallback "ltoconfigfailed"
+              fi
+              ;;
+            *)
+              echo "└─ 🚀 LTO Skipped For Kernel $KERNELVERSION"
+              echo "└─ 📊 LTO Status : Skipped (Unsupported Kernel)"
+              ;;
+          esac
+        fi
+
+        # Disable Unneeded KUnit Test Configurations
+        echo "└─ 🧪 Disabling Unneeded KUnit Test Configurations"
+        configdisablelists=(
+          CONFIG_REGMAP_KUNIT
+          CONFIG_INPUT_KUNIT_TEST
+          CONFIG_SND_SOC_TOPOLOGY_KUNIT_TEST
+          CONFIG_SND_SOC_UTILS_KUNIT_TEST
+          CONFIG_HID_KUNIT_TEST
+          CONFIG_RTC_LIB_KUNIT_TEST
+          CONFIG_CLK_KUNIT_TEST
+          CONFIG_CLK_GATE_KUNIT_TEST
+          CONFIG_IIO_FORMAT_KUNIT_TEST
+          CONFIG_EXT4_KUNIT_TESTS
+          CONFIG_FAT_KUNIT_TEST
+        )
+        for configsymbol in "${configdisablelists[@]}"; do
+          if "$CONFIGTOOL" \
+            --file "$OUTDIR/.config" \
+            -d "$configsymbol" 2>/dev/null; then
+            echo "└─ Disabled      : $configsymbol"
+          else
+            echo "└─ Not Available : $configsymbol"
+          fi
+          
+        done
+
+        # Generate Final Kernel Configuration
+        echo "└─ 🚀 Running Old Default Configuration"
+        if ! make O="$OUTDIR" \
+          "${MAKE_ARGS[@]}" \
+          olddefconfig; then
+          echo "└─ ⚠️ [Warn] Old Default Configuration Failed"
+          fallback "olddefconfigfailed"
+        fi
+
+        # Verify Required KSU Configuration
+        if [[ "$SUSFS" != "-1" ]]; then
+          echo "🔐 Verifying Required KSU Configuration"
+          for configsymbol in \
+            CONFIG_KSU_SUSFS
+          do
+            if grep -q "^${configsymbol}=y$" out/.config; then
+              echo "└─ Enabled : $configsymbol"
+            else
+              echo "⚠️ Required KSU Option Missing After Old Default Configuration : $configsymbol"
+              fallback "ksuconfigmissing"
+            fi
+            
+          done
+          
+        fi
+
+        # Save Important Build Outputs For Fast Build Cache
+        CACHE_DIR="../cache"
+        savefastccache() {
+          echo "└─ 📦 Saving Fast Build Cache..."
+          mkdir -p "$CACHE_DIR" || {
+            echo "└─ ⚠️ [Warn] Unable to Create Fast Build Cache"
+            return 0
+          }
+          [[ -f "$OUTDIR/.config" ]] &&
+            cp -f "$OUTDIR/.config" "$CACHE_DIR/.config" || true
+          if [[ -d "$OUTDIR/include" ]]; then
+            rm -rf "$CACHE_DIR/include" || true
+            cp -rf "$OUTDIR/include" "$CACHE_DIR/" || true
+          fi
+
+          [[ -f "$OUTDIR/Module.symvers" ]] &&
+            cp -f "$OUTDIR/Module.symvers" "$CACHE_DIR/Module.symvers" || true
+          echo "└─ 📌 Build Cache Saved"
+        }
+        # Save Configuration Before Compilation
+        savefastccache
+        # Display Available System Resources
+        echo "└─ 💻 CPU Threads : $(nproc)"
+        free -h || true
+        echo "└─ 🚀 Compiling Kernel with $(nproc) Threads"
+        # Compile Kernel
+        if ! make -j"$(nproc)" \
+          O="$OUTDIR" \
+          "${MAKE_ARGS[@]}"; then
+          echo "└─ ⚠️ [Warn] Kernel Compilation Failed"
+          fallback "compilefailed"
+        fi
+
+        # Save Generated Build Outputs After Compilation
+        savefastccache
+        # Capture Final CCache Statistics After Kernel Compilation
+        echo "└─ 📊 Final Compiler Cache Statistics"
+        CCACHESTATS="$(ccache -s 2>&1 || true)"
+        echo "$CCACHESTATS"
+        # Extract Cache Hits and Misses
+        CACHEHITS="$(printf '%s\n' "$CCACHESTATS" | awk '/^[[:space:]]*Hits:/ {print $2; exit}')"
+        CACHEMISSES="$(printf '%s\n' "$CCACHESTATS" | awk '/^[[:space:]]*Misses:/ {print $2; exit}')"
+        # Normalize Missing Statistics
+        CACHEHITS="${CACHEHITS:-0}"
+        CACHEMISSES="${CACHEMISSES:-0}"
+        # Calculate Cache Requests and Hit Rate
+        CACHEREQUESTS=$((CACHEHITS + CACHEMISSES))
+        if (( CACHEREQUESTS > 0 )); then
+          HITRATE="$(awk -v hits="$CACHEHITS" -v total="$CACHEREQUESTS" \
+            'BEGIN { printf "%.2f", (hits / total) * 100 }')"
+        else
+          HITRATE="0.00"
+        fi
+
+        # Export Final Cache Statistics For Subsequent Workflow Steps
+        {
+          echo "KERNELCACHEHITS=$CACHEHITS"
+          echo "KERNELCACHEMISSES=$CACHEMISSES"
+          echo "KERNELCACHEREQUESTS=$CACHEREQUESTS"
+          echo "KERNELCACHEHITRATE=$HITRATE"
+        } >> "$GITHUB_ENV"
+        # Display Final Cache Performance
+        echo "└─ 📊 CCache Hits     : $CACHEHITS"
+        echo "└─ 📊 CCache Misses   : $CACHEMISSES"
+        echo "└─ 📊 CCache Requests : $CACHEREQUESTS"
+        echo "└─ 📊 CCache Hit Rate : ${HITRATE}%"
+        # Calculate Fast Build Duration
+        FASTBUILDEND=$(date +%s)
+        FASTBUILDTIME=$((FASTBUILDEND - FASTBUILDSTART))
+        echo "fastbuildtime=$FASTBUILDTIME" >> "$GITHUB_OUTPUT"
+        echo "fastbuildstatus=success" >> "$GITHUB_OUTPUT"
+        echo "└─⏱️ Build Time : ${FASTBUILDTIME}s"
+        # Generate GitHub Actions Build Summary
+        CCACHESUMMARY="$(ccache -s 2>&1)"
+        {
+          echo "## 🧠 Compiler Cache Performance Summary"
+          echo "| Metric | Result |"
+          echo "|---|---:|"
+          echo "| Build Status | 🚀 Success |"
+          echo "| Fast Build Time | **${FASTBUILDTIME}s** |"
+          echo "| Cacheable Calls | $(echo "$CCACHESUMMARY" | grep "Cacheable calls:" | sed 's/.*Cacheable calls:[[:space:]]*//') |"
+          echo "| Cache Hits | $(echo "$CCACHESUMMARY" | grep -E "^[[:space:]]*Hits:" | head -n1 | sed 's/.*Hits:[[:space:]]*//') |"
+          echo "| Direct Hits | $(echo "$CCACHESUMMARY" | grep "Direct:" | sed 's/.*Direct:[[:space:]]*//') |"
+          echo "| Preprocessed Hits | $(echo "$CCACHESUMMARY" | grep "Preprocessed:" | sed 's/.*Preprocessed:[[:space:]]*//') |"
+          echo "| Cache Misses | $(echo "$CCACHESUMMARY" | grep -E "^[[:space:]]*Misses:" | head -n1 | sed 's/.*Misses:[[:space:]]*//') |"
+          echo "| Uncacheable Calls | $(echo "$CCACHESUMMARY" | grep "Uncacheable calls:" | sed 's/.*Uncacheable calls:[[:space:]]*//') |"
+          echo "| Cache Size | $(echo "$CCACHESUMMARY" | grep "Cache size" | sed 's/.*Cache size (GB):[[:space:]]*//') |"
+          echo "### ⚡ Build Result"
+          echo "**🎉 Build Completed Successfully**"
+        } >> "$GITHUB_STEP_SUMMARY"
+        echo "└─ 🎉 Build Complete"
