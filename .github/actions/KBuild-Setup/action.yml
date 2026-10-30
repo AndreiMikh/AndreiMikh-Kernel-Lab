@@ -1,0 +1,133 @@
+# Kernel Build Setup Composite Action
+name: 🛠️ Kernel Build Setup
+description: Configure Custom Kernel Build Timestamp and Disable MediaTek GPU Embedded Bridge
+# Define Inputs Required by the Composite Action
+inputs:
+  # Custom Kernel Build Timestamp or UTC Fallback
+  BUILDTIME:
+    description: Custom Kernel Build Timestamp
+    required: false
+    default: F
+# Define Composite Action Execution Steps
+runs:
+  using: composite
+  steps:
+    # Configure Custom Kernel Build Timestamp
+    - name: 🕒 Setup Custom Build Time
+      shell: bash
+      env:
+        # Import Custom Build Timestamp Input
+        BUILDTIME: ${{ inputs.BUILDTIME }}
+        # Import Android and Kernel Version Information
+        ANDROIDVERSION: ${{ env.ANDROIDVERSION }}
+        KERNELVERSION: ${{ env.KERNELVERSION }}
+        # Import Kernel Source Directory Paths
+        KERNELPLATFORM: ${{ env.KERNELPLATFORM }}
+        COMMONKERNELFOLDER: ${{ env.COMMONKERNELFOLDER }}
+        MSMKERNELFOLDER: ${{ env.MSMKERNELFOLDER }}
+      run: |
+        set -Eeuo pipefail
+        # Resolve Custom Build Timestamp or Use UTC Fallback
+        TIMEINPUT="$BUILDTIME"
+        if [[ -n "$TIMEINPUT" && ! "$TIMEINPUT" =~ ^[Ff]$ ]]; then
+          DATESTR="$TIMEINPUT"
+          echo "└─ 🔎 Using Input Build Time     : $DATESTR"
+        else
+          DATESTR="$(TZ='UTC' date '+%a %b %-d %H:%M:%S UTC %Y')"
+          echo "└─ 🛠️ Using UTC Time as Fallback : $DATESTR"
+        fi
+
+        # Export Kernel Build Timestamp and Build Version
+        {
+          echo "KBUILD_BUILD_TIMESTAMP=$DATESTR"
+          echo "KBUILD_BUILD_VERSION=1"
+        } >> "$GITHUB_ENV"
+        # Move Into Kernel Platform Source Directory
+        cd "$KERNELPLATFORM"
+        # Skip MKCompile Headers Modification for Android 16 / Kernel 6.12
+        if [[ "$ANDROIDVERSION" == "android16" && "$KERNELVERSION" == "6.12" ]]; then
+          echo "└─ ℹ️ Android 16 / 6.12 Detected"
+          echo "└─ ℹ️ Using Kbuild Build Timestamp"
+          echo "└─ ℹ️ Skipping MKCompile H Modification"
+        else
+          # Define Common and MSM Kernel MKCompile Scripts
+          SCRIPTS=(
+            "${COMMONKERNELFOLDER}/scripts/mkcompile_h"
+            "${MSMKERNELFOLDER}/scripts/mkcompile_h"
+          )
+          # Initialize Successfully Patched Script Counter
+          PATCHED=0
+          # Iterate Through Available MKCompile Scripts
+          for SCRIPT in "${SCRIPTS[@]}"; do
+            # Skip Missing MKCompile Scripts
+            if [[ ! -f "$SCRIPT" ]]; then
+              echo "└─ ℹ️ Script Not Found : $SCRIPT — Skipping"
+              continue
+            fi
+
+            echo "└─ 🚀 Patching MKCompile Script : $SCRIPT"
+            # Replace Existing UTS Version Assignment
+            if grep -q '^UTS_VERSION=' "$SCRIPT"; then
+              perl -pi -e \
+                "s{^UTS_VERSION=.*}{UTS_VERSION=\"#1 SMP PREEMPT $DATESTR\"}" \
+                "$SCRIPT"
+              echo "└─ ✔ Replaced Existing UTS Version"
+            # Inject UTS_VERSION Definition Into MKCompile Heredoc
+            elif grep -q 'cat <<EOF' "$SCRIPT"; then
+              perl -0777 -pi -e \
+                "s{(cat <<EOF)}{\$1\n#undef UTS_VERSION\n#define UTS_VERSION \"#1 SMP PREEMPT $DATESTR\"}ms" \
+                "$SCRIPT"
+              echo "└─ ✔ Injected UTS Version Definition"
+            else
+              # Skip Scripts Without a Recognized Injection Point
+              echo "└─ ⚠️ UTS Version Injection Point Not Found : $SCRIPT"
+              continue
+            fi
+
+            # Increment Successfully Patched Script Counter
+            PATCHED=$((PATCHED + 1))
+            
+          done
+
+          # Report MKCompile Modification Results
+          if [[ "$PATCHED" -eq 0 ]]; then
+            echo "└─ ℹ️ No MKCompile Scripts Required Patching"
+            echo "└─ ℹ️ Kbuild Build Timestamp will be Used"
+          else
+            echo "└─ 🎉 Patched $PATCHED MKCompile Scripts"
+          fi
+        fi
+
+        # Display Final Kernel Build Environment
+        echo "└─ 🔍 Build Environment :"
+        echo "└─ Build Timestamp=$DATESTR"
+        echo "└─ Build Version=1"
+        echo "└─ 🎉 Custom Build Time Setup Completed"
+
+    # Disable MediaTek GPU Embedded Bridge / Engine for Kernel 5.10
+    - name: 🚫 Disable GPU Embedded Bridge / Engine
+      if: ${{ env.KERNELVERSION == '5.10' && startsWith(env.CPU, 'mt') }}
+      shell: bash
+      env:
+        # Import Common Kernel Source Directory
+        COMMONKERNELFOLDER: ${{ env.COMMONKERNELFOLDER }}
+      run: |
+        set -Eeuo pipefail
+        # Resolve MediaTek GPU Embedded Bridge Makefile
+        MAKEFILEGPUEB="${COMMONKERNELFOLDER}/drivers/gpu/mediatek/Makefile"
+        echo "└─ 📂 GPU Makefile : $MAKEFILEGPUEB"
+        # Verify GPU Embedded Bridge Makefile Exists
+        [[ -f "$MAKEFILEGPUEB" ]] || {
+          echo "└─ ⚠️ GPU Embedded Bridge Makefile Not Found"
+          echo "└─ 📁 Expected Path : $MAKEFILEGPUEB"
+          exit 0
+        }
+
+        # Remove GPU Embedded Bridge / Engine Build Entries
+        if grep -qE 'obj-y.*gpueb|obj-\+=.*gpueb' "$MAKEFILEGPUEB"; then
+          sed -i '/obj-y.*gpueb/d;/obj-\+=.*gpueb/d' "$MAKEFILEGPUEB"
+          echo "└─ 🚫 GPU Embedded Bridge / Engine Disabled"
+        else
+          # Report When GPU Embedded Bridge is Already Disabled
+          echo "└─ ☘️ GPU Embedded Bridge / Engine Already Disabled"
+        fi
