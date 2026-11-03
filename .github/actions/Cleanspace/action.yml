@@ -46,14 +46,15 @@ runs:
         REMOVECODEQL: ${{ inputs.remove-codeql }}
         REMOVEDOCKERIMAGES: ${{ inputs.remove-docker-images }}
         DEBUG: ${{ inputs.debug }}
+
       run: |
         # Enable Strict Error Handling
         set -Eeuo pipefail
         # Initialize Cleanup Timer
-        STARTTIME=$(date +%s)
+        STARTTIME=$(date +%s%3N)
         # Configure Maximum Parallel Cleanup Workers
-        MAXWORKERS=8
-        # Initialize Cleanup Process Tracking
+        MAXWORKERS=4
+        # Initialize Cleanup Statistics
         CLEANUPPIDS=()
         CLEANUPFAILED=0
         REMOVEDCOUNT=0
@@ -77,19 +78,26 @@ runs:
           /usr/local/lib/heroku
           /opt/az
           /opt/microsoft/powershell
-          /usr/local/julia*
           /usr/local/bin/pulumi*
         )
         # Enable Safe Wildcard Expansion
         shopt -s nullglob
+        # Track Individual Cleanup Durations
+        declare -A CLEANUPSTART=()
         # Wait for Completed Cleanup Processes
         waitforcleanup() {
           local PID="${CLEANUPPIDS[0]}"
-          if ! wait "${PID}"; then
-            echo "└─ ⚠️ Cleanup Process Failed : ${PID}"
+          local PATHNAME="${CLEANUPSTART[${PID}]}"
+          if wait "${PID}"; then
+            if [[ "${DEBUG}" == "true" ]]; then
+              echo "└─ 📌 Removed : ${PATHNAME}"
+            fi
+          else
+            echo "└─ ⚠️ Cleanup Failed : ${PATHNAME}"
             CLEANUPFAILED=1
           fi
 
+          unset 'CLEANUPSTART[$PID]'
           CLEANUPPIDS=("${CLEANUPPIDS[@]:1}")
         }
         # Start Parallel Directory Cleanup
@@ -104,15 +112,19 @@ runs:
             echo "└─ 🗑️ Removing : ${CLEANUPPATH}"
           fi
 
-          # Start Directory Removal in Background
-          sudo rm -rf -- "${CLEANUPPATH}" &
-          CLEANUPPIDS+=("$!")
+          # Start Timed Directory Removal
+          (
+            sudo rm -rf -- "${CLEANUPPATH}"
+          ) &
+          CLEANUPPID=$!
+          CLEANUPPIDS+=("${CLEANUPPID}")
+          CLEANUPSTART["${CLEANUPPID}"]="${CLEANUPPATH}"
           ((REMOVEDCOUNT+=1))
           # Limit Simultaneous Cleanup Processes
           if (( ${#CLEANUPPIDS[@]} >= MAXWORKERS )); then
             waitforcleanup
           fi
-          
+
         done
 
         # Wait for Remaining Cleanup Processes
@@ -141,7 +153,7 @@ runs:
         fi
 
         # Calculate Cleanup Duration
-        ENDTIME=$(date +%s)
+        ENDTIME=$(date +%s%3N)
         ELAPSED=$((ENDTIME - STARTTIME))
         # Display Final Disk Usage
         echo "└─ 📊 Disk Usage After Cleanup :"
@@ -149,10 +161,10 @@ runs:
         # Display Cleanup Statistics
         echo "└─ ⚙️ Parallel Workers  : ${MAXWORKERS}"
         echo "└─ 🗑️ Targets Processed : ${REMOVEDCOUNT}"
-        echo "└─ ⏱️ Cleanup Duration  : ${ELAPSED}s"
+        echo "└─ ⏱️ Cleanup Duration  : $((ELAPSED / 1000)).$((ELAPSED % 1000))s"
         # Report Cleanup Results
         if (( CLEANUPFAILED != 0 )); then
-          echo "└─ ⚠️ Storage Optimization Completed with Warnings"
+          echo "└─ ⚠️ Storage Optimization Completed With Warnings"
         else
           echo "└─ 🎉 Build Storage Optimization Complete"
         fi
