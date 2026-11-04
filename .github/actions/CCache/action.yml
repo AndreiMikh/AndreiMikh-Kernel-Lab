@@ -1,0 +1,568 @@
+# Cache-ECS Installation, Restoration and Configuration
+name: 📦 Cache-ECS
+description: Install Cache-ECS, Restore Compiler and ThinLTO Caches and Configure Build Cache
+# Define Inputs Passed From Calling Workflow
+inputs:
+  # Device Manifest Configuration File Name Used to Identify Build Target
+  FILE:
+    description: Device Manifest Configuration File Name
+    required: true
+  # Selected Root Engine Used to Identify the Release Compiler Cache
+  ROOTENGINE:
+    description: Selected Root Engine Used to Identify Release Cache
+    required: true
+  # Target CPU Used to Identify Corresponding Release Cache
+  CPU:
+    description: Target CPU Used to Identify Compiler Cache
+    required: true
+
+  # Operating System Used to Identify Local GitHub Actions Cache
+  RUNNEROS:
+    description: Runner Operating System
+    required: false
+    default: Linux
+  # Enable or Disable Installation of Custom Cache-ECS Binary
+  ECS:
+    description: Install Cache-ECS as System Compiler Cache Binary
+    required: false
+    default: Enabled
+  # Enable or Disable ThinLTO Cache Restoration
+  THINLTO:
+    description: Enable or Disable ThinLTO Cache Restoration
+    required: false
+    default: Enabled
+  # Resolved Kernel Version Used to Select Compatible ThinLTO Cache
+  KERNELVERSION:
+    description: Resolved Kernel Version
+    required: true
+# Define Composite Action Outputs Available to Calling Workflow
+outputs:
+  # Report Whether a Release Compiler Cache was Successfully Restored
+  cache-restored:
+    description: Whether a Release Cache was Successfully Restored
+    value: ${{ steps.cache-restoration.outputs.cache-restored }}
+  # Report Whether an Exact GitHub Actions Cache was Restored
+  local-cache-hit:
+    description: Whether an Exact GitHub Actions Cache was Restored
+    value: ${{ steps.ccache-restore.outputs.cache-hit }}
+  # Preserve the Release Cache Output Alias For Compatibility
+  release-cache-hit:
+    description: Whether a Release Cache was Successfully Restored
+    value: ${{ steps.cache-restoration.outputs.cache-restored }}
+# Define Composite Action Execution Steps
+runs:
+  using: composite
+  steps:
+    # Install Cache-ECS as the System Compiler Cache Binary
+    - name: 📦 Install and Configure Cache-ECS
+      # Skip Installation When Compiler Cache or Cache-ECS Is Disabled
+      if: ${{ env.BUILDCCACHE != 'Disabled' && inputs.ECS != 'Disabled' }}
+      # Execute the Installation Script Using Bash
+      shell: bash
+      # Define Remote Source of Cache-ECS Binary
+      env:
+        ECSURL: https://raw.githubusercontent.com/AndreiMikh/AndreiMikh-Kernel-Lab/LiquidAndrei/lib/ccache-x86-64
+      run: |
+        # Enable Strict Error Handling
+        set -Eeuo pipefail
+        # Define Cache-ECS Binary Source and Temporary Path
+        # Runner Temp Keeps Downloaded Binary Outside the Repository
+        ECSBIN="${RUNNER_TEMP}/ccache-ecs"
+        echo "└─ 📥 Downloading Cache-ECS..."
+        # Download Cache-ECS with Automatic Retry Protection
+        # Retry Failed Requests up to Five Times
+        # Allow Three Seconds Between Retries
+        # Retry Transient and Other Recoverable Errors
+        # Abort Connections That Take Longer Than 30 Seconds
+        # Use a Browser-Like User Agent
+        # Save Downloaded Binary to Temporary Path
+        curl -fsSL \
+          --retry 5 \
+          --retry-delay 3 \
+          --retry-all-errors \
+          --connect-timeout 30 \
+          --max-time 300 \
+          -A "Mozilla/5.0" \
+          "$ECSURL" \
+          -o "$ECSBIN"
+        # Verify Downloaded Binary Exists and Is Not Empty
+        [[ -s "$ECSBIN" ]] || {
+          echo "└─ ⚠️ Cache-ECS Download Failed"
+          exit 1
+        }
+        # Grant Execute Permission to Downloaded Binary
+        chmod +x "$ECSBIN"
+        # Install Cache-ECS as the System Cache Binary
+        # Use Sudo Because /usr/bin Requires Elevated Permissions
+        # Set Permissions to 0755 : Owner Can Write, All Can Execute
+        # Replace Existing Compiler Cache Binary
+        echo "└─ 🔧 Installing Cache-ECS..."
+        sudo install -m 0755 "$ECSBIN" /usr/bin/ccache
+        # Remove Temporary Binary After Installation
+        rm -f "$ECSBIN"
+        # Ensure System Binary Directory is Available in Subsequent Steps
+        # GitHub Path Persists Path Addition Across Workflow Steps
+        echo "/usr/bin" >> "$GITHUB_PATH"
+        # Update Path Immediately For Current Shell
+        export PATH="/usr/bin:$PATH"
+        # Display Cache-ECS Version to Verify Successful Installation
+        echo "└─ 📜 Cache-ECS Version :"
+        ccache --version
+        # Confirm Cache-ECS Installation is Complete
+        echo "└─ 🎉 Cache-ECS Setup Complete"
+
+    # ♻️ Restore Compiler Cache From GitHub Releases
+    - name: ♻️ Release Cache Restoration
+      id: cache-restoration
+      # Attempt Release Restoration Only When Compiler Cache Is Enabled
+      if: ${{ env.BUILDCCACHE != 'Disabled' }}
+      # Execute Release Restoration Script Using Bash
+      shell: bash
+      # Export Composite Inputs and GitHub Authentication Variables
+      env:
+        # GitHub Token Used to Access Release Metadata and Assets
+        GH_TOKEN: ${{ github.token }}
+        # Repository Owner and Name Used to Locate Release
+        OWNER: ${{ github.repository }}
+        # Device Manifest Configuration File
+        FILE: ${{ inputs.FILE }}
+        # Selected Root Engine Used in Cache Archive Name
+        ROOTENGINE: ${{ inputs.ROOTENGINE }}
+        # Target CPU Used as Release Tag
+        CPU: ${{ inputs.CPU }}
+        # Compiler Cache Directory Used For Restoration
+        CCACHEDIR: ${{ env.CCACHE_DIR }}
+      run: |
+        # Enable Strict Error Handling
+        set -Eeuo pipefail
+        # Validate Required Compiler Cache Environment Variable
+        : "${CCACHEDIR:?not defined in the calling workflow}"
+        # Initialize Release Restoration Status
+        # Assume No Cache was Restored Until Extraction Completes
+        echo "cache-restored=false" >> "$GITHUB_OUTPUT"
+        # Define Release Tag and Cache Archive Paths
+        # CPU Name Identifies GitHub Release Tag
+        TAG="$CPU"
+        # Construct Expected Cache Archive Name
+        # Format : Cache-FILE-ROOTENGINE-BRANCH.tar.zst
+        ARCHIVE="${RUNNER_TEMP}/Cache-${FILE}-${ROOTENGINE}-${GITHUB_REF_NAME}.tar.zst"
+        # Define a Temporary Directory for Cache Extraction
+        # Existing Cache is Replaced Only After Extraction Succeeds
+        RESTOREDIR="${CCACHEDIR}.restore"
+        # Define Temporary Release Metadata File
+        RELEASEJSON="${RUNNER_TEMP}/ccache-release.json"
+        # Display Release and Cache Information
+        echo "└─ 📦 Release Tag : $TAG"
+        echo "└─ 📁 Cache File  : $(basename "$ARCHIVE")"
+        echo "└─ 📂 Cache Path  : $CCACHEDIR"
+        # Prepare Compiler Cache Directory
+        # Create Directory if It Does Not Already Exist
+        mkdir -p "$CCACHEDIR"
+        # Ensure Compiler Cache Directory is Accessible
+        chmod 755 "$CCACHEDIR"
+        # Fetch GitHub Release Metadata
+        # GitHub API Returns JSON Containing Release Assets
+        echo "└─ 📩 Fetching Release Metadata..."
+        # Retrieve Release Metadata and Capture HTTP Status Code
+        # Save JSON Response to a Temporary File
+        # Authenticate Request Using GitHub Token
+        # Request GitHub's Standard JSON API Representation
+        # Continue Without Release Cache if Request Fails
+        if ! HTTP_CODE=$(curl -sSL \
+          --retry 3 \
+          --retry-delay 2 \
+          --connect-timeout 30 \
+          --max-time 300 \
+          -o "$RELEASEJSON" \
+          -w '%{http_code}' \
+          -H "Authorization: Bearer $GH_TOKEN" \
+          -H "Accept: application/vnd.github+json" \
+          "https://api.github.com/repos/${OWNER}/releases/tags/${TAG}"); then
+          # Report Release Metadata Request Failure
+          echo "└─ ⚠️ Release Metadata Request Failed"
+          echo "└─ ⏭️ Continuing Without Release Cache"
+          # Remove Temporary Release Metadata
+          rm -f "$RELEASEJSON"
+          # Allow Local Cache Restoration to Run
+          exit 0
+        fi
+
+        # Handle GitHub Release Response
+        # Missing Release or API Error Should Not Fail Kernel Build
+        case "$HTTP_CODE" in
+          200)
+            # Release Exists and its Metadata was Retrieved Successfully
+            echo "└─ 📌 Release Metadata Retrieved"
+            ;;
+          404)
+            # Release Does Not Exist Yet
+            # Continue Without Release Cache and Use Local Cache Fallback
+            echo "└─ ℹ️ GitHub Release Not Found     : $TAG"
+            echo "└─ ➡️ No Release Cache Available Yet"
+            echo "└─ ⏭️ Continuing Without Release Cache"
+            # Remove Temporary Release Metadata
+            rm -f "$RELEASEJSON"
+            # Return Successfully Without a Release Cache
+            exit 0
+            ;;
+          *)
+            # Handle API Errors, Rate Limits or Other Unexpected Responses
+            echo "└─ ⚠️ Release Metadata Unavailable : HTTP $HTTP_CODE"
+            echo "└─ ⏭️ Continuing Without Release Cache"
+            # Remove Temporary Release Metadata
+            rm -f "$RELEASEJSON"
+            # Allow Workflow to Continue Without Release Cache
+            exit 0
+            ;;
+        esac
+        # Locate Exact Cache Asset in Release Metadata
+        # Return Asset API URL Required For Binary Download
+        # Treat Invalid JSON or Missing Assets as a Cache Miss
+        ASSETURL=$(jq -r \
+          --arg FILE "$(basename "$ARCHIVE")" \
+          '[.assets[]? | select(.name == $FILE) | .url][0] // empty' \
+          "$RELEASEJSON" 2>/dev/null || true)
+        # Continue Without Cache if Matching Asset Does Not Exist
+        # An Existing Release May Not Contain the Requested Cache Archive
+        if [[ -z "$ASSETURL" || "$ASSETURL" == "null" ]]; then
+          echo "└─ ℹ️ Cache Asset Not Found"
+          echo "└─ ⏭️ Continuing Without Release Cache"
+          # Remove Temporary Release Metadata
+          rm -f "$RELEASEJSON"
+          # Allow Local Cache Restoration to Run
+          exit 0
+        fi
+
+        # Confirm Matching Cache Asset was Located
+        echo "└─ 🚀 Cache Asset Located"
+        # Remove Any Previous Temporary Archive
+        # Prevent an Old Archive From Being Mistaken For a New Download
+        rm -f "$ARCHIVE"
+        # Download Cache Archive
+        # Use GitHub Asset API URL with Binary Content Negotiation
+        echo "└─ 🌐 Downloading Cache Archive..."
+        # Download Archive with Automatic Retry Protection
+        # Continue Without Release Cache if Download Fails
+        if ! curl -fL \
+          --retry 5 \
+          --retry-delay 3 \
+          --retry-all-errors \
+          --connect-timeout 30 \
+          --max-time 300 \
+          -H "Authorization: Bearer $GH_TOKEN" \
+          -H "Accept: application/octet-stream" \
+          -A "Mozilla/5.0" \
+          "$ASSETURL" \
+          -o "$ARCHIVE"; then
+          # Report Download Failure
+          echo "└─ ⚠️ Cache Download Failed"
+          # Remove Failed Archive and Temporary Metadata
+          rm -f "$ARCHIVE" "$RELEASEJSON"
+          # Allow Workflow to Continue Without Release Cache
+          exit 0
+        fi
+
+        # Verify Downloaded Archive Exists and is Not Empty
+        # Successful HTTP Request Does Not Guarantee Valid Archive Data
+        if [[ ! -s "$ARCHIVE" ]]; then
+          echo "└─ ⚠️ Cache Archive is Empty"
+          # Remove Invalid Archive and Temporary Metadata
+          rm -f "$ARCHIVE" "$RELEASEJSON"
+          # Continue Without Release Cache
+          exit 0
+        fi
+
+        # Display Archive Information
+        # Show Downloaded Archive Size For Diagnostic Purposes
+        echo "└─ 📊 Archive Information :"
+        ls -lh "$ARCHIVE"
+        # Verify ZStandard Archive Integrity
+        # Ensure Downloaded Archive Can Be Decompressed
+        echo "└─ 🔍 Testing Archive Integrity..."
+        if ! zstd -t "$ARCHIVE"; then
+          # Reject the Archive if its Integrity Test Fails
+          echo "└─ ⚠️ Archive Integrity Test Failed"
+          # Remove Invalid Archive and Temporary Metadata
+          rm -f "$ARCHIVE" "$RELEASEJSON"
+          # Continue Without Release Cache
+          exit 0
+        fi
+
+        # Confirm Archive Passed Integrity Test
+        echo "└─ 📌 Archive Integrity Verified"
+        # Prepare Temporary Restoration Directory
+        # Remove Any Previous Incomplete Extraction
+        rm -rf "$RESTOREDIR"
+        # Create a Clean Directory For Archive Extraction
+        mkdir -p "$RESTOREDIR"
+        # Extract Cache Into Temporary Directory
+        # Use Unzstd to Decompress Zstandard Archive
+        # Archive Must Contain Cache Contents at its Root
+        # Keep Existing Compiler Cache Untouched Until Extraction Succeeds
+        echo "└─ 📦 Extracting Cache Archive..."
+        if ! tar \
+          --use-compress-program=unzstd \
+          -xf "$ARCHIVE" \
+          -C "$RESTOREDIR"; then
+          # Report Extraction Failure
+          echo "└─ ⚠️ Cache Extraction Failed"
+          # Remove Incomplete Extraction Directory
+          rm -rf "$RESTOREDIR"
+          # Remove Failed Archive and Temporary Metadata
+          rm -f "$ARCHIVE" "$RELEASEJSON"
+          # Continue Without Release Cache
+          exit 0
+        fi
+
+        # Verify Extracted Cache Contains Files
+        # Reject Empty Archives That Passed Compression Test
+        if ! find "$RESTOREDIR" -mindepth 1 -print -quit | grep -q .; then
+          echo "└─ ⚠️ Extracted Cache Directory is Empty"
+          # Remove Empty Extraction Directory
+          rm -rf "$RESTOREDIR"
+          # Remove Archive and Temporary Metadata
+          rm -f "$ARCHIVE" "$RELEASEJSON"
+          # Continue Without Release Cache
+          exit 0
+        fi
+
+        # Replace Existing Cache Only After Successful Extraction
+        # Preserve Previous Cache Until New Cache is Installed
+        BACKUPDIR="${CCACHEDIR}.previous"
+        # Remove Any Previous Backup Directory
+        rm -rf "$BACKUPDIR"
+        # Preserve Existing Compiler Cache
+        if [[ -d "$CCACHEDIR" ]]; then
+          mv "$CCACHEDIR" "$BACKUPDIR"
+        fi
+
+        # Move Successfully Extracted Cache Into its Final Location
+        if mv "$RESTOREDIR" "$CCACHEDIR"; then
+          # Remove Previous Cache After Successful Replacement
+          rm -rf "$BACKUPDIR"
+        else
+          # Restore Previous Cache if Replacement Fails
+          echo "└─ ⚠️ Cache Replacement Failed"
+          if [[ -d "$BACKUPDIR" ]]; then
+            mv "$BACKUPDIR" "$CCACHEDIR"
+          fi
+
+          # Remove Incomplete Restoration Data
+          rm -rf "$RESTOREDIR"
+          rm -f "$ARCHIVE" "$RELEASEJSON"
+          # Continue Without Release Cache
+          exit 0
+        fi
+
+        # Ensure Restored Cache Files and Directories Are Accessible
+        # Preserve Existing Executable Permissions
+        chmod -R u+rwX,go+rX "$CCACHEDIR"
+        # Remove Temporary Archive and Release Metadata
+        rm -f "$ARCHIVE" "$RELEASEJSON"
+        # Confirm Successful Cache Restoration
+        echo "└─ 🎉 Cache Restoration Completed"
+        # Report Successful Release Cache Restoration
+        # Output Prevents Local Cache Fallback From Running
+        echo "cache-restored=true" >> "$GITHUB_OUTPUT"
+
+    # ♻️ Restore Local GitHub Actions Cache as Fallback
+    - name: ♻️ Local Cache Restoration
+      id: ccache-restore
+      # Run Local Cache Restoration Only When :
+      # - Compiler Cache is Enabled
+      # - Release Cache Restoration was Not Successful
+      if: ${{ env.BUILDCCACHE != 'Disabled' && steps.cache-restoration.outputs.cache-restored != 'true' }}
+      # Use Official GitHub Actions Cache Restoration Action
+      uses: actions/cache/restore@v6
+      with:
+        # Restore Compiler Cache Files Into Configured Cache Directory
+        path: ${{ env.CCACHE_DIR }}
+        # Construct Exact Local Cache Key
+        # Include OS, Device Manifest, CPU and Workflow Branch
+        key: CCache-${{ inputs.RUNNEROS }}-${{ inputs.FILE }}-${{ inputs.CPU }}-${{ github.ref_name }}
+        # Restore Hierarchy For Partial Cache Reuse
+        # GitHub Attempts Exact Key First
+        # If No Exact Match Exists, Search Broader Prefixes
+        # Allows Reuse of Compatible Cache Objects
+        restore-keys: |
+          CCache-${{ inputs.RUNNEROS }}-${{ inputs.FILE }}-${{ inputs.CPU }}-
+          CCache-${{ inputs.RUNNEROS }}-${{ inputs.FILE }}-
+
+    # ♻️ Restore ThinLTO Cache For Linux 5.x Kernels
+    - name: ♻️ ThinLTO Cache Restoration
+      id: restore-thinlto
+      # Restore ThinLTO Cache Only When :
+      # - ThinLTO Cache Restoration is Enabled
+      # - Resolved Kernel Version Starts With 5
+      if: ${{ inputs.THINLTO != 'Disabled' && startsWith(inputs.KERNELVERSION, '5.') }}
+      # Use GitHub Actions Cache Restoration
+      uses: actions/cache/restore@v6
+      with:
+        # Define ThinLTO Cache Directory
+        # This Directory Contains Reusable ThinLTO Compilation Data
+        path: ${{ github.workspace }}/kernel_workspace/.thinlto-cache
+        # Construct the ThinLTO Cache Key
+        # Include OS, Branch, Device Manifest and Kernel Version
+        # Separate Kernel Versions to Avoid Incompatible Cache Reuse
+        key: thinlto-${{ inputs.RUNNEROS }}-${{ github.ref_name }}-${{ inputs.FILE }}-${{ inputs.KERNELVERSION }}
+
+    # Display Compiler Cache Key and Restoration Status
+    - name: 🗝️ Cache Key and Status
+      id: cache-status
+      # Skip Cache Status Reporting When Compiler Cache is Disabled
+      if: ${{ env.BUILDCCACHE != 'Disabled' }}
+      # Execute the Cache Status Script Using Bash
+      shell: bash
+      # Export Inputs and Cache Restoration Results
+      env:
+        # Operating System Used in the Local Cache Key
+        RUNNEROS: ${{ inputs.RUNNEROS }}
+        # Device Manifest Configuration File
+        FILE: ${{ inputs.FILE }}
+        # Selected Root Engine Used in the Release Cache Key
+        ROOTENGINE: ${{ inputs.ROOTENGINE }}
+        # Target CPU Used in Cache Key
+        CPU: ${{ inputs.CPU }}
+        # Exact or Partial Local Cache Restoration Result
+        LOCAL: ${{ steps.ccache-restore.outputs.cache-hit }}
+        # Release Cache Restoration Result
+        RELEASE: ${{ steps.cache-restoration.outputs.cache-restored }}
+        # Compiler Cache Directory to Inspect
+        CCACHEDIR: ${{ env.CCACHE_DIR }}
+      run: |
+        # Enable Strict Error Handling
+        set -euo pipefail
+        # Validate Required Compiler Cache Environment Variable
+        : "${CCACHEDIR:?not defined in the calling workflow}"
+        # Construct Logical Cache Keys
+        # Local Cache Key Includes Runner OS and CPU
+        LOCALCACHEKEY="CCache-${RUNNEROS}-${FILE}-${CPU}-${GITHUB_REF_NAME}"
+        # Release Cache Key Includes Device, Root Engine and Branch
+        RELEASECACHEKEY="Cache-${FILE}-${ROOTENGINE}-${GITHUB_REF_NAME}"
+        # Normalize Cache Restoration Results
+        LOCAL="${LOCAL:-false}"
+        RELEASE="${RELEASE:-false}"
+        # Select Cache Key and Restoration Source
+        # Prefer Local Cache When it was Successfully Restored
+        # Otherwise Select the Release Cache When it was Restored
+        # If Neither was Restored, Display Local Cache Key
+        if [[ "$LOCAL" == "true" ]]; then
+          CACHEKEY="$LOCALCACHEKEY"
+          CACHESOURCE="Local"
+        elif [[ "$RELEASE" == "true" ]]; then
+          CACHEKEY="$RELEASECACHEKEY"
+          CACHESOURCE="Release"
+        else
+          CACHEKEY="$LOCALCACHEKEY"
+          CACHESOURCE="None"
+        fi
+
+        # Check Whether Compiler Cache Directory Contains Data
+        # Non-Empty Directory may Contain a Partial Cache Restored
+        # Through GitHub Actions Restore-Key Fallbacks
+        CACHEDATA=false
+        if [[ -d "$CCACHEDIR" ]] &&
+          find "$CCACHEDIR" -mindepth 1 -maxdepth 1 -print -quit | grep -q .; then
+          CACHEDATA=true
+        fi
+      
+        # Display Selected Cache Key and Restoration Results
+        echo "└─ 🔑 Cache Key         : $CACHEKEY"
+        echo "└─ 📍 Cache Source      : $CACHESOURCE"
+        echo "└─ 🎯 Local Cache Hit   : $LOCAL"
+        echo "└─ 🎯 Release Cache Hit : $RELEASE"
+        # Initialize GitHub Actions Step Summary
+        # Create a Markdown Table For Final Cache Status
+        {
+          echo "### 🧠 Compiler Cache Status"
+          echo ""
+          echo "| Status | Value |"
+          echo "|--------|-------|"
+        } >> "$GITHUB_STEP_SUMMARY"
+        # Determine Final Cache Status by Restoration Priority
+        # Priority :
+        # 1. Exact Local Cache Match
+        # 2. Successfully Restored Release Cache
+        # 3. Partial Cache Data From Restore-Key Fallback
+        # 4. No Cache Data Available
+        if [[ "$LOCAL" == "true" ]]; then
+          STATUS="♻️ Exact Cache Match Restored From Local"
+          echo "└─ ♻️ Cache Data Found"
+        elif [[ "$RELEASE" == "true" ]]; then
+          STATUS="♻️ Exact Cache Match Restored From Release"
+          echo "└─ ♻️ Cache Data Found"
+        elif [[ "$CACHEDATA" == "true" ]]; then
+          STATUS="♻️ Partial Cache Restored Through Fallback Restore Keys"
+          echo "└─ ♻️ Cache Data Found"
+        else
+          # No Cached Objects Were Found
+          # Kernel Build Will Start With a Cold Compiler Cache
+          STATUS="⚠️ No Cache Available (Cold Build)"
+          echo "└─ ⚠️ No Cache Found — Cold Build"
+        fi
+
+        # Append Final Cache Status to Workflow Summary
+        echo "| Cache | $STATUS |" >> "$GITHUB_STEP_SUMMARY"
+        # Display Final Cache Status in Workflow Log
+        echo "└─ 📦 Final Cache Status :"
+        echo "$STATUS"
+
+    # ⚙️ Configure and Setup Compiler Cache
+    - name: ⚙️ Configure Compiler Cache
+      # Skip Compiler Cache Configuration When Disabled
+      if: ${{ env.BUILDCCACHE != 'Disabled' }}
+      # Execute Compiler Cache Configuration Using Bash
+      shell: bash
+      # Export Compiler Cache Directory and Maximum Size
+      env:
+        # Directory Used by Cache-ECS to Store Cached Objects
+        CCACHEDIR: ${{ env.CCACHE_DIR }}
+
+        # Maximum Storage Capacity Allowed For Compiler Cache
+        CCACHEMAXSIZE: ${{ env.CCACHE_MAXSIZE }}
+      run: |
+        # Enable Strict Error Handling
+        set -Eeuo pipefail
+        # Validate Required Compiler Cache Configuration
+        : "${CCACHEDIR:?not defined in the calling workflow}"
+        : "${CCACHEMAXSIZE:?not defined in the calling workflow}"
+        # Prepare Compiler Cache Directory
+        # Create Directory if It Does Not Already Exist
+        mkdir -p "$CCACHEDIR"
+        # Verify Compiler Cache Installation
+        # Skip Cache Configuration if Binary is Missing
+        if ! command -v ccache >/dev/null 2>&1; then
+          echo "└─ ⚠️ Compiler Cache Not Found"
+          echo "└─ 🛠️ Skipping Compiler Cache Setup"
+          exit 0
+        fi
+
+        # Verify Compiler Cache Binary
+        # Display Resolved Binary Path and Installed Version
+        CCACHEBIN="$(command -v ccache)"
+        echo "└─ 📍 Cache Path     : $CCACHEBIN"
+        echo "└─ 📜 Cache Version  :"
+        ccache --version
+        # Configure Maximum Cache Size
+        # Apply Configured Storage Limit to Compiler Cache
+        echo "└─ 💾 Cache Size     : $CCACHEMAXSIZE"
+        ccache -M "$CCACHEMAXSIZE"
+        # Configure Compiler Cache Binary Path
+        # Locate Installed Cache-ECS or Compiler Cache Binary
+        CCACHEBINDIR="$(dirname "$CCACHEBIN")"
+        # Persist Compiler Cache Binary Directory Across Workflow Steps
+        echo "$CCACHEBINDIR" >> "$GITHUB_PATH"
+        # Update Path Immediately For Current Shell
+        export PATH="$CCACHEBINDIR:$PATH"
+        echo "└─ 🔗 Cache Binary : $CCACHEBIN"
+        # Reset Compiler Cache Statistics
+        # Clear Previous Statistics Before Kernel Build Starts
+        # Allows Final Statistics to Reflect the Current Build
+        echo "└─ 🧾 Resetting Compiler Cache Statistics..."
+        ccache -z
+        # Display Initial Compiler Cache Statistics
+        # Statistics Provide a Baseline Before Compilation
+        echo "└─ 📊 Compiler Cache Statistics (Before Build) :"
+        ccache -s
+        # Confirm Compiler Cache Configuration is Complete
+        echo "└─ 🎉 Compiler Cache Ready!"
