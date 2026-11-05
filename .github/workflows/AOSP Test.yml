@@ -39,15 +39,6 @@ on:
         description: 'Custom Root Engine Source Commit SHA (7–40 Characters; Optional, Empty = Use Default Branch)'
         required: false
         default: ''    
-      NOMOUNT:
-        type: choice
-        description: 'Enable NoMount Built-in Kernel Integration (Master = Stable, Dev = Development, None = Disabled)'
-        required: true        
-        default: Master
-        options:
-          - Master
-          - Dev
-          - None  
       SUSFSREPOSITORY:
         type: string
         description: "Rollback SUSFS Revision (Enter Hash or Number or -1 to Turn Off)"
@@ -66,6 +57,20 @@ on:
         description: "Extract and Apply SUSFS Development Branch?"
         required: true
         default: false
+      NOMOUNT:
+        type: choice
+        description: 'Enable NoMount Built-in Kernel Integration (Master = Stable, Dev = Development, None = Disabled)'
+        required: true        
+        default: Master
+        options:
+          - Master
+          - Dev
+          - None  
+      WINDSPEED:
+        type: boolean
+        description: 'Enable Fengchi (Hmbird) Scheduler'
+        required: true
+        default: true
       NEONLZ4UPDATE:
         type: boolean
         description: 'Enable LZ4 1.10.0 Compression Update with ARM64 NEON Optimizations (Improved Compression Performance and Ratio); Replaces In-Tree LZ4'
@@ -175,7 +180,7 @@ jobs:
       CCACHE_NOHASHDIR: "true"
       CCACHE_NOHARDLINK: "true"
       CCACHE_IS_KERNEL_COMPILING: "true"
-
+      CPU: "SM8750"
     steps:
       - name: 🧹 Clean Runner Environment
         shell: bash
@@ -206,11 +211,12 @@ jobs:
           # Resolve Workflow Dispatch Inputs
           AOSPSOURCE='${{ inputs.AOSPSOURCE }}'
           ROOTENGINE='${{ inputs.ROOTENGINE }}'
-          ROOTCOMMIT='${{ inputs.ROOTCOMMIT }}'
-          NOMOUNT='${{ inputs.NOMOUNT }}'
+          ROOTCOMMIT='${{ inputs.ROOTCOMMIT }}'          
           SUSFSREPOSITORY='${{ inputs.SUSFSREPOSITORY }}'
           SUSFSVARIANT='${{ inputs.SUSFSVARIANT }}'
           SUSFSBRANCHDEV='${{ inputs.SUSFSBRANCHDEV }}'
+          NOMOUNT='${{ inputs.NOMOUNT }}'
+          WINDSPEED='${{ inputs.WINDSPEED }}'
           NEONLZ4UPDATE='${{ inputs.NEONLZ4UPDATE }}'
           BBG='${{ inputs.BBG }}'
           BETTERNET='${{ inputs.BETTERNET }}'
@@ -232,11 +238,12 @@ jobs:
           echo "└─ 🔍 Selected Workflow Inputs"
           printf '%-24s : %s\n' "AOSP Source"                 "$AOSPSOURCE"
           printf '%-24s : %s\n' "Root Engine"                 "$ROOTENGINE"
-          printf '%-24s : %s\n' "Root Commit"                 "$ROOTCOMMIT"
-          printf '%-24s : %s\n' "NoMount"                     "$NOMOUNT"
+          printf '%-24s : %s\n' "Root Commit"                 "$ROOTCOMMIT"        
           printf '%-24s : %s\n' "SUSFS Meta"                  "$SUSFSREPOSITORY"
           printf '%-24s : %s\n' "SUSFS Variant"               "$SUSFSVARIANT"
           printf '%-24s : %s\n' "SUSFS Development Branch"    "$SUSFSBRANCHDEV"
+          printf '%-24s : %s\n' "NoMount"                     "$NOMOUNT"
+          printf '%-24s : %s\n' "Fengchi Scheduler"           "$WINDSPEED"
           printf '%-24s : %s\n' "LZ4 / ZSTD Update"           "$NEONLZ4UPDATE"
           printf '%-24s : %s\n' "Baseband Guard"              "$BBG"
           printf '%-24s : %s\n' "Netfilter"                   "$BETTERNET"
@@ -335,7 +342,8 @@ jobs:
             ["Master"]="-NoMountMaster"
             ["Dev"]="-NoMountDev"
           )
-          SUFFIX+="${NOMOUNTVARMAP[$NOMOUNT]:-}"    
+          SUFFIX+="${NOMOUNTVARMAP[$NOMOUNT]:-}"
+          [[ "$WINDSPEED" == "true" ]] && SUFFIX+="-Hmbird"
           [[ "$NEONLZ4UPDATE" == "true" ]] && SUFFIX+="-LZ4(Neon)"
           [[ "$BBG" == "true" ]] && SUFFIX+="-BBG"  
           [[ "$BETTERNET" == "true" ]] && SUFFIX+="-BetterNet"
@@ -2027,7 +2035,9 @@ jobs:
               else
                 sed -i "s|^# ${config} is not set$|${config}=y|" "${DEFCONFIG}"
               fi
+              
             done
+            
           else
             echo "└─ ⚠️ Default Configuration is Not Set; Skipping Configuration Updates"
           fi
@@ -2183,6 +2193,35 @@ jobs:
           echo "└─ 📌 NoMount Makefile Integration Verified"
           echo "└─ 📌 NoMount Source Integration Verified"
           echo "└─ 🎉 NoMount Built-in Integration Complete"
+
+      # Configure Hmbird Scheduler
+      - name: ⚙️ Hmbird Scheduler
+        shell: bash
+        env:
+          # Define Hmbird Scheduler Toggle
+          WINDSPEED: ${{ inputs.WINDSPEED }}
+        run: |
+          # Remove Existing Hmbird Scheduler Configuration to Prevent Duplicates
+          sed -i \
+            '/^CONFIG_HMBIRD_SCHED=/d; /^# CONFIG_HMBIRD_SCHED is not set/d' \
+            "$DEFCONFIG"
+          # Check Whether Hmbird Scheduler is Enabled
+          if [[ "$WINDSPEED" == "true" ]]; then
+            # Validate Hmbird Scheduler Source Directory
+            if [[ ! -d "$SOURCEDIR/kernel/sched/hmbird" ]]; then
+              echo "└─ ⚠️ Hmbird Scheduler Source Missing"
+              echo "└─ 📂 Expected : $SOURCEDIR/kernel/sched/hmbird"
+              exit 1
+            fi
+
+            # Enable Hmbird Scheduler
+            echo "CONFIG_HMBIRD_SCHED=y" >> "$DEFCONFIG"
+            echo "└─ 📌 Hmbird Scheduler Enabled"
+          else
+            # Explicitly Disable Hmbird Scheduler
+            echo "CONFIG_HMBIRD_SCHED=n" >> "$DEFCONFIG"
+            echo "└─ ⛔ Hmbird Scheduler Disabled"
+          fi
    
       - name: ⚡ LZ4 ARM64 Neon Optimization
         if: ${{ inputs.NEONLZ4UPDATE }}
@@ -2636,7 +2675,7 @@ jobs:
           # Validate Kernel Paths
           if [[ -z "${SOURCEDIR:-}" || ! -f "$SOURCEDIR/Makefile" ]]; then
             echo "└─ ⚠️ Kernel Makefile Not Found"
-            echo "└─ 📂 Expected : ${SOURCEDIR:-<Unset>}/Makefile"
+            echo "└─ 📂 Expected : ${SOURCEDIR:-Unset}/Makefile"
             exit 1
           fi
 
@@ -2652,7 +2691,7 @@ jobs:
 
           if [[ -z "${DEFCONFIG:-}" || ! -s "$DEFCONFIG" ]]; then
             echo "└─ ⚠️ GKI Default Configuration Not Found or Empty"
-            echo "└─ 📂 Expected : ${DEFCONFIG:-<Unset>}"
+            echo "└─ 📂 Expected : ${DEFCONFIG:-Unset}"
             exit 1
           fi
 
@@ -2680,6 +2719,37 @@ jobs:
 
           echo "└─ 📌 Clang : $(clang --version | head -n 1)"
           echo "└─ 📌 LLD   : $(ld.lld --version | head -n 1)"
+          # Configure Qualcomm Oryon CPU Targeting
+          KCFLAGSEXTRA=()
+          case "$CPU" in
+            SM8750)
+              echo "└─ 🔍 Checking Clang Oryon CPU Target Support..."
+              echo "└─ 🛠️ Clang Version :"
+              CLANGVERSION="$(clang --version)"
+              echo "${CLANGVERSION%%$'\n'*}"
+              # Test Whether Clang Supports Oryon CPU Target
+              if printf 'int main(void){return 0;}\n' |
+                clang \
+                  -mcpu=oryon-1 \
+                  --target=aarch64-linux-gnu \
+                  -fsyntax-only -x c - \
+                  >/dev/null 2>&1; then
+                # Enable Oryon CPU Targeting
+                KCFLAGSEXTRA+=(-mcpu=oryon-1)
+                echo "└─ 🧠 Oryon CPU Targeting Enabled"
+                echo "└─ 📱 Target : $CPU"
+                echo "└─ ⚙️ Flag   : -mcpu=oryon-1"
+              else
+                # Retain Default Compiler CPU Target
+                echo "└─ ⚠️ Clang Does Not Support Oryon Optimizations"
+                echo "└─ ℹ️ Keeping Existing Compiler Target Defaults"
+              fi
+              ;;
+            *)
+              # Skip Oryon Targeting For Other CPUs
+              echo "└─ ℹ️ Oryon Targeting Skipped For $CPU"
+              ;;
+          esac
           # Validate Fake Time Libraries
           if [[ ! -s "$LIBDIR/libfakestat.so" || ! -s "$LIBDIR/libfaketimeMT.so" ]]; then
             echo "└─ ⚠️ Fake Time Libraries Not Found"
@@ -2780,8 +2850,7 @@ jobs:
             LD="$LDWRAPPER" \
             HOSTLD="ld.lld" \
             O="$OUTDIR" \
-            KCFLAGS+=-O2 \
-            KCFLAGS+=-Wno-error \
+            KCFLAGS="-O2 -Wno-error ${KCFLAGSEXTRA[*]}" \
             Image
           # Calculate Build Duration
           BUILDEND="$(date +%s)"
