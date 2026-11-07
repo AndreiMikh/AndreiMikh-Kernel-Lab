@@ -1,0 +1,468 @@
+# SuSFS and Kernel Compatibility Patches Composite Action
+name: 🩹 SuSFS and Kernel Compatibility Patches
+description: Apply SuSFS Patches, Kernel Compatibility Fixes and Fake Patch Handling
+# Define Inputs Required by Composite Action
+inputs:
+  # Select Root Engine Used by Kernel Build
+  ROOTENGINE:
+    description: Root Engine
+    required: true
+  # Select Root Engine Branch Source Used by Kernel Build
+  ROOTBRANCHSOURCE:
+    description: Root Engine Branch Source
+    required: true
+  # Select a SuSFS Commit, Tag, Branch or Numeric Rollback Value
+  SUSFSREPOSITORY:
+    description: SuSFS Revision or Rollback Value
+    required: true
+  # Select SuSFS Repository Variant
+  SUSFSVARIANT:
+    description: SuSFS Variant (GKI or OGKI)
+    required: true
+  # Append Development Suffix to Selected SuSFS Branch When Enabled
+  SUSFSBRANCHDEV:
+    description: SuSFS Development Branch
+    required: true
+  # Specify Target Kernel Configuration
+  FILE:
+    description: Kernel Target Configuration
+    required: true
+# Expose Detected SuSFS Version to Subsequent Workflow Steps
+outputs:
+  susfsver:
+    description: Detected SuSFS Version
+    value: ${{ steps.susfs.outputs.susfsver }}
+  susfscommit:
+    description: Active SuSFS Commit
+    value: ${{ steps.susfs.outputs.susfscommit }}
+runs:
+  using: composite
+  steps:
+    # These Changes Prepare Older or Newer Kernel Sources For SUSFS Patch
+    # Apply Kernel Fake Patches Before SuSFS Integration
+    # Apply Temporary Kernel Compatibility Fixes Before SuSFS Integration
+    - name: 📥 Invert Fake Patches
+      if: ${{ inputs.SUSFSREPOSITORY == '' || !startsWith(inputs.SUSFSREPOSITORY, '-') }}
+      shell: bash
+      env:
+        COMMONKERNELFOLDER: ${{ env.COMMONKERNELFOLDER }}
+        SCRIPTSDIR: ${{ env.SCRIPTSDIR }}
+      # Disable Strict Bash Error Handling
+      run: |
+        set -e
+        # Define Fake Patches Script Path
+        FAKESCRIPT="${SCRIPTSDIR}/FakePatches/SuSFS-Compat.kts"
+        echo "└─ 📌 Script   : $FAKESCRIPT"
+        # Verify Kotlin Compiler Availability and Version
+        echo "└─ ☕ Kotlin Compiler :"
+        kotlinc -version
+        # Apply Fake Patches to Prepare For SUSFS Integration
+        echo "└─ 🔧 Applying Fake Patches..."
+        kotlinc -script "$FAKESCRIPT" Apply "$COMMONKERNELFOLDER"
+        # Confirm Fake Patches were Applied Successfully
+        echo "└─ 🎉 Fake Patches Applied Successfully"
+
+    # Clone SuSFS and Apply Patches
+    - name: 🩹 SuSFS Integration
+      id: susfs
+      if: ${{ inputs.SUSFSREPOSITORY == '' || !startsWith(inputs.SUSFSREPOSITORY, '-') }}
+      shell: bash
+      # Export Composite Action Inputs and Import Environment Variables
+      env:
+        # Kernel Build Paths From Caller Environment
+        WORKDIR: ${{ env.WORKDIR }}
+        COMMONKERNELFOLDER: ${{ env.COMMONKERNELFOLDER }}
+        SCRIPTSDIR: ${{ env.SCRIPTSDIR }}
+        PATCHDIR: ${{ env.PATCHDIR }}
+        REJECTCHECKER: ${{ env.REJECTCHECKER }}
+        # Root Engine and SuSFS Configuration
+        ROOTENGINE: ${{ inputs.ROOTENGINE }}
+        ROOTBRANCHSOURCE: ${{ inputs.ROOTBRANCHSOURCE }}
+        SUSFSREPOSITORY: ${{ inputs.SUSFSREPOSITORY }}
+        SUSFSVARIANT: ${{ inputs.SUSFSVARIANT }}
+        SUSFSBRANCHDEV: ${{ inputs.SUSFSBRANCHDEV }}
+        FILE: ${{ inputs.FILE }}
+        # Kernel Version Information
+        ANDROIDVERSION: ${{ env.ANDROIDVERSION }}
+        KERNELVERSION: ${{ env.KERNELVERSION }}
+        SUBLEVEL: ${{ env.SUBLEVEL }}
+      # Enable Strict Error Handling
+      run: |
+        set -euo pipefail
+        # Construct Android and Kernel Version Identifier
+        GKIVERSION="${ANDROIDVERSION}-${KERNELVERSION}"
+        # Kotlin Environment
+        CONTEXTSCRIPT="${SCRIPTSDIR}/FakePatches/SuSFS-Context.kts"
+        # Navigate to Kernel Working Directory
+        cd "$WORKDIR"
+        # Display Kernel Environment Information
+        echo "└─ 🧾 Android Version       : $ANDROIDVERSION"
+        echo "└─ 🧾 Kernel Version        : $KERNELVERSION"
+        echo "└─ 🔎 Detected Kernel Base  : $GKIVERSION"
+        echo "└─ 📁 Kernel Directory      : $COMMONKERNELFOLDER"
+        echo "└─ 📌 Script                : $CONTEXTSCRIPT"
+        # Select SuSFS Repository, Branch and Optional Fallback
+        echo "└─ 📥 Cloning SuSFS..."
+        if [[ "$SUSFSVARIANT" == "OGKI" ]]; then
+          # Select OGKI Repository and Branch
+          BRANCH="oki-${ANDROIDVERSION}-${KERNELVERSION}"
+          REPOURL="https://github.com/cctv18/susfs4oki.git"
+          FALLBACKURL=""
+        else
+          # Select GKI Repository and GitHub Mirror
+          BRANCH="gki-${ANDROIDVERSION}-${KERNELVERSION}"
+          REPOURL="https://gitlab.com/simonpunk/susfs4ksu.git"
+          FALLBACKURL="https://github.com/AndreiMikh/susfs4ksu.git"
+        fi
+
+        # Append Development Suffix When Enabled
+        if [[ "$SUSFSBRANCHDEV" == "true" ]]; then
+          BRANCH="${BRANCH}-dev"
+        fi
+
+        # Attempt to Clone Selected Branch up to Three Times
+        CLONED=false
+        for attempt in {1..3}; do
+          # Remove Any Previous Failed Clone
+          rm -rf susfs4ksu
+          # Clone Requested Branch with Shallow History
+          if git clone --depth=1 --single-branch \
+            --branch "$BRANCH" \
+            "$REPOURL" susfs4ksu; then
+            echo "└─ 📌 SuSFS Clone Successful"
+            CLONED=true
+            break
+          fi
+
+          # Remove an Incomplete Repository Before Retrying
+          rm -rf susfs4ksu
+          # Delay Between Retry Attempts
+          if [[ "$attempt" -lt 3 ]]; then
+            echo "└─ ⚠️ Clone Failed (Attempt $attempt/3)"
+            sleep $((attempt * 3))
+          fi
+          
+        done
+
+        # Try GitHub Mirror if Primary Clone Failed
+        if [[ "$CLONED" != "true" && -n "$FALLBACKURL" ]]; then
+          echo "└─ ⚠️ GitLab Unavailable, Trying GitHub Mirror..."
+          if git clone --depth=1 --single-branch \
+            --branch "$BRANCH" \
+            "$FALLBACKURL" susfs4ksu; then
+            echo "└─ 📌 SuSFS GitHub Mirror Clone Successful"
+            CLONED=true
+          fi
+        fi
+
+        # Stop Build if No Repository Could be Cloned
+        if [[ "$CLONED" != "true" ]]; then
+          echo "└─ ⚠️ SuSFS Clone Failed"
+          echo "└─ 📦 Repository : $REPOURL"
+          echo "└─ 🌿 Branch     : $BRANCH"
+          [[ -z "$FALLBACKURL" ]] || echo "└─ 🔄 Fallback   : $FALLBACKURL"
+          exit 1
+        fi
+
+        # Display Selected SuSFS Branch
+        echo "└─ 📌 SuSFS Branch   : $BRANCH"
+        # Enter Cloned SuSFS Repository
+        cd susfs4ksu || exit 1
+        # Check Whether a Specific SuSFS Revision was Requested
+        if [[ -n "$SUSFSREPOSITORY" ]]; then
+          echo "└─ 🔎 SuSFS Revision : ${SUSFSREPOSITORY:-Default}"
+          # Handle Numeric Rollback Values
+          # Select a Previous Commit Relative to Current Branch Head
+          if [[ "$SUSFSREPOSITORY" =~ ^[0-9]+$ ]]; then
+            echo "└─ 📦 Fetching Additional Git History..."
+            # Fetch Complete History of the Selected SuSFS Branch
+            git fetch --unshallow origin \
+              "+refs/heads/${BRANCH}:refs/remotes/origin/${BRANCH}" || {
+              echo "└─ ⚠️ Failed to Fetch SuSFS History"
+              exit 1
+            }
+            # Check Out Requested Number of Commits Behind Head
+            git checkout "HEAD~${SUSFSREPOSITORY}" || {
+              echo "└─ ⚠️ Failed Checkout Head~${SUSFSREPOSITORY}"
+              exit 1
+            }
+          # Handle Explicit SuSFS Commit Hashes
+          elif [[ "$SUSFSREPOSITORY" =~ ^[0-9a-fA-F]{7,40}$ ]]; then
+            echo "└─ 📦 Fetching SuSFS Branch History..."
+            # Fetch Complete History of Selected SuSFS Branch
+            git fetch --unshallow origin \
+              "+refs/heads/${BRANCH}:refs/remotes/origin/${BRANCH}" || {
+              echo "└─ ⚠️ Failed to Fetch SuSFS History"
+              exit 1
+            }
+            # Verify Requested Commit Exists Locally
+            if ! git cat-file -e "${SUSFSREPOSITORY}^{commit}" 2>/dev/null; then
+              echo "└─ ⚠️ SuSFS Commit Not Found in Selected Branch : $SUSFSREPOSITORY"
+              exit 1
+            fi
+
+            # Check Out Requested Commit in Detached Head State
+            git checkout --detach "$SUSFSREPOSITORY" || {
+              echo "└─ ⚠️ Failed to Checkout SuSFS Commit"
+              exit 1
+            }
+          # Handle Named SuSFS Branches and Tags
+          else
+            echo "└─ 📦 Fetching Requested SuSFS Branch or Tag..."
+            # Fetch Available Remote Branches and Tags
+            git fetch origin || {
+              echo "└─ ⚠️ Failed to Fetch SuSFS Repository"
+              exit 1
+            }
+            # Check Out Requested Branch or Tag
+            git checkout "$SUSFSREPOSITORY" || {
+              echo "└─ ⚠️ Invalid SuSFS Revision : $SUSFSREPOSITORY"
+              exit 1
+            }
+          fi
+        fi
+
+        # Display Active SuSFS Commit
+        SUSFSCOMMIT=$(git rev-parse --short HEAD)
+        echo "└─ 📌 Active SuSFS Commit : $SUSFSCOMMIT"
+        # Detect SuSFS Version From its Header
+        SUSFSVER="Unknown"
+        SUSFSHEADER="./kernel_patches/include/linux/susfs.h"
+        if [[ -f "$SUSFSHEADER" ]]; then
+          SUSFSVER=$(
+            awk -F'"' '/SUSFS_VERSION/ {print $2; exit}' "$SUSFSHEADER"
+          )
+          SUSFSVER="${SUSFSVER:-Unknown}"
+        fi
+
+        # Export SuSFS Version to Workflow Environment
+        echo "└─ 📦 SuSFS Version : $SUSFSVER"
+        echo "SUSFSVER=$SUSFSVER" >> "$GITHUB_ENV"
+        # Export SuSFS Commit and Version to Step Outputs
+        {
+          echo "susfscommit=$SUSFSCOMMIT"
+          echo "susfsver=$SUSFSVER"
+        } >> "$GITHUB_OUTPUT"
+        # Return to the Working Directory
+        cd "$WORKDIR" || exit 1
+        # Find SuSFS Core Patch Files Matching Current Kernel Base
+        echo "└─ 🔎 Searching SuSFS Patches..."
+        shopt -s nullglob
+        SUSFSPATCHLIST=(
+          "$WORKDIR"/susfs4ksu/kernel_patches/50_add_susfs_in_gki-"${ANDROIDVERSION}"-"${KERNELVERSION}"*.patch
+        )
+        # Stop if No Matching SuSFS Patch Exists
+        if [[ ${#SUSFSPATCHLIST[@]} -eq 0 ]]; then
+          echo "└─ ⚠️ No SuSFS Patch Found"
+          ls "$WORKDIR/susfs4ksu/kernel_patches/" || true
+          exit 1
+        fi
+
+        # Select Last Matching Patch From Sorted Array
+        SUSFSPATCH="${SUSFSPATCHLIST[-1]}"
+        # Copy SuSFS Patch Files Into Common Kernel Source Tree
+        echo "└─ 🧾 SuSFS Patch Directory : $SUSFSPATCH"
+        echo "└─ 📥 Copying SuSFS Patches..."
+        # Verify Required SuSFS Source Directories
+        for DIR in \
+          "$WORKDIR/susfs4ksu/kernel_patches/fs" \
+          "$WORKDIR/susfs4ksu/kernel_patches/include/linux"; do
+          if [[ ! -d "$DIR" ]]; then
+            echo "└─ ⚠️ Required SuSFS Directory Not Found: $DIR"
+            exit 1
+          fi
+          
+        done
+
+        # Copy Main SuSFS Patch
+        cp -f "$SUSFSPATCH" "$COMMONKERNELFOLDER/" || {
+          echo "└─ ⚠️ Failed to Copy SuSFS Core Patch"
+          exit 1
+        }
+        # Copy SuSFS File System Changes
+        cp -r "$WORKDIR/susfs4ksu/kernel_patches/fs/." \
+          "$COMMONKERNELFOLDER/fs/" || {
+          echo "└─ ⚠️ Failed to Copy SuSFS File System Changes"
+          exit 1
+        }
+        # Copy SuSFS Linux Header Changes
+        cp -r "$WORKDIR/susfs4ksu/kernel_patches/include/linux/." \
+          "$COMMONKERNELFOLDER/include/linux/" || {
+          echo "└─ ⚠️ Failed to Copy SuSFS Linux Header Changes"
+          exit 1
+        }
+        # Enter Common Kernel Source Directory
+        cd "$COMMONKERNELFOLDER" || exit 1
+        # Resolve Exact Selected SuSFS Patch File Name
+        SUSFSPATCHNAME="$(basename "$SUSFSPATCH")"
+        LOCALSUSFSPATCH="${COMMONKERNELFOLDER}/${SUSFSPATCHNAME}"
+        # Verify Selected SuSFS Patch was Copied
+        if [[ ! -f "$LOCALSUSFSPATCH" ]]; then
+          echo "└─ ⚠️ SuSFS Patch Not Found : $LOCALSUSFSPATCH"
+          exit 1
+        fi
+
+        # Detect Whether SuSFS Core Patch is Already Applied
+        echo "└─ 🔎 Checking SuSFS Core Patch Status..."
+        if patch -R -p1 --dry-run < "$LOCALSUSFSPATCH" >/dev/null 2>&1; then
+          echo "└─ ℹ️ SuSFS Core Patch Already Applied; Skipping"
+        else
+          # Restore Missing Include Context Before Applying SuSFS
+          echo "└─ 🧩 Restoring SuSFS Patch Context..."
+          kotlinc -script "$CONTEXTSCRIPT" \
+            "$COMMONKERNELFOLDER" "$LOCALSUSFSPATCH"
+          # Apply SuSFS Core Patch
+          echo "└─ ⚙️ Applying SuSFS Core Patch (50 Add SuSFS Patch)"
+          if patch -p1 < "$LOCALSUSFSPATCH"; then
+            echo "└─ 📌 SuSFS Core Patch Applied Successfully"
+          else
+            echo "└─ ⚠️ SuSFS Core Patch Failed"
+            exit 1
+          fi
+        fi
+
+        # Apply SuSFS Enable Patch For KernelSU
+        if [[ "$ROOTENGINE" == "KernelSU" ]]; then
+          echo "└─ ⚙️ Applying KernelSU SuSFS Enable Patch..."
+          SUSFS10PATCH="${WORKDIR}/susfs4ksu/kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch"
+          KSUDIR="$(dirname "$COMMONKERNELFOLDER")/KernelSU"
+          if [[ ! -f "$SUSFS10PATCH" ]]; then
+            echo "└─ ⚠️ SuSFS Enable Patch Not Found : $SUSFS10PATCH"
+            exit 1
+          fi
+
+          if [[ ! -d "$KSUDIR" ]]; then
+            echo "└─ ⚠️ KernelSU Source Directory Not Found : $KSUDIR"
+            exit 1
+          fi
+
+          cd "$KSUDIR" || exit 1
+          echo "└─ 🩹 Applying KernelSU SuSFS Enable Patch..."
+          if patch -p1 < "$SUSFS10PATCH"; then
+            echo "└─ 📌 KernelSU SuSFS Enable Patch Applied"
+          else
+            echo "└─ ⚠️ KernelSU SuSFS Enable Patch Not Compatible"
+            echo "└─ ℹ️ Skipping KernelSU Enable Patch"
+          fi
+
+          cd "$COMMONKERNELFOLDER" || exit 1
+        fi
+
+        # Apply Additional SuSFS Integration For SukiSU-Ultra Main Only
+        if [[ "$ROOTBRANCHSOURCE" == "SukiSU-Ultra-Main" ]]; then
+          echo "└─ ⚙️ Applying SukiSU-Ultra SUSFS Integration..."
+          SUSFS10PATCH="${WORKDIR}/susfs4ksu/kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch"
+          KSUDIR="$(dirname "$COMMONKERNELFOLDER")/KernelSU"
+          if [[ ! -f "$SUSFS10PATCH" ]]; then
+            echo "└─ ⚠️ SuSFS Enable Patch Not Found : $SUSFS10PATCH"
+            exit 1
+          fi
+
+          if [[ ! -d "$KSUDIR" ]]; then
+            echo "└─ ⚠️ SukiSU Source Directory Not Found : $KSUDIR"
+            exit 1
+          fi
+
+          cd "$KSUDIR" || exit 1
+          # Apply Main SUSFS Enable Patch
+          echo "└─ 🩹 Applying SUSFS Enable Patch..."
+          patch -p1 --forward < "$SUSFS10PATCH" || true
+          # Find Rejected Patch Files
+          mapfile -t REJECTEDFILES < <(
+            find ./kernel -maxdepth 2 -type f -name "*.rej" \
+              -printf '%f\n' |
+              sed 's/\.rej$//' |
+              sort -u
+          )
+          # Apply Individual Compatibility Fixes
+          for file in "${REJECTEDFILES[@]}"; do
+            FIXPATCH="${PATCHDIR}/SuSFS/fix-${file}.patch"
+            echo "└─ 🩹 Fixing Rejected File : $file"
+            if [[ ! -f "$FIXPATCH" ]]; then
+              echo "└─ ⚠️ Compatibility Patch Not Found : $FIXPATCH"
+              exit 1
+            fi
+
+            if patch -p1 --forward < "$FIXPATCH"; then
+              find ./kernel -maxdepth 2 -type f \
+                -name "${file}.rej" -delete
+              echo "└─ 📌 Compatibility Fix Applied : $file"
+            else
+              echo "└─ ⚠️ Compatibility Fix Failed : $file"
+              exit 1
+            fi
+            
+          done
+
+          # Apply SukiSU Hook Mode Replacement
+          OVERWRITEHOOK="${PATCHDIR}/SuSFS/overwrite-hook.patch"
+          if [[ ! -f "$OVERWRITEHOOK" ]]; then
+            echo "└─ ⚠️ Hook Mode Patch Not Found : $OVERWRITEHOOK"
+            exit 1
+          fi
+
+          echo "└─ 🔧 Applying SukiSU Hook Mode..."
+          if patch -p1 --forward < "$OVERWRITEHOOK"; then
+            echo "└─ 📌 SukiSU Hook Mode Applied Successfully"
+          else
+            echo "└─ ⚠️ SukiSU Hook Mode Patch Failed"
+            exit 1
+          fi
+
+          echo "└─ 🎉 SukiSU-Ultra SUSFS Integration Completed"
+          cd "$COMMONKERNELFOLDER" || exit 1
+        fi
+
+        echo "└─ 🎉 SuSFS Patches Complete"
+        # Apply Legacy Compatibility Fix For Older Android 13 Kernel 5.15 Builds
+        if [[ "$GKIVERSION" == "android13-5.15" && "$SUBLEVEL" -lt 123 ]]; then
+          # Resolve Legacy Compatibility Patch Path
+          LEGACYPATCH="${PATCHDIR}/Legacy-5.15-Fix.patch"
+          # Stop if Required Legacy Patch is Missing
+          if [[ ! -f "$LEGACYPATCH" ]]; then
+            echo "└─ ⚠️ Patch Not Found : $LEGACYPATCH"
+            exit 1
+          fi
+
+          echo "└─ 🚀 Applying Legacy Fix (Kernel 5.15.0–5.15.123)"
+          # Skip Patch if it is Already Applied
+          if patch -R -p1 --dry-run < "$LEGACYPATCH" >/dev/null 2>&1; then
+            echo "└─ ⚠️ Patch Already Applied — Skipping"
+          else
+            # Apply Legacy Fix
+            if patch -p1 < "$LEGACYPATCH"; then
+              echo "└─ 📌 Legacy 5.15 Fix Applied"
+            else
+              echo "└─ ⚠️ Patch Failed"
+              exit 1
+            fi
+          fi
+        fi
+
+        # Load Reject Checker and Check For Patch Rejects
+        source "$REJECTCHECKER"
+        checkrejects .
+        echo "└─ 🎉 Kernel Compatibility Fix Stage Completed"
+
+    # Reverse Temporary Kernel Compatibility Fixes After SuSFS Integration
+    - name: 📤 Revert Fake Patches
+      if: ${{ inputs.SUSFSREPOSITORY == '' || !startsWith(inputs.SUSFSREPOSITORY, '-') }}
+      shell: bash
+      env:
+        COMMONKERNELFOLDER: ${{ env.COMMONKERNELFOLDER }}
+        SCRIPTSDIR: ${{ env.SCRIPTSDIR }}
+      # Disable Strict Bash Error Handling
+      run: |
+        set -e
+        # Define Fake Patches Script Path
+        FAKESCRIPT="${SCRIPTSDIR}/FakePatches/SuSFS-Compat.kts"
+        # Display Script and Compiler Paths
+        echo "└─ 📌 Script   : $FAKESCRIPT"
+        # Apply Post-Fix Adjustments Before Reverting Fake Patches
+        echo "└─ 🔧 Running Fake Patches PostFix..."
+        kotlinc -script "$FAKESCRIPT" PostFix "$COMMONKERNELFOLDER"
+        # Revert Fake Patches and Restore Original Kernel Source
+        echo "└─ 🔄 Reverting Fake Patches..."
+        kotlinc -script "$FAKESCRIPT" Revert "$COMMONKERNELFOLDER"
+        # Confirm Fake Patches were Reverted Successfully
+        echo "└─ 🎉 Fake Patches Reverted Successfully"
