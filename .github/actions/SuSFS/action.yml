@@ -374,23 +374,40 @@ runs:
               sed 's/\.rej$//' |
               sort -u
           )
-          # Apply Individual Compatibility Fixes
+          # Apply Individual Compatibility Fixes Without Reapplying Existing Changes
           for file in "${REJECTEDFILES[@]}"; do
             FIXPATCH="${PATCHDIR}/SuSFS/fix-${file}.patch"
-            echo "└─ 🩹 Fixing Rejected File : $file"
+            echo "└─ 🩹 Checking Compatibility Fix : $file"
             if [[ ! -f "$FIXPATCH" ]]; then
               echo "└─ ⚠️ Compatibility Patch Not Found : $FIXPATCH"
               echo "└─ ℹ️ Skipping Compatibility Fix : $file"
               continue
             fi
 
-            if patch -p1 --forward < "$FIXPATCH"; then
+            # Skip If All Changes From The Compatibility Patch Are Already Present
+            if patch --dry-run --reverse --batch -p1 < "$FIXPATCH" >/dev/null 2>&1; then
+              echo "└─ ⏭️ Compatibility Fix Already Applied : $file"
               find ./kernel -maxdepth 2 -type f \
                 -name "${file}.rej" -delete
-              echo "└─ 📌 Compatibility Fix Applied : $file"
-            else
-              echo "└─ ⚠️ Compatibility Fix Failed : $file"
+              continue
+            fi
+
+            # Check Whether Missing Changes Can Still Be Applied
+            if ! patch --dry-run --forward --batch -p1 < "$FIXPATCH" >/dev/null 2>&1; then
+              echo "└─ ⚠️ Compatibility Fix Has Conflicts : $file"
               echo "└─ ℹ️ Skipping Compatibility Fix : $file"
+              continue
+            fi
+
+            # Apply Only Changes That Are Not Already Present
+            echo "└─ 🔧 Applying Missing Compatibility Changes : $file"
+            if patch --forward --batch -p1 < "$FIXPATCH"; then
+              echo "└─ 📌 Compatibility Fix Applied Successfully : $file"
+              find ./kernel -maxdepth 2 -type f \
+                -name "${file}.rej" -delete
+            else
+              echo "└─ ⚠️ Compatibility Fix Partially Applied Or Failed : $file"
+              echo "└─ ℹ️ Rejected Hunks Have Been Preserved : $file"
               continue
             fi
             
