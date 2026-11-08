@@ -1,5 +1,3 @@
-diff --git a/kernel/runtime/ksud_integration.c b/kernel/runtime/ksud_integration.c
-index a4fb4138..1a2fb61c 100644
 --- a/kernel/runtime/ksud_integration.c
 +++ b/kernel/runtime/ksud_integration.c
 @@ -11,7 +11,6 @@
@@ -10,23 +8,25 @@ index a4fb4138..1a2fb61c 100644
  #include <linux/printk.h>
  #include <linux/types.h>
  #include <linux/uaccess.h>
-@@ -27,10 +26,12 @@
- #include "runtime/ksud_boot.h"
+@@ -28,10 +27,13 @@
  #include "policy/feature.h"
+ #include "feature/module_blacklist.h"
  #include "selinux/selinux.h"
 -#include "hook/syscall_hook.h"
 -#include "hook/syscall_event_bridge.h"
  #include "preinit/preinit.h"
  
 +DEFINE_STATIC_KEY_TRUE(ksu_is_init_rc_hook_enabled);
++DEFINE_STATIC_KEY_TRUE(ksu_is_input_hook_enabled);
 +DEFINE_STATIC_KEY_TRUE(is_init_second_stage_not_executed);
 +DEFINE_STATIC_KEY_TRUE(is_first_zygote);
 +
  // clang-format off
  static const char KERNEL_SU_RC[] =
      "\n"
-@@ -51,44 +53,5 @@ static const char KERNEL_SU_RC[] =
+@@ -52,45 +54,6 @@
      "\n";
+ // clang-format on
  
 -static void stop_init_rc_hook();
 -static void stop_execve_hook();
@@ -70,7 +70,7 @@ index a4fb4138..1a2fb61c 100644
  /*
   * count() counts the number of strings in array ARGV.
   */
-@@ -137,7 +100,7 @@ static bool check_argv(struct user_arg_ptr argv, int index, const char *expected
+@@ -138,7 +101,7 @@
      if (!p || IS_ERR(p))
          goto fail;
  
@@ -79,96 +79,7 @@ index a4fb4138..1a2fb61c 100644
          goto fail;
  
      buf[buf_len - 1] = '\0';
-@@ -148,41 +111,58 @@ fail:
-     return false;
- }
- 
--void ksu_handle_execveat_ksud(const char *path, struct user_arg_ptr *argv)
-+int ksu_handle_execveat_ksud(int *fd, struct filename **filename_ptr,
-+                             struct user_arg_ptr *argv,
-+                             struct user_arg_ptr *envp, int *flags)
- {
-+    struct filename *filename;
-     static const char app_process[] = "/system/bin/app_process";
--    static bool first_zygote = true;
--
--    /* This applies to versions Android 10+ */
-     static const char system_bin_init[] = "/system/bin/init";
--    static bool init_second_stage_executed = false;
- 
--    // https://cs.android.com/android/platform/superproject/+/android-16.0.0_r2:system/core/init/main.cpp;l=77
--    if (unlikely(!memcmp(path, system_bin_init, sizeof(system_bin_init) - 1) && argv)) {
--        char buf[16];
--        if (!init_second_stage_executed && check_argv(*argv, 1, "second_stage", buf, sizeof(buf))) {
--            pr_info("/system/bin/init second_stage executed\n");
--            ksu_preinit_release();
--            ksu_selinux_hide_handle_second_stage();
--            apply_kernelsu_rules();
--            cache_sid();
--            setup_ksu_cred();
--            // after apply_kernelsu_rules, so that selinux_hide has its sepolicy backup
--            ksu_feature_apply_forced();
--            init_second_stage_executed = true;
--        }
--    }
-+    (void)fd;
-+    (void)envp;
-+    (void)flags;
- 
--    if (unlikely(first_zygote && !memcmp(path, app_process, sizeof(app_process) - 1) && argv)) {
--        char buf[16];
--        if (check_argv(*argv, 1, "-Xzygote", buf, sizeof(buf))) {
--            pr_info("exec zygote, /data prepared, second_stage: %d\n", init_second_stage_executed);
--            ksu_preinit_release();
--            on_post_fs_data();
--            first_zygote = false;
--            ksu_stop_ksud_execve_hook();
--        }
--    }
-+    if (!filename_ptr)
-+        return 0;
-+
-+    filename = *filename_ptr;
-+    if (IS_ERR_OR_NULL(filename) || !filename->name)
-+        return 0;
-+
-+    if (static_branch_unlikely(&is_init_second_stage_not_executed) &&
-+        unlikely(!memcmp(filename->name, system_bin_init,
-+                         sizeof(system_bin_init) - 1) && argv)) {
-+        char buf[16];
-+
-+        if (check_argv(*argv, 1, "second_stage", buf, sizeof(buf))) {
-+            pr_info("/system/bin/init second_stage executed\n");
-+            ksu_preinit_release();
-+            ksu_selinux_hide_handle_second_stage();
-+            apply_kernelsu_rules();
-+            cache_sid();
-+            setup_ksu_cred();
-+            ksu_feature_apply_forced();
-+            ksu_module_blacklist_apply();
-+            static_branch_disable(&is_init_second_stage_not_executed);
-+        }
-+    }
-+
-+    if (static_branch_unlikely(&is_first_zygote) &&
-+        unlikely(!memcmp(filename->name, app_process,
-+                         sizeof(app_process) - 1) && argv)) {
-+        char buf[16];
-+
-+        if (check_argv(*argv, 1, "-Xzygote", buf, sizeof(buf))) {
-+            pr_info("exec zygote, second_stage: %d\n",
-+                    !static_key_enabled(&is_init_second_stage_not_executed));
-+            ksu_preinit_release();
-+            on_post_fs_data();
-+            static_branch_disable(&is_first_zygote);
-+        }
-+    }
-+
-+    return 0;
- }
- 
- static ssize_t (*orig_read)(struct file *, char __user *, size_t, loff_t *);
-@@ -422,12 +405,16 @@ static void ksu_install_rc_hook(struct file *file)
+@@ -446,13 +409,16 @@
          return;
      }
      rc_hooked = true;
@@ -183,10 +94,11 @@ index a4fb4138..1a2fb61c 100644
      // `/system/etc/init/init.rc`
  
      load_module_rc_once();
-     pr_info("read init.rc, comm: %s, rc_count: %zu, module_rc: %zu\n",
-             current->comm, ksu_rc_len, module_rc_len);
+-
+     pr_info("read init.rc, comm: %s, rc_count: %zu, module_rc: %zu\n", current->comm, ksu_rc_len, module_rc_len);
  
-@@ -450,7 +437,7 @@ static void ksu_install_rc_hook(struct file *file)
+     // Now we need to proxy the read and modify the result!
+@@ -471,7 +437,7 @@
      file->f_op = &fops_proxy;
  }
  
@@ -195,7 +107,43 @@ index a4fb4138..1a2fb61c 100644
  {
      struct file *file = fget(fd);
      if (!file) {
-@@ -511,155 +498,37 @@ bool ksu_is_safe_mode()
+@@ -492,12 +458,15 @@
+ {
+     if (*type == EV_KEY && *code == KEY_VOLUMEDOWN) {
+         int val = *value;
++
+         if (val) {
++	    // - We cannot call static_branch_disable() here as we are within the
++	    //   spinlock section, which is not sleepable.
++            // - So if volumedown is enough, just do nothing until it gets disabled by on_post_fs_data().
++            if (is_volumedown_enough(volumedown_pressed_count))
++                return 0;
+             // key pressed, count it
+             volumedown_pressed_count += 1;
+-            if (is_volumedown_enough(volumedown_pressed_count)) {
+-                ksu_stop_input_hook_runtime();
+-            }
+         }
+     }
+ 
+@@ -512,12 +481,11 @@
+         return true;
+     }
+ 
+-    if (ksu_late_loaded) {
+-        return false;
+-    }
+-
+     // stop hook first!
+-    ksu_stop_input_hook_runtime();
++    if (static_key_enabled(&ksu_is_input_hook_enabled)) {
++        static_branch_disable(&ksu_is_input_hook_enabled);
++        pr_info("ksu_input_hook is disabled\n");
++    }
+ 
+     pr_info("volumedown_pressed_count: %d\n", volumedown_pressed_count);
+     if (is_volumedown_enough(volumedown_pressed_count)) {
+@@ -530,66 +498,13 @@
      return false;
  }
  
@@ -225,20 +173,16 @@ index a4fb4138..1a2fb61c 100644
 -
 -void ksu_execve_hook_ksud(const struct pt_regs *regs)
 -{
--    const char __user *filename_user =
--        (const char __user *)PT_REGS_SYSCALL_PARM1(regs);
--    const char __user *const __user *argv_user =
--        (const char __user *const __user *)PT_REGS_PARM2(regs);
+-    const char __user *filename_user = (const char __user *)PT_REGS_SYSCALL_PARM1(regs);
+-    const char __user *const __user *argv_user = (const char __user *const __user *)PT_REGS_PARM2(regs);
 -
 -    ksu_execve_hook_ksud_common(filename_user, argv_user);
 -}
 -
 -void ksu_execveat_hook_ksud(const struct pt_regs *regs)
 -{
--    const char __user *filename_user =
--        (const char __user *)PT_REGS_SYSCALL_PARM2(regs);
--    const char __user *const __user *argv_user =
--        (const char __user *const __user *)PT_REGS_PARM3(regs);
+-    const char __user *filename_user = (const char __user *)PT_REGS_PARM2(regs);
+-    const char __user *const __user *argv_user = (const char __user *const __user *)PT_REGS_PARM3(regs);
 -
 -    ksu_execve_hook_ksud_common(filename_user, argv_user);
 -}
@@ -266,12 +210,11 @@ index a4fb4138..1a2fb61c 100644
 -    long ret;
 -
      struct file *file = fget(fd);
- 
++
      if (file) {
          if (is_init_rc(file)) {
              pr_info("stat init.rc");
-             is_rc = true;
-         }
+@@ -599,84 +514,20 @@
          fput(file);
      }
  
@@ -283,26 +226,20 @@ index a4fb4138..1a2fb61c 100644
 -        size_t extra = ksu_rc_len + module_rc_len;
 -        if (!copy_from_user_nofault(&size, st_size_ptr, sizeof(long))) {
 -            new_size = size + extra;
--            pr_info("adding rc len: %ld -> %ld (static=%zu module=%zu)",
--                    size, new_size, ksu_rc_len, module_rc_len);
+-            pr_info("adding rc len: %ld -> %ld (static=%zu module=%zu)", size, new_size, ksu_rc_len, module_rc_len);
 -            if (!copy_to_user_nofault(st_size_ptr, &new_size, sizeof(long))) {
 -                pr_info("added rc len");
 -            } else {
--                pr_err("add rc len failed: statbuf 0x%lx",
--                       (unsigned long)st_size_ptr);
+-                pr_err("add rc len failed: statbuf 0x%lx", (unsigned long)st_size_ptr);
 -            }
 -        } else {
 -            pr_err("read statbuf 0x%lx failed", (unsigned long)st_size_ptr);
 -        }
-+        extra = ksu_rc_len + module_rc_len;
-+        *kstat_size_ptr = orig_size + extra;
-+        pr_info("adding rc len: %lld -> %lld (static=%zu module=%zu)",
-+                orig_size, *kstat_size_ptr, ksu_rc_len, module_rc_len);
-     }
+-    }
 -
 -    return ret;
- }
- 
+-}
+-
 -static int input_handle_event_handler_pre(struct kprobe *p, struct pt_regs *regs)
 -{
 -    unsigned int *type = (unsigned int *)&PT_REGS_PARM2(regs);
@@ -331,11 +268,15 @@ index a4fb4138..1a2fb61c 100644
 -void ksu_stop_input_hook_runtime(void)
 -{
 -    static bool input_hook_stopped = false;
--    if (input_hook_stopped)
+-    if (input_hook_stopped) {
 -        return;
++        extra = ksu_rc_len + module_rc_len;
++        *kstat_size_ptr = orig_size + extra;
++        pr_info("adding rc len: %lld -> %lld (static=%zu module=%zu)", orig_size, *kstat_size_ptr, ksu_rc_len, module_rc_len);
+     }
 -    input_hook_stopped = true;
 -    schedule_work(&stop_input_hook_work);
--}
+ }
  
  // ksud: module support
  void __init ksu_ksud_init()
@@ -353,6 +294,9 @@ index a4fb4138..1a2fb61c 100644
  
  void __exit ksu_ksud_exit()
  {
+-    // TODO:
+-    // this should be done before unregister vfs_read_kp
+-    // stop_init_rc_hook();
 -    unregister_kprobe(&input_event_kp);
 -
      if (module_rc_buf) {
