@@ -1,6 +1,6 @@
 # KernelPatch Configuration Composite Action
 name: 🧩 AnyKernel3 and KernelPatch Configuration
-description: Clone and Configure AnyKernel3, Apply SukiSU-Ultra KernelPatch-Module or KernelSU-Next KernelPatch-Next and Prepare Final Image
+description: Clone and Configure AnyKernel3, Apply KernelPatch-Next and Prepare Final Image
 # Define Inputs Required by Composite Action
 inputs:
   # Select Root Engine Used by Kernel Build
@@ -11,9 +11,9 @@ inputs:
   FILE:
     description: Kernel Manifest Configuration File
     required: true
-  # Select KernelPatch Variant (KPM or KPN)
+  # Select KernelPatch Variant (KernelPatch-Next)
   KERNELPATCH:
-    description: KernelPatch variant (KPM or KPN)
+    description: KernelPatch variant (KernelPatch-Next)
     required: true
     default: KPN
   # Root Engine and Manager Information
@@ -76,16 +76,16 @@ runs:
         # Confirm AnyKernel3 Branch
         # Enter Cloned Repository and Display Currently Checked-Out Branch
         cd "$ANYKERNEL"
-        echo "└─ 🌿 AnyKernel3 Branch : $(git branch --show-current)"
+        echo "└─ 🌿 AnyKernel3 Branch    : $(git branch --show-current)"
         # Configure AnyKernel3 Kernel Name
         # Display Resolved Root Engine Configuration and SuSFS Information
         echo "└─ 🔧 Configuring AnyKernel3 Kernel Name..."
         echo "└─ 🔍 Root Engine Version  : ${KSUVERSION:-Unknown}"
         echo "└─ 🔍 Manager Tag          : ${MANAGERTAG:-Unknown}"
         echo "└─ 🔍 SuSFS Version        : ${SUSFSVERSION:-Unknown}"
-        echo "└─ 🔍 SuSFS Commit         : ${SUSFSCOMMIT:-Unknown}"        
+        echo "└─ 🔍 SuSFS Commit         : ${SUSFSCOMMIT:-Unknown}"
         # Build Kernel Identification String
-        KERNELNAME="Root Configuration : ${ROOTENGINE} ${MANAGERTAG} (${KSUVERSION}) | Device : ${FILE} | SuSFS Version : ${SUSFSVERSION} | SuSFS Commit : ${SUSFSCOMMIT} | Kernel Base : ${KERNELVERSION}.${SUBLEVEL} | Built by Andrei"
+        KERNELNAME="Root Configuration : ${ROOTENGINE} ${MANAGERTAG} (${KSUVERSION}) | Device : ${FILE} | SuSFS Version : ${SUSFSVERSION:-Unknown} | SuSFS Commit : ${SUSFSCOMMIT:-Unknown} | Kernel Base : ${KERNELVERSION}.${SUBLEVEL} | Built by Andrei"
         # Update Kernel String Only When Setting Already Exists in AnyKernel Script
         if grep -q '^kernel.string=' "$ANYKERNEL/anykernel.sh"; then
           sed -i \
@@ -111,7 +111,7 @@ runs:
 
         # Display Compiled Kernel Image Information
         # Show Resolved Path, Human-Readable Size and Exact Byte Count
-        echo "└─ 📌 Kernel Image Found:"
+        echo "└─ 📌 Kernel Image Found :"
         realpath "${IMAGEPATH}"
         echo "└─ 📦 Image Size :"
         ls -lh "${IMAGEPATH}"
@@ -127,9 +127,8 @@ runs:
     # Configure and Apply Selected KernelPatch Variant
     # Operates Directly on Image Already Copied Into AnyKernel3
     - name: 🧩 KernelPatch Configuration
-      # Run KernelPatch-Module Only For SukiSU-Ultra, or KernelPatch-Next For Any Root Engine
-      # Skip Step When KernelPatch-Module is Selected with a Root Engine Other Than SukiSU-Ultra
-      if: ${{ (inputs.KERNELPATCH == 'KPM' && inputs.ROOTENGINE == 'SukiSU-Ultra') || inputs.KERNELPATCH == 'KPN' }}
+      # Run KernelPatch-Next Only When KPN is Selected
+      if: ${{ inputs.KERNELPATCH == 'KPN' }}
       shell: bash
       env:
         # Pass Composite Action Inputs and Import Paths to Shell Environment
@@ -142,7 +141,7 @@ runs:
       run: |
         set -Eeuo pipefail
         # Define Kernel Image and AnyKernel3 Paths
-        # Kernel-Patch Modifies Packaged Image Directly Without Copying it Back
+        # KernelPatch-Next Modifies Packaged Image Directly
         ANYKERNEL="${WORKSPACEDIR}/AnyKernel3"
         IMAGE="${ANYKERNEL}/Image"
         # Define Temporary KernelPatch-Next Tool Paths
@@ -154,15 +153,15 @@ runs:
           local STATUS=$?
           trap - EXIT
           rm -f -- \
-            "${WORKDIR}/kptools-linux" \
-            "${WORKDIR}/kpimg-linux" \
-            "${WORKDIR}/oImage" \
+            "$KPTTOOLS" \
+            "$KPIMG" \
+            "$KPOUTPUT" \
             "${ANYKERNEL}/Image.sha256" \
             "${ANYKERNEL}/oImage" || true
           return "$STATUS"
         }
         trap cleanup EXIT
-        # Display Kernel-Patch Configuration
+        # Display KernelPatch Configuration
         echo "------------------------------"
         echo "└─ 🧩 KernelPatch Configuration"
         echo "└─ KernelPatch  : ${KERNELPATCH}"
@@ -181,13 +180,12 @@ runs:
           exit 1
         }
         # Validate Kernel Image Exists and is Not Empty
-        # Prevent Kernel-Patch From Running Against a Missing or Empty Image
+        # Prevent KernelPatch From Running Against a Missing or Empty Image
         [[ -s "$IMAGE" ]] || {
           echo "└─ ⚠️ Kernel Image Not Found : $IMAGE"
           exit 1
         }
         # Enter Kernel Image Output Directory
-        # KernelPatch-Module Operates Inside AnyKernel3
         cd "$ANYKERNEL"
         # Display Original Kernel Image Information
         echo "└─ 📌 Kernel Image : $IMAGE"
@@ -196,197 +194,129 @@ runs:
         # Checksum is Retained to Determine Whether Patch Changed Image
         echo "└─ 🔐 Creating Original Image Checksum..."
         sha256sum Image > Image.sha256
-        # SukiSU-Ultra KernelPatch-Module (KPM)
-        # KernelPatch-Module Uses Patch Linux Executable Supplied by SukiSU-Ultra Patch Directory
-        if [[ "$KERNELPATCH" == "KPM" && "$ROOTENGINE" == "SukiSU-Ultra" ]]; then
-          echo "└─ 🧩 Using SukiSU-Ultra KernelPatch-Module"
-          # Define SukiSU-Ultra Repository Paths
-          SUKISUPATCHDIR="${WORKDIR}/SukiSU_patch"
-          PATCHDIRECTORY="${SUKISUPATCHDIR}/kpm"
-          PATCHTOOL="${PATCHDIRECTORY}/patch_linux"
-          # Clone Repository If Missing or Incomplete
-          if [[ ! -d "$SUKISUPATCHDIR/.git" ]]; then
-            echo "└─ 📥 Cloning SukiSU-Ultra KernelPatch Repository..."
-            rm -rf "$SUKISUPATCHDIR"
-            git clone --depth=1 --single-branch --branch main \
-              https://github.com/SukiSU-Ultra/SukiSU_patch.git \
-              "$SUKISUPATCHDIR"
-          elif [[ ! -d "$PATCHDIRECTORY" ]]; then
-            echo "└─ 🔄 Updating SukiSU-Ultra KernelPatch Repository..."
-            git -C "$SUKISUPATCHDIR" fetch --depth=1 origin main
-            git -C "$SUKISUPATCHDIR" reset --hard origin/main
-          else
-            echo "└─ ♻️ Using Existing SukiSU-Ultra KernelPatch Repository"
-          fi
-
-          # Validate KPM Patch Directory
-          [[ -d "$PATCHDIRECTORY" ]] || {
-            echo "└─ ⚠️ KPM Patch Directory Not Found : $PATCHDIRECTORY"
-            exit 1
-          }
-          # Validate KPM Patch Tool
-          [[ -f "$PATCHTOOL" ]] || {
-            echo "└─ ⚠️ KernelPatch Tool Not Found : $PATCHTOOL"
-            echo "└─ 🔍 Searching Repository For Patch Linux File..."
-            find "$SUKISUPATCHDIR" -maxdepth 3 -type f -name 'patch_linux' -print
-            exit 1
-          }
-          # Display Repository Information
-          echo "└─ 📌 SukiSU-Ultra KernelPatch Commit:"
-          git -C "$SUKISUPATCHDIR" log -1 --oneline
-          # Grant Execution Permission
-          echo "└─ 🔐 Granting KernelPatch Execution Permission..."
-          chmod +x "$PATCHTOOL"
-          # Apply SukiSU-Ultra KernelPatch-Module to Kernel Image
-          # Patch Tool Generates Patched Kernel Image as Output Image
-          echo "└─ 🛠️ Applying KernelPatch..."
-          "$PATCHTOOL"
-          # Validate Patched Kernel Image was Generated
-          [[ -s "oImage" ]] || {
-            echo "└─ ⚠️ Patched Image (oImage) Not Found"
-            exit 1
-          }
-          # Replace Original Kernel Image with Patched Image
-          echo "└─ 📌 Replacing Original Image..."
-          mv -f oImage Image
-          # Compare Patched Image Against Original Checksum
-          # Matching Checksum Indicates Image was Not Modified
-          echo "└─ 🔍 Checking Image Integrity..."
-          if sha256sum -c Image.sha256 >/dev/null 2>&1; then
-            echo "└─ ⚠️ Image Checksum Unchanged"
-          else
-            echo "└─ 📌 Image Modified by Patch"
-          fi
-
-          # Report Successful SukiSU-Ultra KernelPatch-Module Configuration
-          echo "└─ 🎉 SukiSU-Ultra KernelPatch-Module Completed"
         # KernelSU-Next KernelPatch-Next (KPN)
         # KernelPatch-Next Downloads its Tools From Official Release, with a Repository Fallback
-        elif [[ "$KERNELPATCH" == "KPN" ]]; then
-          echo "└─ 🧩 Using KernelSU-Next KernelPatch-Next"
-          # Define KernelSU-Next KernelPatch-Next Repository and Fallback Download URL
-          KPREPO="KernelSU-Next/KPatch-Next"
-          KPFALLBACK="https://raw.githubusercontent.com/AndreiMikh/AndreiMikh-Kernel-Lab/refs/heads/${GITHUB_REF_NAME}/patches/KPN"
-          # Resolve Latest KernelSU-Next KernelPatch-Next Release
-          # Query GitHub Latest-Release API and Extract its Tag Name
-          echo "└─ 🌐 Resolving Latest KernelPatch-Next Release..."
+        echo "└─ 🧩 Using KernelSU-Next KernelPatch-Next"
+        # Define KernelSU-Next KernelPatch-Next Repository and Fallback Download URL
+        KPREPO="KernelSU-Next/KPatch-Next"
+        KPFALLBACK="https://raw.githubusercontent.com/AndreiMikh/AndreiMikh-Kernel-Lab/refs/heads/${GITHUB_REF_NAME}/patches/KPN"
+        # Resolve Latest KernelSU-Next KernelPatch-Next Release
+        # Query GitHub Latest-Release API and Extract its Tag Name
+        echo "└─ 🌐 Resolving Latest KernelPatch-Next Release..."
+        TAG="$(
+          curl -fsSL \
+            -H "User-Agent: Mozilla/5.0" \
+            --retry 5 \
+            --retry-all-errors \
+            --retry-delay 3 \
+            "https://api.github.com/repos/${KPREPO}/releases/latest" \
+          | sed -n 's/.*"tag_name":[[:space:]]*"\([^"]*\)".*/\1/p' \
+          || true
+        )"
+        # Attempt to Resolve Latest Release From Releases List if Latest Endpoint Fails
+        # Provides a Secondary API Lookup When Latest-Release Endpoint is Unavailable
+        if [[ -z "$TAG" || "$TAG" == "null" ]]; then
+          echo "└─ ⚠️ Latest Release Lookup Failed"
+          echo "└─ 🔄 Falling Back to Releases List..."
           TAG="$(
             curl -fsSL \
               -H "User-Agent: Mozilla/5.0" \
               --retry 5 \
               --retry-all-errors \
               --retry-delay 3 \
-              "https://api.github.com/repos/${KPREPO}/releases/latest" \
+              "https://api.github.com/repos/${KPREPO}/releases" \
             | sed -n 's/.*"tag_name":[[:space:]]*"\([^"]*\)".*/\1/p' \
             || true
           )"
-          # Attempt to Resolve Latest Release From Releases List if Latest Endpoint Fails
-          # Provides a Secondary API Lookup When Latest-Release Endpoint is Unavailable
-          if [[ -z "$TAG" || "$TAG" == "null" ]]; then
-            echo "└─ ⚠️ Latest release lookup failed"
-            echo "└─ 🔄 Falling Back to Releases List..."
-            TAG="$(
-              curl -fsSL \
-                -H "User-Agent: Mozilla/5.0" \
-                --retry 5 \
-                --retry-all-errors \
-                --retry-delay 3 \
-                "https://api.github.com/repos/${KPREPO}/releases" \
-              | sed -n 's/.*"tag_name":[[:space:]]*"\([^"]*\)".*/\1/p' \
-              || true
-            )"
-          fi
+        fi
 
-          # Use Built-in KernelPatch-Next Release Version if Both Release Lookups Fail
-          # Hardcoded Fallback Keeps Workflow Usable if Both API Requests Fail
-          if [[ -z "$TAG" || "$TAG" == "null" ]]; then
-            echo "└─ ⚠️ Unable to Determine Latest Release"
-            echo "└─ 📦 Using Built-in Fallback: 0.13.5-2"
-            TAG="0.13.5-2"
-          fi
+        # Use Built-in KernelPatch-Next Release Version if Both Release Lookups Fail
+        # Hardcoded Fallback Keeps Workflow Usable if Both API Requests Fail
+        if [[ -z "$TAG" || "$TAG" == "null" ]]; then
+          echo "└─ ⚠️ Unable to Determine Latest Release"
+          echo "└─ 📦 Using Built-in Fallback: 0.13.5-2"
+          TAG="0.13.5-2"
+        fi
 
-          # Construct KernelPatch-Next Release Download URL
-          BASEKPNURL="https://github.com/${KPREPO}/releases/download/${TAG}"
-          # Display Resolved KernelPatch-Next Release Information
-          echo "└─ 📦 Release Information"
-          echo "└─ Repository : ${KPREPO}"
-          echo "└─ Tag        : ${TAG}"
-          # Download KernelSU-Next KernelPatch-Next Files with Primary and Fallback Sources
-          # Helper First Attempts Official Release URL and then Configured Fallback
-          download() {
-            local FILE="$1"
-            local PRIMARY="${BASEKPNURL}/${FILE}"
-            local FALLBACK="${KPFALLBACK}/${FILE}"
-            local DEST="${WORKDIR}/${FILE}"
-            # Attempt to Download File From Official Release
-            echo "└─ 📥 Downloading ${FILE}"
-            if ! curl -fsSL \
+        # Construct KernelPatch-Next Release Download URL
+        BASEKPNURL="https://github.com/${KPREPO}/releases/download/${TAG}"
+        # Display Resolved KernelPatch-Next Release Information
+        echo "└─ 📦 Release Information"
+        echo "└─ Repository : ${KPREPO}"
+        echo "└─ Tag        : ${TAG}"
+        # Download KernelSU-Next KernelPatch-Next Files with Primary and Fallback Sources
+        # Helper First Attempts Official Release URL and then Configured Fallback
+        download() {
+          local FILE="$1"
+          local PRIMARY="${BASEKPNURL}/${FILE}"
+          local FALLBACK="${KPFALLBACK}/${FILE}"
+          local DEST="${WORKDIR}/${FILE}"
+          # Attempt to Download File From Official Release
+          echo "└─ 📥 Downloading ${FILE}"
+          if ! curl -fsSL \
+            -H "User-Agent: Mozilla/5.0" \
+            --retry 5 \
+            --retry-all-errors \
+            --retry-delay 3 \
+            -o "$DEST" \
+            "$PRIMARY"
+          then
+            # Attempt Fallback Download if Official Release Download Fails
+            echo "└─ ⚠️ Primary Download Failed"
+            echo "└─ 🔄 Trying Fallback..."
+            curl -fsSL \
               -H "User-Agent: Mozilla/5.0" \
               --retry 5 \
               --retry-all-errors \
               --retry-delay 3 \
               -o "$DEST" \
-              "$PRIMARY"
-            then
-              # Attempt Fallback Download if Official Release Download Fails
-              echo "└─ ⚠️ Primary Download Failed"
-              echo "└─ 🔄 Trying Fallback..."
-              curl -fsSL \
-                -H "User-Agent: Mozilla/5.0" \
-                --retry 5 \
-                --retry-all-errors \
-                --retry-delay 3 \
-                -o "$DEST" \
-                "$FALLBACK"
-            fi
-
-            # Validate Downloaded File Exists and is Not Empty
-            # Prevent Execution of an Incomplete or Missing Download
-            [[ -s "$DEST" ]] || {
-              echo "└─ ⚠️ ${FILE} Download Failed"
-              exit 1
-            }
-
-            # Grant Execution Permission to Downloaded KernelPatch-Next Tool
-            chmod +x "$DEST"
-            echo "└─ 📥 ${FILE} Ready"
-          }
-          # Download KernelSU-Next KernelPatch-Next Tools
-          # Both Patching Utility and KernelPatch Image are Required by KernelPatch-Next
-          download "kptools-linux"
-          download "kpimg-linux"
-          # Apply KernelPatch-Next to Original Kernel Image
-          # Generate Output Image Using Downloaded KernelPatch-Next Tools and Packaged Image
-          echo "└─ ⚙️ Applying KernelPatch-Next..."
-          "$KPTTOOLS" \
-            -p \
-            -i "$IMAGE" \
-            -k "$KPIMG" \
-            -o "$KPOUTPUT"
-          # Validate KernelPatch-Next Generated a Patched Image
-          # Ensure Output Exists and Contains Data Before Replacing Image
-          [[ -s "$KPOUTPUT" ]] || {
-            echo "└─ ⚠️ KernelPatch Failed"
-            exit 1
-          }
-          # Replace Original Kernel Image with Patched Image
-          mv -f "$KPOUTPUT" "$IMAGE"
-          # Compare Patched Image Against Original Checksum
-          # Report Whether KernelPatch-Next Changed Original Kernel Image
-          echo "└─ 🔍 Verifying Patched Image..."
-          if sha256sum -c Image.sha256 >/dev/null 2>&1; then
-            echo "└─ ⚠️ Image Checksum is Unchanged"
-            echo "└─ ⚠️ KernelPatch may Not have been Applied"
-          else
-            echo "└─ 🎉 Kernel Image Successfully Modified"
+              "$FALLBACK"
           fi
 
-          # Report Successful KernelSU-Next KernelPatch-Next Configuration
-          echo "└─ 🎉 KernelSU-Next KernelPatch-Next Completed"
+          # Validate Downloaded File Exists and is Not Empty
+          # Prevent Execution of an Incomplete or Missing Download
+          [[ -s "$DEST" ]] || {
+            echo "└─ ⚠️ ${FILE} Download Failed"
+            exit 1
+          }
+          # Grant Execution Permission to Downloaded KernelPatch-Next Tool
+          chmod +x "$DEST"
+          echo "└─ 📥 ${FILE} Ready"
+        }
+        # Download KernelSU-Next KernelPatch-Next Tools
+        # Both Patching Utility and KernelPatch Image are Required by KernelPatch-Next
+        download "kptools-linux"
+        download "kpimg-linux"
+        # Apply KernelPatch-Next to Original Kernel Image
+        # Generate Output Image Using Downloaded KernelPatch-Next Tools and Packaged Image
+        echo "└─ ⚙️ Applying KernelPatch-Next..."
+        "$KPTTOOLS" \
+          -p \
+          -i "$IMAGE" \
+          -k "$KPIMG" \
+          -o "$KPOUTPUT"
+        # Validate KernelPatch-Next Generated a Patched Image
+        # Ensure Output Exists and Contains Data Before Replacing Image
+        [[ -s "$KPOUTPUT" ]] || {
+          echo "└─ ⚠️ KernelPatch Failed"
+          exit 1
+        }
+        # Replace Original Kernel Image with Patched Image
+        mv -f "$KPOUTPUT" "$IMAGE"
+        # Compare Patched Image Against Original Checksum
+        # Report Whether KernelPatch-Next Changed Original Kernel Image
+        echo "└─ 🔍 Verifying Patched Image..."
+        if sha256sum -c Image.sha256 >/dev/null 2>&1; then
+          echo "└─ ⚠️ Image Checksum is Unchanged"
+          echo "└─ ⚠️ KernelPatch may Not have been Applied"
+        else
+          echo "└─ 🎉 Kernel Image Successfully Modified"
         fi
 
+        # Report Successful KernelSU-Next KernelPatch-Next Configuration
+        echo "└─ 🎉 KernelSU-Next KernelPatch-Next Completed"
         # Report Completed KernelPatch Configuration
-        # Final Packaged Image Now Contains Selected Kernel-Patch Modification
+        # Final Packaged Image Now Contains Selected KernelPatch Modification
         echo "------------------------------"
         echo "└─ 🎉 KernelPatch Configuration Completed"
         echo "└─ 📦 AnyKernel3 Image Ready : ${IMAGE}"
