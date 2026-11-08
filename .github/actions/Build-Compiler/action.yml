@@ -11,20 +11,22 @@ runs:
         use-cache: true
         cache-size-limit: 2048
 
-    # Resolve and Install Latest Stable Kotlin Compiler
+    # Resolve and Install the Latest Stable Kotlin Compiler
     - name: 🧰 Setup Kotlin Compiler
       shell: bash
       env:
         GH_TOKEN: ${{ github.token }}
-      # Enable Strict Bash Error Handling
       run: |
         set -euo pipefail
-        # Define the Kotlin Installation Directory and Download Archive
+        # Define Kotlin Installation and Download Directories
         KOTLINHOME="$HOME/kotlinc"
         KOTLINZIP="$RUNNER_TEMP/kotlinc.zip"
-        # Query GitHub for the Latest Published Kotlin Release
+        KOTLINPART="${KOTLINZIP}.part"
+        # Remove Temporary Download Files When Step Exits
+        trap 'rm -f "$KOTLINZIP" "$KOTLINPART"' EXIT
+        # Resolve Latest Published Stable Kotlin Release
         echo "🔎 Resolving Latest Stable Kotlin Compiler..."
-        KOTLINVER="$(
+        RELEASE="$(
           curl \
             --fail \
             --location \
@@ -33,92 +35,163 @@ runs:
             --retry 8 \
             --retry-all-errors \
             --retry-delay 5 \
+            --retry-max-time 300 \
             --connect-timeout 30 \
-            --max-time 60 \
+            --max-time 120 \
             -H "Accept: application/vnd.github+json" \
             -H "Authorization: Bearer ${GH_TOKEN}" \
             -H "X-GitHub-Api-Version: 2022-11-28" \
-            "https://api.github.com/repos/JetBrains/kotlin/releases/latest" |
+            "https://api.github.com/repos/JetBrains/kotlin/releases/latest"
+        )"
+        # Extract and Validate Latest Kotlin Version
+        KOTLINVER="$(
           jq -er '
             .tag_name
             | select(type == "string" and length > 0)
             | sub("^v"; "")
             | select(test("^[0-9]+\\.[0-9]+\\.[0-9]+$"))
-          '
+          ' <<< "$RELEASE"
         )"
-        # Construct Kotlin Compiler Release Download URL
-        KOTLINURL="https://github.com/JetBrains/kotlin/releases/download/v${KOTLINVER}/kotlin-compiler-${KOTLINVER}.zip"
-        echo "└─ 📦 Kotlin Compiler Version: ${KOTLINVER}"
-        # Reuse the Existing Compiler Only When Its Version Matches
+        # Locate Exact Kotlin Compiler Release Asset
+        KOTLINASSET="$(
+          jq -cer --arg version "$KOTLINVER" '
+            .assets[]
+            | select(.name == ("kotlin-compiler-" + $version + ".zip"))
+            | select(.browser_download_url | type == "string")
+            | select(.browser_download_url | startswith("https://"))
+          ' <<< "$RELEASE"
+        )"
+        # Extract Official Compiler Download URL
+        KOTLINURL="$(
+          jq -er '.browser_download_url' <<< "$KOTLINASSET"
+        )"
+        # Extract Published SHA-256 Digest When Available
+        KOTLINHASH="$(
+          jq -r '
+            if (.digest | type == "string") and
+               (.digest | startswith("sha256:")) then
+              .digest | sub("^sha256:"; "")
+            else
+              empty
+            end
+          ' <<< "$KOTLINASSET"
+        )"
+        echo "└─ 📦 Kotlin Compiler Version : ${KOTLINVER}"
+        # Reuse Existing Compiler Only When its Version Matches
         if [[ -x "$KOTLINHOME/bin/kotlinc" ]] &&
           "$KOTLINHOME/bin/kotlinc" -version 2>&1 |
             grep -Fq "kotlinc-jvm ${KOTLINVER}"; then
-          echo "└─ ✔️ Kotlin ${KOTLINVER} Is Already Installed"
+          echo "└─ 📌 Kotlin ${KOTLINVER} is Already Installed"
         else
-          # Remove Previous Installation and Any Stale Archive
+          # Prepare a Clean Installation Environment
           echo "└─ ⚙️ Installing Kotlin ${KOTLINVER}..."
           rm -rf "$KOTLINHOME"
-          rm -f "$KOTLINZIP"
-          # Download Kotlin Compiler Distribution
-          curl \
-            --fail \
-            --location \
-            --silent \
-            --show-error \
-            --retry 8 \
-            --retry-all-errors \
-            --retry-delay 5 \
-            --connect-timeout 30 \
-            --max-time 600 \
-            "$KOTLINURL" \
-            --output "$KOTLINZIP"
+          rm -f "$KOTLINZIP" "$KOTLINPART"
+          # Download Kotlin Compiler with Extended Retry Handling
+          # Exponential Backoff Helps Recover From Temporary HTTP 504 Errors
+          echo "└─ 🌐 Downloading Kotlin Compiler..."
+          DOWNLOADSUCCESS=false
+          for ATTEMPT in {1..6}; do
+            echo "   🔄 Download Attempt ${ATTEMPT}/6..."
+            if curl \
+              --fail \
+              --location \
+              --silent \
+              --show-error \
+              --connect-timeout 30 \
+              --max-time 900 \
+              --output "$KOTLINPART" \
+              "$KOTLINURL"; then
+              if [[ -s "$KOTLINPART" ]]; then
+                DOWNLOADSUCCESS=true
+                break
+              fi
+            fi
+
+            # Remove Any Incomplete Download Before Retrying
+            rm -f "$KOTLINPART"
+            if [[ "$ATTEMPT" -lt 6 ]]; then
+              # Increase Waiting Time Between Download Attempts
+              WAIT=$((10 * (2 ** (ATTEMPT - 1))))
+              echo "   ⚠️ Download Failed. Retrying in ${WAIT}s..."
+              sleep "$WAIT"
+            fi
+            
+          done
+
+          # Abort When All Download Attempts Have Failed
+          if [[ "$DOWNLOADSUCCESS" != "true" ]]; then
+            echo "└─ ⛔ Kotlin Compiler Download Failed"
+            exit 1
+          fi
+
           # Reject an Empty or Missing Compiler Archive
-          [[ -s "$KOTLINZIP" ]] || {
+          [[ -s "$KOTLINPART" ]] || {
             echo "└─ ⛔ Kotlin Compiler Archive is Missing or Empty"
             exit 1
           }
-          # Verify Download is a Valid ZIP Archive
-          unzip -tq "$KOTLINZIP" >/dev/null
-          # Extract Distribution Into HOME Directory
+          # Verify Official SHA-256 Digest When Published
+          if [[ -n "$KOTLINHASH" ]]; then
+            echo "└─ 🔐 Verifying Kotlin Compiler SHA-256..."
+            echo "${KOTLINHASH}  ${KOTLINPART}" |
+              sha256sum --check --status || {
+                echo "└─ ⛔ Kotlin Compiler SHA-256 Verification Failed"
+                exit 1
+              }
+            echo "└─ ✔️ SHA-256 Verification Passed"
+          else
+            echo "└─ ⚠️ No Published SHA-256 Digest Found"
+          fi
+
+          # Promote Verified Download to its Final Archive
+          mv "$KOTLINPART" "$KOTLINZIP"
+          # Verify Downloaded Archive is a Valid ZIP File
+          echo "└─ 📦 Validating Kotlin Compiler Archive..."
+          unzip -tq "$KOTLINZIP" >/dev/null || {
+            echo "└─ ⛔ Kotlin Compiler Archive Is Corrupted"
+            exit 1
+          }
+          # Extract Compiler Distribution Into HOME
+          echo "└─ 📂 Extracting Kotlin Compiler..."
           unzip -q "$KOTLINZIP" -d "$HOME"
-          # Remove the Temporary Archive After Extraction
-          rm -f "$KOTLINZIP"
-          # Verify Kotlin Compiler Executable Exists
+          # Verify the Kotlin Compiler Executable Exists
           [[ -x "$KOTLINHOME/bin/kotlinc" ]] || {
             echo "└─ ⛔ Kotlin Compiler Installation Failed"
             exit 1
           }
-          # Confirm Installed Compiler Matches Requested Version
+          # Confirm the Installed Compiler Matches the Requested Version
           "$KOTLINHOME/bin/kotlinc" -version 2>&1 |
             grep -Fq "kotlinc-jvm ${KOTLINVER}" || {
               echo "└─ ⛔ Installed Kotlin Version Does Not Match"
               exit 1
             }
+
+          echo "└─ ✔️ Kotlin Compiler Installation Verified"
         fi
 
-        # Add Kotlin to PATH For All Subsequent Workflow Steps
+        # Add Kotlin Compiler to PATH for Subsequent Workflow Steps
         echo "$KOTLINHOME/bin" >> "$GITHUB_PATH"
         # Export Kotlin Installation Directory to Workflow Environment
         echo "KOTLINHOME=$KOTLINHOME" >> "$GITHUB_ENV"
-        # Display Final Compiler Version For Build Logs
+        # Display the Final Kotlin Compiler Version
         echo "└─ 🎉 Kotlin Compiler Setup Completed"
         "$KOTLINHOME/bin/kotlinc" -version
 
-    # Remove Old Zig Caches to Reclaim Repository Cache Storage
+    # Remove Previous Zig Caches to Reclaim Repository Cache Storage
     - name: 🧹 Clean Previous Zig Caches
       uses: actions/github-script@v9
       continue-on-error: true
       env:
-        ZIG_VERSION: 0.16.0
+        ZIGVERSION: 0.16.0
       with:
         script: |
           // Identify Current Workflow Run and Repository
           const currentRunId = String(context.runId);
           const { owner, repo } = context.repo;
-          // Match Caches Created by Setup-Zig V2 For Build Configuration
+          // Match Existing Setup-Zig Version 2 Caches For this Configuration
           const prefix =
-            `setup-zig-cache-v2-kernel_build-zig-x86_64-linux-${process.env.ZIG_VERSION}--`;
-          // Retrieve Repository's Available Actions Caches
+            `setup-zig-cache-v2-kernel_build-zig-x86_64-linux-${process.env.ZIGVERSION}--`;
+          // Retrieve Available GitHub Actions Caches
           const caches = await github.paginate(
             github.rest.actions.getActionsCacheList,
             {
@@ -132,13 +205,13 @@ runs:
             cache.key.startsWith(prefix) &&
             !cache.key.includes(`--${currentRunId}-`)
           );
-          // Report When No Previous Zig Caches Need to Be Removed
+          // Report When No Previous Zig Caches Need Cleanup
           if (previousCaches.length === 0) {
             console.log("ℹ️ No Previous Zig Caches Found");
           }
-          // Delete Each Matching Cache and Handle Already-Removed Entries
+          // Delete Previous Zig Caches and Handle Missing Entries
           for (const cache of previousCaches) {
-            console.log(`🧹 Deleting Previous Zig Cache: ${cache.key}`);
+            console.log(`🧹 Deleting Previous Zig Cache : ${cache.key}`);
             try {
               await github.rest.actions.deleteActionsCacheById({
                 owner,
@@ -146,16 +219,16 @@ runs:
                 cache_id: cache.id
               });
               // Confirm Successful Cache Removal
-              console.log(`└─ 📌 Deleted: ${cache.key}`);
+              console.log(`└─ 📌 Deleted : ${cache.key}`);
             } catch (error) {
-              // Ignore Caches That were Already Deleted by Another Process
+              // Ignore Caches Already Deleted by Another Process
               if (error.status === 404) {
-                console.log(`└─ ℹ️ Cache Already Missing: ${cache.key}`);
+                console.log(`└─ ℹ️ Cache Already Missing : ${cache.key}`);
                 continue;
               }
-              // Propagate Other API Errors to Action's Error Handler
+              // Propagate Other API Errors
               throw error;
             }
           }
-          // Report the Final Cache Cleanup Status
+          // Report Final Zig Cache Cleanup Status
           console.log("🎉 Previous Zig Cache Cleanup Completed");
