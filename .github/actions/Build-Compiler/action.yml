@@ -16,14 +16,19 @@ runs:
       shell: bash
       env:
         GH_TOKEN: ${{ github.token }}
+        GITHUB_REPOSITORY: ${{ github.repository }}
+      # Enable Strict Error Bash Handling
       run: |
-        set -euo pipefail
+        set -Eeuo pipefail
         # Define Kotlin Installation and Download Directories
         KOTLINHOME="$HOME/kotlinc"
         KOTLINZIP="$RUNNER_TEMP/kotlinc.zip"
         KOTLINPART="${KOTLINZIP}.part"
-        # Remove Temporary Download Files When Step Exits
-        trap 'rm -f "$KOTLINZIP" "$KOTLINPART"' EXIT
+        KOTLINSTAGE="$RUNNER_TEMP/kotlin-install"
+        KOTLINRELEASE="Kotlin"
+        KOTLINCACHE="Kotlin-Compiler"
+        # Remove Temporary Download and Installation Files When Step Exits
+        trap 'rm -rf "$KOTLINZIP" "$KOTLINPART" "$KOTLINSTAGE"' EXIT
         # Resolve Latest Published Stable Kotlin Release
         echo "🔎 Resolving Latest Stable Kotlin Compiler..."
         RELEASE="$(
@@ -52,31 +57,46 @@ runs:
             | select(test("^[0-9]+\\.[0-9]+\\.[0-9]+$"))
           ' <<< "$RELEASE"
         )"
-        # Locate Exact Kotlin Compiler Release Asset
+        # Initialize Optional JetBrains Download Metadata
+        KOTLINASSET=""
+        KOTLINURL=""
+        KOTLINHASH=""
+        # Locate Exact Kotlin Compiler Release Asset When Available
         KOTLINASSET="$(
-          jq -cer --arg version "$KOTLINVER" '
-            .assets[]
-            | select(.name == ("kotlin-compiler-" + $version + ".zip"))
-            | select(.browser_download_url | type == "string")
-            | select(.browser_download_url | startswith("https://"))
+          jq -c --arg version "$KOTLINVER" '
+            [
+              .assets[]?
+              | select(.name == ("kotlin-compiler-" + $version + ".zip"))
+              | select(.browser_download_url | type == "string")
+              | select(.browser_download_url | startswith("https://"))
+            ]
+            | first // empty
           ' <<< "$RELEASE"
         )"
-        # Extract Official Compiler Download URL
-        KOTLINURL="$(
-          jq -er '.browser_download_url' <<< "$KOTLINASSET"
-        )"
-        # Extract Published SHA-256 Digest When Available
-        KOTLINHASH="$(
-          jq -r '
-            if (.digest | type == "string") and
-               (.digest | startswith("sha256:")) then
-              .digest | sub("^sha256:"; "")
-            else
-              empty
-            end
-          ' <<< "$KOTLINASSET"
-        )"
+        # Extract Official JetBrains Download Metadata When Available
+        if [[ -n "$KOTLINASSET" ]]; then
+          # Extract Official Compiler Download URL
+          KOTLINURL="$(
+            jq -er '.browser_download_url' <<< "$KOTLINASSET"
+          )"
+          # Extract Published SHA-256 Digest When Available
+          KOTLINHASH="$(
+            jq -r '
+              if (.digest | type == "string") and
+                 (.digest | startswith("sha256:")) then
+                .digest | sub("^sha256:"; "")
+              else
+                empty
+              end
+            ' <<< "$KOTLINASSET"
+          )"
+        else
+          echo "└─ ⚠️ JetBrains Compiler Asset Not Found in Release Metadata"
+        fi
+
+        # Display Resolved Kotlin Compiler Information
         echo "└─ 📦 Kotlin Compiler Version : ${KOTLINVER}"
+        echo "└─ 📦 GitHub Release Tag      : ${KOTLINRELEASE}"
         # Reuse Existing Compiler Only When its Version Matches
         if [[ -x "$KOTLINHOME/bin/kotlinc" ]] &&
           "$KOTLINHOME/bin/kotlinc" -version 2>&1 |
@@ -85,41 +105,134 @@ runs:
         else
           # Prepare a Clean Installation Environment
           echo "└─ ⚙️ Installing Kotlin ${KOTLINVER}..."
-          rm -rf "$KOTLINHOME"
+          rm -rf "$KOTLINHOME" "$KOTLINSTAGE"
           rm -f "$KOTLINZIP" "$KOTLINPART"
-          # Download Kotlin Compiler with Extended Retry Handling
-          # Exponential Backoff Helps Recover From Temporary HTTP 504 Errors
-          echo "└─ 🌐 Downloading Kotlin Compiler..."
+          # Check Whether the Matching Kotlin Compiler Exists in GitHub Release
+          echo "└─ 🔎 Checking GitHub Kotlin Compiler Release..."
+          echo "└─ 📌 Repository  : $GITHUB_REPOSITORY"
+          echo "└─ 📌 Release Tag : $KOTLINRELEASE"
+          echo "└─ 📌 Asset       : ${KOTLINCACHE}-${KOTLINVER}.zip"
+          # Initialize Download Status and Installation Source
           DOWNLOADSUCCESS=false
-          for ATTEMPT in {1..6}; do
-            echo "   🔄 Download Attempt ${ATTEMPT}/6..."
-            if curl \
+          DOWNLOADSOURCE=""
+          # Retrieve Kotlin Compiler Release Metadata
+          if RELEASECACHE="$(
+            curl \
               --fail \
               --location \
               --silent \
               --show-error \
+              --retry 3 \
+              --retry-all-errors \
+              --retry-delay 5 \
               --connect-timeout 30 \
-              --max-time 900 \
-              --output "$KOTLINPART" \
-              "$KOTLINURL"; then
-              if [[ -s "$KOTLINPART" ]]; then
-                DOWNLOADSUCCESS=true
-                break
+              --max-time 120 \
+              -H "Accept: application/vnd.github+json" \
+              -H "Authorization: Bearer ${GH_TOKEN}" \
+              -H "X-GitHub-Api-Version: 2022-11-28" \
+              "https://api.github.com/repos/${GITHUB_REPOSITORY}/releases/tags/${KOTLINRELEASE}" \
+            2>/dev/null
+          )"; then
+            # Locate Matching Versioned Kotlin Compiler Cache Asset
+            if CACHEASSET="$(
+              jq -c --arg asset "${KOTLINCACHE}-${KOTLINVER}.zip" '
+                [
+                  .assets[]?
+                  | select(.name == $asset)
+                  | select(.browser_download_url | type == "string")
+                  | select(.browser_download_url | startswith("https://"))
+                ]
+                | first // empty
+              ' <<< "$RELEASECACHE" 2>/dev/null
+            )" && [[ -n "$CACHEASSET" ]]; then
+              # Extract GitHub Release Compiler Download URL
+              CACHEURL="$(
+                jq -er '.browser_download_url' <<< "$CACHEASSET"
+              )"
+              # Restore Kotlin Compiler From GitHub Release
+              echo "└─ 📥 Restoring Kotlin Compiler From GitHub Release..."
+              if curl \
+                --fail \
+                --location \
+                --silent \
+                --show-error \
+                --retry 3 \
+                --retry-all-errors \
+                --retry-delay 5 \
+                --retry-max-time 180 \
+                --connect-timeout 30 \
+                --max-time 900 \
+                --output "$KOTLINPART" \
+                "$CACHEURL" &&
+                [[ -s "$KOTLINPART" ]]; then
+                # Verify Restored GitHub Release Archive
+                if unzip -tq "$KOTLINPART" >/dev/null 2>&1; then
+                  DOWNLOADSUCCESS=true
+                  DOWNLOADSOURCE="GitHub Release"
+                  echo "└─ ✔️ Kotlin Compiler Restored Successfully"
+                else
+                  echo "└─ ⚠️ Restored Kotlin Compiler Archive is Invalid"
+                fi
+                
+              else
+                echo "└─ ⚠️ GitHub Release Download Failed"
               fi
-            fi
-
-            # Remove Any Incomplete Download Before Retrying
-            rm -f "$KOTLINPART"
-            if [[ "$ATTEMPT" -lt 6 ]]; then
-              # Increase Waiting Time Between Download Attempts
-              WAIT=$((10 * (2 ** (ATTEMPT - 1))))
-              echo "   ⚠️ Download Failed. Retrying in ${WAIT}s..."
-              sleep "$WAIT"
+              
+            else
+              echo "└─ ⚠️ Matching Kotlin Compiler Asset Not Found"
             fi
             
-          done
+          else
+            echo "└─ ⚠️ Kotlin GitHub Release Not Found or Unavailable"
+          fi
 
-          # Abort When All Download Attempts Have Failed
+          # Remove Failed GitHub Release Download Before Fallback
+          if [[ "$DOWNLOADSUCCESS" != "true" ]]; then
+            rm -f "$KOTLINPART"
+            # Ensure Official JetBrains Compiler Download URL is Available
+            if [[ -z "$KOTLINURL" ]]; then
+              echo "└─ ⛔ Official JetBrains Compiler Download URL Not Found"
+              echo "└─ ⚠️ Cannot Continue Without a Valid Compiler Asset"
+              exit 1
+            fi
+
+            # Fall Back to Official JetBrains Compiler Download
+            echo "└─ 🔄 Falling Back to Official JetBrains Download..."
+            echo "└─ 🌐 Download URL : $KOTLINURL"
+            # Download Kotlin Compiler From Official JetBrains Release
+            # Exponential Backoff Helps Recover From Temporary HTTP 504 Errors
+            for ATTEMPT in {1..6}; do
+              echo "   🔄 Download Attempt ${ATTEMPT}/6..."
+              if curl \
+                --fail \
+                --location \
+                --silent \
+                --show-error \
+                --connect-timeout 30 \
+                --max-time 900 \
+                --output "$KOTLINPART" \
+                "$KOTLINURL"; then
+                if [[ -s "$KOTLINPART" ]]; then
+                  DOWNLOADSUCCESS=true
+                  DOWNLOADSOURCE="JetBrains"
+                  break
+                fi
+              fi
+
+              # Remove Any Incomplete Download Before Retrying
+              rm -f "$KOTLINPART"
+              if [[ "$ATTEMPT" -lt 6 ]]; then
+                # Increase Waiting Time Between Download Attempts
+                WAIT=$((10 * (2 ** (ATTEMPT - 1))))
+                echo "   ⚠️ Download Failed. Retrying in ${WAIT}s..."
+                sleep "$WAIT"
+              fi
+              
+            done
+            
+          fi
+
+          # Abort When All Download Attempts have Failed
           if [[ "$DOWNLOADSUCCESS" != "true" ]]; then
             echo "└─ ⛔ Kotlin Compiler Download Failed"
             exit 1
@@ -131,16 +244,22 @@ runs:
             exit 1
           }
           # Verify Official SHA-256 Digest When Published
-          if [[ -n "$KOTLINHASH" ]]; then
-            echo "└─ 🔐 Verifying Kotlin Compiler SHA-256..."
-            echo "${KOTLINHASH}  ${KOTLINPART}" |
-              sha256sum --check --status || {
-                echo "└─ ⛔ Kotlin Compiler SHA-256 Verification Failed"
-                exit 1
-              }
-            echo "└─ ✔️ SHA-256 Verification Passed"
+          if [[ "$DOWNLOADSOURCE" == "JetBrains" ]]; then
+            if [[ -n "$KOTLINHASH" ]]; then
+              echo "└─ 🔐 Verifying Kotlin Compiler SHA-256..."
+              echo "${KOTLINHASH}  ${KOTLINPART}" |
+                sha256sum --check --status || {
+                  echo "└─ ⛔ Kotlin Compiler SHA-256 Verification Failed"
+                  exit 1
+                }
+              echo "└─ ✔️ SHA-256 Verification Passed"
+            else
+              echo "└─ ⚠️ No Published SHA-256 Digest Found"
+            fi
+            
           else
-            echo "└─ ⚠️ No Published SHA-256 Digest Found"
+            # GitHub Release Archive is Checked Through ZIP and Version Validation
+            echo "└─ 📌 Using GitHub Release Compiler Archive"
           fi
 
           # Promote Verified Download to its Final Archive
@@ -151,25 +270,29 @@ runs:
             echo "└─ ⛔ Kotlin Compiler Archive Is Corrupted"
             exit 1
           }
-          # Extract Compiler Distribution Into HOME
+          # Extract Compiler Distribution Into Temporary Directory
           echo "└─ 📂 Extracting Kotlin Compiler..."
-          unzip -q "$KOTLINZIP" -d "$HOME"
-          # Verify the Kotlin Compiler Executable Exists
-          [[ -x "$KOTLINHOME/bin/kotlinc" ]] || {
+          mkdir -p "$KOTLINSTAGE"
+          unzip -q "$KOTLINZIP" -d "$KOTLINSTAGE"
+          # Verify Kotlin Compiler Executable Exists
+          [[ -x "$KOTLINSTAGE/kotlinc/bin/kotlinc" ]] || {
             echo "└─ ⛔ Kotlin Compiler Installation Failed"
             exit 1
           }
-          # Confirm the Installed Compiler Matches the Requested Version
-          "$KOTLINHOME/bin/kotlinc" -version 2>&1 |
+          # Confirm Installed Compiler Matches Requested Version
+          "$KOTLINSTAGE/kotlinc/bin/kotlinc" -version 2>&1 |
             grep -Fq "kotlinc-jvm ${KOTLINVER}" || {
               echo "└─ ⛔ Installed Kotlin Version Does Not Match"
               exit 1
             }
-
+          # Move Verified Compiler Into its Final Installation Directory
+          mv "$KOTLINSTAGE/kotlinc" "$KOTLINHOME"
+          # Report Successful Kotlin Compiler Installation
           echo "└─ ✔️ Kotlin Compiler Installation Verified"
+          echo "└─ 📌 Installation Source : $DOWNLOADSOURCE"
         fi
 
-        # Add Kotlin Compiler to PATH for Subsequent Workflow Steps
+        # Add Kotlin Compiler to PATH For Subsequent Workflow Steps
         echo "$KOTLINHOME/bin" >> "$GITHUB_PATH"
         # Export Kotlin Installation Directory to Workflow Environment
         echo "KOTLINHOME=$KOTLINHOME" >> "$GITHUB_ENV"
