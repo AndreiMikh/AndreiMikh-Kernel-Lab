@@ -159,6 +159,8 @@ index 88e22811..a9f796d3 100644
 +endmenu
  
  endmenu
+
+
 diff --git a/kernel/Makefile b/kernel/Makefile
 index 05888d7b..208e7f0e 100644
 --- a/kernel/Makefile
@@ -178,6 +180,8 @@ index 05888d7b..208e7f0e 100644
 +endif
 +
  # Keep a new line here!! Because someone may append config
+
+
 diff --git a/kernel/core/init.c b/kernel/core/init.c
 index 81f3b658..6c1d38aa 100644
 --- a/kernel/core/init.c
@@ -398,6 +402,8 @@ index 81f3b658..6c1d38aa 100644
      ksu_module_blacklist_exit();
  
      put_cred(ksu_cred);
+
+
 diff --git a/kernel/feature/adb_root.c b/kernel/feature/adb_root.c
 index 5945bd16..3535ab20 100644
 --- a/kernel/feature/adb_root.c
@@ -549,6 +555,8 @@ index 5945bd16..3535ab20 100644
      }
      return 0;
  }
+
+
 diff --git a/kernel/feature/adb_root.h b/kernel/feature/adb_root.h
 index 154a466d..ac113ea5 100644
 --- a/kernel/feature/adb_root.h
@@ -563,6 +571,7 @@ index 154a466d..ac113ea5 100644
  
  void ksu_adb_root_init(void);
  
+
 diff --git a/kernel/feature/kernel_umount.c b/kernel/feature/kernel_umount.c
 index 7e337abf..8b6e0b3c 100644
 --- a/kernel/feature/kernel_umount.c
@@ -598,6 +607,7 @@ index 7e337abf..8b6e0b3c 100644
      // umount the target mnt
      pr_info("handle umount for uid: %d, pid: %d\n", new_uid, current->pid);
  
+
 diff --git a/kernel/feature/selinux_hide.c b/kernel/feature/selinux_hide.c
 index 385b415a..036890d6 100644
 --- a/kernel/feature/selinux_hide.c
@@ -986,6 +996,8 @@ index 385b415a..036890d6 100644
 -}
 +}
 \ No newline at end of file
+
+
 diff --git a/kernel/feature/sucompat.c b/kernel/feature/sucompat.c
 index 003f86b6..180743e6 100644
 --- a/kernel/feature/sucompat.c
@@ -1408,6 +1420,8 @@ index 003f86b6..180743e6 100644
  }
  
  void __exit ksu_sucompat_exit()
+
+
 diff --git a/kernel/feature/sucompat.h b/kernel/feature/sucompat.h
 index 5e2cfe11..f2f1f3f3 100644
 --- a/kernel/feature/sucompat.h
@@ -1436,25 +1450,30 @@ index 5e2cfe11..f2f1f3f3 100644
 -#endif
 +#endif
 \ No newline at end of file
+
+
 diff --git a/kernel/hook/setuid_hook.c b/kernel/hook/setuid_hook.c
 index 208c9199..1f1e91be 100644
 --- a/kernel/hook/setuid_hook.c
 +++ b/kernel/hook/setuid_hook.c
-@@ -11,6 +11,8 @@
+@@ -11,44 +11,130 @@
  #include <linux/types.h>
  #include <linux/uaccess.h>
  #include <linux/uidgid.h>
++#include <linux/workqueue.h>
 +#include <linux/susfs_def.h>
++
 +#include "selinux/selinux.h"
  
  #include "policy/allowlist.h"
  #include "hook/setuid_hook.h"
-@@ -18,38 +20,136 @@
+ #include "klog.h" // IWYU pragma: keep
  #include "manager/manager_identity.h"
- #include "infra/seccomp_cache.h"
+-#include "infra/seccomp_cache.h"
  #include "supercall/supercall.h"
 -#include "hook/tp_marker.h"
  #include "feature/kernel_umount.h"
+ #include "feature/mount_hide.h"
  
 -int ksu_handle_setresuid(uid_t old_uid, uid_t new_uid)
 +extern u32 susfs_zygote_sid;
@@ -1467,77 +1486,25 @@ index 208c9199..1f1e91be 100644
 -    // we rely on the fact that zygote always call setresuid(3) with same uids
 +    if (work_pending(&susfs_extra_works))
 +        return;
-+
-+    schedule_work(&susfs_extra_works);
-+}
-+
-+static int handle_zygote_setresuid(uid_t ruid) {
-+    // Check if spawned process is isolated service first, and force to do umount if so
-+    if (is_isolated_process(ruid)) {
-+        susfs_set_current_proc_no_su();
-+        susfs_set_current_proc_umounted();
-+        goto do_umount;
-+    }
-+
-+    // - Since ksu maanger app uid is excluded in allow_list_arr, so ksu_uid_should_umount(manager_uid)
-+    //   will always return true, that's why we need to explicitly check if new_uid belongs to
-+    //   ksu manager.
-+    // - Disable seccomp restriction for KSU manager since running with "su" will disable seccomp anyway
-+    if (likely(ksu_is_manager_appid_valid()) && unlikely(is_uid_manager(ruid))) {
-+        disable_seccomp();
-+        pr_info("install fd for manager: %d\n", ruid);
-+        ksu_install_fd();
-+        return 0;
-+    }
-+
-+    // - Check if spawned process is normal user app and needs to be umounted
-+    // - Now app_profile for webview_zygote is available in KernelSU manager
-+    if (likely(is_appuid(ruid) && ksu_uid_should_umount(ruid))) {
-+        susfs_set_current_proc_no_su();
-+        susfs_set_current_proc_umounted();
-+        goto do_umount;
-+    }
-+
-+    // Disable seccomp restriction for root allowed apps since running with "su" will disable seccomp anyway
-+    if (ksu_is_allow_uid_for_current(ruid)) {
-+        disable_seccomp();
-+        return 0;
-+    }
-+
-+    // Process not umounted but also root not allowed
-+    susfs_set_current_proc_no_su();
-+    return 0;
-+
-+do_umount:
-+    {
-+        // Handle kernel umount
-+        ksu_handle_umount(current_uid().val, ruid);
-+
-+        // Handle extra susfs work
-+        ksu_handle_extra_susfs_work();
-+    }
-+
-+    return 0;
-+}
  
 -    if (unlikely(is_uid_manager(new_uid))) {
 -        spin_lock_irq(&current->sighand->siglock);
 -        ksu_seccomp_allow_cache(current->seccomp.filter, __NR_reboot);
 -        ksu_set_task_tracepoint_flag(current);
 -        spin_unlock_irq(&current->sighand->siglock);
-+static int handle_zygote_next_setresuid(uid_t ruid) {
-+    // Check if spawned process is isolated service first, and force to do umount if so
++    schedule_work(&susfs_extra_works);
++}
+ 
++static int handle_zygote_setresuid(uid_t ruid)
++{
++    // Check if spawned process is an isolated service first.
 +    if (is_isolated_process(ruid)) {
 +        susfs_set_current_proc_no_su();
 +        susfs_set_current_proc_umounted();
-+        susfs_set_current_proc_umounted_for_zygote_next();
-+        goto do_susfs_work;
++        goto do_umount;
 +    }
- 
-+    // - Since ksu maanger app uid is excluded in allow_list_arr, so ksu_uid_should_umount(manager_uid)
-+    //   will always return true, that's why we need to explicitly check if new_uid belongs to
-+    //   ksu manager.
-+    // - Disable seccomp restriction for KSU manager since running with "su" will disable seccomp anyway
++
++    // The manager UID is excluded from the allowlist, so check it explicitly.
 +    if (likely(ksu_is_manager_appid_valid()) && unlikely(is_uid_manager(ruid))) {
 +        disable_seccomp();
 +        pr_info("install fd for manager: %d\n", ruid);
@@ -1554,8 +1521,53 @@ index 208c9199..1f1e91be 100644
 -        ksu_set_task_tracepoint_flag(current);
 -    } else {
 -        ksu_clear_task_tracepoint_flag_if_needed(current);
-+    // - Check if spawned process is normal user app and needs to be umounted
-+    // - Now app_profile for webview_zygote is available in KernelSU manager
++    // Check whether the spawned app needs to be umounted.
++    if (likely(is_appuid(ruid) && ksu_uid_should_umount(ruid))) {
++        susfs_set_current_proc_no_su();
++        susfs_set_current_proc_umounted();
++        goto do_umount;
+     }
+ 
+-    // Handle kernel umount
+-    ksu_handle_umount(old_uid, new_uid);
++    // Disable seccomp for root-allowed apps.
++    if (ksu_is_allow_uid_for_current(ruid)) {
++        disable_seccomp();
++        return 0;
++    }
++
++    // Process is not umounted, but root is not allowed.
++    susfs_set_current_proc_no_su();
++    return 0;
++
++do_umount:
++    // Handle kernel umount.
++    ksu_handle_umount(current_uid().val, ruid);
++
++    // Handle additional SUSFS work.
++    ksu_handle_extra_susfs_work();
++    return 0;
++}
++
++static int handle_zygote_next_setresuid(uid_t ruid)
++{
++    // Check whether the spawned process is an isolated service.
++    if (is_isolated_process(ruid)) {
++        susfs_set_current_proc_no_su();
++        susfs_set_current_proc_umounted();
++        susfs_set_current_proc_umounted_for_zygote_next();
++        goto do_susfs_work;
++    }
++
++    // The manager UID is excluded from the allowlist, so check it explicitly.
++    if (likely(ksu_is_manager_appid_valid()) && unlikely(is_uid_manager(ruid))) {
++        disable_seccomp();
++        pr_info("install fd for manager: %d\n", ruid);
++        ksu_install_fd();
++        return 0;
++    }
++
++    // Check whether the spawned app needs to be umounted.
 +    if (likely(is_appuid(ruid) && ksu_uid_should_umount(ruid))) {
 +        susfs_set_current_proc_no_su();
 +        susfs_set_current_proc_umounted();
@@ -1563,26 +1575,19 @@ index 208c9199..1f1e91be 100644
 +        goto do_susfs_work;
 +    }
 +
-+    // Disable seccomp restriction for root allowed apps since running with "su" will disable seccomp anyway
++    // Disable seccomp for root-allowed apps.
 +    if (ksu_is_allow_uid_for_current(ruid)) {
 +        disable_seccomp();
 +        return 0;
 +    }
 +
-+    // Process not umounted but also root not allowed
++    // Process is not umounted, but root is not allowed.
 +    susfs_set_current_proc_no_su();
 +    return 0;
 +
 +do_susfs_work:
-+    {
-+        // Do not umount here as we are in init namespace now
-+
-+        // Handle extra susfs work
-+        ksu_handle_extra_susfs_work();
-     }
- 
--    // Handle kernel umount
--    ksu_handle_umount(old_uid, new_uid);
++    // Do not umount here because we are in the init namespace.
++    ksu_handle_extra_susfs_work();
 +    return 0;
 +}
 +
@@ -1593,7 +1598,7 @@ index 208c9199..1f1e91be 100644
 +    if (cur_uid != 0)
 +        return 0;
 +
-+    // We only interest in process spwaned by zygote or zygote_next
++    // Only handle processes spawned by zygote or zygote_next.
 +    if (susfs_is_sid_equal(current_cred(), susfs_zygote_sid))
 +        return handle_zygote_setresuid(ruid);
 +
@@ -1601,15 +1606,14 @@ index 208c9199..1f1e91be 100644
 +        return handle_zygote_next_setresuid(ruid);
  
      return 0;
-+
  }
- 
- void __init ksu_setuid_hook_init(void)
+
+
 diff --git a/kernel/hook/setuid_hook.h b/kernel/hook/setuid_hook.h
 index 3a3dfea8..b8486238 100644
 --- a/kernel/hook/setuid_hook.h
 +++ b/kernel/hook/setuid_hook.h
-@@ -7,7 +7,4 @@
+@@ -7,7 +7,5 @@
  void ksu_setuid_hook_init(void);
  void ksu_setuid_hook_exit(void);
  
@@ -1617,6 +1621,8 @@ index 3a3dfea8..b8486238 100644
 -int ksu_handle_setresuid(uid_t old_uid, uid_t new_uid);
 -
  #endif
+
+
 diff --git a/kernel/include/ksu.h b/kernel/include/ksu.h
 index be25a826..7f2870a8 100644
 --- a/kernel/include/ksu.h
@@ -1656,22 +1662,25 @@ index dc785e37..34d5b240 100644
  }
  
  // Never scan from the fsnotify handler: fsnotify_mark_srcu and the rename's dir
+
+
 diff --git a/kernel/policy/allowlist.c b/kernel/policy/allowlist.c
 index 33cb5096..3d9bc3e8 100644
 --- a/kernel/policy/allowlist.c
 +++ b/kernel/policy/allowlist.c
-@@ -291,10 +291,7 @@ bool ksu_uid_should_umount(uid_t uid)
+@@ -289,10 +289,6 @@ 
+
+ bool ksu_uid_should_umount(uid_t uid)
  {
-     struct app_profile *profile;
-     bool res;
 -    if (likely(ksu_is_manager_appid_valid()) && unlikely(ksu_get_manager_appid() == uid % PER_USER_RANGE)) {
 -        // we should not umount on manager!
 -        return false;
 -    }
-+
  #ifdef CONFIG_KSU_DISABLE_POLICY
      return !__ksu_is_allow_uid(uid);
  #else
+
+
 diff --git a/kernel/policy/app_profile.c b/kernel/policy/app_profile.c
 index 10d03262..33cd6779 100644
 --- a/kernel/policy/app_profile.c
@@ -1816,6 +1825,8 @@ index 10d03262..33cd6779 100644
 -#endif
 +    return 0;
  }
+
+
 diff --git a/kernel/policy/app_profile.h b/kernel/policy/app_profile.h
 index 0e223df7..f63c84a8 100644
 --- a/kernel/policy/app_profile.h
@@ -1837,6 +1848,8 @@ index 0e223df7..f63c84a8 100644
 +int escape_to_root_for_init(void);
  
  #endif
+
+
 diff --git a/kernel/policy/feature.h b/kernel/policy/feature.h
 index e3936078..50d1891c 100644
 --- a/kernel/policy/feature.h
@@ -1987,6 +2000,8 @@ index 5bf94f14..ca37cfb4 100644
 +{
 +    return false;
  }
+
+
 diff --git a/kernel/preinit/preinit.h b/kernel/preinit/preinit.h
 index 34eb056b..a51d2c98 100644
 --- a/kernel/preinit/preinit.h
@@ -2016,6 +2031,8 @@ index 34eb056b..a51d2c98 100644
      return false;
  }
  #endif
+
+
 diff --git a/kernel/runtime/boot_event.c b/kernel/runtime/boot_event.c
 index 91848e6c..d469c213 100644
 --- a/kernel/runtime/boot_event.c
@@ -2040,6 +2057,8 @@ index 91848e6c..d469c213 100644
      ksu_selinux_hide_handle_post_fs_data();
      // retry forced features which failed at second stage
      ksu_feature_apply_forced();
+
+
 diff --git a/kernel/runtime/ksud.h b/kernel/runtime/ksud.h
 index 09384def..70c67562 100644
 --- a/kernel/runtime/ksud.h
@@ -2089,6 +2108,8 @@ index 09384def..70c67562 100644
 +                             struct user_arg_ptr *argv,
 +                             struct user_arg_ptr *envp, int *flags);
  #endif
+
+
 diff --git a/kernel/runtime/ksud_integration.c b/kernel/runtime/ksud_integration.c
 index a4fb4138..1a2fb61c 100644
 --- a/kernel/runtime/ksud_integration.c
@@ -2101,9 +2122,9 @@ index a4fb4138..1a2fb61c 100644
  #include <linux/printk.h>
  #include <linux/types.h>
  #include <linux/uaccess.h>
-@@ -27,10 +26,13 @@
- #include "runtime/ksud_boot.h"
+@@ -28,10 +27,13 @@
  #include "policy/feature.h"
+ #include "feature/module_blacklist.h"
  #include "selinux/selinux.h"
 -#include "hook/syscall_hook.h"
 -#include "hook/syscall_event_bridge.h"
@@ -2117,7 +2138,7 @@ index a4fb4138..1a2fb61c 100644
  // clang-format off
  static const char KERNEL_SU_RC[] =
      "\n"
-@@ -51,45 +53,6 @@ static const char KERNEL_SU_RC[] =
+@@ -52,45 +54,6 @@
      "\n";
  // clang-format on
  
@@ -2163,7 +2184,7 @@ index a4fb4138..1a2fb61c 100644
  /*
   * count() counts the number of strings in array ARGV.
   */
-@@ -137,7 +100,7 @@ static bool check_argv(struct user_arg_ptr argv, int index, const char *expected
+@@ -138,7 +101,7 @@
      if (!p || IS_ERR(p))
          goto fail;
  
@@ -2172,7 +2193,7 @@ index a4fb4138..1a2fb61c 100644
          goto fail;
  
      buf[buf_len - 1] = '\0';
-@@ -148,41 +111,58 @@ fail:
+@@ -149,44 +112,58 @@
      return false;
  }
  
@@ -2191,7 +2212,7 @@ index a4fb4138..1a2fb61c 100644
      /* This applies to versions Android 10+ */
      static const char system_bin_init[] = "/system/bin/init";
 -    static bool init_second_stage_executed = false;
--
+ 
 -    // https://cs.android.com/android/platform/superproject/+/android-16.0.0_r2:system/core/init/main.cpp;l=77
 -    if (unlikely(!memcmp(path, system_bin_init, sizeof(system_bin_init) - 1) && argv)) {
 -        char buf[16];
@@ -2204,8 +2225,10 @@ index a4fb4138..1a2fb61c 100644
 -            setup_ksu_cred();
 -            // after apply_kernelsu_rules, so that selinux_hide has its sepolicy backup
 -            ksu_feature_apply_forced();
+-            // Not earlier: a blocked module failing to load in first stage
+-            // init is fatal, ksuinit uses modules.blocklist for that instead.
+-            ksu_module_blacklist_apply();
 -            init_second_stage_executed = true;
-+
 +    if (!filename_ptr)
 +        return 0;
 +
@@ -2256,7 +2279,7 @@ index a4fb4138..1a2fb61c 100644
  }
  
  static ssize_t (*orig_read)(struct file *, char __user *, size_t, loff_t *);
-@@ -442,13 +422,16 @@ static void ksu_install_rc_hook(struct file *file)
+@@ -446,13 +423,16 @@
          return;
      }
      rc_hooked = true;
@@ -2275,7 +2298,7 @@ index a4fb4138..1a2fb61c 100644
      pr_info("read init.rc, comm: %s, rc_count: %zu, module_rc: %zu\n", current->comm, ksu_rc_len, module_rc_len);
  
      // Now we need to proxy the read and modify the result!
-@@ -467,7 +450,7 @@ static void ksu_install_rc_hook(struct file *file)
+@@ -471,7 +451,7 @@
      file->f_op = &fops_proxy;
  }
  
@@ -2284,7 +2307,7 @@ index a4fb4138..1a2fb61c 100644
  {
      struct file *file = fget(fd);
      if (!file) {
-@@ -488,12 +471,15 @@ int ksu_handle_input_handle_event(unsigned int *type, unsigned int *code, int *v
+@@ -492,12 +472,15 @@
  {
      if (*type == EV_KEY && *code == KEY_VOLUMEDOWN) {
          int val = *value;
@@ -2303,7 +2326,7 @@ index a4fb4138..1a2fb61c 100644
          }
      }
  
-@@ -508,12 +494,11 @@ bool ksu_is_safe_mode()
+@@ -512,12 +495,11 @@
          return true;
      }
  
@@ -2320,7 +2343,7 @@ index a4fb4138..1a2fb61c 100644
  
      pr_info("volumedown_pressed_count: %d\n", volumedown_pressed_count);
      if (is_volumedown_enough(volumedown_pressed_count)) {
-@@ -526,66 +511,13 @@ bool ksu_is_safe_mode()
+@@ -530,66 +512,13 @@
      return false;
  }
  
@@ -2391,7 +2414,7 @@ index a4fb4138..1a2fb61c 100644
      if (file) {
          if (is_init_rc(file)) {
              pr_info("stat init.rc");
-@@ -595,84 +527,20 @@ static long ksu_sys_fstat(const struct pt_regs *regs)
+@@ -599,84 +528,20 @@
          fput(file);
      }
  
@@ -2479,6 +2502,8 @@ index a4fb4138..1a2fb61c 100644
      if (module_rc_buf) {
          free_module_rc();
      }
+
+
 diff --git a/kernel/selinux/rules.c b/kernel/selinux/rules.c
 index 587f9306..2595940b 100644
 --- a/kernel/selinux/rules.c
