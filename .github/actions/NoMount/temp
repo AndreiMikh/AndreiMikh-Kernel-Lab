@@ -6,41 +6,79 @@ inputs:
   NOMOUNT:
     description: Selected NoMount Branch
     required: true
-# Expose Verified NoMount Source Metadata to Calling Workflow
+# Expose Verified NoMount Source Metadata and Generated Package Paths
 outputs:
   # Return Short SHA of Verified NoMount Commit
   nomountsha:
     description: Verified NoMount Source Commit (Short SHA)
     value: ${{ steps.nomount.outputs.nomountsha }}
+  # Return Absolute Path of Generated NoMount ZIP
+  nomountzip:
+    description: Generated NoMount Userspace Module ZIP
+    value: ${{ steps.nomount.outputs.nomountzip }}
+  # Return Absolute Path of Generated NoMount ZIP Checksum
+  nomountchecksum:
+    description: Generated NoMount ZIP SHA-256 Checksum
+    value: ${{ steps.nomount.outputs.nomountchecksum }}
 # Configure Composite Action and Run NoMount Integration
 runs:
   using: composite
   steps:
     - name: 🧩 NoMount Kernel Integration and Package
-      # Step ID Used to Export Verified NoMount Commit SHA
+      # Step ID Used to Export NoMount Metadata and Package Paths
       id: nomount
       shell: bash
-      # Export Composite Action Input and Import Environment Variables
+      # Export Composite Action Inputs and Import Workflow Environment Variables
       env:
         WORKDIR: ${{ env.WORKDIR }}
         COMMONKERNELFOLDER: ${{ env.COMMONKERNELFOLDER }}
-        NOMOUNT: ${{ inputs.NOMOUNT }}
         KERNELVERSION: ${{ env.KERNELVERSION }}
+        NOMOUNT: ${{ inputs.NOMOUNT }}
       # Enable Strict Bash Error Handling
       run: |
         set -Eeuo pipefail
-        # Define NoMount Source, Binary, Package And Output Paths
+        # Define NoMount Source, Binary, Module and Output Paths
         NOMOUNTBRANCH="$NOMOUNT"
         NOMOUNTSOURCE="${WORKDIR}/nomount-source"
         NOMOUNTBIN="${WORKDIR}/nomount-bin"
         NOMOUNTMODULEDIR="${WORKDIR}/nomount-userspace"
         NOMOUNTOUTDIR="${WORKDIR}/output"
-        # Enter Kernel Common Source Directory
-        cd "$COMMONKERNELFOLDER"
+        # Validate Required Workflow Environment Variables
+        for VARIABLE in WORKDIR COMMONKERNELFOLDER KERNELVERSION NOMOUNT; do
+          if [[ -z "${!VARIABLE:-}" ]]; then
+            echo "└─ ⛔ [Warn] Required Environment Variable Missing : $VARIABLE"
+            exit 1
+          fi
+
+        done
+
+        # Verify Required Build Directories Exist
+        [[ -d "$WORKDIR" ]] || {
+          echo "└─ ⛔ [Warn] Work Directory Missing : $WORKDIR"
+          exit 1
+        }
+        [[ -d "$COMMONKERNELFOLDER" ]] || {
+          echo "└─ ⛔ [Warn] Kernel Common Directory Missing : $COMMONKERNELFOLDER"
+          exit 1
+        }
+        # Verify Required Build Utilities Exist
+        for TOOL in git awk sed grep readlink zig zip unzip sha256sum; do
+          command -v "$TOOL" >/dev/null 2>&1 || {
+            echo "└─ ⛔ [Warn] Required Build Utility Missing : $TOOL"
+            exit 1
+          }
+
+        done
+
         # Display Initial Integration Information
         echo "NoMount Kernel Integration and Package"
         echo "└─ 📂 [Info] Work Directory : $WORKDIR"
+        echo "└─ 📂 [Info] Kernel Source  : $COMMONKERNELFOLDER"
         echo "└─ 📦 [Info] NoMount Branch : $NOMOUNTBRANCH"
+        echo "└─ 📌 [Info] Kernel Version : $KERNELVERSION"
+        # Enter Kernel Common Source Directory
+        cd "$COMMONKERNELFOLDER"
+        # Resolve Selected NoMount Source Branch
         # Map User-Selected NoMount Variant to its Git Branch
         case "$NOMOUNTBRANCH" in
           # Stable NoMount Variant Uses Master Branch
@@ -58,29 +96,31 @@ runs:
             exit 1
             ;;
         esac
-        # Display The Resolved NoMount Branch
+        # Display Resolved NoMount Branch
         echo "└─ 📌 [Info] Selected Branch : $NOMOUNTBRANCH"
         echo "└─ 📌 [Info] Git Branch      : $NOMOUNTGITBRANCH"
+        # Verify Remote NoMount Source Revision
         # Retrieve Current Remote Commit SHA For Selected Branch
         echo "└─ 🔎 [Info] Verifying NoMount Remote Branch..."
         REMOTECOMMIT="$(
           git ls-remote \
             "https://github.com/maxsteeel/nomount.git" \
             "refs/heads/${NOMOUNTGITBRANCH}" |
-          awk '{print $1}'
+          awk 'NR == 1 { print $1 }'
         )"
         # Stop if Selected Remote Branch Cannot be Resolved
         [[ -n "$REMOTECOMMIT" ]] || {
           echo "└─ ⛔ [Warn] NoMount Remote Branch Not Found"
-          echo "└─ [Info] refs/heads/${NOMOUNTGITBRANCH}"
+          echo "└─ 📌 [Info] Expected Reference : refs/heads/${NOMOUNTGITBRANCH}"
           exit 1
         }
         # Record Remote Commit For Later Verification
-        echo "└─ 📌 [Info] Remote Commit   : $REMOTECOMMIT"
+        echo "└─ 📌 [Info] Remote Commit : $REMOTECOMMIT"
+        # Clone Verified NoMount Source
         # Remove Any Previous Checkout Before Downloading Source
         echo "└─ 📥 [Info] Cloning NoMount Source..."
         rm -rf "$NOMOUNTSOURCE"
-        # Clone Only Selected Branch with a Shallow History
+        # Clone Only Selected Branch with Shallow History
         git clone \
           --depth=1 \
           --branch "$NOMOUNTGITBRANCH" \
@@ -95,22 +135,22 @@ runs:
           git -C "$NOMOUNTSOURCE" rev-parse HEAD
         )"
         # Display Source Checkout Details
-        echo "└─ 📂 [Info] NoMount Source   : $NOMOUNTSOURCE"
+        echo "└─ 📂 [Info] NoMount Source    : $NOMOUNTSOURCE"
         echo "└─ 📌 [Info] Requested Branch : $NOMOUNTGITBRANCH"
         echo "└─ 📌 [Info] Checked-Out      : $ACTUALBRANCH"
         echo "└─ 📌 [Info] NoMount Commit   : $ACTUALCOMMIT"
         # Verify Checked-Out Branch Matches Requested Branch
         [[ "$ACTUALBRANCH" == "$NOMOUNTGITBRANCH" ]] || {
           echo "└─ ⛔ [Warn] NoMount Branch Verification Failed"
-          echo "└─ [Info] Expected : $NOMOUNTGITBRANCH"
-          echo "└─ [Info] Actual   : $ACTUALBRANCH"
+          echo "└─ 📌 [Info] Expected : $NOMOUNTGITBRANCH"
+          echo "└─ 📌 [Info] Actual   : $ACTUALBRANCH"
           exit 1
         }
-        # Verify  Checked-Out Commit Matches Remote Reference
+        # Verify Checked-Out Commit Matches Remote Reference
         [[ "$ACTUALCOMMIT" == "$REMOTECOMMIT" ]] || {
           echo "└─ ⛔ [Warn] NoMount Commit Verification Failed"
-          echo "└─ [Info] Expected : $REMOTECOMMIT"
-          echo "└─ [Info] Actual   : $ACTUALCOMMIT"
+          echo "└─ 📌 [Info] Expected : $REMOTECOMMIT"
+          echo "└─ 📌 [Info] Actual   : $ACTUALCOMMIT"
           exit 1
         }
         # Report Successful Branch and Commit Verification
@@ -120,98 +160,112 @@ runs:
         NOMOUNTSHA="${ACTUALCOMMIT:0:7}"
         echo "└─ 📌 [Info] Full Commit SHA  : $ACTUALCOMMIT"
         echo "└─ 📌 [Info] Short Commit SHA : $NOMOUNTSHA"
-        # Export Short SHA For Use by Subsequent Workflow Steps
+        # Export Verified Short SHA For Calling Workflow
         echo "nomountsha=$NOMOUNTSHA" >> "$GITHUB_OUTPUT"
-        # Verify All Required NoMount Source Files Exist
+        # Verify Required NoMount Repository Files
+        # Verify Official NoMount Kernel Setup Script
         [[ -f "$NOMOUNTSOURCE/kernel/setup.sh" ]] || {
-          echo "└─ ⚠️ [Warn] NoMount Setup Script Missing"
+          echo "└─ ⛔ [Warn] NoMount Setup Script Missing"
           exit 1
         }
+        # Verify NoMount Userspace Source
         [[ -f "$NOMOUNTSOURCE/userspace/src/nm.c" ]] || {
-          echo "└─ ⚠️ [Warn] NoMount Userspace Source Missing"
+          echo "└─ ⛔ [Warn] NoMount Userspace Source Missing"
           exit 1
         }
+        # Verify NoMount Module Directory
         [[ -d "$NOMOUNTSOURCE/module" ]] || {
-          echo "└─ ⚠️ [Warn] NoMount Module Directory Missing"
+          echo "└─ ⛔ [Warn] NoMount Module Directory Missing"
           exit 1
         }
+        # Verify NoMount Module Metadata
         [[ -f "$NOMOUNTSOURCE/module/module.prop" ]] || {
-          echo "└─ ⚠️ [Warn] NoMount Module.prop Missing"
+          echo "└─ ⛔ [Warn] NoMount Module.prop Missing"
           exit 1
         }
-        # Continue Only After Required Repository Files are Verified
+        # Verify NoMount Common Configuration
+        [[ -f "$NOMOUNTSOURCE/module/common.sh" ]] || {
+          echo "└─ ⛔ [Warn] NoMount Common Configuration Missing"
+          exit 1
+        }
+        # Report Successful Repository Verification
         echo "└─ 📌 [Info] NoMount Repository Verified"
-        # Run Official NoMount Method Kernel Setup Script
-        # Pass Resolved Git Branch to Setup Script
+        # Integrate NoMount Into Kernel Source
+        # Run Official NoMount Method 1 Kernel Setup Script
         echo "└─ 🚀 [Info] Running Official NoMount Method 1 Setup..."
         bash "$NOMOUNTSOURCE/kernel/setup.sh" "$NOMOUNTGITBRANCH"
-        # Verify Setup Created the Expected Kernel Integration
+        # Verify Setup Created Expected Kernel Integration
         echo "└─ 🔎 [Info] Verifying NoMount Kernel Integration..."
-        # Confirm FS/NoMount is a Symbolic Link
+        # Confirm File System NoMount Directory is a Symbolic Link
         [[ -L "$COMMONKERNELFOLDER/fs/nomount" ]] || {
-          echo "└─ ⚠️ [Warn] NoMount Symlink Missing"
+          echo "└─ ⛔ [Warn] NoMount Symlink Missing"
           exit 1
         }
         # Resolve Symlink to its Actual Kernel Source Directory
-        NOMOUNTKDIR="$(readlink -f "$COMMONKERNELFOLDER/fs/nomount")"
+        NOMOUNTKDIR="$(
+          readlink -f "$COMMONKERNELFOLDER/fs/nomount"
+        )"
+        [[ -d "$NOMOUNTKDIR" ]] || {
+          echo "└─ ⛔ [Warn] NoMount Kernel Source Target Missing"
+          exit 1
+        }
+        # Display NoMount Kernel Source Information
         echo "└─ 📂 [Info] Kernel Source  : $COMMONKERNELFOLDER"
         echo "└─ 📂 [Info] NoMount Kernel : $NOMOUNTKDIR"
         # Verify Required NoMount Kernel Source Files
-        [[ -f "$COMMONKERNELFOLDER/fs/nomount/Kconfig" ]] || {
-          echo "└─ ⚠️ [Warn] NoMount Kernel Configuration Missing"
-          exit 1
-        }
-        [[ -f "$COMMONKERNELFOLDER/fs/nomount/Makefile" ]] || {
-          echo "└─ ⚠️ [Warn] NoMount Makefile Missing"
-          exit 1
-        }
-        [[ -f "$COMMONKERNELFOLDER/fs/nomount/nomount.c" ]] || {
-          echo "└─ ⚠️ [Warn] NoMount Source Missing"
-          exit 1
-        }
-        # Verify NoMount Kernel Configuration is Registered in FS/Kconfig
+        for FILE in Kconfig Makefile nomount.c; do
+          [[ -f "$COMMONKERNELFOLDER/fs/nomount/$FILE" ]] || {
+            echo "└─ ⛔ [Warn] NoMount Kernel Source File Missing : $FILE"
+            exit 1
+          }
+
+        done
+
+        # Verify NoMount Kernel Configuration is Registered
         grep -qF 'source "fs/nomount/Kconfig"' \
           "$COMMONKERNELFOLDER/fs/Kconfig" || {
-          echo "└─ ⚠️ [Warn] NoMount Kernel Configuration Registration Missing"
+          echo "└─ ⛔ [Warn] NoMount Kconfig Registration Missing"
           exit 1
         }
-        # Verify NoMount Directory is Registered in FS/Makefile
+        # Verify NoMount Kernel Makefile is Registered
         grep -qF 'obj-$(CONFIG_NOMOUNT) += nomount/' \
           "$COMMONKERNELFOLDER/fs/Makefile" || {
-          echo "└─ ⚠️ [Warn] NoMount Makefile Registration Missing"
+          echo "└─ ⛔ [Warn] NoMount Makefile Registration Missing"
           exit 1
         }
         # Report Successful Kernel Integration Checks
         echo "└─ 📌 [Info] NoMount Symlink Verified"
         echo "└─ 📌 [Info] NoMount Source Files Verified"
         echo "└─ 📌 [Info] NoMount Kernel Integration Verified"
-        # Ensure Setup Script Did Not Change Checked-Out Commit
+        # Verify Original NoMount Source Revision was Preserved
+        # Retrieve Source Commit After Kernel Integration
         SETUPCOMMIT="$(
           git -C "$NOMOUNTSOURCE" rev-parse HEAD
         )"
+        # Ensure Setup Script Did Not Change Checked-Out Commit
         [[ "$SETUPCOMMIT" == "$ACTUALCOMMIT" ]] || {
           echo "└─ ⛔ [Warn] NoMount Source Commit Changed During Setup"
-          echo "└─ [Info] Original : $ACTUALCOMMIT"
-          echo "└─ [Info] Current  : $SETUPCOMMIT"
+          echo "└─ 📌 [Info] Original : $ACTUALCOMMIT"
+          echo "└─ 📌 [Info] Current  : $SETUPCOMMIT"
           exit 1
         }
-        # Confirm Original Source Revision was Preserved
+        # Report Successful Source Revision Verification
         echo "└─ 📌 [Info] NoMount Source Revision Preserved"
-        # Define NoMount Userspace Source and Working Paths
+        # Compile NoMount Userspace Binaries
+        # Define NoMount Userspace Source Directory
         NOMOUNTUSERDIR="${NOMOUNTSOURCE}/userspace"
         NOMOUNTUSERSRC="${NOMOUNTUSERDIR}/src/nm.c"
         echo "NoMount Userspace Compilation"
         echo "└─ 📂 [Info] Source : $NOMOUNTUSERSRC"
-        # Verify Userspace C Source Before Compilation
+        # Verify Userspace Source Before Compilation
         [[ -f "$NOMOUNTUSERSRC" ]] || {
-          echo "└─ ⛔ [Info] NoMount Userspace Source Not Found"
+          echo "└─ ⛔ [Warn] NoMount Userspace Source Not Found"
           exit 1
         }
-
-        # Recreate a Clean Directory For Compiled Binaries
+        # Recreate Clean Directory For Compiled Binaries
         rm -rf "$NOMOUNTBIN"
         mkdir -p "$NOMOUNTBIN"
-        # Enter Directory Containing Userspace C Source
+        # Enter Directory Containing Userspace Source
         cd "${NOMOUNTUSERDIR}/src"
         # Compile ARM64 Userspace Binary Using Zig
         echo "└─ 🔨 [Info] Building NoMount-ARM64..."
@@ -246,66 +300,89 @@ runs:
           nm.c \
           -o "${NOMOUNTBIN}/nm-arm"
         # Verify Both Compiled Binaries Exist and are Executable
-        [[ -x "${NOMOUNTBIN}/nm-arm64" ]] || {
-          echo "└─ ⚠️ [Warn] NoMount-ARM64 Compilation Failed"
-          exit 1
-        }
-        [[ -x "${NOMOUNTBIN}/nm-arm" ]] || {
-          echo "└─ ⚠️ [Warn] NoMount-ARM Compilation Failed"
-          exit 1
-        }
+        for BINARY in nm-arm64 nm-arm; do
+          [[ -s "${NOMOUNTBIN}/${BINARY}" && -x "${NOMOUNTBIN}/${BINARY}" ]] || {
+            echo "└─ ⛔ [Warn] NoMount Binary Compilation Failed : $BINARY"
+            exit 1
+          }
+
+        done
+
         # Report Successful Compilation and Display Binary Sizes
         echo "└─ 🎉 [Result] NoMount-ARM64 Compiled Successfully"
         echo "└─ 🎉 [Result] NoMount-ARM Compiled Successfully"
         ls -lh \
           "${NOMOUNTBIN}/nm-arm64" \
           "${NOMOUNTBIN}/nm-arm"
-        # Prepare Clean Directory For NoMount Userspace Package
+        # Prepare NoMount Userspace Module Package
         echo "NoMount Userspace Packaging"
+        # Recreate Clean Module Package Directory
         rm -rf "$NOMOUNTMODULEDIR"
         mkdir -p "$NOMOUNTMODULEDIR/bin"
+        # Create Output Directory Without Removing Other Workflow Assets
         mkdir -p "$NOMOUNTOUTDIR"
         # Copy Original NoMount Module Files Into Package
         cp -a "$NOMOUNTSOURCE/module/." \
           "$NOMOUNTMODULEDIR/"
         # Define NoMount Base Description
         BASEDESCRIPTION="Replaces Overlay File System and Magic Mount with Virtual File System-Based Path Redirection"
-        # Customize NoMount Module Metadata and Configuration
+        # Customize NoMount Module Metadata
         echo "└─ 📝 [Info] Updating NoMount Module Metadata and Configuration..."
         # Update Module Version, Author and Description
         sed -i \
           -e 's/^version=.*/version=v2.2.0/' \
           -e 's/^author=.*/author=Andrei/' \
           -e "s|^description=.*|description=${BASEDESCRIPTION}|" \
+          -e '/^updateJson=/d' \
           "$NOMOUNTMODULEDIR/module.prop"
-        # Update NoMount Base Destination Description
+        # Normalize Version Code To 1 When Property Exists
+        if grep -q '^versionCode=' "$NOMOUNTMODULEDIR/module.prop"; then
+          sed -i 's/^versionCode=.*/versionCode=1/' \
+            "$NOMOUNTMODULEDIR/module.prop"
+        else
+          printf '%s\n' 'versionCode=1' >> "$NOMOUNTMODULEDIR/module.prop"
+        fi
+
+        # Replace Only Exact Original BASE DESC Assignment
         sed -i \
-          "s|^BASE_DEST=.*|BASE_DEST=\"${BASEDESCRIPTION}\"|" \
+          's|^BASE_DESC="A metamodule that replaces OverlayFS/MagicMount with VFS path redirection\."$|BASE_DESC="'"${BASEDESCRIPTION}"'"|' \
           "$NOMOUNTMODULEDIR/common.sh"
         # Verify Updated Module Metadata
         grep -E '^(name|version|versionCode|author|description)=' \
           "$NOMOUNTMODULEDIR/module.prop"
-        # Verify Updated Base Destination Description
-        grep -n '^BASE_DEST=' "$NOMOUNTMODULEDIR/common.sh"          
-        # Install Both Compiled Binaries with Executable Permissions
+        # Verify Exact Updated BASE DESC Assignment
+        grep -Fx "BASE_DESC=\"${BASEDESCRIPTION}\"" \
+          "$NOMOUNTMODULEDIR/common.sh" || {
+          echo "└─ ⛔ [Warn] NoMount Base Description Update Verification Failed"
+          exit 1
+        }
+        # Verify Original BASE DESC Assignment No Longer Exists
+        if grep -Fq \
+          'BASE_DESC="A metamodule that replaces OverlayFS/MagicMount with VFS path redirection."' \
+          "$NOMOUNTMODULEDIR/common.sh"; then
+          echo "└─ ⛔ [Warn] Original Base Description Assignment Still Exists"
+          exit 1
+        fi
+
+        # Report Successful Metadata and Configuration Updates
+        echo "└─ 📌 [Info] NoMount Module Metadata Updated"
+        echo "└─ 📌 [Info] Exact Base Description Assignment Updated"
+        # Install Compiled NoMount Userspace Binaries
+        # Install ARM64 Binary with Executable Permissions
         install -m 0755 \
           "${NOMOUNTBIN}/nm-arm64" \
           "$NOMOUNTMODULEDIR/bin/nm-arm64"
+        # Install ARM32 Binary with Executable Permissions
         install -m 0755 \
           "${NOMOUNTBIN}/nm-arm" \
           "$NOMOUNTMODULEDIR/bin/nm-arm"
+        # Store Verified NoMount Source Commit Metadata
         # Store Full Source Commit SHA in Package
         printf '%s\n' "$ACTUALCOMMIT" \
           > "$NOMOUNTMODULEDIR/nm-commit-src"
         # Store Short Source Commit SHA in Package
         printf '%s\n' "$NOMOUNTSHA" \
           > "$NOMOUNTMODULEDIR/nm-commit"
-        # Normalize Version Code To 1 When Property Exists
-        if grep -q '^versionCode=' "$NOMOUNTMODULEDIR/module.prop"; then
-          sed -i 's/^versionCode=.*/versionCode=1/' \
-            "$NOMOUNTMODULEDIR/module.prop"
-        fi
-     
         # Verify Packaged Full Commit SHA Matches Source
         [[ "$(cat "$NOMOUNTMODULEDIR/nm-commit-src")" == "$ACTUALCOMMIT" ]] || {
           echo "└─ ⛔ [Warn] Full Commit Metadata Verification Failed"
@@ -318,55 +395,116 @@ runs:
         }
         # Report Successful Commit Metadata Verification
         echo "└─ 📌 [Info] Full Commit Metadata Verified"
-        echo "└─ 📌 [Info] 8-Digit Commit Metadata Verified"
-        # Define Output ZIP File Name Using Kernel Version and Commit SHA
+        echo "└─ 📌 [Info] Short Commit Metadata Verified"
+        # Generate NoMount Userspace Package File Name
+        # Define ZIP File Name Using Kernel Version and Source Commit SHA
         NOMOUNTMODULEZIP="${NOMOUNTOUTDIR}/NoMount-Userspace-Metamodule-${KERNELVERSION}-Commit(${NOMOUNTSHA}).zip"
-        # Remove Any Previous ZIP Before Creating New Package
-        rm -f "$NOMOUNTMODULEZIP"
-        echo "└─ 📦 Creating NoMount Userspace ZIP..."
+        # Define SHA-256 Checksum File Name
+        NOMOUNTMODULECHECKSUM="${NOMOUNTMODULEZIP}.sha256"
+        # Remove Only Previous NoMount Assets with Same File Name
+        rm -f "$NOMOUNTMODULEZIP" "$NOMOUNTMODULECHECKSUM"
+        # Create NoMount Userspace ZIP Package
+        echo "└─ 📦 [Info] Creating NoMount Userspace ZIP..."
         # Archive Module Contents From Package Root
         (
           cd "$NOMOUNTMODULEDIR"
           zip -qr "$NOMOUNTMODULEZIP" .
         )
-        # Generate SHA-256 Checksum File For ZIP Package
-        sha256sum "$NOMOUNTMODULEZIP" \
-          > "${NOMOUNTMODULEZIP}.sha256"
-        # Confirm ZIP Exists and is Not Empty
+        # Verify ZIP Exists and Is Not Empty
         [[ -s "$NOMOUNTMODULEZIP" ]] || {
-          echo "└─ ⚠️ [Warn] NoMount Userspace ZIP was Not Created"
+          echo "└─ ⛔ [Warn] NoMount Userspace ZIP Was Not Created"
           exit 1
         }
+        # Generate SHA-256 Checksum File For ZIP Package
+        sha256sum "$NOMOUNTMODULEZIP" \
+          > "$NOMOUNTMODULECHECKSUM"
+        # Verify Checksum File Exists
+        [[ -s "$NOMOUNTMODULECHECKSUM" ]] || {
+          echo "└─ ⛔ [Warn] NoMount ZIP Checksum was Not Created"
+          exit 1
+        }
+        # Verify NoMount ZIP Package Integrity
+        echo "└─ 🔎 [Info] Verifying NoMount ZIP Integrity..."
         # Test ZIP Archive For Structural Integrity
         unzip -tq "$NOMOUNTMODULEZIP" || {
-          echo "└─ ⛔ [Warn] NoMount Userspace ZIP Integrity Check Failed"
+          echo "└─ ⛔ [Warn] NoMount ZIP Integrity Check Failed"
           exit 1
         }
         # Verify ZIP Contains Required Module Metadata
-        unzip -l "$NOMOUNTMODULEZIP" | grep -q 'module.prop' || {
+        unzip -Z1 "$NOMOUNTMODULEZIP" |
+          grep -Fxq 'module.prop' || {
           echo "└─ ⛔ [Warn] Module.prop Missing From NoMount ZIP"
           exit 1
         }
+        # Verify ZIP Contains Common Module Configuration
+        unzip -Z1 "$NOMOUNTMODULEZIP" |
+          grep -Fxq 'common.sh' || {
+          echo "└─ ⛔ [Warn] Common.sh Missing From NoMount ZIP"
+          exit 1
+        }
         # Verify ARM64 Userspace Binary is Included
-        unzip -l "$NOMOUNTMODULEZIP" | grep -q 'bin/nm-arm64' || {
+        unzip -Z1 "$NOMOUNTMODULEZIP" |
+          grep -Fxq 'bin/nm-arm64' || {
           echo "└─ ⛔ [Warn] NoMount-ARM64 Missing From NoMount ZIP"
           exit 1
         }
         # Verify ARM32 Userspace Binary is Included
-        unzip -l "$NOMOUNTMODULEZIP" | grep -q 'bin/nm-arm' || {
+        unzip -Z1 "$NOMOUNTMODULEZIP" |
+          grep -Fxq 'bin/nm-arm' || {
           echo "└─ ⛔ [Warn] NoMount-ARM Missing From NoMount ZIP"
           exit 1
         }
         # Verify Full Source Commit Metadata is Included
-        unzip -l "$NOMOUNTMODULEZIP" | grep -q 'nm-commit-src' || {
+        unzip -Z1 "$NOMOUNTMODULEZIP" |
+          grep -Fxq 'nm-commit-src' || {
           echo "└─ ⛔ [Warn] Full Commit Metadata Missing From NoMount ZIP"
           exit 1
         }
         # Verify Short Source Commit Metadata is Included
-        unzip -l "$NOMOUNTMODULEZIP" | grep -q 'nm-commit' || {
-          echo "└─ ⛔ [Warn] 7-Digit Commit Metadata Missing From NoMount ZIP"
+        unzip -Z1 "$NOMOUNTMODULEZIP" |
+          grep -Fxq 'nm-commit' || {
+          echo "└─ ⛔ [Warn] Short Commit Metadata Missing From NoMount ZIP"
           exit 1
         }
+        # Verify ZIP Contains Updated Base Description
+        unzip -p "$NOMOUNTMODULEZIP" common.sh |
+          grep -Fxq "BASE_DESC=\"${BASEDESCRIPTION}\"" || {
+          echo "└─ ⛔ [Warn] Updated Base Description Missing From NoMount ZIP"
+          exit 1
+        }
+        # Verify Generated Checksum
+        # Verify Generated SHA-256 Checksum Matches ZIP
+        sha256sum --check "$NOMOUNTMODULECHECKSUM" || {
+          echo "└─ ⛔ [Warn] NoMount ZIP SHA-256 Verification Failed"
+          exit 1
+        }
+        # Export Absolute Package Paths to Calling Workflow
+        # Resolve Absolute NoMount ZIP Path
+        NOMOUNTMODULEZIP="$(
+          cd "$(dirname "$NOMOUNTMODULEZIP")" &&
+          printf '%s/%s\n' "$PWD" "$(basename "$NOMOUNTMODULEZIP")"
+        )"
+        # Resolve Absolute NoMount Checksum Path
+        NOMOUNTMODULECHECKSUM="$(
+          cd "$(dirname "$NOMOUNTMODULECHECKSUM")" &&
+          printf '%s/%s\n' "$PWD" "$(basename "$NOMOUNTMODULECHECKSUM")"
+        )"
+        # Verify Both Exported Release Assets Exist
+        [[ -s "$NOMOUNTMODULEZIP" ]] || {
+          echo "└─ ⛔ [Warn] Exported NoMount ZIP Missing"
+          exit 1
+        }
+        [[ -s "$NOMOUNTMODULECHECKSUM" ]] || {
+          echo "└─ ⛔ [Warn] Exported NoMount Checksum Missing"
+          exit 1
+        }
+        # Export Generated NoMount ZIP Path
+        echo "nomountzip=$NOMOUNTMODULEZIP" >> "$GITHUB_OUTPUT"
+        # Export Generated NoMount Checksum Path
+        echo "nomountchecksum=$NOMOUNTMODULECHECKSUM" >> "$GITHUB_OUTPUT"
+        # Report Successful Package Path Export
+        echo "└─ 📌 [Info] NoMount ZIP Path Exported"
+        echo "└─ 📌 [Info] NoMount Checksum Path Exported"
         # Print Final NoMount Integration and Packaging Report
         echo "------------------------------"
         echo "└─ [Result] NoMount Integration Complete"
@@ -379,10 +517,13 @@ runs:
         echo "└─ 📦 [Result] ARM64 Binary    : ${NOMOUNTBIN}/nm-arm64"
         echo "└─ 📦 [Result] ARM32 Binary    : ${NOMOUNTBIN}/nm-arm"
         echo "└─ 📦 [Result] Userspace ZIP   : $NOMOUNTMODULEZIP"
-        echo "└─ 🔐 [Result] SHA-256         : ${NOMOUNTMODULEZIP}.sha256"
-        # Display Contents of Completed ZIP Package
-        echo "└─ 📋 [Result] NoMount ZIP Contents  :"
+        echo "└─ 🔐 [Result] SHA-256         : $NOMOUNTMODULECHECKSUM"
+        # Display Contents of Completed NoMount ZIP
+        echo "└─ 📋 [Result] NoMount ZIP Contents:"
         unzip -l "$NOMOUNTMODULEZIP"
+        # Display Final Package File Sizes
+        ls -lh \
+          "$NOMOUNTMODULEZIP" \
+          "$NOMOUNTMODULECHECKSUM"
         # Confirm NoMount Integration and Packaging Completed
         echo "└─ 🎉 [Result] NoMount Kernel Integration and Packaging Completed Successfully"
-        echo "------------------------------"
