@@ -1,5 +1,5 @@
---- a/kernel/runtime/ksud_integration.c
-+++ b/kernel/runtime/ksud_integration.c
+diff --git a/kernel/runtime/ksud_integration.c b/kernel/runtime/ksud_integration.c
+index 6ca310e..b6ae4e4 100644
 @@ -11,7 +11,6 @@
  #include <linux/fs.h>
  #include <linux/version.h>
@@ -79,7 +79,95 @@
          goto fail;
  
      buf[buf_len - 1] = '\0';
-@@ -446,13 +409,16 @@
+@@ -149,44 +112,60 @@
+     return false;
+ }
+ 
+-void ksu_handle_execveat_ksud(const char *path, struct user_arg_ptr *argv)
++extern int ksu_handle_execveat_init(struct filename *filename, struct user_arg_ptr *argv_user, struct user_arg_ptr *envp_user);
++
++// IMPORTANT NOTE: the call from execve_handler_pre WON'T provide correct value for envp and flags in GKI version
++int ksu_handle_execveat_ksud(int *fd, struct filename **filename_ptr,
++                             struct user_arg_ptr *argv,
++                             struct user_arg_ptr *envp, int *flags)
+ {
++    struct filename *filename;
+     static const char app_process[] = "/system/bin/app_process";
+-    static bool first_zygote = true;
+ 
+     /* This applies to versions Android 10+ */
+     static const char system_bin_init[] = "/system/bin/init";
+-    static bool init_second_stage_executed = false;
+ 
+-    // https://cs.android.com/android/platform/superproject/+/android-16.0.0_r2:system/core/init/main.cpp;l=77
+-    if (unlikely(!memcmp(path, system_bin_init, sizeof(system_bin_init) - 1) && argv)) {
+-        char buf[16];
+-        if (!init_second_stage_executed && check_argv(*argv, 1, "second_stage", buf, sizeof(buf))) {
+-            pr_info("/system/bin/init second_stage executed\n");
+-            ksu_preinit_release();
+-            ksu_selinux_hide_handle_second_stage();
+-            apply_kernelsu_rules();
+-            cache_sid();
+-            setup_ksu_cred();
+-            // after apply_kernelsu_rules, so that selinux_hide has its sepolicy backup
+-            ksu_feature_apply_forced();
+-            // Not earlier: a blocked module failing to load in first stage
+-            // init is fatal, ksuinit uses modules.blocklist for that instead.
+-            ksu_module_blacklist_apply();
+-            init_second_stage_executed = true;
++    if (!filename_ptr)
++        return 0;
++
++    filename = *filename_ptr;
++    if (IS_ERR(filename))
++        return 0;
++
++    if (static_branch_unlikely(&is_init_second_stage_not_executed)) {
++        // https://cs.android.com/android/platform/superproject/+/android-16.0.0_r2:system/core/init/main.cpp;l=77
++        if (unlikely(!memcmp(filename->name, system_bin_init, sizeof(system_bin_init) - 1) && argv)) {
++            char buf[16];
++            if (check_argv(*argv, 1, "second_stage", buf, sizeof(buf))) {
++                pr_info("/system/bin/init second_stage executed\n");
++                ksu_preinit_release();
++                ksu_selinux_hide_handle_second_stage();
++                apply_kernelsu_rules();
++                cache_sid();
++                setup_ksu_cred();
++                // after apply_kernelsu_rules, so that selinux_hide has its sepolicy backup
++                ksu_feature_apply_forced();
++                // Not earlier: a blocked module failing to load in first stage
++                // init is fatal, ksuinit uses modules.blocklist for that instead.
++                ksu_module_blacklist_apply();
++                static_branch_disable(&is_init_second_stage_not_executed);
++            }
+         }
+     }
+ 
+-    if (unlikely(first_zygote && !memcmp(path, app_process, sizeof(app_process) - 1) && argv)) {
+-        char buf[16];
+-        if (check_argv(*argv, 1, "-Xzygote", buf, sizeof(buf))) {
+-            pr_info("exec zygote, /data prepared, second_stage: %d\n", init_second_stage_executed);
+-            ksu_preinit_release();
+-            on_post_fs_data();
+-            first_zygote = false;
+-            ksu_stop_ksud_execve_hook();
++    if (static_branch_unlikely(&is_first_zygote)) {
++        if (unlikely(!memcmp(filename->name, app_process, sizeof(app_process) - 1) && argv)) {
++            char buf[16];
++            if (check_argv(*argv, 1, "-Xzygote", buf, sizeof(buf))) {
++                pr_info("exec zygote, /data prepared, second_stage: %d\n", !static_key_enabled(&is_init_second_stage_not_executed));
++                ksu_preinit_release();
++                on_post_fs_data();
++                static_branch_disable(&is_first_zygote);
++            }
+         }
+     }
++
++    return 0;
+ }
+ 
+ static ssize_t (*orig_read)(struct file *, char __user *, size_t, loff_t *);
+@@ -446,13 +425,16 @@
          return;
      }
      rc_hooked = true;
@@ -98,7 +186,7 @@
      pr_info("read init.rc, comm: %s, rc_count: %zu, module_rc: %zu\n", current->comm, ksu_rc_len, module_rc_len);
  
      // Now we need to proxy the read and modify the result!
-@@ -471,7 +437,7 @@
+@@ -471,7 +453,7 @@
      file->f_op = &fops_proxy;
  }
  
@@ -107,13 +195,13 @@
  {
      struct file *file = fget(fd);
      if (!file) {
-@@ -492,12 +458,15 @@
+@@ -492,12 +474,15 @@
  {
      if (*type == EV_KEY && *code == KEY_VOLUMEDOWN) {
          int val = *value;
 +
          if (val) {
-+	    // - We cannot call static_branch_disable() here as we are within the
++            // - We cannot call static_branch_disable() here as we are within the
 +	    //   spinlock section, which is not sleepable.
 +            // - So if volumedown is enough, just do nothing until it gets disabled by on_post_fs_data().
 +            if (is_volumedown_enough(volumedown_pressed_count))
@@ -126,7 +214,7 @@
          }
      }
  
-@@ -512,12 +481,11 @@
+@@ -512,12 +497,11 @@
          return true;
      }
  
@@ -143,7 +231,7 @@
  
      pr_info("volumedown_pressed_count: %d\n", volumedown_pressed_count);
      if (is_volumedown_enough(volumedown_pressed_count)) {
-@@ -530,66 +498,13 @@
+@@ -530,66 +514,13 @@
      return false;
  }
  
@@ -172,7 +260,8 @@
 -}
 -
 -void ksu_execve_hook_ksud(const struct pt_regs *regs)
--{
++void ksu_handle_vfs_fstat(int fd, loff_t *kstat_size_ptr)
+ {
 -    const char __user *filename_user = (const char __user *)PT_REGS_SYSCALL_PARM1(regs);
 -    const char __user *const __user *argv_user = (const char __user *const __user *)PT_REGS_PARM2(regs);
 -
@@ -200,8 +289,7 @@
 -
 -static long (*orig_sys_fstat)(const struct pt_regs *regs);
 -static long ksu_sys_fstat(const struct pt_regs *regs)
-+void ksu_handle_vfs_fstat(int fd, loff_t *kstat_size_ptr)
- {
+-{
 -    unsigned int fd = PT_REGS_SYSCALL_PARM1(regs);
 -    void __user *statbuf = (void __user *)PT_REGS_PARM2(regs);
 +    loff_t orig_size = *kstat_size_ptr;
@@ -214,7 +302,7 @@
      if (file) {
          if (is_init_rc(file)) {
              pr_info("stat init.rc");
-@@ -599,84 +514,20 @@
+@@ -599,84 +530,20 @@
          fput(file);
      }
  
