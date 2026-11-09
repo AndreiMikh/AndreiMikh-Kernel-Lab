@@ -1,19 +1,22 @@
-
 diff --git a/kernel/hook/setuid_hook.c b/kernel/hook/setuid_hook.c
 --- a/kernel/hook/setuid_hook.c
 +++ b/kernel/hook/setuid_hook.c
-@@ -11,44 +11,143 @@
- #include <linux/types.h>
- #include <linux/uaccess.h>
- #include <linux/uidgid.h>
+@@ -1,3 +1,6 @@
 +#include <linux/cred.h>
 +#include <linux/susfs_def.h>
 +#include <linux/workqueue.h>
+ #include <linux/compiler.h>
+ #include <linux/version.h>
+ #include <linux/slab.h>
+@@ -11,6 +14,7 @@
+ #include <linux/uaccess.h>
+ #include <linux/uidgid.h>
  
 +#include "selinux/selinux.h"
  #include "policy/allowlist.h"
  #include "hook/setuid_hook.h"
  #include "klog.h" // IWYU pragma: keep
+@@ -18,42 +22,132 @@
  #include "manager/manager_identity.h"
  #include "infra/seccomp_cache.h"
  #include "supercall/supercall.h"
@@ -27,7 +30,6 @@ diff --git a/kernel/hook/setuid_hook.c b/kernel/hook/setuid_hook.c
 +extern void disable_seccomp(void);
 +extern struct work_struct susfs_extra_works;
 +
-+// Schedule additional SUSFS work when required
 +static inline void ksu_handle_extra_susfs_work(void)
  {
 -    // we rely on the fact that zygote always call setresuid(3) with same uids
@@ -42,17 +44,14 @@ diff --git a/kernel/hook/setuid_hook.c b/kernel/hook/setuid_hook.c
 +    schedule_work(&susfs_extra_works);
 +}
  
-+// Handle processes spawned by Zygote
 +static int handle_zygote_setresuid(uid_t ruid)
 +{
-+    // Check whether the spawned process is an isolated service
 +    if (is_isolated_process(ruid)) {
 +        susfs_set_current_proc_no_su();
 +        susfs_set_current_proc_umounted();
 +        goto do_umount;
 +    }
 +
-+    // Handle KernelSU manager application
 +    if (likely(ksu_is_manager_appid_valid()) &&
 +        unlikely(is_uid_manager(ruid))) {
 +        disable_seccomp();
@@ -70,38 +69,30 @@ diff --git a/kernel/hook/setuid_hook.c b/kernel/hook/setuid_hook.c
 -        ksu_set_task_tracepoint_flag(current);
 -    } else {
 -        ksu_clear_task_tracepoint_flag_if_needed(current);
-+    // Check whether the spawned application requires mount isolation
 +    if (likely(is_appuid(ruid) && ksu_uid_should_umount(ruid))) {
 +        susfs_set_current_proc_no_su();
 +        susfs_set_current_proc_umounted();
 +        goto do_umount;
      }
  
-+    // Allow applications authorized for root access
+-    // Handle kernel umount
+-    ksu_handle_umount(old_uid, new_uid);
 +    if (ksu_is_allow_uid_for_current(ruid)) {
 +        disable_seccomp();
 +        return 0;
 +    }
 +
-+    // Deny root access to other processes
 +    susfs_set_current_proc_no_su();
 +    return 0;
 +
 +do_umount:
-     // Handle kernel umount
--    ksu_handle_umount(old_uid, new_uid);
 +    ksu_handle_umount(current_uid().val, ruid);
-+
-+    // Schedule additional SUSFS work
 +    ksu_handle_extra_susfs_work();
-+
 +    return 0;
 +}
 +
-+// Handle processes spawned by Zygote Next
 +static int handle_zygote_next_setresuid(uid_t ruid)
 +{
-+    // Check whether the spawned process is an isolated service
 +    if (is_isolated_process(ruid)) {
 +        susfs_set_current_proc_no_su();
 +        susfs_set_current_proc_umounted();
@@ -109,7 +100,6 @@ diff --git a/kernel/hook/setuid_hook.c b/kernel/hook/setuid_hook.c
 +        goto do_susfs_work;
 +    }
 +
-+    // Handle KernelSU manager application
 +    if (likely(ksu_is_manager_appid_valid()) &&
 +        unlikely(is_uid_manager(ruid))) {
 +        disable_seccomp();
@@ -118,7 +108,6 @@ diff --git a/kernel/hook/setuid_hook.c b/kernel/hook/setuid_hook.c
 +        return 0;
 +    }
 +
-+    // Check whether the spawned application requires mount isolation
 +    if (likely(is_appuid(ruid) && ksu_uid_should_umount(ruid))) {
 +        susfs_set_current_proc_no_su();
 +        susfs_set_current_proc_umounted();
@@ -126,48 +115,52 @@ diff --git a/kernel/hook/setuid_hook.c b/kernel/hook/setuid_hook.c
 +        goto do_susfs_work;
 +    }
 +
-+    // Allow applications authorized for root access
 +    if (ksu_is_allow_uid_for_current(ruid)) {
 +        disable_seccomp();
 +        return 0;
 +    }
 +
-+    // Deny root access to other processes
 +    susfs_set_current_proc_no_su();
 +    return 0;
 +
 +do_susfs_work:
-+    // Do not perform umount here because this is the Zygote Next path
 +    ksu_handle_extra_susfs_work();
-+
 +    return 0;
 +}
 +
-+// Handle setresuid syscall events
 +int ksu_handle_setresuid(uid_t ruid, uid_t euid, uid_t suid)
 +{
-+    // The effective and saved UIDs are not needed by this SUSFS handler
 +    (void)euid;
 +    (void)suid;
 +
-+    // Only handle processes currently running with root privileges
 +    if (current_uid().val != 0)
 +        return 0;
 +
-+    // Handle processes spawned by Zygote
 +    if (susfs_is_sid_equal(current_cred(), susfs_zygote_sid))
 +        return handle_zygote_setresuid(ruid);
 +
-+    // Handle processes spawned by Zygote Next
 +    if (susfs_is_sid_equal(current_cred(), susfs_zygote_next_sid))
 +        return handle_zygote_next_setresuid(ruid);
  
      return 0;
  }
+ 
+ void __init ksu_setuid_hook_init(void)
+ {
+     ksu_kernel_umount_init();
+     ksu_mount_hide_init();
+ }
+ 
+ void __exit ksu_setuid_hook_exit(void)
+ {
+     pr_info("ksu_core_exit\n");
+     ksu_kernel_umount_exit();
+     ksu_mount_hide_exit();
+ }
 diff --git a/kernel/hook/setuid_hook.h b/kernel/hook/setuid_hook.h
 --- a/kernel/hook/setuid_hook.h
 +++ b/kernel/hook/setuid_hook.h
-@@ -8,6 +8,6 @@
+@@ -8,7 +8,7 @@
  void ksu_setuid_hook_exit(void);
  
  // Handler functions for hook_manager
