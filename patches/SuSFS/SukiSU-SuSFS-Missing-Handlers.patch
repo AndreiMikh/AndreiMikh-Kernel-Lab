@@ -1,0 +1,246 @@
+diff --git a/kernel/feature/sucompat.c b/kernel/feature/sucompat.c
+index 003f86b..9ffcf0d 100644
+--- a/kernel/feature/sucompat.c
++++ b/kernel/feature/sucompat.c
+@@ -2,6 +2,7 @@
+ #include "linux/fcntl.h"
+ #include "linux/namei.h"
+ #include <linux/compiler_types.h>
++#include <linux/err.h>
+ #include <linux/preempt.h>
+ #include <linux/printk.h>
+ #include <linux/mm.h>
+@@ -14,6 +15,7 @@
+ #include <linux/version.h>
+ #include <linux/sched/task_stack.h>
+ #include <linux/ptrace.h>
++#include <linux/jump_label.h>
+ 
+ #include "arch.h"
+ #include "policy/allowlist.h"
+@@ -31,18 +33,24 @@
+ #define SU_PATH "/system/bin/su"
+ #define SH_PATH "/system/bin/sh"
+ 
+-bool ksu_su_compat_enabled __read_mostly = true;
++static const char sh_path[] = SH_PATH;
++static const char ksud_path[] = KSUD_PATH;
++
++DEFINE_STATIC_KEY_TRUE(ksu_su_compat_enabled);
+ 
+ static int su_compat_feature_get(u64 *value)
+ {
+-    *value = ksu_su_compat_enabled ? 1 : 0;
++    *value = static_key_enabled(&ksu_su_compat_enabled) ? 1 : 0;
+     return 0;
+ }
+ 
+ static int su_compat_feature_set(u64 value)
+ {
+     bool enable = value != 0;
+-    ksu_su_compat_enabled = enable;
++    if (enable)
++        static_branch_enable(&ksu_su_compat_enabled);
++    else
++        static_branch_disable(&ksu_su_compat_enabled);
+     pr_info("su_compat: set to %d\n", enable);
+     return 0;
+ }
+@@ -253,12 +261,126 @@ long ksu_handle_execve_sucompat(const char __user **filename_user, int orig_nr,
+                                              PT_REGS_PARM3(regs), false, orig_nr, regs);
+ }
+ 
+-long ksu_handle_execveat_sucompat(const char __user **filename_user, int orig_nr, struct pt_regs *regs)
++long ksu_handle_execveat_sucompat_syscall(const char __user **filename_user, int orig_nr, struct pt_regs *regs)
+ {
+     return ksu_handle_execve_sucompat_common(filename_user, (const char __user *const __user *)PT_REGS_PARM3(regs),
+                                              PT_REGS_SYSCALL_PARM4(regs), true, orig_nr, regs);
+ }
+ 
++
++
++/*
++ * SUSFS calls these handlers from the VFS/exec path. Keep the existing
++ * SukiSU syscall-dispatch handlers above for its native hook infrastructure.
++ */
++int ksu_handle_faccessat(int *dfd, struct filename **filename, int *mode,
++                         int *__unused_flags)
++{
++    (void)dfd;
++    (void)mode;
++    (void)__unused_flags;
++
++    if (!filename || IS_ERR_OR_NULL(*filename) || !(*filename)->name)
++        return 0;
++
++    if (strcmp((*filename)->name, su_path))
++        return 0;
++
++    pr_info("ksu_handle_faccessat: su->sh!\n");
++    memcpy((void *)(*filename)->name, sh_path, sizeof(sh_path));
++    return 0;
++}
++
++int ksu_handle_stat(int *dfd, struct filename **filename, int *flags)
++{
++    (void)dfd;
++    (void)flags;
++
++    if (!filename || IS_ERR_OR_NULL(*filename) || !(*filename)->name)
++        return 0;
++
++    if (strcmp((*filename)->name, su_path))
++        return 0;
++
++    pr_info("ksu_handle_stat: su->sh!\n");
++    memcpy((void *)(*filename)->name, sh_path, sizeof(sh_path));
++    return 0;
++}
++
++int ksu_handle_execveat_sucompat(int *fd, struct filename **filename_ptr,
++                                 void *argv_user, void *envp_user, int *flags)
++{
++    struct filename *filename;
++    struct ksu_sulog_pending_event *pending_sucompat;
++    int ret;
++
++    (void)fd;
++    (void)envp_user;
++    (void)flags;
++
++    if (!filename_ptr || !argv_user)
++        return -EINVAL;
++
++    filename = *filename_ptr;
++    if (IS_ERR_OR_NULL(filename) || !filename->name)
++        return -EINVAL;
++
++    if (!__ksu_is_allow_uid_for_current(current_uid().val))
++        return -EINVAL;
++
++    if (strcmp(filename->name, su_path))
++        return -EINVAL;
++
++    /*
++     * Capture the original /system/bin/su path before replacing the kernel
++     * filename with ksud's path.
++     */
++    pending_sucompat = ksu_sulog_capture_sucompat(
++        filename->name, (struct user_arg_ptr *)argv_user, GFP_KERNEL);
++
++    ret = escape_with_root_profile();
++    ksu_sulog_emit_pending(pending_sucompat, ret, GFP_KERNEL);
++    if (ret) {
++        pr_err("escape_with_root_profile failed: %d\n", ret);
++        return -EINVAL;
++    }
++
++    pr_info("ksu_handle_execveat_sucompat: su->ksud!\n");
++    memcpy((void *)filename->name, ksud_path, sizeof(ksud_path));
++    return 0;
++}
++
++int ksu_handle_post_execveat_sucompat(int *fd, struct filename **filename_ptr,
++                                      void *argv_user, void *envp_user,
++                                      int *flags, int *retval)
++{
++    (void)fd;
++    (void)filename_ptr;
++    (void)argv_user;
++    (void)envp_user;
++    (void)flags;
++
++    if (retval && *retval >= 0) {
++        int su_fd = ksu_install_su_fd();
++        if (su_fd < 0)
++            pr_warn("install su session fd failed: %d\n", su_fd);
++    }
++
++    return 0;
++}
++
++int ksu_handle_execveat(int *fd, struct filename **filename_ptr, void *argv,
++                        void *envp, int *flags)
++{
++    if (static_branch_unlikely(&is_first_zygote)) {
++        (void)ksu_handle_execveat_ksud(
++            fd, filename_ptr, (struct user_arg_ptr *)argv,
++            (struct user_arg_ptr *)envp, flags);
++    }
++
++    return ksu_handle_execveat_sucompat(fd, filename_ptr, argv, envp, flags);
++}
++
+ // sucompat: permitted process can execute 'su' to gain root access.
+ void __init ksu_sucompat_init()
+ {
+diff --git a/kernel/feature/sucompat.h b/kernel/feature/sucompat.h
+index 5e2cfe1..dc2e95f 100644
+--- a/kernel/feature/sucompat.h
++++ b/kernel/feature/sucompat.h
+@@ -2,8 +2,11 @@
+ #define __KSU_H_SUCOMPAT
+ #include <asm/ptrace.h>
+ #include <linux/types.h>
++#include <linux/jump_label.h>
+ 
+-extern bool ksu_su_compat_enabled;
++struct filename;
++
++extern struct static_key_true ksu_su_compat_enabled;
+ 
+ void ksu_sucompat_init(void);
+ void ksu_sucompat_exit(void);
+@@ -12,6 +15,18 @@ void ksu_sucompat_exit(void);
+ long ksu_handle_faccessat_sucompat(int orig_nr, struct pt_regs *regs);
+ long ksu_handle_stat_sucompat(int orig_nr, struct pt_regs *regs);
+ long ksu_handle_execve_sucompat(const char __user **filename_user, int orig_nr, struct pt_regs *regs);
+-long ksu_handle_execveat_sucompat(const char __user **filename_user, int orig_nr, struct pt_regs *regs);
++long ksu_handle_execveat_sucompat_syscall(const char __user **filename_user, int orig_nr, struct pt_regs *regs);
++
++/* VFS/exec handlers used by the SUSFS kernel-side integration. */
++int ksu_handle_stat(int *dfd, struct filename **filename, int *flags);
++int ksu_handle_faccessat(int *dfd, struct filename **filename, int *mode,
++                         int *unused_flags);
++int ksu_handle_execveat(int *fd, struct filename **filename_ptr, void *argv,
++                        void *envp, int *flags);
++int ksu_handle_execveat_sucompat(int *fd, struct filename **filename_ptr,
++                                 void *argv, void *envp, int *flags);
++int ksu_handle_post_execveat_sucompat(int *fd, struct filename **filename_ptr,
++                                      void *argv, void *envp, int *flags,
++                                      int *retval);
+ 
+ #endif
+diff --git a/kernel/hook/syscall_event_bridge.c b/kernel/hook/syscall_event_bridge.c
+index 5ccb2c9..a5ff5e9 100644
+--- a/kernel/hook/syscall_event_bridge.c
++++ b/kernel/hook/syscall_event_bridge.c
+@@ -52,7 +52,7 @@ static int ksu_handle_init_mark_tracker(const char __user **filename_user)
+ 
+ long __nocfi ksu_hook_newfstatat(int orig_nr, const struct pt_regs *regs)
+ {
+-    if (!ksu_su_compat_enabled)
++    if (!static_branch_likely(&ksu_su_compat_enabled))
+         return ksu_syscall_table[orig_nr](regs);
+ 
+     return ksu_handle_stat_sucompat(orig_nr, (struct pt_regs *)regs);
+@@ -60,7 +60,7 @@ long __nocfi ksu_hook_newfstatat(int orig_nr, const struct pt_regs *regs)
+ 
+ long __nocfi ksu_hook_faccessat(int orig_nr, const struct pt_regs *regs)
+ {
+-    if (!ksu_su_compat_enabled)
++    if (!static_branch_likely(&ksu_su_compat_enabled))
+         return ksu_syscall_table[orig_nr](regs);
+ 
+     return ksu_handle_faccessat_sucompat(orig_nr, (struct pt_regs *)regs);
+@@ -110,8 +110,8 @@ static long __nocfi ksu_hook_execve_common(int orig_nr, const struct pt_regs *re
+         if (ret) {
+             pr_err("adb root failed: %ld\n", ret);
+         }
+-    } else if (ksu_su_compat_enabled) {
+-        ret = execveat ? ksu_handle_execveat_sucompat(filename_user, orig_nr, (struct pt_regs *)regs) :
++    } else if (static_branch_likely(&ksu_su_compat_enabled)) {
++        ret = execveat ? ksu_handle_execveat_sucompat_syscall(filename_user, orig_nr, (struct pt_regs *)regs) :
+                          ksu_handle_execve_sucompat(filename_user, orig_nr, (struct pt_regs *)regs);
+         ksu_sulog_emit_pending(pending_root_execve, ret, GFP_KERNEL);
+         return ret;
