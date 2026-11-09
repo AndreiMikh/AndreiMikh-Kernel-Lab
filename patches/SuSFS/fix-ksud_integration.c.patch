@@ -1,0 +1,133 @@
+diff --git a/kernel/runtime/ksud_integration.c b/kernel/runtime/ksud_integration.c
+--- a/kernel/runtime/ksud_integration.c
++++ b/kernel/runtime/ksud_integration.c
+@@ -55,3 +55,37 @@
+ /*
+  * count() counts the number of strings in array ARGV.
+  */
+ 
++#define MAX_ARG_STRINGS 0x7FFFFFFF
++struct user_arg_ptr {
++#ifdef CONFIG_COMPAT
++    bool is_compat;
++#endif
++    union {
++        const char __user *const __user *native;
++#ifdef CONFIG_COMPAT
++        const compat_uptr_t __user *compat;
++#endif
++    } ptr;
++};
++
++static const char __user *get_user_arg_ptr(struct user_arg_ptr argv, int nr)
++{
++    const char __user *native;
++
++#ifdef CONFIG_COMPAT
++    if (unlikely(argv.is_compat)) {
++        compat_uptr_t compat;
++
++        if (get_user(compat, argv.ptr.compat + nr))
++            return ERR_PTR(-EFAULT);
++
++        return compat_ptr(compat);
++    }
++#endif
++
++    if (get_user(native, argv.ptr.native + nr))
++        return ERR_PTR(-EFAULT);
++
++    return native;
++}
++
+ /*
+  * Make sure old GCC compiler can use __maybe_unused,
+  * Test passed in 4.4.x ~ 4.9.x when use GCC.
+@@ -108,43 +142,59 @@
+ fail:
+     pr_err("check_argv failed\n");
+     return false;
+ }
+ 
+-void ksu_handle_execveat_ksud(const char *path, struct user_arg_ptr *argv)
++extern int ksu_handle_execveat_init(struct filename *filename, struct user_arg_ptr *argv_user, struct user_arg_ptr *envp_user);
++
++// IMPORTANT NOTE: the call from execve_handler_pre WON'T provided correct value for envp and flags in GKI version
++int ksu_handle_execveat_ksud(int *fd, struct filename **filename_ptr,
++                             struct user_arg_ptr *argv,
++                             struct user_arg_ptr *envp, int *flags)
+ {
++    struct filename *filename;
+     static const char app_process[] = "/system/bin/app_process";
+-    static bool first_zygote = true;
+ 
+     /* This applies to versions Android 10+ */
+     static const char system_bin_init[] = "/system/bin/init";
+-    static bool init_second_stage_executed = false;
+ 
+-    // https://cs.android.com/android/platform/superproject/+/android-16.0.0_r2:system/core/init/main.cpp;l=77
+-    if (unlikely(!memcmp(path, system_bin_init, sizeof(system_bin_init) - 1) && argv)) {
+-        char buf[16];
+-        if (!init_second_stage_executed && check_argv(*argv, 1, "second_stage", buf, sizeof(buf))) {
+-            pr_info("/system/bin/init second_stage executed\n");
+-            ksu_preinit_release();
+-            ksu_selinux_hide_handle_second_stage();
+-            apply_kernelsu_rules();
+-            cache_sid();
+-            setup_ksu_cred();
+-            // after apply_kernelsu_rules, so that selinux_hide has its sepolicy backup
+-            ksu_feature_apply_forced();
+-            // Not earlier: a blocked module failing to load in first stage
+-            // init is fatal, ksuinit uses modules.blocklist for that instead.
+-            ksu_module_blacklist_apply();
+-            init_second_stage_executed = true;
++    if (!filename_ptr)
++        return 0;
++
++    filename = *filename_ptr;
++    if (IS_ERR(filename)) {
++        return 0;
++    }
++
++    if (static_branch_unlikely(&is_init_second_stage_not_executed)) {
++        // https://cs.android.com/android/platform/superproject/+/android-16.0.0_r2:system/core/init/main.cpp;l=77
++        if (unlikely(!memcmp(filename->name, system_bin_init, sizeof(system_bin_init) - 1) && argv)) {
++            char buf[16];
++            if (check_argv(*argv, 1, "second_stage", buf, sizeof(buf))) {
++                pr_info("/system/bin/init second_stage executed\n");
++                ksu_preinit_release();
++                ksu_selinux_hide_handle_second_stage();
++                apply_kernelsu_rules();
++                cache_sid();
++                setup_ksu_cred();
++                // after apply_kernelsu_rules, so that selinux_hide has its sepolicy backup
++                ksu_feature_apply_forced();
++                // Preserve SukiSU-Ultra Main's module blacklist initialization.
++                ksu_module_blacklist_apply();
++                static_branch_disable(&is_init_second_stage_not_executed);
++            }
+         }
+     }
+ 
+-    if (unlikely(first_zygote && !memcmp(path, app_process, sizeof(app_process) - 1) && argv)) {
+-        char buf[16];
+-        if (check_argv(*argv, 1, "-Xzygote", buf, sizeof(buf))) {
+-            pr_info("exec zygote, /data prepared, second_stage: %d\n", init_second_stage_executed);
+-            ksu_preinit_release();
+-            on_post_fs_data();
+-            first_zygote = false;
+-            ksu_stop_ksud_execve_hook();
++    if (static_branch_unlikely(&is_first_zygote)) {
++        if (unlikely(!memcmp(filename->name, app_process, sizeof(app_process) - 1) && argv)) {
++            char buf[16];
++            if (check_argv(*argv, 1, "-Xzygote", buf, sizeof(buf))) {
++                pr_info("exec zygote, /data prepared, second_stage: %d\n", !static_key_enabled(&is_init_second_stage_not_executed));
++                ksu_preinit_release();
++                on_post_fs_data();
++                static_branch_disable(&is_first_zygote);
++            }
+         }
+     }
++
++    return 0;
+ }
