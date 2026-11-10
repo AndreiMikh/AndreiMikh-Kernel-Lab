@@ -1,4 +1,3 @@
-
 #!/usr/bin/env kotlin
 import java.io.File
 import kotlin.system.exitProcess
@@ -353,7 +352,7 @@ fun revertAndroid16DmaBufHeader(file: File) {
 
     when (matches.size) {
         0 -> {
-            // The SuSFS Patch Already Consumed or Removed the Header
+            // SuSFS Patch Already Consumed or Removed the Header
             logSkip(
                 file,
                 "Temporary DMA-BUF Header Already Consumed"
@@ -365,9 +364,9 @@ fun revertAndroid16DmaBufHeader(file: File) {
             lines.removeAt(matches.first())
             file.writeLines(lines)
 
-            logPostfix(
+            logRevert(
                 file,
-                "Removed Unused Temporary Linux/DMA-BUF.H"
+                "Removed Unused Temporary Linux/DMA-BUF Headers"
             )
         }
 
