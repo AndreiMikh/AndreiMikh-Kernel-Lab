@@ -364,7 +364,7 @@ fun revertAndroid16DmaBufHeader(file: File) {
             lines.removeAt(matches.first())
             file.writeLines(lines)
 
-            logRevert(
+            logPostfix(
                 file,
                 "Removed Unused Temporary Linux/DMA-BUF Headers"
             )
