@@ -582,6 +582,54 @@ jobs:
           echo "└─ 📌 PYTHONPATH     :"
           echo "└─ /tmp"
           echo "└─ 🎉 Clang Configuration and Toolchain Verification Complete"    
+
+      - name: 📥 Setup AArch64 GCC 6.4.1 Toolchain
+        shell: bash
+        run: |
+          # Define AArch64 GCC Toolchain Repository and Directory
+          GCCREPO="https://github.com/LineageOS/android_prebuilts_gcc_linux-x86_aarch64_aarch64-linux-gnu-6.4.1.git"
+          GCCDIR="$GITHUB_WORKSPACE/gcc"
+          GCCBIN="$GCCDIR/bin"
+          GCCPREFIX="aarch64-linux-gnu-"
+          # Display Toolchain Information
+          echo "└─ 📦 Setting Up AArch64 GCC 6.4.1..."
+          echo "└─ 📦 Repository : $GCCREPO"
+          echo "└─ 📂 Directory  : $GCCDIR"
+          # Remove Previous Toolchain Directory
+          rm -rf "$GCCDIR"
+          # Clone Prebuilt AArch64 GCC Toolchain
+          git clone \
+            --depth=1 \
+            "$GCCREPO" \
+            "$GCCDIR"
+          # Validate GCC Toolchain Directory
+          if [[ ! -x "$GCCBIN/aarch64-linux-gnu-gcc" ]]; then
+            echo "└─ ⚠️ AArch64 GCC Compiler Not Found"
+            echo "└─ 📂 Expected : $GCCBIN/aarch64-linux-gnu-gcc"
+            exit 1
+          fi
+
+          # Add GCC Toolchain to GitHub Actions PATH
+          echo "$GCCBIN" >> "$GITHUB_PATH"
+          # Export GCC Toolchain Variables
+          {
+            echo "AARCH64GCCDIR=$GCCDIR"
+            echo "AARCH64GCCBIN=$GCCBIN"
+            echo "AARCH64GCCPREFIX=$GCCPREFIX"
+          } >> "$GITHUB_ENV"
+          # Verify GCC Compiler
+          echo "└─ 🔎 AArch64 GCC Compiler  :"
+          "$GCCBIN/aarch64-linux-gnu-gcc" --version
+          # Verify GNU Linker
+          echo "└─ 🔎 AArch64 GNU Linker    :"
+          "$GCCBIN/aarch64-linux-gnu-ld" --version
+          # Verify GNU Assembler
+          echo "└─ 🔎 AArch64 GNU Assembler :"
+          "$GCCBIN/aarch64-linux-gnu-as" --version
+          # Verify GNU Object Copy
+          echo "└─ 🔎 AArch64 GNU Objcopy   :"
+          "$GCCBIN/aarch64-linux-gnu-objcopy" --version
+          echo "└─ 🎉 AArch64 GCC 6.4.1 Toolchain Ready"
             
       - name: 📥 Restore Public Compiler Cache
         id: ccache-public
@@ -1784,7 +1832,7 @@ jobs:
 
           else
             # Resolve Explicit Commit Hashes, Tags, and Branch Names
-            echo "└─ 🔎 Resolving SuSFS Revision: ${SUSFSREPOSITORY}"
+            echo "└─ 🔎 Resolving SuSFS Revision : ${SUSFSREPOSITORY}"
             SUSFSRESOLVED=""
             # Check Existing Local Git Objects
             if git rev-parse --verify \
@@ -2616,18 +2664,27 @@ jobs:
         run: |
           # Configure Build Environment
           WORKDIR="$GITHUB_WORKSPACE"
+          # Prioritize Ccache and Clang Toolchain Directories
           export PATH="/usr/lib/ccache:$PATH"
           export PATH="$WORKDIR/clang/bin:$PATH"
+          # Configure Kernel Architecture
           export ARCH=arm64
+          # Configure Clang Compiler and Integrated Assembler
           export LLVM=1
           export LLVM_IAS=1
+          # Configure AArch64 GCC Cross-Compilation Prefix
+          # Allows Kbuild to Locate AArch64 GNU Toolchain Utilities
+          export CROSS_COMPILE="${AARCH64GCCPREFIX}"
+          # Configure Kernel Build Identity
           export KBUILD_BUILD_USER="${GITOWNER}"
           export KBUILD_BUILD_HOST="${GITHOST}"
           # Configure Cache
+          # Enable Detailed Ccache Logging When Debugging Is Requested
           if [[ "${{ inputs.DEBUGBUILDCCACHE }}" == "true" ]]; then
             export CCACHE_LOGFILE="$GITHUB_WORKSPACE/ccache.log"
           fi
 
+          # Configure Ccache Behavior and Cache Directory
           export CCACHE_COMPILERCHECK="content"
           export CCACHE_BASEDIR="$GITHUB_WORKSPACE"
           export CCACHE_NOHASHDIR="true"
@@ -2635,36 +2692,41 @@ jobs:
           export CCACHE_DIR="${CCACHE_DIR:-$HOME/.cache/ccache}"
           export CCACHE_MAXSIZE="2G"
           export CCACHE_IS_KERNEL_COMPILING="true"
+          # Configure Ccache Sloppiness for Faster Kernel Compilation
           touch "$CCACHE_DIR/ccache.conf"
           echo "sloppiness = file_stat_matches,include_file_ctime,include_file_mtime,pch_defines,file_macro,time_macros" >> "$CCACHE_DIR/ccache.conf"
-          # Validate Kernel Paths
+          # Validate Kernel Source Directory
           if [[ -z "${SOURCEDIR:-}" || ! -f "$SOURCEDIR/Makefile" ]]; then
             echo "└─ ⚠️ Kernel Makefile Not Found"
             echo "└─ 📂 Expected : ${SOURCEDIR:-Unset}/Makefile"
             exit 1
           fi
 
+          # Validate Kernel Output Directory
           if [[ -z "${OUTDIR:-}" ]]; then
             echo "└─ ⚠️ Kernel Output Directory Not Set"
             exit 1
           fi
 
+          # Validate Fake Time Library Directory
           if [[ -z "${LIBDIR:-}" ]]; then
             echo "└─ ⚠️ Fake Time Library Directory Not Set"
             exit 1
           fi
 
+          # Validate GKI Default Configuration
           if [[ -z "${DEFCONFIG:-}" || ! -s "$DEFCONFIG" ]]; then
             echo "└─ ⚠️ GKI Default Configuration Not Found or Empty"
             echo "└─ 📂 Expected : ${DEFCONFIG:-Unset}"
             exit 1
           fi
 
+          # Define Kernel Image and Wrapper Paths
           IMAGE="$OUTDIR/arch/arm64/boot/Image"
           CCWRAPPER="$GITHUB_WORKSPACE/cc-wrapper"
           LDWRAPPER="$GITHUB_WORKSPACE/ld-wrapper"
           TESTWRAPPER="$GITHUB_WORKSPACE/test-wrapper.sh"
-          # Validate Build Tools
+          # Validate Required Build Tools
           echo "└─ 🔎 Validating Build Tools..."
           for TOOL in make clang ld.lld ccache; do
             if ! command -v "$TOOL" >/dev/null 2>&1; then
@@ -2674,7 +2736,8 @@ jobs:
             
           done
 
-          # Display Compiler Versions
+          # Display Pahole Version
+          # Pahole is Used For Generating BTF Debug Information
           PAHOLEVERSION="$(pahole --version 2>/dev/null | head -n 1 || true)"
           if [[ -z "$PAHOLEVERSION" ]]; then
             echo "└─ 📌 Pahole : Not Installed"
@@ -2682,14 +2745,17 @@ jobs:
             echo "└─ 📌 Pahole : $PAHOLEVERSION"
           fi
 
-          echo "└─ 📌 Clang : $(clang --version | head -n 1)"
-          echo "└─ 📌 LLD   : $(ld.lld --version | head -n 1)"
+          # Display Clang and LLD Versions
+          echo "└─ 📌 Clang  : $(clang --version | head -n 1)"
+          echo "└─ 📌 LLD    : $(ld.lld --version | head -n 1)"
           # Configure Qualcomm Oryon CPU Targeting
+          # Enable Oryon-Specific Optimization Only for SM8750
           KCFLAGSEXTRA=()
           case "$CPU" in
             SM8750)
               echo "└─ 🔍 Checking Clang Oryon CPU Target Support..."
               echo "└─ 🛠️ Clang Version :"
+              # Display Full Clang Version Information
               CLANGVERSION="$(clang --version)"
               echo "${CLANGVERSION%%$'\n'*}"
               # Test Whether Clang Supports Oryon CPU Target
@@ -2699,35 +2765,38 @@ jobs:
                   --target=aarch64-linux-gnu \
                   -fsyntax-only -x c - \
                   >/dev/null 2>&1; then
-                # Enable Oryon CPU Targeting
+                # Enable Oryon CPU Optimization Flag
                 KCFLAGSEXTRA+=(-mcpu=oryon-1)
                 echo "└─ 🧠 Oryon CPU Targeting Enabled"
                 echo "└─ 📱 Target : $CPU"
                 echo "└─ ⚙️ Flag   : -mcpu=oryon-1"
               else
-                # Retain Default Compiler CPU Target
+                # Retain Default Clang CPU Target When Unsupported
                 echo "└─ ⚠️ Clang Does Not Support Oryon Optimizations"
                 echo "└─ ℹ️ Keeping Existing Compiler Target Defaults"
               fi
               ;;
             *)
-              # Skip Oryon Targeting For Other CPUs
+              # Skip Oryon CPU Optimization for Other Devices
               echo "└─ ℹ️ Oryon Targeting Skipped For $CPU"
               ;;
           esac
-          # Validate Fake Time Libraries
+          # Validate Fake Time Shared Libraries
           if [[ ! -s "$LIBDIR/libfakestat.so" || ! -s "$LIBDIR/libfaketimeMT.so" ]]; then
             echo "└─ ⚠️ Fake Time Libraries Not Found"
             echo "└─ 📂 Library Directory : $LIBDIR"
             exit 1
           fi
 
+          # Set Executable Permissions For Fake Time Libraries
           chmod 755 "$LIBDIR/libfakestat.so" "$LIBDIR/libfaketimeMT.so"
-          # Configure Fake Time
+          # Configure Fake Time Environment
           export FAKESTAT="2025-05-25 12:00:00"
           export FAKETIME="@2025-05-25 13:00:00"
+          # Configure Libraries to Preload During Build Operations
           export PRELOAD_LIBS="$LIBDIR/libfakestat.so:$LIBDIR/libfaketimeMT.so"
-          # Create Compiler Wrapper
+          # Create Clang Compiler Wrapper
+          # Apply Fake Time Environment and Route Compilation Through Cache
           printf '%s\n' \
             '#!/bin/bash' \
             'export LD_PRELOAD="$PRELOAD_LIBS"' \
@@ -2735,7 +2804,8 @@ jobs:
             'export FAKETIME="$FAKETIME"' \
             'exec ccache clang "$@"' \
             > "$CCWRAPPER"
-          # Create Linker Wrapper
+          # Create LLD Linker Wrapper
+          # Apply Fake Time Environment and Use LLVM Linker
           printf '%s\n' \
             '#!/bin/bash' \
             'export LD_PRELOAD="$PRELOAD_LIBS"' \
@@ -2744,6 +2814,7 @@ jobs:
             'exec ld.lld "$@"' \
             > "$LDWRAPPER"
           # Create Fake Time Test Wrapper
+          # Verify Environment Variables Before Executing Commands
           printf '%s\n' \
             '#!/bin/bash' \
             'export LD_PRELOAD="$PRELOAD_LIBS"' \
@@ -2752,14 +2823,16 @@ jobs:
             'echo "Wrapper environment check complete."' \
             'exec "$@"' \
             > "$TESTWRAPPER"
+          # Set Executable Permissions For All Wrappers
           chmod 755 "$CCWRAPPER" "$LDWRAPPER" "$TESTWRAPPER"
           # Test Fake Time Environment
           echo "└─ 🧪 Testing Fake Time Wrappers..."
           "$TESTWRAPPER" date
           "$TESTWRAPPER" stat "$SOURCEDIR/Makefile"
+          # Verify Fake Time Using Date and Stat
           echo "└─ 🕒 Build Time: $(LD_PRELOAD="$PRELOAD_LIBS" date)"
           LD_PRELOAD="$PRELOAD_LIBS" stat "$SOURCEDIR/Makefile"
-          # Validate Kbuild Metadata
+          # Validate Kernel Build Metadata
           if [[ -z "${KBUILD_BUILD_TIMESTAMP:-}" ]]; then
             echo "└─ ⚠️ Kbuild Build Timestamp Not Set"
             exit 1
@@ -2770,8 +2843,9 @@ jobs:
             exit 1
           fi
 
-          echo "└─ 📌 Build Timestamp: $KBUILD_BUILD_TIMESTAMP"
-          echo "└─ 📌 Build Version: $KBUILD_BUILD_VERSION"
+          # Display Kernel Build Metadata
+          echo "└─ 📌 Build Timestamp : $KBUILD_BUILD_TIMESTAMP"
+          echo "└─ 📌 Build Version   : $KBUILD_BUILD_VERSION"
           # Generate GKI Kernel Configuration
           echo "└─ ⚙️ Generating GKI Kernel Configuration..."
           make -C "$SOURCEDIR" \
@@ -2780,14 +2854,14 @@ jobs:
             LLVM_IAS="$LLVM_IAS" \
             O="$OUTDIR" \
             gki_defconfig
-          # Validate Generated Configuration
+          # Validate Generated Kernel Configuration
           CONFIGFILE="$OUTDIR/.config"
           if [[ ! -s "$CONFIGFILE" ]]; then
-            echo "└─ ⚠️ GKI Configuration Was Not Generated"
+            echo "└─ ⚠️ GKI Configuration was Not Generated"
             exit 1
           fi
-       
-          # Resolve Configuration Dependencies
+
+          # Resolve Kernel Configuration Dependencies
           echo "└─ ⚙️ Resolving Kernel Configuration..."
           make -C "$SOURCEDIR" \
             ARCH="$ARCH" \
@@ -2795,50 +2869,52 @@ jobs:
             LLVM_IAS="$LLVM_IAS" \
             O="$OUTDIR" \
             olddefconfig
-          # Validate Final Configuration
+          # Validate Final Kernel Configuration
           if [[ ! -s "$CONFIGFILE" ]]; then
             echo "└─ ⚠️ Final Kernel Configuration is Missing"
             exit 1
           fi
-        
-          # Start Build Timer and Remove Old Image
+
+          # Start Kernel Build Timer and Remove Previous Image
           BUILDSTART="$(date +%s)"
           rm -f "$IMAGE"
-          # Build Kernel Image
+          # Build Kernel Image Using Clang, LLD and GCC Cross-Compilation Prefix
           echo "└─ 🔨 Building Kernel Image..."
           make -C "$SOURCEDIR" \
             -j"$(nproc --all)" \
             ARCH="$ARCH" \
             LLVM="$LLVM" \
             LLVM_IAS="$LLVM_IAS" \
+            CROSS_COMPILE="$CROSS_COMPILE" \
             CC="$CCWRAPPER" \
             LD="$LDWRAPPER" \
             HOSTLD="ld.lld" \
             O="$OUTDIR" \
             KCFLAGS="-O2 -Wno-error ${KCFLAGSEXTRA[*]}" \
             Image
-          # Calculate Build Duration
+          # Calculate Kernel Build Duration
           BUILDEND="$(date +%s)"
           BUILDTIME="$((BUILDEND - BUILDSTART))"
-          # Verify Fake Time After Build
-          echo "└─ 🕒 Post-Build Fake Time: $(LD_PRELOAD="$PRELOAD_LIBS" date)"
+          # Verify Fake Time Environment After Compilation
+          echo "└─ 🕒 Post-Build Fake Time : $(LD_PRELOAD="$PRELOAD_LIBS" date)"
           LD_PRELOAD="$PRELOAD_LIBS" stat "$SOURCEDIR/Makefile"
           # Display Compiler Cache Statistics
           echo "└─ 📊 Compiler Cache Status"
           ccache -s
-          # Validate Kernel Image
+          # Validate Generated Kernel Image
           if [[ ! -s "$IMAGE" ]]; then
             echo "└─ ⚠️ Kernel Image Missing or Empty"
             echo "└─ 📂 Expected: $IMAGE"
             exit 1
           fi
 
-          # Display Build Result
+          # Display Generated Kernel Image Information
           echo "└─ 📦 Kernel Image"
           ls -lh "$IMAGE"
+          # Display Kernel Build Duration and Completion Status
           echo "└─ ⏱️ Build Duration : ${BUILDTIME}Second(s)"
           echo "└─ 🎉 Kernel Build Complete"
-          # Display Available Disk Space
+          # Display Available Runner Disk Space
           echo "└─ 💾 Disk Space"
           df -h
           # Generate Compiler Cache Summary
