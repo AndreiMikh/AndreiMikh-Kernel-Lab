@@ -2910,7 +2910,7 @@ jobs:
 
           # Display Kernel Build Metadata
           echo "└─ 📌 Build Timestamp : $KBUILD_BUILD_TIMESTAMP"
-          echo "└─ 📌 Build Version   : $KBUILD_BUILD_VERSION"
+          echo "└─ 📌 Build Version   : $KBUILD_BUILD_VERSION"          
           # Generate GKI Kernel Configuration
           echo "└─ ⚙️ Generating GKI Kernel Configuration..."
           make -C "$SOURCEDIR" \
@@ -2922,8 +2922,69 @@ jobs:
           # Validate Generated Kernel Configuration
           CONFIGFILE="$OUTDIR/.config"
           if [[ ! -s "$CONFIGFILE" ]]; then
-            echo "└─ ⚠️ GKI Configuration was Not Generated"
+            echo "└─ ⚠️ GKI Configuration Was Not Generated"
             exit 1
+          fi
+
+          # Locate Scripts / Configuration
+          CONFIGTOOL=""
+          for path in \
+            "$SOURCEDIR/scripts/config" \
+            ../scripts/config \
+            ./scripts/config \
+            ../../scripts/config
+          do
+            if [[ -x "$path" ]]; then
+              CONFIGTOOL="$path"
+              break
+            fi
+            
+          done
+
+          # Search Source Tree When No Standard Path Exists
+          if [[ -z "$CONFIGTOOL" ]]; then
+            CONFIGTOOL="$(
+              find "$SOURCEDIR" \
+                -type f \
+                -path '*/scripts/config' \
+                -executable \
+                -print -quit 2>/dev/null || true
+            )"
+          fi
+
+          # Validate Configuration Tool
+          if [[ -n "$CONFIGTOOL" ]] &&
+             [[ ! -x "$CONFIGTOOL" ]]; then
+            CONFIGTOOL=""
+          fi
+
+          # Configure ThinLTO For Supported 5.x Kernels
+          echo "🧾 Configuring Link Time Optimization (LTO) For Kernel $KERNELVERSION"
+          if [[ -z "$CONFIGTOOL" ]]; then
+            echo "└─ ⚠️ [Warn] Scripts / Configuration Tool Not Found"
+            echo "└─ 📊 [Info] LTO Status : Skipped (Missing Configuration Tool)"
+          else
+            echo "└─ 🧰 [Info] Configuration Tool : $CONFIGTOOL"
+            case "$KERNELVERSION" in
+              5.*)
+                echo "└─ 🚀 [Info] LTO : Thin"
+                if "$CONFIGTOOL" \
+                  --file "$CONFIGFILE" \
+                  -e LTO_CLANG \
+                  -e LTO_CLANG_THIN \
+                  -d LTO_CLANG_NONE \
+                  -d LTO_CLANG_FULL; then
+                  echo "└─ 📊 [Info] LTO Status : Applied (Thin)"
+                else
+                  echo "└─ ⚠️ [Warn] LTO Configuration Apply Failed"
+                  echo "└─ 📊 [Info] LTO Status : Skipped"
+                fi
+                ;;
+              *)
+                echo "└─ 🚀 [Skip] LTO Skipped For Kernel $KERNELVERSION"
+                echo "└─ 📊 [Info] LTO Status : Skipped (Unsupported Kernel)"
+                ;;
+            esac
           fi
 
           # Resolve Kernel Configuration Dependencies
@@ -2936,10 +2997,13 @@ jobs:
             olddefconfig
           # Validate Final Kernel Configuration
           if [[ ! -s "$CONFIGFILE" ]]; then
-            echo "└─ ⚠️ Final Kernel Configuration is Missing"
+            echo "└─ ⚠️ Final Kernel Configuration Is Missing"
             exit 1
           fi
 
+          # Display Final LTO Configuration
+          echo "└─ 📊 Final LTO Configuration :"
+          grep -E '^CONFIG_LTO_CLANG(=|_)|^# CONFIG_LTO_CLANG' "$CONFIGFILE" || true
           # Start Kernel Build Timer and Remove Previous Image
           BUILDSTART="$(date +%s)"
           rm -f "$IMAGE"
