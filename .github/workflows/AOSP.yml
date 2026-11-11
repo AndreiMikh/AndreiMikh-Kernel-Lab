@@ -3,6 +3,16 @@ run-name: "🟢 ${{ inputs.ROOTENGINE }} | ${{ inputs.AOSPSOURCE }}"
 on:
   workflow_dispatch:
     inputs:
+      DEVICE:
+        type: choice
+        description: 'Select Device'
+        required: true       
+        default: OnePlus 13
+        options:
+          - OnePlus 11
+          - OnePlus 12
+          - OnePlus 13
+          - OnePlus 15
       AOSPSOURCE:
         type: choice
         description: 'Select Android Open Source Project (AOSP) ROM Source'
@@ -165,8 +175,6 @@ jobs:
       CCACHE_NOHASHDIR: true
       CCACHE_NOHARDLINK: true
       CCACHE_IS_KERNEL_COMPILING: true
-      # Define Target Qualcomm CPU
-      CPU: SM8750
       # Configure Kernel Build Identity
       GITOWNER: AndreiMikh
       GITHOST: AOSP-Crimson-Kernel
@@ -193,11 +201,52 @@ jobs:
           path: work/AndreiMikh-Kernel-Lab
           fetch-depth: 1
 
+      - name: 🤖 Target Device SoC
+        id: cpu-info
+        shell: bash
+        env:
+          # Get Selected Device From Workflow Inputs
+          DEVICE: ${{ inputs.DEVICE }}
+        run: |
+          # Detect Qualcomm SoC Based on Selected Device
+          case "$DEVICE" in
+            "OnePlus 11")
+              CPU="SM8550"
+              ;;
+            "OnePlus 12")
+              CPU="SM8650"
+              ;;
+            "OnePlus 13")
+              CPU="SM8750"
+              ;;
+            "OnePlus 15")
+              CPU="SM8850"
+              ;;
+            *)
+              # Stop Workflow if Selected Device is Not Supported
+              echo "└─ ⚠️ Unsupported Device"
+              echo "└─ 📱 Device : $DEVICE"
+              exit 1
+              ;;
+          esac
+          # Export Detected SoC as an Environment Variable For Subsequent Steps
+          {
+            echo "CPU=$CPU"
+          } >> "$GITHUB_ENV"
+          # Export Detected SoC as a Step Output For Use in Later Workflow Steps
+          echo "cpu=$CPU" >> "$GITHUB_OUTPUT"
+          # Display Device and Detected SoC Information in Workflow Logs
+          echo "└─ 🤖 Target SoC Detected"
+          echo "└─ 📱 Device : $DEVICE"
+          echo "└─ 🧠 CPU    : $CPU"
+          echo "└─ 🎉 SoC Detection Complete"
+
       - name: 🔍 Debug Selected Workflow Inputs
         id: build-identity
         shell: bash
         run: |
           # Resolve Workflow Dispatch Inputs
+          DEVICE='${{ inputs.DEVICE }}'
           AOSPSOURCE='${{ inputs.AOSPSOURCE }}'
           ROOTENGINE='${{ inputs.ROOTENGINE }}'
           ROOTCOMMIT='${{ inputs.ROOTCOMMIT }}'          
@@ -222,6 +271,7 @@ jobs:
           DEBUGKERNELBUILD='${{ inputs.DEBUGKERNELBUILD }}'
           # Display Selected Inputs
           echo "└─ 🔍 Selected Workflow Inputs"
+          printf '%-24s : %s\n' "Device"                      "$DEVICE"
           printf '%-24s : %s\n' "AOSP Source"                 "$AOSPSOURCE"
           printf '%-24s : %s\n' "Root Engine"                 "$ROOTENGINE"
           printf '%-24s : %s\n' "Root Commit"                 "$ROOTCOMMIT"        
@@ -297,7 +347,15 @@ jobs:
           else
             echo "└─ Kbuild Suffix : Empty"
           fi
-       
+
+          # Device
+          declare -A DEVICEMAP=(
+            ["OnePlus 11"]="1+11"
+            ["OnePlus 12"]="1+12"
+            ["OnePlus 13"]="1+13"
+            ["OnePlus 15"]="1+15"
+          )
+          SUFFIX+="${DEVICEMAP[$DEVICE]:-}"
           # AOSP / Custom ROM Source
           declare -A AOSPSOURCEMAP=(
             ["Lineage-24.0"]="Lineage(24.0)"
@@ -655,8 +713,8 @@ jobs:
               ;;
           esac
           # Define Public Compiler Cache Release
-          ARCHIVE="CCache-SM8750-${AOSPSOURCE}-${ROOTENGINE}.tar.zst"
-          RELEASE="CCache-SM8750-${AOSPSOURCEREPO}"
+          ARCHIVE="CCache-${CPU}-${AOSPSOURCE}-${ROOTENGINE}.tar.zst"
+          RELEASE="CCache-${CPU}-${AOSPSOURCEREPO}"
           CACHEFILE="${RUNNER_TEMP}/${ARCHIVE}"
           echo "└─ 📥 Public Compiler Cache Restore"
           echo "└─ Repository : $GITHUB_REPOSITORY"
@@ -738,13 +796,13 @@ jobs:
         with:
           path: .ccache
           # Rolling Exact Key
-          key: CCache-SM8750-${{ inputs.AOSPSOURCE }}-${{ runner.os }}-${{ runner.arch }}-${{ github.ref_name }}
+          key: CCache-${CPU}-${{ inputs.AOSPSOURCE }}-${{ runner.os }}-${{ runner.arch }}-${{ github.ref_name }}
           # Restore Newest Compatible Cache
           restore-keys: |
-            CCache-SM8750-${{ inputs.AOSPSOURCE }}-${{ runner.os }}-${{ runner.arch }}-${{ github.ref_name }}
-            CCache-SM8750-${{ inputs.AOSPSOURCE }}-${{ runner.os }}-${{ runner.arch }}-
-            CCache-SM8750-${{ inputs.AOSPSOURCE }}-${{ runner.os }}-
-            CCache-SM8750-${{ inputs.AOSPSOURCE }}-
+            CCache-${CPU}-${{ inputs.AOSPSOURCE }}-${{ runner.os }}-${{ runner.arch }}-${{ github.ref_name }}
+            CCache-${CPU}-${{ inputs.AOSPSOURCE }}-${{ runner.os }}-${{ runner.arch }}-
+            CCache-${CPU}-${{ inputs.AOSPSOURCE }}-${{ runner.os }}-
+            CCache-${CPU}-${{ inputs.AOSPSOURCE }}-
 
       - name: ⚙️ Configure Compiler Cache / ECS
         if: ${{ inputs.BUILDCCACHE }}
@@ -986,6 +1044,7 @@ jobs:
             echo "KERNELSRC=$SOURCEDIR"
             echo "KERNELMODULES=$KERNELMODULES"
             echo "KERNELDEVICETREES=$KERNELDEVICETREES"
+            echo "KERNELMAINSRCREPO=$KERNELMAINSRCREPO"
           } >> "$GITHUB_ENV"
           # Validate Kernel Source
           echo "└─ 🔍 Validating Kernel Source..."
@@ -3035,6 +3094,7 @@ jobs:
         id: package
         shell: bash
         env:
+          DEVICE: ${{ inputs.DEVICE }}
           AOSPSOURCE: ${{ inputs.AOSPSOURCE }}
           ATTR: ${{ inputs.ATTR }}
           BUILDARTIFACT: ${{ inputs.BUILDARTIFACT }}
@@ -3078,6 +3138,7 @@ jobs:
           esac
           # Display Package Configuration
           echo "└─ 📦 AnyKernel3 Packaging"
+          echo "└─ 📂 Device Model        : ${DEVICE}"
           echo "└─ 📂 Kernel Source       : ${SOURCEDIR}"
           echo "└─ 📂 AnyKernel3          : ${AK3DIR}"
           echo "└─ 📂 Package Directory   : ${PACKDIR}"
@@ -3127,9 +3188,9 @@ jobs:
           # Configure AnyKernel3 Kernel Name
           echo "└─ 🔧 Configuring AnyKernel3 Kernel Name..."
           if [[ "$ATTR" == "true" ]]; then
-            KERNELNAME="AOSP ${AOSPSOURCE} Kernel | Build by ${GITOWNER}"
+            KERNELNAME="AOSP ${AOSPSOURCE} Kernel | ${DEVICE} | Build by ${GITOWNER}"
           else
-            KERNELNAME="${AOSPSOURCE} OPlus AOSP SM8750 Kernel"
+            KERNELNAME="${AOSPSOURCE} OPlus AOSP ${CPU} Kernel"
           fi
      
           if ! grep -q '^kernel.string=' "$PACKDIR/anykernel.sh"; then
@@ -3251,7 +3312,7 @@ jobs:
           echo "└─ 📲 Final Boot Patchlevel     : ${AOSPPATCHLEVEL}"
           # Generate AnyKernel3 Package Name
           STAMP="$(date +%Y-%m-%d)"
-          ZIP="AnyKernel3-(Dodge-SM8750)-(${{ steps.kernelversion.outputs.fullversion }})(${{ steps.build-identity.outputs.suffix }})(${{ steps.rootengine.outputs.ksuversion }})(${STAMP}).zip"
+          ZIP="AK3-${DEVICE}-(${{ steps.kernelversion.outputs.fullversion }})(${{ steps.build-identity.outputs.suffix }})(${{ steps.rootengine.outputs.ksuversion }})(${STAMP}).zip"
           ZIPPATH="${OUTDIR}/${ZIP}"
           echo "└─ 📦 Creating AnyKernel3 ZIP..."
           echo "└─ 📌 Package : ${ZIP}"
@@ -3326,7 +3387,7 @@ jobs:
       - name: 📤 Upload Kernel Artifacts
         uses: actions/upload-artifact@v6
         with:
-          name: Package-${{ inputs.AOSPSOURCE }}(${{ steps.kernelversion.outputs.fullversion }})-${{ inputs.ROOTENGINE }}(${{ steps.rootengine.outputs.ksuversion }})
+          name: Package-${{ inputs.DEVICE }}-${{ inputs.AOSPSOURCE }}(${{ steps.kernelversion.outputs.fullversion }})-${{ inputs.ROOTENGINE }}(${{ steps.rootengine.outputs.ksuversion }})
           path: |
             out/AnyKernel3-*.zip
             out/Image
@@ -3358,7 +3419,7 @@ jobs:
           # Define Kernel Configuration and Release Details
           CONFIGFILE="${GITHUB_WORKSPACE}/out/.config"
           RENAMEDCONFIG="${GITHUB_WORKSPACE}/out/${AOSPSOURCEREPO}-KernelConfig.txt"
-          TAG="CCache-SM8750-${AOSPSOURCEREPO}"
+          TAG="CCache-${CPU}-${AOSPSOURCEREPO}"
           ASSET="KernelConfig-${AOSPSOURCE}.zip"
           ZIPFILE="${RUNNER_TEMP}/${ASSET}"
           # Validate Generated Kernel Configuration
@@ -3464,8 +3525,8 @@ jobs:
               exit 1
               ;;
           esac
-          ARCHIVE="CCache-SM8750-${AOSPSOURCE}-${ROOTENGINE}.tar.zst"
-          RELEASETAG="CCache-SM8750-${AOSPSOURCEREPO}"
+          ARCHIVE="CCache-${CPU}-${AOSPSOURCE}-${ROOTENGINE}.tar.zst"
+          RELEASETAG="CCache-${CPU}-${AOSPSOURCEREPO}"
           MAXSIZE=$((2 * 1024 * 1024 * 1024))
           SELECTEDLEVEL=""
           echo "└─ 📦 Packaging Public Compiler Cache..."
@@ -3526,7 +3587,7 @@ jobs:
             "$ARCHIVE" \
             --repo "$GH_REPO" \
             --title "$RELEASETAG" \
-            --notes 'Category: Compiler Cache | SM8750 — Public Compiler Cache For OPlus AOSP SM8750 Kernel Builds'; then
+            --notes 'Category: Compiler Cache | ${CPU} — Public Compiler Cache For OPlus AOSP Kernel Builds'; then
             echo "└─ 📌 Public Compiler Cache Release Created"
           elif gh release upload \
             "$RELEASETAG" \
