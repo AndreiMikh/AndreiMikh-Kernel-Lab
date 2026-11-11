@@ -491,25 +491,45 @@ jobs:
           sudo rm -rf /var/lib/apt/lists/*
           echo "└─ 🎉 Build Dependencies Ready"
  
-      - name: 📦 Restore / Publish Clang Version 21.0.0
+      - name: 📦 Restore and Publish Clang Version
         id: clang-release
         shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           OWNERREPO: ${{ github.repository }}
+          DEVICE: ${{ inputs.DEVICE }}
         run: |
+          # Select Clang Revision Based on Selected Device
+          case "$DEVICE" in
+            "OnePlus 13")
+              CLANGVERSION="r563880c"
+              ;;
+            "OnePlus 12")
+              CLANGVERSION="r563880c"
+              ;;
+            "OnePlus 11")
+              CLANGVERSION="r547379"
+              ;;
+            *)
+              echo "└─ ⚠️ No Clang Revision Configured For : $DEVICE"
+              exit 1
+              ;;
+          esac
           # Define Android 16 QPR2 Clang Release Metadata
-          CLANGVERSION="r563880c"
           CLANGARCHIVE="clang-${CLANGVERSION}-android16-qpr2.tar.gz"
-          CLANGRELEASE="AOSP-Clang-Revision-563880-Android16-QPR2"
+          CLANGRELEASE="AOSP-Clang-Revision-${CLANGVERSION}-Android16-QPR2"
           CLANGDIR="$GITHUB_WORKSPACE/clang"
           CLANGFILE="$GITHUB_WORKSPACE/$CLANGARCHIVE"
-          CLANGURL="https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/9916fb51ccb914d62d35ad9a7b9b21d2ef046928/clang-${CLANGVERSION}.tar.gz"
-          # Display Clang Release Information
-          echo "└─ 📌 Clang Revision : $CLANGVERSION"
-          echo "└─ 📌 Clang Archive  : $CLANGARCHIVE"
-          echo "└─ 📌 Release Tag    : $CLANGRELEASE"
-          # Prepare Clang Workspace
+          # Define Android 16 QPR2 AOSP Clang Branch
+          CLANGREF="refs/heads/android16-qpr2-release"          
+          # Define AOSP Clang Archive Download URL
+          CLANGURL="https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/${CLANGREF}/clang-${CLANGVERSION}.tar.gz"
+          # Display Selected Device and Clang Release Information
+          echo "└─ 📱 Selected Device : $DEVICE"
+          echo "└─ 📌 Clang Revision  : $CLANGVERSION"
+          echo "└─ 📌 Clang Archive   : $CLANGARCHIVE"
+          echo "└─ 📌 Release Tag     : $CLANGRELEASE"
+          # Remove Previous Clang Installation and Temporary Archive
           rm -rf "$CLANGDIR"
           rm -f "$CLANGFILE"
           mkdir -p "$CLANGDIR"
@@ -524,7 +544,7 @@ jobs:
             echo "└─ 📥 Clang Archive Restored From GitHub Release"
             echo "source=release" >> "$GITHUB_OUTPUT"
           else
-            # Download Clang Archive From AOSP
+            # Download Clang Archive From Official AOSP Repository
             echo "└─ 📥 Downloading Clang From AOSP..."
             rm -f "$CLANGFILE"
             curl \
@@ -542,101 +562,108 @@ jobs:
               exit 1
             fi
 
-            # Create Clang Release When Missing
+            # Create GitHub Release When it Does Not Exist
             if ! gh release view "$CLANGRELEASE" --repo "$OWNERREPO" >/dev/null 2>&1; then
               gh release create "$CLANGRELEASE" \
                 --repo "$OWNERREPO" \
-                --title "AOSP Clang Cache" \
-                --notes "Cached AOSP Clang Toolchains For AndreiMikh Kernel Lab"
+                --title "AOSP Clang ${CLANGVERSION} Cache" \
+                --notes "Cached AOSP Clang Toolchain ${CLANGVERSION} For AndreiMikh Kernel Lab"
             fi
 
-            # Check Whether Release Asset Already Exists
-            EXISTINGFILE="$GITHUB_WORKSPACE/existing-${CLANGARCHIVE}"
-            rm -f "$EXISTINGFILE"
+            # Prepare Temporary Directory For Existing Archive Comparison
+            EXISTINGDIR="$(mktemp -d)"
+            EXISTINGFILE="$EXISTINGDIR/$CLANGARCHIVE"
+            # Check Whether Clang Archive Already Exists
             if gh release download "$CLANGRELEASE" \
                  --repo "$OWNERREPO" \
                  --pattern "$CLANGARCHIVE" \
-                 --dir "$GITHUB_WORKSPACE" >/dev/null 2>&1; then
-              if [[ -s "$CLANGFILE" ]] && [[ -s "$EXISTINGFILE" ]] &&
-                 cmp -s "$CLANGFILE" "$EXISTINGFILE"; then
+                 --dir "$EXISTINGDIR" >/dev/null 2>&1 &&
+               [[ -s "$EXISTINGFILE" ]]; then
+              # Compare Existing Archive With Newly Downloaded Archive
+              if cmp -s "$CLANGFILE" "$EXISTINGFILE"; then
                 echo "└─ 📤 Clang Archive is Unchanged; Skipping Upload"
               else
-                # Publish New Or Updated Clang Archive
+                # Publish Updated Clang Archive
                 gh release upload "$CLANGRELEASE" "$CLANGFILE" \
                   --repo "$OWNERREPO" \
                   --clobber
-                echo "└─ 📤 Clang Archive Published or Updated"
+                echo "└─ 📤 Clang Archive Updated"
               fi
-        
+
             else
-              # Publish Missing Clang Archive
+              # Publish Clang Archive When Asset is Missing
               gh release upload "$CLANGRELEASE" "$CLANGFILE" \
                 --repo "$OWNERREPO"
-              echo "└─ 📤 Clang Archive Published to GitHub Release"
+              echo "└─ 📤 Clang Archive Published"
             fi
 
-            # Cleanup Comparison Archive
-            rm -f "$EXISTINGFILE"
+            # Remove Temporary Archive Comparison Directory
+            rm -rf "$EXISTINGDIR"
+            # Record AOSP as Clang Archive Source
             echo "source=aosp" >> "$GITHUB_OUTPUT"
           fi
 
-          # Extract Clang Toolchain
+          # Extract Clang Toolchain Into Workspace
           echo "└─ 📦 Extracting Clang..."
           tar -xzf "$CLANGFILE" -C "$CLANGDIR"
-          # Validate Clang Installation
+          # Verify Clang Executable After Extraction
           if [[ ! -x "$CLANGDIR/bin/clang" ]]; then
             echo "└─ ⚠️ Clang Executable Not Found After Extraction"
             echo "└─ 📂 Clang Directory :"
             ls -la "$CLANGDIR" || true
-            echo "└─ 📂 Clang/Bin       :"
+            echo "└─ 📂 Clang / Bin     :"
             ls -la "$CLANGDIR/bin" || true
             exit 1
           fi
 
-          # Remove Temporary Clang Archive
+          # Remove Temporary Clang Archive After Extraction
           rm -f "$CLANGFILE"
           # Display Successful Clang Installation
           echo "└─ 🎉 AOSP Clang Ready"
           "$CLANGDIR/bin/clang" --version
-   
-      - name: 🪛 Configure Clang Version 21.0.0
+
+      - name: 🪛 Configure Clang Version
         shell: bash
         run: |
-          # Define Clang Toolchain Path
+          # Define Clang Toolchain Binary Directory
           CLANGBIN="$GITHUB_WORKSPACE/clang/bin"
-          # Add Clang To GitHub Actions Path
+          # Add Clang Toolchain to GitHub Actions PATH
           echo "$CLANGBIN" >> "$GITHUB_PATH"
           export PATH="$CLANGBIN:$PATH"
+          # Display Clang Configuration Information
           echo "└─ 🔧 Configuring LLVM Clang..."
-          echo "└─ 📂 Clang Path     : $CLANGBIN"
-          # Validate Clang Binary
-          if [ ! -x "$CLANGBIN/clang" ]; then
+          echo "└─ 📂 Clang Path : $CLANGBIN"
+          # Validate Clang Binary Availability
+          if [[ ! -x "$CLANGBIN/clang" ]]; then
             echo "└─ ⚠️ Clang Binary Not Found"
-            echo "└─ 📂 Expected     : $CLANGBIN/clang"
+            echo "└─ 📂 Expected : $CLANGBIN/clang"
             exit 1
           fi
-          # Verify LLVM Clang
+
+          # Verify LLVM Clang Version
           echo "└─ 🔎 Verifying LLVM Toolchain..."
-          echo "└─ 📌 Clang          :"
+          echo "└─ 📌 Clang :"
           clang --version
-          # Verify LLVM LLD
-          echo "└─ 📌 LLD            :"
+          # Verify LLVM LLD Version
+          echo "└─ 📌 LLD :"
           ld.lld --version
-          # Verify Clang LLD Resolution
+          # Verify Clang LLD Linker Resolution
           echo "└─ 📌 Clang LLD Path :"
           clang -print-prog-name=ld.lld
-          # Create GKI Certificate Stub
+          # Create GKI Certificate Generation Stub
+          mkdir -p /tmp/gki
           printf '%s\n' \
             'def generate_gki_certificate(*args, **kwargs):' \
             '    raise SystemExit("GKI SIGNING NOT SUPPORTED (STUB)")' \
             > /tmp/gki/generate_gki_certificate.py
           # Export Python Module Search Path
           echo "PYTHONPATH=/tmp" >> "$GITHUB_ENV"
-          echo "└─ 📌 GKI Certificate Stub  :"
-          echo "/tmp/gki/generate_gki_certificate.py"
-          echo "└─ 📌 PYTHONPATH     :"
+          # Display GKI Certificate Stub Configuration
+          echo "└─ 📌 GKI Certificate Stub :"
+          echo "└─ /tmp/gki/generate_gki_certificate.py"
+          echo "└─ 📌 Python Path :"
           echo "└─ /tmp"
-          echo "└─ 🎉 Clang Configuration and Toolchain Verification Complete"    
+          echo "└─ 🎉 Clang Configuration and Toolchain Verification Complete"
 
       - name: 📥 Setup AArch64 GCC 6.4.1 Toolchain
         shell: bash
