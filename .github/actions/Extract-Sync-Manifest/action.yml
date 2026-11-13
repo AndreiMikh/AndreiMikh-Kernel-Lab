@@ -1,0 +1,774 @@
+# GitHub Composite Action Metadata
+# Action Locates the Requested Device Manifest, Extracts Build Information
+# Initializes and Synchronizes Kernel Source Repositories, and Performs
+# Post-Sync Cleanup Required by the Kernel Build Environment
+name: 🧬 Initialize, Extract, Synchronize and Clean Manifest
+description: Locate and Parse Device Manifest, Apply Fallback Configuration, Synchronize Kernel Sources and Clean ABI Protected Exports and Disable Default Configuration Checks
+# Define Inputs Required by the Combined Composite Action
+inputs:
+  # Device Manifest Configuration Name Without XML Extension
+  # Value is Used to Locate Matching Manifest in Configured Repositories
+  FILE:
+    description: Device Manifest Configuration File Name Without XML Extension
+    required: true
+  # Optional GitHub Repository Used as an Additional Manifest Search Source
+  # Accepts Either an Owner / Repository name or a GitHub Repository URL
+  # Built-in Repositories are Always Searched Before this Optional Repository
+  GITHUBREPOSITORY:
+    description: Optional GitHub Repository URL or Owner/Repository Name For Dynamic Manifest Search
+    required: false
+    default: ""
+  # Maximum Time Allowed For Complete Repo Sync Operation
+  # The Value Must be a Positive Integer Representing Minutes
+  SYNCTIMEOUT:
+    description: Maximum Repository Synchronization Time in Minutes
+    required: false
+    default: "120"
+# Export Manifest Information From Extraction Step
+# Outputs Allow Subsequent Workflow Steps to Access the Normalized
+# Device Identity, Detected CPU Platform, and Android Version
+outputs:
+  manifestbasefile:
+    description: Normalized Manifest Base File Name Derived From Device Configuration
+    value: ${{ steps.extract-info.outputs.manifestbasefile }}
+  cpu:
+    description: CPU Platform Identifier Extracted From Manifest Revision or Branch
+    value: ${{ steps.extract-info.outputs.cpu }}
+  value:
+    description: Android Version Identity Extracted From Manifest Revision
+    value: ${{ steps.extract-info.outputs.value }}
+runs:
+  using: composite
+  steps:
+    # Locate Requested XML Manifest in Configured GitHub Repositories
+    # Validate the downloaded XML, retain a local fallback copy, and Extract
+    # CPU Platform, Android Version, and Optional README Build Information
+    - name: 🧬 Extract Manifest Information
+      id: extract-info
+      shell: bash
+      env:
+        FILE: ${{ inputs.FILE }}
+        GITREPOSITORYINPUT: ${{ inputs.GITHUBREPOSITORY }}
+        WORKSPACEDIR: ${{ env.WORKSPACEDIR }}
+        GITHUB_TOKEN: ${{ github.token }}
+      run: |
+        # Stop immediately on Command Failures, Undefined Variables, or Failed
+        # Commands Inside Pipelines
+        set -Eeuo pipefail
+        # Resolve Workspace Directory
+        WORKSPACE="${WORKSPACEDIR:-$GITHUB_WORKSPACE}"
+        cd "$WORKSPACE"
+        # Validate Required Tools
+        for TOOL in curl jq git sed grep awk xmllint; do
+          if ! command -v "$TOOL" >/dev/null 2>&1; then
+            if [[ "$TOOL" == "xmllint" ]]; then
+              echo "└─ ⚠️ XML Lint Not Installed, XML Parsing Will Use Python"
+            else
+              echo "└─ ⚠️ Required Tool Not Installed : $TOOL"
+              exit 1
+            fi
+          fi
+          
+        done
+
+        # Validate Manifest Configuration Name
+        if [[ -z "${FILE:-}" || "$FILE" == */* || "$FILE" == *..* ]]; then
+          echo "└─ ⚠️ Invalid Manifest Configuration : ${FILE:-<Empty>}"
+          exit 1
+        fi
+
+        # Normalize Manifest Configuration Name
+        if [[ "$FILE" =~ ^(.+)_([a-zA-Z])$ ]]; then
+          MANIFESTFILECONFIG="${FILE%_*}"
+        else
+          MANIFESTFILECONFIG="$FILE"
+        fi
+
+        # Generate Normalized Manifest Base Name
+        # Convert Known Vendor and Configuration Identifiers Into the Display
+        # Format Used by Kernel Build Workflow
+        MANIFESTBASEFILE=$(echo "$MANIFESTFILECONFIG" | sed -E '
+          s/_aosp/AOSP/g;
+          s/_custom/Custom/g;
+          s/_([a-zA-Z0-9])/\U\1/g;
+          s/^oneplus/1+/;
+          s/^realme/RealMe/;
+          s/^oppo/Oppo/
+        ')
+        # Prepare Manifest Fallback Directory
+        # Store the Discovered Manifest and Optional README Outside the Synced
+        # Manifest Checkout so Remain Available During Repository Setup
+        FALLBACKDIR=".repo/fallbackmanifests"
+        mkdir -p "$FALLBACKDIR"
+        # Define Manifest and README Paths
+        XMLPATH="${FALLBACKDIR}/${FILE}.xml"
+        READMEPATH="${FALLBACKDIR}/README.md"
+        # Display Normalized Manifest Information
+        echo "└─ 🧾 Manifest File          : $FILE"
+        echo "└─ 🧾 Manifest Configuration : $MANIFESTFILECONFIG"
+        echo "└─ 🧾 Manifest Base File     : $MANIFESTBASEFILE"
+        # Export Normalized Manifest Information
+        {
+          echo "MANIFESTFILECONFIG=$MANIFESTFILECONFIG"
+          echo "MANIFESTBASEFILE=$MANIFESTBASEFILE"
+        } >> "$GITHUB_ENV"
+        echo "manifestbasefile=$MANIFESTBASEFILE" >> "$GITHUB_OUTPUT"
+        # Define Repository Search Priority
+        REPOS=(
+          "AndreiMikh|Kernel-Manifest"
+          "AndreiMikh|AndreiMikh-Kernel-Lab"
+        )
+
+        # Add Optional Dynamic Repository
+        # Normalize Optional Input so Both GitHub URLs and Owner / Repository
+        # Identifiers can be Used with Same Repository Lookup Logic
+        if [[ -n "${GITREPOSITORYINPUT:-}" ]]; then
+          GITREPOSITORYINPUT="${GITREPOSITORYINPUT#https://github.com/}"
+          GITREPOSITORYINPUT="${GITREPOSITORYINPUT#http://github.com/}"
+          GITREPOSITORYINPUT="${GITREPOSITORYINPUT%/}"
+          GITREPOSITORYINPUT="${GITREPOSITORYINPUT%.git}"
+          # If Only an Owner is Supplied, Use Kernel-Manifest as Default
+          if [[ "$GITREPOSITORYINPUT" == */* ]]; then
+            OWNER="${GITREPOSITORYINPUT%%/*}"
+            REPO="${GITREPOSITORYINPUT#*/}"
+          else
+            OWNER="$GITREPOSITORYINPUT"
+            REPO="Kernel-Manifest"
+          fi
+
+          # Reject Incomplete Repository Identifiers and Nested Repository Paths
+          if [[ -z "$OWNER" || -z "$REPO" || "$REPO" == */* ]]; then
+            echo "└─ ⚠️ Invalid Dynamic Repository"
+            exit 1
+          fi
+
+          echo "└─ 🧾 Dynamic Repository : ${OWNER}/${REPO}"
+          REPOS+=("${OWNER}|${REPO}")
+        fi
+
+        # Initialize Manifest Search Results
+        MANIFESTFOUNDREPO=""
+        MANIFESTFOUNDREPONAME=""
+        MANIFESTFOUNDBRANCH=""
+        # Retrieve Repository Branches Through GitHub API
+        get_branches() {
+          local OWNER="$1"
+          local REPO="$2"
+          local PAGE=1
+          local RESPONSE
+          local BRANCHES=""
+          while true; do
+            RESPONSE=$(curl \
+              --connect-timeout 10 \
+              --max-time 30 \
+              --fail \
+              --silent \
+              --show-error \
+              -H "Accept: application/vnd.github+json" \
+              -H "X-GitHub-Api-Version: 2022-11-28" \
+              ${GITHUB_TOKEN:+-H "Authorization: Bearer $GITHUB_TOKEN"} \
+              "https://api.github.com/repos/${OWNER}/${REPO}/branches?per_page=100&page=${PAGE}" \
+              2>/dev/null || true)
+            # Empty Response Indicates API Request Failed or
+            # Returned No Usable Response
+            if [[ -z "$RESPONSE" ]]; then
+              return 1
+            fi
+
+            # Confirm API Returned a JSON Array Before Parsing Branches
+            if ! jq -e 'type == "array"' >/dev/null 2>&1 <<< "$RESPONSE"; then
+              return 1
+            fi
+
+            # Extract Branch Names From Current API Page
+            local PAGEBRANCHES
+            PAGEBRANCHES=$(jq -r '.[].name // empty' <<< "$RESPONSE")
+            # Append Current Page's Branches to Accumulated Results
+            [[ -n "$PAGEBRANCHES" ]] && BRANCHES+="${PAGEBRANCHES}"$'\n'
+            # Page Containing Fewer Than 100 Entries is the Final Page
+            local COUNT
+            COUNT=$(jq 'length' <<< "$RESPONSE")
+            if (( COUNT < 100 )); then
+              break
+            fi
+
+            # Continue Requesting Next Page When Current Page is Full
+            ((PAGE++))
+            
+          done
+
+          # Return All Collected Branch Names to Calling Function
+          printf '%s' "$BRANCHES"
+        }
+        # Search Repositories in Deterministic Priority Order
+        # Each Repository is Checked Until Requested XML is Found
+        for ENTRY in "${REPOS[@]}"; do
+          OWNER="${ENTRY%%|*}"
+          REPOSITORYNAME="${ENTRY##*|}"
+          echo "└─ 🔎 Checking ${OWNER}/${REPOSITORYNAME}"
+          BRANCHES=""
+          # Query GitHub API With Authentication
+          BRANCHES=$(get_branches "$OWNER" "$REPOSITORYNAME" || true)
+          # Fallback to Git LS-Remote When GitHub API Is Unavailable
+          # Use Git's Remote Reference Listing When API Request Fails or
+          # Does Not Return a Usable Branch List
+          if [[ -z "$BRANCHES" ]]; then
+            echo "└─ ⚠️ GitHub API Unavailable"
+            echo "└─ 🔄 Falling Back to Git LS-Remote..."
+            BRANCHES=$(git ls-remote \
+              --heads \
+              "https://github.com/${OWNER}/${REPOSITORYNAME}.git" \
+              2>/dev/null \
+              | sed 's|.*refs/heads/||' \
+              || true)
+          fi
+
+          # Skip Repository When No Branches Are Available
+          if [[ -z "$BRANCHES" ]]; then
+            echo "└─ ⚠️ No Branches Found"
+            continue
+          fi
+
+          # Search Each Branch For the Requested Manifest
+          while IFS= read -r BRANCH; do
+            [[ -z "$BRANCH" ]] && continue
+            echo "└─ 🔎 Trying Branch : $BRANCH"
+            # Construct Raw GitHub URLs For Manifest and its README
+            XMLURL="https://raw.githubusercontent.com/${OWNER}/${REPOSITORYNAME}/${BRANCH}/${FILE}.xml"
+            READMEURL="https://raw.githubusercontent.com/${OWNER}/${REPOSITORYNAME}/${BRANCH}/README.md"
+            # Temporary Files Prevent Incomplete Downloads From Replacing
+            # Previously Discovered Fallback Files       
+            TMPXML="${XMLPATH}.tmp"
+            TMPREADME="${READMEPATH}.tmp"
+            # Download Manifest Directly Instead of Using HEAD
+            # Download Actual File Because a Successful HEAD Request Alone Does
+            # Not Guarante Manifest Content is Valid
+            if ! curl \
+              --connect-timeout 10 \
+              --max-time 60 \
+              --retry 2 \
+              --retry-delay 2 \
+              --fail \
+              --silent \
+              --show-error \
+              --location \
+              "$XMLURL" \
+              -o "$TMPXML"; then
+              rm -f "$TMPXML"
+              continue
+            fi
+
+            # Verify Downloaded Manifest Is Not Empty
+            # Empty Responses are Rejected Before XML Validation
+            if [[ ! -s "$TMPXML" ]]; then
+              echo "└─ ⚠️ Downloaded Manifest Is Empty"
+              rm -f "$TMPXML"
+              continue
+            fi
+
+            # Validate Downloaded Manifest XML
+            # Prefer XMLLINT When Installed; Otherwise, Use Python's Built-in
+            # ElementTree Parser to Verify that Document is Well-Formed
+            if command -v xmllint >/dev/null 2>&1; then
+              if ! xmllint --noout "$TMPXML" >/dev/null 2>&1; then
+                echo "└─ ⚠️ Invalid Manifest XML"
+                rm -f "$TMPXML"
+                continue
+              fi
+            elif command -v python3 >/dev/null 2>&1; then
+              if ! python3 -c 'import sys, xml.etree.ElementTree as ET; ET.parse(sys.argv[1])' "$TMPXML" 2>/dev/null; then
+                echo "└─ ⚠️ Invalid Manifest XML"
+                rm -f "$TMPXML"
+                continue
+              fi
+            fi
+
+            # Move Valid Manifest Into Final Location
+            # Only a Successfully Downloaded and Validated Manifest is Promoted
+            mv "$TMPXML" "$XMLPATH"
+            # Download README When Available
+            # README Information is Optional and Does Not Determine Whether
+            # Manifest Itself is Considered Valid
+            if curl \
+              --connect-timeout 10 \
+              --max-time 30 \
+              --fail \
+              --silent \
+              --show-error \
+              --location \
+              "$READMEURL" \
+              -o "$TMPREADME"; then
+              # Keep README Only When it Contains Actual Content
+              if [[ -s "$TMPREADME" ]]; then
+                mv "$TMPREADME" "$READMEPATH"
+              else
+                rm -f "$TMPREADME"
+              fi
+              
+            else
+              rm -f "$TMPREADME"
+            fi
+
+            # Store Successful Repository Information
+            MANIFESTFOUNDREPO="$OWNER"
+            MANIFESTFOUNDREPONAME="$REPOSITORYNAME"
+            MANIFESTFOUNDBRANCH="$BRANCH"
+            echo "└─ ✔️ Found ${FILE}.xml"
+            echo "└─ 📂 Repository : ${OWNER}/${REPOSITORYNAME}"
+            echo "└─ 🌿 Branch     : ${BRANCH}"
+            # Stop Both Branch Loop and Repository Loop After First Valid Branch has been Found
+            break 2
+          done <<< "$BRANCHES"
+          echo "└─ ⚠️ ${FILE}.xml Not Found in ${OWNER}/${REPOSITORYNAME}"
+          
+        done
+
+        # Verify Manifest Was Successfully Located
+        if [[ -z "$MANIFESTFOUNDREPO" || ! -s "$XMLPATH" ]]; then
+          echo "└─ ⚠️ ${FILE}.xml Not Found in Any Repository"
+          exit 1
+        fi
+
+        # Display Located Manifest Information
+        echo "------ Manifest Located ------"
+        echo "└─ 📂 Repository : ${MANIFESTFOUNDREPO}/${MANIFESTFOUNDREPONAME}"
+        echo "└─ 🌿 Branch     : ${MANIFESTFOUNDBRANCH}"
+        echo "------------------------------"
+        # Export Manifest Repository Information
+        # These Values are Consumed by the Repository Initialization Step
+        {
+          echo "MANIFESTREPO=$MANIFESTFOUNDREPO"
+          echo "MANIFESTREPONAME=$MANIFESTFOUNDREPONAME"
+          echo "MANIFESTBRANCH=$MANIFESTFOUNDBRANCH"
+        } >> "$GITHUB_ENV"
+        # Parse Manifest Revision
+        # Read Revision Attribute From First Project that Defines One
+        # Use XMLLINT When Available and Python as Parsing Fallback
+        echo "└─ 📌 Parsing Manifest"
+
+        if command -v xmllint >/dev/null 2>&1; then
+          REVISION=$(xmllint \
+            --xpath 'string((//project[@revision])[1]/@revision)' \
+            "$XMLPATH" \
+            2>/dev/null || true)
+        else
+          REVISION=$(python3 -c '
+        import sys
+        import xml.etree.ElementTree as ET
+        root = ET.parse(sys.argv[1]).getroot()
+        project = root.find(".//project[@revision]")
+        print(project.get("revision", "") if project is not None else "")
+        ' "$XMLPATH")
+        fi
+
+        # Extract CPU From Manifest Revision
+        CPU=""
+        if [[ "$REVISION" == */* ]]; then
+          CPU=$(cut -d'/' -f2 <<< "$REVISION" | cut -d'_' -f1)
+        fi
+
+        # Fallback to Manifest Branch
+        if [[ -z "$CPU" || "$CPU" =~ ^[[:xdigit:]]{40}$ ]]; then
+          if [[ "$MANIFESTFOUNDBRANCH" =~ ^oneplus/([^/]+)$ ]]; then
+            CPU="${BASH_REMATCH[1]}"
+          fi
+        fi
+
+        # Validate Extracted CPU
+        # CPU Identifier is Required For Downstream Build Configuration
+        if [[ -z "$CPU" ]]; then
+          echo "└─ ⚠️ CPU Could Not Be Determined"
+          echo "└─ 📌 Manifest Branch   : ${MANIFESTFOUNDBRANCH:-Unknown}"
+          echo "└─ 📌 Manifest Revision : ${REVISION:-Unknown}"
+          exit 1
+        fi
+
+        echo "└─ 📌 CPU : $CPU"
+        # Extract Android Version From Manifest Revision
+        # Capture First Numeric Version in Revision String
+        VANDROID=$(grep -oP '\d+\.\d+(\.\d+)?' <<< "$REVISION" | head -n1 || true)
+        # Extract Android Major Version
+        ASHORTVERSION=""
+        if [[ -n "$VANDROID" ]]; then
+          ASHORTVERSION="${VANDROID%%.*}"
+        fi
+
+        # Export Parsed Manifest Information
+        # Make the Parsed Values Available to Later Steps and Action Consumers
+        {
+          echo "CPU=$CPU"
+          echo "VANDROID=$VANDROID"
+          echo "ASHORTVERSION=$ASHORTVERSION"
+        } >> "$GITHUB_ENV"
+        echo "cpu=$CPU" >> "$GITHUB_OUTPUT"
+        echo "value=Android${VANDROID:-Unknown}" >> "$GITHUB_OUTPUT"
+        # Parse README Build Information
+        # Extract Optional Build Script Arguments From First README Line
+        CPUD=""
+        BUILDMETHOD=""
+        if [[ -s "$READMEPATH" ]]; then
+          BUILDLINE=$(grep -m1 'oplus_build_kernel.sh' "$READMEPATH" || true)
+          if [[ -n "$BUILDLINE" ]]; then
+            CPUD=$(awk '{print $(NF-1)}' <<< "$BUILDLINE")
+            BUILDMETHOD=$(awk '{print $NF}' <<< "$BUILDLINE")
+            # Export README-Derived Build Information Only When a Matching Build Command was Found
+            {
+              echo "CPUD=$CPUD"
+              echo "BUILDMETHOD=$BUILDMETHOD"
+            } >> "$GITHUB_ENV"
+          fi
+        fi
+
+        echo "└─ 🎉 Manifest Parsing Complete"
+
+    # Initialize Android Repo Client Using the Repository and Branch
+    - name: 🔄 Initialize and Sync Repository
+      shell: bash
+      env:
+        FILE: ${{ inputs.FILE }}
+        WORKDIR: ${{ env.WORKDIR }}
+        SYNCTIMEOUT: ${{ inputs.SYNCTIMEOUT }}
+      run: |
+        # Enable Strict Error Handling For Synchronization Process
+        set -Eeuo pipefail
+        # Configure Runner Timezone
+        # Etc/GMT-8 Represents UTC+8; Use Timezone For Synchronization
+        # Timestamps Printed in Workflow Logs
+        export TZ="Etc/GMT-8"
+        # Provide a Consistent Timestamp Format For Start and Watchdog Messages
+        timezone() {
+          date '+%Y-%m-%d %H:%M:%S UTC%z'
+        }
+        echo "🕒 Start Time : $(timezone)"
+        # Resolve Workspace Directory
+        WORKDIR="${WORKDIR:-$GITHUB_WORKSPACE}"
+        cd "$WORKDIR"
+        # Validate Manifest Configuration
+        # Apply Same Input Validation Used During Manifest Discovery
+        if [[ -z "${FILE:-}" || "$FILE" == */* || "$FILE" == *..* ]]; then
+          echo "└─ ⚠️ Invalid Manifest Configuration : ${FILE:-<Empty>}"
+          exit 1
+        fi
+
+        # Validate Required Manifest Variables
+        for VARIABLE in MANIFESTREPO MANIFESTREPONAME MANIFESTBRANCH; do
+          if [[ -z "${!VARIABLE:-}" ]]; then
+            echo "└─ ⚠️ Missing Manifest Variable : $VARIABLE"
+            exit 1
+          fi
+          
+        done
+
+        # Validate Synchronization Timeout
+        if [[ ! "$SYNCTIMEOUT" =~ ^[1-9][0-9]*$ ]]; then
+          echo "└─ ⚠️ Invalid Synchronization Timeout : $SYNCTIMEOUT"
+          exit 1
+        fi
+
+        # Configure Git Performance and Reliability
+        # Increase Parallel Fetch Capacity, Disable Compression to Reduce
+        # CPU Overhead, and Use Git Protocol Version 2
+        echo "└─ ⚙️ Applying Git Performance Tweaks..."
+        git config --global fetch.parallel 16
+        git config --global core.compression 0
+        git config --global protocol.version 2
+        # Disable Interactive Prompts and Relax Git HTTP Low-Speed Detection
+        export GIT_TERMINAL_PROMPT=0
+        export GIT_HTTP_LOW_SPEED_LIMIT=0
+        export GIT_HTTP_LOW_SPEED_TIME=999999
+        # Define Manifest Repository and File Paths
+        MANIFESTBASE="https://github.com/${MANIFESTREPO}/${MANIFESTREPONAME}.git"
+        MANIFESTFILE=".repo/manifests/${FILE}.xml"
+        FALLBACKMANIFEST="$GITHUB_WORKSPACE/.repo/fallbackmanifests/${FILE}.xml"
+        # Validate Required Fallback Manifest
+        # The fallback copy must exist and contain data before initialization
+        # or synchronization can proceed.
+        if [[ ! -s "$FALLBACKMANIFEST" ]]; then
+          echo "└─ ⚠️ Fallback Manifest Not Found : $FALLBACKMANIFEST"
+          exit 1
+        fi
+
+        # Initialize Repository When Required
+        # Reinitialize When Repo Metadata, Repo Client, or Selected Manifest is Missing
+        # Otherwise, Retain Existing Initialization
+        echo "└─ 🚀 Preparing Repository..."
+        if [[ ! -d ".repo" || ! -f ".repo/repo/repo" || ! -f "$MANIFESTFILE" ]]; then
+          echo "└─ 🔄 Running Repository Initialization..."
+          # Initialize Repo Client Using Discovered Manifest Repository, Branch and Requested XML File
+          repo init \
+            -u "$MANIFESTBASE" \
+            -b "$MANIFESTBRANCH" \
+            -m "${FILE}.xml" \
+            --depth=1 \
+            --no-clone-bundle \
+            --no-tags
+        else
+          echo "└─ ⚡ Existing Repository Initialization Detected"
+        fi
+
+        # Ensure Manifest Directory Exists
+        mkdir -p .repo/manifests
+        # Apply Fallback Manifest Only When Contents Differ
+        echo "└─ 📥 Checking Fallback Manifest..."
+        if ! cmp -s "$FALLBACKMANIFEST" "$MANIFESTFILE"; then
+          echo "└─ 🔄 Updating Selected Manifest..."
+          cp "$FALLBACKMANIFEST" "$MANIFESTFILE"
+        else
+          echo "└─ ⚡ Selected Manifest Is Already Up To Date"
+        fi
+
+        # Validate Selected Manifest Before Synchronization
+        if ! grep -q '<manifest' "$MANIFESTFILE"; then
+          echo "└─ ⚠️ Selected Manifest Does Not Contain a Manifest Root"
+          exit 1
+        fi
+
+        # Remove Unwanted KS-Kernel.LNX.5.0.R3-Rel Prebuilt Entries
+        # Remove Matching Prebuilt Project Entries From Selected Manifest
+        echo "└─ 🧹 Cleaning Unwanted Manifest Prebuilt Entries..."
+        sed -i \
+          -e '/prebuilts\/asuite"/{/ks-kernel\.lnx\.5\.0\.r3-rel/d;}' \
+          -e '/tools\/tradefederation\/prebuilts"/{/ks-kernel\.lnx\.5\.0\.r3-rel/d;}' \
+          "$MANIFESTFILE"
+        # Display Configured Repository Projects
+        # Print Manifest Project List For Troubleshooting and Verification
+        echo "└─ 📃 Configured Repository Projects"
+        repo list || true
+        # Check CodeLinaro Repository Reachability
+        echo "└─ 🔎 Testing CodeLinaro Repository..."
+        if timeout 15s git ls-remote \
+          https://git.codelinaro.org/clo/la/kernel/prebuilts/build-tools \
+          >/dev/null 2>&1; then
+          echo "└─ CodeLinaro Repository : 🟢 Online"
+        else
+          # Distinguish a Timeout From Other Connection or Remote Errors
+          STATUS=$?
+          if [[ "$STATUS" -eq 124 ]]; then
+            echo "└─ CodeLinaro Repository : 🟠 Not Responsive"
+          else
+            echo "└─ CodeLinaro Repository : 🔴 Unreachable"
+          fi
+        fi
+
+        # Prepare Repository Synchronization Options
+        SYNCFLAGS=(
+          -c
+          --force-sync
+          --no-clone-bundle
+          --no-tags
+          --optimized-fetch
+          --prune
+          --retry-fetches=5
+          --verbose
+          "-j$(nproc)"
+        )
+        # Display synchronization Configuration Before Starting Operation
+        echo "└─ ⚡ Parallel Jobs : $(nproc)"
+        echo "└─ ⏱️ Sync Timeout  : ${SYNCTIMEOUT} Minutes"
+        # Start Synchronization Watchdog
+        # Run a Background Process that Prints a Heartbeat Every 60 Seconds
+        # Provides Visible Activity in the Workflow Logs During Long Syncs
+        (
+          while true; do
+            sleep 60
+            echo "└─ ⏳ Repository Sync Alive... $(timezone)"
+          done
+        ) &
+
+        WATCHDOGPID=$!
+        # Stop Watchdog When Synchronization Finishes or Fails
+        # Terminate and Wait For Background Process
+        cleanupwatchdog() {
+          if [[ -n "${WATCHDOGPID:-}" ]]; then
+            kill "$WATCHDOGPID" >/dev/null 2>&1 || true
+            wait "$WATCHDOGPID" 2>/dev/null || true
+            WATCHDOGPID=""
+          fi
+        }
+        # Register Cleanup For Normal Completion and Interruption Signals
+        trap cleanupwatchdog EXIT INT TERM
+        # Synchronize All Repository Projects
+        # Timeout Applies to Complete Repo Sync Command
+        echo "└─ 📁 Synchronizing Repository..."
+        if timeout \
+          --signal=TERM \
+          --kill-after=60s \
+          "${SYNCTIMEOUT}m" \
+          repo sync "${SYNCFLAGS[@]}"; then
+          SYNCSTATUS=0
+        else
+          # Capture Sync Exit Code so Timeout and Regular Sync Failures
+          # Can be Reported Separately After the Watchdog has been Stopped
+          SYNCSTATUS=$?
+        fi
+
+        # Stop Synchronization Watchdog
+        # Explicitly Stop Watchdog Before Evaluating Synchronization Result
+        cleanupwatchdog
+        trap - EXIT INT TERM
+        # Handle Synchronization Failure
+        # Exit Codes 124 and 137 are Treated as Timeout-Related Failures
+        # Other Non-Zero Codes are Reported as Regular Synchronization Errors
+        if [[ "$SYNCSTATUS" -ne 0 ]]; then
+          if [[ "$SYNCSTATUS" -eq 124 || "$SYNCSTATUS" -eq 137 ]]; then
+            echo "└─ ⚠️ Repository Sync Timed Out After ${SYNCTIMEOUT} Minutes"
+          else
+            echo "└─ ⚠️ Repository Sync Failed (Exit Code : $SYNCSTATUS)"
+          fi
+
+          exit 1
+        fi
+
+        echo "└─ ⚡ Repository Sync Completed"
+        # Inspect Repository Metadata
+        echo "└─ 📂 Inspecting Repository Metadata..."
+        echo "------------ Root ------------"
+        ls -la .repo/ || true
+        echo "---------- Manifest ----------"
+        ls -la .repo/manifests/ || true
+        echo "------------ Tool ------------"
+        ls -la .repo/repo || true
+        # Display Repository Metadata Directory Sizes
+        echo "└─ 📊 Repository Breakdown"
+        du -sh .repo/* 2>/dev/null || true
+        # Display Repository Metadata Total Size
+        echo "└─ 📊 Repository Size Summary"
+        du -sh .repo 2>/dev/null || true
+        # Detect Kernel Repository From Build Configuration
+        # Search Outside Repo For First Kernel Build.Config File
+        # Its Parent Directory is Treated as Kernel Repository Directory
+        echo "└─ 🔎 Detecting Kernel Repository..."
+        KREPOSPATH=$(
+          find . \
+            -type f \
+            -name "build.config*" \
+            -not -path "*/.repo/*" \
+            -print -quit
+        )
+        # Stop When No Kernel Build Configuration was Found
+        if [[ -z "$KREPOSPATH" ]]; then
+          echo "└─ ⚠️ No Kernel Build Configuration Found"
+          exit 1
+        fi
+
+        # Derive Kernel Repository Directory
+        # Remove Leading ./ Before Resolving Parent Directory
+        KERNELREPOSITORY=$(dirname "${KREPOSPATH#./}")
+        echo "└─ 📌 Build Configuration : $KREPOSPATH"
+        echo "└─ 📂 Kernel Repository   : $KERNELREPOSITORY"
+        # Export Kernel Repository Path
+        # Make Detected Kernel Source Directory Available to Later
+        # Build and Configuration Steps
+        echo "KERNELREPOSITORY=$KERNELREPOSITORY" >> "$GITHUB_ENV"
+        echo "└─ 🎉 Kernel Repository Pipeline Complete"
+
+    # Remove ABI Protected Export Metadata and References, Disable the Default
+    # Default Configuration Validation Checks, and Prepare the Synchronized Kernel Sources
+    - name: 🧹 Cleanup Kernel Repository
+      shell: bash
+      env:
+        WORKDIR: ${{ env.WORKDIR }}
+        KERNELPLATFORM: ${{ env.KERNELPLATFORM }}
+      run: |
+        # Enable Strict Error Handling For All Cleanup Operations
+        set -Eeuo pipefail
+        # Resolve Required Directories
+        # Use Configured Workspace When Available and Normalize an Empty
+        # Kernel Platform Value Before Validating Directory
+        WORKDIR="${WORKDIR:-$GITHUB_WORKSPACE}"
+        KERNELPLATFORM="${KERNELPLATFORM:-}"
+        # Cleanup Operations Require a Valid Kernel Platform Directory
+        if [[ -z "$KERNELPLATFORM" || ! -d "$KERNELPLATFORM" ]]; then
+          echo "└─ ⚠️ Kernel Platform Directory Not Found : ${KERNELPLATFORM:-<Empty>}"
+          exit 1
+        fi
+
+        # Navigate to Kernel Platform Directory
+        # All ABI cleanup paths below are relative to this directory.
+        cd "$KERNELPLATFORM"
+        # Cleanup ABI Protected Exports
+        # Remove Generated ABI Protected Export Lists From Common / Android
+        # These Files are Not Needed For Intended Kernel Build Workflow
+        echo "└─ 🧹 Cleaning ABI Protected Exports..."
+        # Remove ABI Protected Export Metadata
+        # Match Every Protected Export File at Top Level of Common / Android
+        # Suppress Errors When Directory Does Not Exist
+        find common/android \
+          -maxdepth 1 \
+          -type f \
+          -name 'abi_gki_protected_exports_*' \
+          -delete \
+          2>/dev/null || true
+        # Disable Protected Module Validation
+        # Replace Protected Modules List with an Empty List in the Common
+        # Module Definition File When that File Exists
+        if [[ -f common/modules.bzl ]]; then
+          sed -i \
+            's/protected_modules = \[.*\]/protected_modules = []/' \
+            common/modules.bzl
+        fi
+
+        # Remove Protected Export References From Bazel Build Files
+        # Check Common and MSM-Kernel Build Definitions and Remove Lines
+        for DIRECTORY in common msm-kernel; do
+          BUILDFILE="$DIRECTORY/BUILD.bazel"
+          if [[ -f "$BUILDFILE" ]]; then
+            sed -i '/protected_exports_list/d' "$BUILDFILE"
+          fi
+          
+        done
+
+        # Return to Kernel Workspace
+        # Subsequent Build Configuration Searches are Performed From
+        # Workspace Root Rather Than Kernel Platform Directory
+        cd "$WORKDIR"
+        # Disable Default Configuration Checks
+        # Remove check Default Configuration Invocations From GKI Build Configuration
+        # Files so Build Does Not Run the Default Configuration Check
+        echo "└─ 🧹 Disabling Default Configuration Checks..."
+        # Locate Relevant Build Configuration Files
+        # Search For Build.Config.GKI Files While Excluding the Repo Metadata
+        # Use Null-Delimited Paths so File Names Containing Spaces are Handled
+        while IFS= read -r -d '' FILEPATH; do
+          if grep -q 'check_defconfig' "$FILEPATH"; then
+            sed -i '/check_defconfig/d' "$FILEPATH"
+            echo "└─ ✔️ Updated : $FILEPATH"
+          fi
+        done < <(
+          find . \
+            -type f \
+            -name 'build.config.gki' \
+            -not -path '*/.repo/*' \
+            -print0
+        )
+        # Locate Kleaf Configuration Files
+        # Inspect BZL files For Default Check
+        # Assignment and Conditional Logic Used by Kleaf
+        while IFS= read -r -d '' FILEPATH; do
+          # Replace Default Configuration Check Value
+          # Change an explicit None value to the disabled string when present.
+          if grep -qE 'check_defconfig[[:space:]]*=[[:space:]]*None,' "$FILEPATH"; then
+            sed -i \
+              's/check_defconfig[[:space:]]*=[[:space:]]*None,/check_defconfig = "disabled",/g' \
+              "$FILEPATH"
+          fi
+
+          # Disable Kleaf Conditional Default Configuration Check
+          # Prevent Default Conditional Branch From Enabling Check
+          if grep -q 'if check_defconfig == None:' "$FILEPATH"; then
+            sed -i \
+              's/if check_defconfig == None:/if False:  # Disabled by CI/' \
+              "$FILEPATH"
+          fi
+
+        done < <(
+          find . \
+            -type f \
+            -name 'common_kernels.bzl' \
+            -not -path '*/.repo/*' \
+            -print0
+        )
+        # Confirm Cleanup Completion
+        # Report successful completion of the ABI and configuration cleanup.
+        echo "└─ 🎉 ABI Protected Exports Cleaned"
+        echo "└─ 🎉 Default Configuration Checks Disabled"
