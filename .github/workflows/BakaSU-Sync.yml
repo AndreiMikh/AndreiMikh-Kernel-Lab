@@ -1,22 +1,17 @@
 name: 🔄 Generate BakaSU Sync-Up Integration Patch
-
 on:
   workflow_dispatch:
-
 # Read-Only Access
 permissions:
   contents: read
-
 # Prevent Overlapping Runs
 concurrency:
   group: bakasu-sync-up-to-main-patch
   cancel-in-progress: true
-
 jobs:
   generate-patch:
-    name: 🧬 Compare Main And Sync-Up
+    name: 🧬 Compare Main and Sync-Up
     runs-on: ubuntu-latest
-
     steps:
       # Clone The Actual BakaSU Repository
       - name: 📥 Checkout BakaSU Repository
@@ -33,20 +28,15 @@ jobs:
         working-directory: BakaSU
         run: |
           set -euo pipefail
-
           echo "Checking Available Remote Branches..."
-
           git ls-remote --heads origin
-
           # Fetch Main And Sync-Up
           git fetch --no-tags origin \
             +refs/heads/main:refs/remotes/origin/main \
             +refs/heads/sync-up:refs/remotes/origin/sync-up
-
           # Verify Both Branches Exist
           git rev-parse --verify origin/main
           git rev-parse --verify origin/sync-up
-
           echo "Both Branches Fetched Successfully"
 
       # Generate Complete Integration Patch
@@ -55,12 +45,10 @@ jobs:
         working-directory: BakaSU
         run: |
           set -euo pipefail
-
           PATCH="BakaSU-sync-up-to-main.patch"
           SUMMARY="BakaSU-sync-up-to-main-summary.txt"
-
-          # Exclude Unwanted Files And Directories
-          DIFF_PATHS=(
+          # Exclude Unwanted Files and Directories
+          DIFFPATHS=(
             .
             ':(exclude)js/README.md'
             ':(exclude,glob).github/workflows/**'
@@ -69,8 +57,10 @@ jobs:
             ':(exclude,glob)**/*.xml'
             ':(exclude,glob)**/*.ts'
             ':(exclude,glob)**/*.rs'
+            ':(exclude,glob)**/*.py'
+            ':(exclude,glob)**/*.js'
+            ':(exclude,glob)**/*waitsys*'
           )
-
           echo "Applying Integration Exclusions..."
           echo "Excluded: js/README.md"
           echo "Excluded: .github/workflows/**"
@@ -79,9 +69,11 @@ jobs:
           echo "Excluded: **/*.xml"
           echo "Excluded: **/*.ts"
           echo "Excluded: **/*.rs"
-
+          echo "Excluded: **/*.py"
+          echo "Excluded: **/*.js"
+          echo "Excluded: **/*waitsys*"
           # Check For Remaining Differences
-          if git diff --quiet origin/main origin/sync-up -- "${DIFF_PATHS[@]}"; then
+          if git diff --quiet origin/main origin/sync-up -- "${DIFFPATHS[@]}"; then
             echo "No Differences Found After Exclusions"
             exit 1
           fi
@@ -94,25 +86,53 @@ jobs:
             origin/main origin/sync-up \
             -- "${DIFF_PATHS[@]}" \
             > "$PATCH"
-
           # Verify Generated Patch
           if [[ ! -s "$PATCH" ]]; then
-            echo "::error::Generated Patch Is Empty"
+            echo "::error::Generated Patch is Empty"
             exit 1
           fi
 
-          # Verify Excluded Files Are Not In Patch
-          if grep -E '^diff --git ' "$PATCH" | grep -E \
-            '(^|/)(README\.md|[^/]+\.(kt|json|xml|ts|rs))$|\.github/workflows/'; then
-            echo "::error::An Excluded File Was Found In The Patch"
-            exit 1
-          fi
-
+          # Verify Excluded Files are Not in Patch
+          python3 - "$PATCH" <<'PY'
+          import re
+          import sys
+          patch_file = sys.argv[1]
+          excluded_extensions = (
+              ".kt",
+              ".json",
+              ".xml",
+              ".ts",
+              ".rs",
+              ".py",
+              ".js",
+          )
+          excluded_paths = []
+          with open(patch_file, "r", encoding="utf-8", errors="replace") as patch:
+              for line in patch:
+                  if not line.startswith("diff --git "):
+                      continue
+                  match = re.match(r"diff --git a/(.*?) b/(.*?)$", line.rstrip("\n"))
+                  if not match:
+                      continue
+                  old_path, new_path = match.groups()
+                  for path in (old_path, new_path):
+                      if (
+                          path == "js/README.md"
+                          or path.startswith(".github/workflows/")
+                          or any(path.endswith(ext) for ext in excluded_extensions)
+                          or "waitsys" in path.lower()
+                      ):
+                          excluded_paths.append(path)
+          if excluded_paths:
+              print("::error::Excluded Files were Found in Patch")
+              for path in sorted(set(excluded_paths)):
+                  print(f"  {path}")
+              sys.exit(1)
+          print("Patch Exclusion Verification Passed")
+          PY
           # Generate Change Summary
           {
-            echo "BakaSU Sync-Up Integration Patch"
-            echo "================================"
-            echo
+            echo "BakaSU Sync-Up Integration Patch"            
             echo "Repository: Baka-SU/BakaSU"
             echo "Direction: sync-up → main"
             echo
@@ -124,6 +144,9 @@ jobs:
             echo "  **/*.xml"
             echo "  **/*.ts"
             echo "  **/*.rs"
+            echo "  **/*.py"
+            echo "  **/*.js"
+            echo "  **/*waitsys*"
             echo
             echo "Main Commit:"
             git rev-parse origin/main
@@ -140,11 +163,9 @@ jobs:
             echo "Patch SHA256:"
             sha256sum "$PATCH"
           } | tee "$SUMMARY"
-
           # Export Artifact File Names
           echo "PATCHFILE=$PATCH" >> "$GITHUB_ENV"
           echo "SUMMARYFILE=$SUMMARY" >> "$GITHUB_ENV"
-
           echo "Integration Patch Generated Successfully"
 
       # Validate Patch Against Main
@@ -153,11 +174,9 @@ jobs:
         working-directory: BakaSU
         run: |
           set -euo pipefail
-
-          # Create A Clean Main Worktree
+          # Create a Clean Main Worktree
           git worktree add --detach /tmp/bakasu-main origin/main
-
-          # Verify Patch Can Be Applied
+          # Verify Patch can be Applied
           if git -C /tmp/bakasu-main apply --check \
             "$GITHUB_WORKSPACE/BakaSU/$PATCHFILE"; then
             echo "Patch Applies Cleanly Against Main"
@@ -169,18 +188,16 @@ jobs:
           # Simulate Patch Application
           git -C /tmp/bakasu-main apply \
             "$GITHUB_WORKSPACE/BakaSU/$PATCHFILE"
-
-          echo "Patch Successfully Applied To Temporary Main Worktree"
-
+          echo "Patch Successfully Applied to Temporary Main Worktree"
           # Check Whitespace Without Rejecting Upstream Changes
           if git -C /tmp/bakasu-main diff --check; then
             echo "No Whitespace Issues Found"
           else
             echo "::warning::Upstream Patch Contains Whitespace Issues"
-            echo "::warning::Review The Reported Files And Lines Above"
+            echo "::warning::Review Reported Files and Lines Above"
           fi
 
-          # Verify That The Applied Changes Exist
+          # Verify Applied Changes Exist
           if [[ -z "$(git -C /tmp/bakasu-main status --porcelain)" ]]; then
             echo "::error::No Changes Detected After Patch Application"
             exit 1
