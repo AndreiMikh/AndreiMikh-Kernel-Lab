@@ -1,44 +1,67 @@
 name: 🔄 Generate BakaSU Sync-Up Integration Patch
+
 on:
   workflow_dispatch:
-# Read-Only Access to Repository Contents
+
+# Read-Only Access
 permissions:
   contents: read
-# Prevent Overlapping Patch-Generation Runs
+
+# Prevent Overlapping Runs
 concurrency:
   group: bakasu-sync-up-to-main-patch
   cancel-in-progress: true
+
 jobs:
   generate-patch:
     name: 🧬 Compare Main And Sync-Up
     runs-on: ubuntu-latest
+
     steps:
-      # Checkout Repository
-      - name: 📥 Checkout Repository
+      # Clone The Actual BakaSU Repository
+      - name: 📥 Checkout BakaSU Repository
         uses: actions/checkout@v7
         with:
+          repository: Baka-SU/BakaSU
+          ref: main
           fetch-depth: 0
+          path: BakaSU
 
-      # Install Git And Fetch Both Branches
-      - name: 🔄 Fetch Branches
+      # Fetch And Verify Both Branches
+      - name: 🔄 Fetch BakaSU Branches
         shell: bash
+        working-directory: BakaSU
         run: |
+          set -e
+
+          echo "Checking Available Remote Branches..."
+
+          git ls-remote --heads origin
+
+          # Fetch Main And Sync-Up
           git fetch --no-tags origin \
             +refs/heads/main:refs/remotes/origin/main \
             +refs/heads/sync-up:refs/remotes/origin/sync-up
+
+          # Verify Both Branches
           git rev-parse --verify origin/main
           git rev-parse --verify origin/sync-up
+
           echo "Both Branches Fetched Successfully"
 
       # Generate Complete Integration Patch
       - name: 📝 Generate Sync-Up Integration Patch
         shell: bash
+        working-directory: BakaSU
         run: |
+          set -e
+
           PATCH="BakaSU-sync-up-to-main.patch"
           SUMMARY="BakaSU-sync-up-to-main-summary.txt"
-          # Check For Branch Differences
+
+          # Check For Differences
           if git diff --quiet origin/main origin/sync-up; then
-            echo "No Differences Found Between Main and Sync-up..."
+            echo "No Differences Found Between Main And Sync-Up"
             exit 1
           fi
 
@@ -49,59 +72,76 @@ jobs:
             --no-ext-diff \
             origin/main origin/sync-up \
             > "$PATCH"
-          # Generate Changed Files And Statistics
+
+          # Generate Change Summary
           {
             echo "BakaSU: sync-up → main"
+            echo
+            echo "Repository: Baka-SU/BakaSU"
+            echo
             echo "Main Commit:"
             git rev-parse origin/main
+            echo
             echo "Sync-Up Commit:"
             git rev-parse origin/sync-up
+            echo
             echo "Changed Files:"
             git diff --name-status origin/main origin/sync-up
-            echo "Change Summary:"
+            echo
+            echo "Change Statistics:"
             git diff --stat origin/main origin/sync-up
+            echo
             echo "Patch SHA256:"
             sha256sum "$PATCH"
           } | tee "$SUMMARY"
 
-          # Verify Patch is Not Empty
+          # Verify Generated Files
           [[ -s "$PATCH" ]] || {
-            echo "Generated Patch is Empty..."
+            echo "Generated Patch Is Empty"
             exit 1
           }
+
           echo "PATCHFILE=$PATCH" >> "$GITHUB_ENV"
           echo "SUMMARYFILE=$SUMMARY" >> "$GITHUB_ENV"
-          echo "Integration Patch Generated"
+
+          echo "Integration Patch Generated Successfully"
 
       # Validate Patch Against Main
       - name: 🧪 Validate Patch Against Main
         shell: bash
+        working-directory: BakaSU
         run: |
+          set -e
+
           # Create A Clean Main Worktree
           git worktree add --detach /tmp/bakasu-main origin/main
-          # Validate Without Modifying Main
+
+          # Check Patch Application
           if git -C /tmp/bakasu-main apply --check \
-            "$GITHUB_WORKSPACE/$PATCHFILE"; then
-            echo "Patch Applies Cleanly to Main"
+            "$GITHUB_WORKSPACE/BakaSU/$PATCHFILE"; then
+            echo "Patch Applies Cleanly Against Main"
           else
             echo "Patch Validation Failed Against Main"
             exit 1
           fi
 
-          # Check Reverse Application After Simulated Apply
+          # Simulate Patch Application
           git -C /tmp/bakasu-main apply \
-            "$GITHUB_WORKSPACE/$PATCHFILE"
-          git -C /tmp/bakasu-main diff --check
-          echo "Patch Whitespace and Application Checks Passed..."
+            "$GITHUB_WORKSPACE/BakaSU/$PATCHFILE"
 
-      # Upload Generated Patch
+          # Verify Whitespace And Patch Integrity
+          git -C /tmp/bakasu-main diff --check
+
+          echo "Patch Application And Integrity Checks Passed"
+
+      # Upload Generated Patch And Summary
       - name: 📦 Upload Integration Patch
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: BakaSU-Sync-Up-To-Main-Patch
           path: |
-            BakaSU-sync-up-to-main.patch
-            BakaSU-sync-up-to-main-summary.txt
+            BakaSU/BakaSU-sync-up-to-main.patch
+            BakaSU/BakaSU-sync-up-to-main-summary.txt
           if-no-files-found: error
           retention-days: 30
 
@@ -109,7 +149,6 @@ jobs:
       - name: 🎉 Patch Generation Complete
         shell: bash
         run: |
-          echo " BakaSU Sync-Up Integration Patch Ready"
+          echo "BakaSU Sync-Up Integration Patch Ready"
           echo "Patch: $PATCHFILE"
           echo "Summary: $SUMMARYFILE"
-          
