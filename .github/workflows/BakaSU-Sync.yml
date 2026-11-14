@@ -32,7 +32,7 @@ jobs:
         shell: bash
         working-directory: BakaSU
         run: |
-          set -e
+          set -euo pipefail
 
           echo "Checking Available Remote Branches..."
 
@@ -43,7 +43,7 @@ jobs:
             +refs/heads/main:refs/remotes/origin/main \
             +refs/heads/sync-up:refs/remotes/origin/sync-up
 
-          # Verify Both Branches
+          # Verify Both Branches Exist
           git rev-parse --verify origin/main
           git rev-parse --verify origin/sync-up
 
@@ -54,12 +54,12 @@ jobs:
         shell: bash
         working-directory: BakaSU
         run: |
-          set -e
+          set -euo pipefail
 
           PATCH="BakaSU-sync-up-to-main.patch"
           SUMMARY="BakaSU-sync-up-to-main-summary.txt"
 
-          # Check For Differences
+          # Check For Branch Differences
           if git diff --quiet origin/main origin/sync-up; then
             echo "No Differences Found Between Main And Sync-Up"
             exit 1
@@ -73,11 +73,19 @@ jobs:
             origin/main origin/sync-up \
             > "$PATCH"
 
+          # Verify Generated Patch
+          if [[ ! -s "$PATCH" ]]; then
+            echo "Generated Patch Is Empty"
+            exit 1
+          fi
+
           # Generate Change Summary
           {
-            echo "BakaSU: sync-up → main"
+            echo "BakaSU Sync-Up Integration Patch"
+            echo "================================"
             echo
             echo "Repository: Baka-SU/BakaSU"
+            echo "Direction: sync-up → main"
             echo
             echo "Main Commit:"
             git rev-parse origin/main
@@ -95,12 +103,7 @@ jobs:
             sha256sum "$PATCH"
           } | tee "$SUMMARY"
 
-          # Verify Generated Files
-          [[ -s "$PATCH" ]] || {
-            echo "Generated Patch Is Empty"
-            exit 1
-          }
-
+          # Export Artifact File Names
           echo "PATCHFILE=$PATCH" >> "$GITHUB_ENV"
           echo "SUMMARYFILE=$SUMMARY" >> "$GITHUB_ENV"
 
@@ -111,17 +114,17 @@ jobs:
         shell: bash
         working-directory: BakaSU
         run: |
-          set -e
+          set -euo pipefail
 
           # Create A Clean Main Worktree
           git worktree add --detach /tmp/bakasu-main origin/main
 
-          # Check Patch Application
+          # Verify Patch Can Be Applied
           if git -C /tmp/bakasu-main apply --check \
             "$GITHUB_WORKSPACE/BakaSU/$PATCHFILE"; then
             echo "Patch Applies Cleanly Against Main"
           else
-            echo "Patch Validation Failed Against Main"
+            echo "::error::Patch Validation Failed Against Main"
             exit 1
           fi
 
@@ -129,10 +132,23 @@ jobs:
           git -C /tmp/bakasu-main apply \
             "$GITHUB_WORKSPACE/BakaSU/$PATCHFILE"
 
-          # Verify Whitespace And Patch Integrity
-          git -C /tmp/bakasu-main diff --check
+          echo "Patch Successfully Applied To Temporary Main Worktree"
 
-          echo "Patch Application And Integrity Checks Passed"
+          # Check Whitespace Without Rejecting Upstream Changes
+          if git -C /tmp/bakasu-main diff --check; then
+            echo "No Whitespace Issues Found"
+          else
+            echo "::warning::Upstream Patch Contains Whitespace Issues"
+            echo "::warning::Review the reported files and lines above"
+          fi
+
+          # Verify That The Applied Changes Exist
+          if [[ -z "$(git -C /tmp/bakasu-main status --porcelain)" ]]; then
+            echo "::error::No Changes Detected After Patch Application"
+            exit 1
+          fi
+
+          echo "Patch Application Validation Passed"
 
       # Upload Generated Patch And Summary
       - name: 📦 Upload Integration Patch
@@ -150,5 +166,6 @@ jobs:
         shell: bash
         run: |
           echo "BakaSU Sync-Up Integration Patch Ready"
-          echo "Patch: $PATCHFILE"
-          echo "Summary: $SUMMARYFILE"
+          echo "Patch: BakaSU/$PATCHFILE"
+          echo "Summary: BakaSU/$SUMMARYFILE"
+          echo "Artifact: BakaSU-Sync-Up-To-Main-Patch"
