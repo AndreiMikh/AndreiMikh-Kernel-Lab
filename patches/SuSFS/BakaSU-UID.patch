@@ -1,7 +1,23 @@
+diff --git a/kernel/Kbuild b/kernel/Kbuild
+index 666dcde2c63a418b782f3d7228393ee9d231c4b5..ef9b1379dfd3a453f25fa3395bf0f4a4e830802b 100644
+--- a/kernel/Kbuild
++++ b/kernel/Kbuild
+@@ -26,8 +26,6 @@ kernelsu-objs += infra/event_queue.o
+ kernelsu-objs += runtime/boot_event.o
+ kernelsu-objs += runtime/ksud_integration.o
+ 
+-kernelsu-objs += infra/btf_parser.o
+-kernelsu-objs += selinux/inode.o
+ kernelsu-objs += selinux/selinux.o
+ kernelsu-objs += selinux/sepolicy.o
+ kernelsu-objs += selinux/rules.o
 diff --git a/kernel/Kconfig b/kernel/Kconfig
+index 79bc79eee88807a19a24807e2c1e8eafab5f1591..da8787d1a56f5ea3d160da5637596476e709ee1f 100644
 --- a/kernel/Kconfig
 +++ b/kernel/Kconfig
-@@ -246,2 +246,10 @@ config KSU_SUSFS_SUS_MAP
+@@ -244,6 +244,14 @@ config KSU_SUSFS_SUS_MAP
+         - It may not be able to evade detections by apps that implement a good injection detection.
+         - Effective only on zygote spawned umounted user app process >= 10000.
  
 +config KSU_SUSFS_PRIORITY_UID_FILTER
 +    bool "Enable SUSFS priority UID filter"
@@ -12,30 +28,773 @@ diff --git a/kernel/Kconfig b/kernel/Kconfig
 +        ioprio_get, and ioprio_set for unprivileged app processes.
 +
  endmenu
+ 
+ endmenu
+diff --git a/kernel/core/init.c b/kernel/core/init.c
+index d68c253213128ddb7cc175b99ca6195915df3f72..65f40a454ab0a0dd58633695cc0e27a663916f15 100644
+--- a/kernel/core/init.c
++++ b/kernel/core/init.c
+@@ -170,8 +170,6 @@ MODULE_PARM_DESC(block_modules, "Comma-separated preset module names to acknowle
+ 
+ int __init kernelsu_init(void)
+ {
+-    int ret;
+-
+     // clang-format off
+     
+     // ddk in x86-64 doesn't have generated/compile.h
+@@ -226,23 +224,17 @@ int __init kernelsu_init(void)
+         pr_alert("shell is allowed at init!");
+     }
+ 
++#ifdef CONFIG_ARM64
++    ksu_start_apatch_conflict_check();
++#endif
++
+     ksu_cred = prepare_creds();
+     if (!ksu_cred) {
+         pr_err("prepare cred failed!\n");
+         return -ENOSYS;
+     }
+ 
+-    pr_info("initializing symbol resolver\n");
+     ksu_init_symbol_resolver();
+-    ret = ksu_selinux_inode_init();
+-    if (ret) {
+-        put_cred(ksu_cred);
+-        ksu_cred = NULL;
+-        return ret;
+-    }
+-#ifdef CONFIG_ARM64
+-    ksu_start_apatch_conflict_check();
+-#endif
+     ksu_selinux_init();
+     ksu_feature_init();
+     ksu_sulog_init();
+diff --git a/kernel/feature/selinux_hide.c b/kernel/feature/selinux_hide.c
+index 91b54efc2c0e2a742829d055ac35417c6668345b..cc592be4be24db936d617ce3a4e03c2af181daa5 100644
+--- a/kernel/feature/selinux_hide.c
++++ b/kernel/feature/selinux_hide.c
+@@ -1071,125 +1071,245 @@ out:
+     mutex_unlock(ksu_selinux_status_lock);
+ }
+ 
++/*
++ * Keep symbol lookup local to the hide parser. The build detects the actual
++ * symtab hash and table layout, including backports, rather than a version cut.
++ * Unknown hash implementations retain the kernel's native lookup.
++ */
++static void *selinux_hide_symtab_search(struct symtab *s, const char *key)
++{
++#if defined(KSU_COMPAT_SYMTAB_HASH_ROT4) || defined(KSU_COMPAT_SYMTAB_HASH_DJB2A)
++#ifdef KSU_COMPAT_HAS_NON_POINTER_SYMTAB_STRUCT
++    struct hashtab *h = &s->table;
++#else
++    struct hashtab *h = s->table;
++#endif
++    struct hashtab_node *node;
++#ifdef KSU_COMPAT_SYMTAB_HASH_DJB2A
++    const unsigned char *p;
++    unsigned int hash = 5381;
++#else
++    const char *p;
++    unsigned int hash = 0;
++#endif
++    int cmp;
++
++    if (!h || !h->size)
++        return NULL;
++
++#ifdef KSU_COMPAT_SYMTAB_HASH_DJB2A
++    /* Newer SELinux uses djb2a with unsigned bytes. */
++    for (p = (const unsigned char *)key; *p; p++)
++        hash = ((hash << 5) + hash) ^ *p;
++#else
++    /* Legacy symhash, including char signedness, without the strlen pass. */
++    for (p = key; *p; p++)
++        hash = (hash << 4 | (hash >> (8 * sizeof(unsigned int) - 4))) ^ *p;
++#endif
++    node = h->htable[hash & (h->size - 1)];
++    while (node) {
++#ifdef KSU_COMPAT_HAS_HASHTAB_KEY_PARAMS
++        /* Modern symtab uses strcmp; the table no longer stores callbacks. */
++        cmp = strcmp(key, node->key);
++#else
++        cmp = h->keycmp(h, key, node->key);
++#endif
++        if (!cmp)
++            return node->datum;
++        if (cmp < 0)
++            break;
++        node = node->next;
++    }
++    return NULL;
++#else
++    return symtab_search(s, key);
++#endif
++}
++
++/*
++ * Caller holds the live policy read lock/RCU protection. Cloned policies usually
++ * retain symbol values, but never assume that across reloads: verify the live
++ * canonical name at that value before using its indexed datum. Reordered IDs,
++ * aliases and missing indexed entries fall back to the live name lookup.
++ * No pointers or mappings are retained beyond the protected policy lifetime.
++ */
++static void *selinux_hide_lookup_live_symbol(struct policydb *pol, unsigned int sym, u32 value, const char *key)
++{
++    void *datum = NULL;
++    const char *name = NULL;
++
++    if (value && value <= pol->symtab[sym].nprim && pol->sym_val_to_name[sym])
++        name = sym_name(pol, sym, value - 1);
++    if (name && !strcmp(name, key)) {
++        switch (sym) {
++        case SYM_USERS:
++            if (pol->user_val_to_struct)
++                datum = pol->user_val_to_struct[value - 1];
++            break;
++        case SYM_ROLES:
++            if (pol->role_val_to_struct)
++                datum = pol->role_val_to_struct[value - 1];
++            break;
++        case SYM_TYPES:
++#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 1, 0) || defined(KSU_COMPAT_HAS_MODERN_POLICYDB)
++            if (pol->type_val_to_struct)
++                datum = pol->type_val_to_struct[value - 1];
++#else
++            if (pol->type_val_to_struct_array)
++                datum = flex_array_get_ptr(pol->type_val_to_struct_array, value - 1);
++#endif
++            break;
++        }
++        if (datum)
++            return datum;
++    }
++
++    return selinux_hide_symtab_search(&pol->symtab[sym], key);
++}
++
+ /*
+  * Caveat:  Mutates scontext.
+  */
+ static int string_to_context_struct(struct policydb *pol, struct policydb *orig_pol, struct sidtab *sidtabp,
+-                                    struct sidtab *orig_sidtabp, char *scontext, char *orig_scontext, u32 scontext_len,
++                                    struct sidtab *orig_sidtabp, char *scontext, const char *source, u32 source_len,
+                                     struct context *ctx, struct context *orig_ctx, u32 def_sid, int *orig_rc_p)
+ {
+     struct role_datum *role, *orig_role;
+     struct type_datum *typdatum, *orig_typdatum;
+     struct user_datum *usrdatum, *orig_usrdatum;
+-    char *scontextp, *orig_scontextp, *p, *orig_p, oldc, orig_oldc;
+-    int rc = 0, orig_rc = 0;
++    char *scontextp, *p, *user_name, *role_name, oldc;
++    bool orig_valid = true;
++    bool mls_started = false;
++    int rc = -EINVAL, orig_rc = -EINVAL;
+ 
+     context_init(ctx);
+     context_init(orig_ctx);
+ 
+-    /* Parse the security context. */
+-
+-    orig_rc = rc = -EINVAL;
++    // split fields once
++    // Resolve backup names once; translate successful symbols to the protected live policy.
+     scontextp = scontext;
+-    orig_scontextp = orig_scontext;
++    user_name = scontextp;
+ 
+     /* Extract the user. */
+     p = scontextp;
+-    orig_p = orig_scontextp;
+-    while (*p && *p != ':') {
++    while (*p && *p != ':')
+         p++;
+-        orig_p++;
+-    }
+ 
+     if (*p == 0)
+         goto out;
+ 
+-    *orig_p++ = *p++ = 0;
++    *p++ = 0;
+ 
+-    usrdatum = symtab_search(&pol->p_users, scontextp);
+-    orig_usrdatum = symtab_search(&orig_pol->p_users, orig_scontextp);
++    usrdatum = selinux_hide_symtab_search(&pol->p_users, scontextp);
+     if (!usrdatum)
+         goto out;
+ 
+     ctx->user = usrdatum->value;
+-    if (orig_usrdatum)
+-        orig_ctx->user = orig_usrdatum->value;
+ 
+     /* Extract role. */
+     scontextp = p;
+-    orig_scontextp = orig_p;
+-    while (*p && *p != ':') {
++    role_name = scontextp;
++    while (*p && *p != ':')
+         p++;
+-        orig_p++;
+-    }
+ 
+     if (*p == 0)
+         goto out;
+ 
+-    *orig_p++ = *p++ = 0;
++    *p++ = 0;
+ 
+-    role = symtab_search(&pol->p_roles, scontextp);
+-    orig_role = symtab_search(&orig_pol->p_roles, orig_scontextp);
++    role = selinux_hide_symtab_search(&pol->p_roles, scontextp);
+     if (!role)
+         goto out;
+     ctx->role = role->value;
+-    if (orig_role)
+-        orig_ctx->role = orig_role->value;
+ 
+     /* Extract type. */
+     scontextp = p;
+-    orig_scontextp = orig_p;
+-    while (*p && *p != ':') {
++    while (*p && *p != ':')
+         p++;
+-        orig_p++;
+-    }
+     oldc = *p;
+-    orig_oldc = *orig_p;
+-    *orig_p++ = *p++ = 0;
++    *p++ = 0;
+ 
+-    typdatum = symtab_search(&pol->p_types, scontextp);
+-    orig_typdatum = symtab_search(&orig_pol->p_types, orig_scontextp);
++    typdatum = selinux_hide_symtab_search(&pol->p_types, scontextp);
+     if (!typdatum || typdatum->attribute)
+         goto out;
+ 
+     ctx->type = typdatum->value;
++
++    /* Translate only successful backup symbols; rejected names need no live lookup. */
++    orig_usrdatum = selinux_hide_lookup_live_symbol(orig_pol, SYM_USERS, usrdatum->value, user_name);
++    if (orig_usrdatum)
++        orig_ctx->user = orig_usrdatum->value;
++    else
++        orig_valid = false;
++    orig_role = selinux_hide_lookup_live_symbol(orig_pol, SYM_ROLES, role->value, role_name);
++    if (orig_role)
++        orig_ctx->role = orig_role->value;
++    else
++        orig_valid = false;
++    orig_typdatum = selinux_hide_lookup_live_symbol(orig_pol, SYM_TYPES, typdatum->value, scontextp);
+     if (orig_typdatum && !orig_typdatum->attribute)
+         orig_ctx->type = orig_typdatum->value;
++    else
++        orig_valid = false;
+ 
++    mls_started = true;
+ #if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 20, 0) || defined(KSU_COMPAT_HAS_STRICTER_MLS_CONTEXT_TO_SID)
+     rc = mls_context_to_sid(pol, oldc, p, ctx, sidtabp, def_sid);
+-    orig_rc = mls_context_to_sid(orig_pol, orig_oldc, orig_p, orig_ctx, orig_sidtabp, def_sid);
+-#else
+-    rc = mls_context_to_sid(pol, oldc, &p, ctx, sidtabp, def_sid);
+-    if ((p - scontext) < scontext_len) {
+-        orig_rc = rc = -EINVAL;
+-        goto out;
++    if (orig_valid) {
++        if (oldc) {
++            size_t offset = p - scontext;
++
++            // restore MLS suffix for live policy
++            memcpy(p, source + offset, source_len - offset);
++            p[source_len - offset] = '\0';
++        }
++        // validate live context with live policy
++        orig_rc = mls_context_to_sid(orig_pol, oldc, p, orig_ctx, orig_sidtabp, def_sid);
++        if (!orig_rc && !policydb_context_isvalid(orig_pol, orig_ctx))
++            orig_rc = -EINVAL;
+     }
++#else
++    // < 4.20: mls_context_to_sid() consumes the string through a char **
++    {
++        size_t mls_offset = p - scontext;
+ 
+-    orig_rc = mls_context_to_sid(orig_pol, orig_oldc, &orig_p, orig_ctx, orig_sidtabp, def_sid);
+-    if ((orig_p - orig_scontext) < scontext_len) {
+-        orig_rc = rc = -EINVAL;
+-        goto out;
++        rc = mls_context_to_sid(pol, oldc, &p, ctx, sidtabp, def_sid);
++        if ((p - scontext) < source_len) {
++            rc = -EINVAL;
++            goto out;
++        }
++
++        if (orig_valid) {
++            char *orig_p;
++
++            if (oldc) {
++                // restore MLS suffix for live policy
++                memcpy(scontext + mls_offset, source + mls_offset, source_len - mls_offset);
++                scontext[source_len] = '\0';
++            }
++            orig_p = scontext + mls_offset;
++            orig_rc = mls_context_to_sid(orig_pol, oldc, &orig_p, orig_ctx, orig_sidtabp, def_sid);
++            if (!orig_rc && (orig_p - scontext) < source_len)
++                orig_rc = -EINVAL;
++            if (!orig_rc && !policydb_context_isvalid(orig_pol, orig_ctx))
++                orig_rc = -EINVAL;
++        }
+     }
+ #endif
++    if (!rc && !policydb_context_isvalid(pol, ctx))
++        rc = -EINVAL;
++out:
+     if (rc) {
++        /* Symbol parsing allocates no context resources; only MLS needs destruction. */
++        if (mls_started)
++            context_destroy(ctx);
++        else
++            ctx->user = ctx->role = ctx->type = 0;
++        // ignore live result if backup fails
+         orig_rc = -EINVAL;
+-        goto out;
+-    }
+-
+-    /* Check the validity of the new context. */
+-    orig_rc = rc = -EINVAL;
+-
+-    if (policydb_context_isvalid(pol, ctx)) {
+-        rc = 0;
+     }
+-    if (policydb_context_isvalid(orig_pol, orig_ctx)) {
+-        orig_rc = 0;
+-    }
+-out:
+-    if (rc)
+-        context_destroy(ctx);
+-    if (orig_rc)
++    /* Before MLS, an early failure leaves orig_ctx in its initial empty state. */
++    if ((rc || orig_rc) && mls_started)
+         context_destroy(orig_ctx);
+     *orig_rc_p = orig_rc;
+     return rc;
+@@ -1240,9 +1360,9 @@ static int ksu_security_context_to_sid(struct policydb *orig_policydb, struct si
+     struct policydb *policydb, *orig_policydb;
+     struct sidtab *sidtab, *orig_sidtab;
+ #endif
+-    char *scontext2, *scontext3, *str = NULL;
++    char *scontext2;
+     struct context context, orig_context;
+-    int rc = 0, orig_rc = 0;
++    int rc = 0, orig_rc = -EINVAL;
+     u32 orig_sid;
+ 
+     /* An empty security context is never valid. */
+@@ -1254,52 +1374,71 @@ static int ksu_security_context_to_sid(struct policydb *orig_policydb, struct si
+     if (!scontext2)
+         return -ENOMEM;
+ 
+-    scontext3 = kmemdup_nul(scontext, scontext_len, gfp_flags);
+-    if (!scontext3) {
+-        kfree(scontext2);
+-        return -ENOMEM;
+-    }
+-
+     // removed: if (!selinux_initialized())
+     *sid = SECSID_NULL;
+     if (orig_sid_p)
+         *orig_sid_p = SECSID_NULL;
+ 
+-        // removed: if (force)
++    // removed: if (force)
++retry:
+ #if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 10, 0) || defined(KSU_COMPAT_HAS_SELINUX_POLICY_STRUCT)
+     rcu_read_lock();
++    policydb = &policy->policydb;
++    sidtab = policy->sidtab;
+     orig_policy = rcu_dereference(selinux_state.policy);
+     orig_policydb = &orig_policy->policydb;
+     orig_sidtab = orig_policy->sidtab;
+-    policydb = &policy->policydb;
+-    sidtab = policy->sidtab;
+ #else
+     ksu_lock_sepolicy_legacy();
+ #endif
+-    rc = string_to_context_struct(policydb, orig_policydb, sidtab, orig_sidtab, scontext2, scontext3, scontext_len,
++
++    // parse both policies together
++    orig_rc = -EINVAL;
++    rc = string_to_context_struct(policydb, orig_policydb, sidtab, orig_sidtab, scontext2, scontext, scontext_len,
+                                   &context, &orig_context, def_sid, &orig_rc);
+-    if (!rc) {
+-#ifdef KSU_COMPAT_HAS_CONTEXT_ADD_HASH
+-        rc = context_add_hash(policydb, &context);
+-#endif
+-        if (!rc)
+-            rc = sidtab_context_to_sid(sidtab, &context, sid);
+-        // rc should not be frozen
+-        context_destroy(&context);
+-        // removed: if (rc == -ESTALE)
+-        if (!orig_rc) {
++    if (rc)
++        goto out_unlock;
++
++        // update backup sidtab first
+ #ifdef KSU_COMPAT_HAS_CONTEXT_ADD_HASH
+-            orig_rc = context_add_hash(orig_policydb, &orig_context);
++    rc = context_add_hash(policydb, &context);
++    if (!rc)
+ #endif
+-            if (!orig_rc) {
+-                // sync to global sidtab
+-                orig_rc = sidtab_context_to_sid(orig_sidtab, &orig_context, &orig_sid);
+-                if (orig_sid_p)
+-                    *orig_sid_p = orig_sid;
+-            }
++        rc = sidtab_context_to_sid(sidtab, &context, sid);
++    context_destroy(&context);
++    if (rc) {
++        if (!orig_rc)
+             context_destroy(&orig_context);
+-        }
++        // backup sidtab is not reloaded
++        orig_rc = rc;
++        goto out_unlock;
++    }
++
++    if (orig_rc)
++        goto out_unlock;
++
++        // only sync valid contexts
++        // sync to live sidtab
++#ifdef KSU_COMPAT_HAS_CONTEXT_ADD_HASH
++    orig_rc = context_add_hash(orig_policydb, &orig_context);
++#endif
++    if (!orig_rc)
++        orig_rc = sidtab_context_to_sid(orig_sidtab, &orig_context, &orig_sid);
++    context_destroy(&orig_context);
++    if (!orig_rc && orig_sid_p)
++        *orig_sid_p = orig_sid;
++    if (orig_rc == -ESTALE) {
++        // retry after live policy reload
++#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 10, 0) || defined(KSU_COMPAT_HAS_SELINUX_POLICY_STRUCT)
++        rcu_read_unlock();
++#else
++        ksu_unlock_sepolicy_legacy();
++#endif
++        memcpy(scontext2, scontext, scontext_len);
++        scontext2[scontext_len] = '\0';
++        goto retry;
+     }
++out_unlock:
+ #if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 10, 0) || defined(KSU_COMPAT_HAS_SELINUX_POLICY_STRUCT)
+     rcu_read_unlock();
+ #else
+@@ -1307,9 +1446,7 @@ static int ksu_security_context_to_sid(struct policydb *orig_policydb, struct si
+ #endif
+     if (orig_rc_p)
+         *orig_rc_p = orig_rc;
+-    kfree(scontext3);
+     kfree(scontext2);
+-    kfree(str);
+     return rc;
+ }
+ 
+diff --git a/kernel/infra/btf_parser.c b/kernel/infra/btf_parser.c
+deleted file mode 100644
+index b95926ff4584feae0b1b4565a2c43f97b4448452..0000000000000000000000000000000000000000
+--- a/kernel/infra/btf_parser.c
++++ /dev/null
+@@ -1,72 +0,0 @@
+-#include "infra/btf_parser.h"
+-
+-#if defined(MODULE) && defined(CONFIG_DEBUG_INFO_BTF)
+-#include <linux/bpf.h>
+-#include <linux/btf.h>
+-#include <linux/err.h>
+-#include <linux/errno.h>
+-#include <linux/string.h>
+-
+-#include "klog.h"
+-
+-int ksu_btf_field(const char *structure, const char *member, u32 kind, u32 size, struct ksu_btf_field *field)
+-{
+-    const struct btf *btf;
+-    const struct btf_type *type;
+-    const struct btf_member *m;
+-    s32 id;
+-    u32 i;
+-
+-    pr_info("BTF: acquiring vmlinux metadata for %s.%s\n", structure, member);
+-    btf = bpf_get_btf_vmlinux();
+-    if (IS_ERR_OR_NULL(btf)) {
+-        pr_err("BTF: vmlinux metadata unavailable (%ld)\n", btf ? PTR_ERR(btf) : -ENOENT);
+-        return btf ? PTR_ERR(btf) : -ENOENT;
+-    }
+-
+-    pr_info("BTF: looking up struct %s\n", structure);
+-    id = btf_find_by_name_kind(btf, structure, BTF_KIND_STRUCT);
+-    if (id < 0)
+-        return id;
+-    type = btf_type_by_id(btf, id);
+-    if (!type)
+-        return -EINVAL;
+-
+-    for_each_member (i, type, m) {
+-        const struct btf_type *member_type;
+-        const char *name = btf_name_by_offset(btf, m->name_off);
+-        u32 bits, bytes, bitfield_size;
+-
+-        if (!name)
+-            return -EINVAL;
+-        if (strcmp(name, member))
+-            continue;
+-        bits = m->offset;
+-        bitfield_size = 0;
+-        if (BTF_INFO_KFLAG(type->info)) {
+-            bitfield_size = BTF_MEMBER_BITFIELD_SIZE(bits);
+-            bits = BTF_MEMBER_BIT_OFFSET(bits);
+-        }
+-        bytes = bits / 8;
+-        if (bitfield_size || !size || (bits & 7) || bytes % size || bytes > type->size || size > type->size - bytes)
+-            return -EINVAL;
+-        member_type = btf_type_skip_modifiers(btf, m->type, NULL);
+-        if (!member_type || BTF_INFO_KIND(member_type->info) != kind)
+-            return -EINVAL;
+-        if (kind == BTF_KIND_INT) {
+-            u32 info = *(const u32 *)(member_type + 1);
+-
+-            if (member_type->size != size || BTF_INT_OFFSET(info) || BTF_INT_BITS(info) != size * 8 ||
+-                (BTF_INT_ENCODING(info) & (BTF_INT_CHAR | BTF_INT_BOOL)))
+-                return -EINVAL;
+-        } else if (kind != BTF_KIND_PTR || size != sizeof(void *)) {
+-            return -EINVAL;
+-        }
+-        field->offset = bytes;
+-        field->struct_size = type->size;
+-        pr_info("BTF: resolved %s.%s at %u, struct size %u\n", structure, member, bytes, type->size);
+-        return 0;
+-    }
+-    return -ENOENT;
+-}
+-#endif
+diff --git a/kernel/infra/btf_parser.h b/kernel/infra/btf_parser.h
+deleted file mode 100644
+index e74629bf56c14b5205db7f6c9e79689a17e516de..0000000000000000000000000000000000000000
+--- a/kernel/infra/btf_parser.h
++++ /dev/null
+@@ -1,15 +0,0 @@
+-#ifndef __KSU_BTF_PARSER_H
+-#define __KSU_BTF_PARSER_H
+-
+-#include <linux/types.h>
+-
+-#if defined(MODULE) && defined(CONFIG_DEBUG_INFO_BTF)
+-
+-struct ksu_btf_field {
+-    u32 offset;
+-    u32 struct_size;
+-};
+-
+-int ksu_btf_field(const char *structure, const char *member, u32 kind, u32 size, struct ksu_btf_field *field);
+-#endif
+-#endif
+diff --git a/kernel/infra/file_wrapper.c b/kernel/infra/file_wrapper.c
+index 89939867bcf9ff9a57a81cceede2f635b45a53d4..710eebfc65f4cdb7ca377d8c458e20283b961d5d 100644
+--- a/kernel/infra/file_wrapper.c
++++ b/kernel/infra/file_wrapper.c
+@@ -628,17 +628,12 @@ int ksu_install_file_wrapper(int fd)
+     struct inode *wrapper_inode = file_inode(wrapper_file);
+     // libc's stdio relies on the fstat() result of the fd to determine its buffer type.
+     wrapper_inode->i_mode = file_inode(orig_file)->i_mode;
+-    // Use ksu_file_sid to bypass SELinux check
+-
+-    // We use ksu_selinux_inode and lookup btf to workaround 6.6's ABI changes
+-    // See more: https://android.googlesource.com/kernel/common/+/41c5b269af8b1f0bffcab7766a793f294ae6764e
+-    struct inode_security_struct *wrapper_sec = ksu_selinux_inode(wrapper_inode);
+-    if (IS_ERR(wrapper_sec)) {
+-        ret = PTR_ERR(wrapper_sec);
+-        goto out_put_wrapper_file;
+-    }
+-    if (wrapper_sec)
++    struct inode_security_struct *wrapper_sec = selinux_inode(wrapper_inode);
++    // Use ksu_file_sid to bypass SELinux check.
++    // When we call `su` from terminal app, this is useful.
++    if (wrapper_sec) {
+         wrapper_sec->sid = ksu_file_sid;
++    }
+     // Install open file operation for inode.
+     wrapper_inode->i_fop = &ksu_file_wrapper_inode_fops;
+ 
 diff --git a/kernel/manager/throne_tracker.c b/kernel/manager/throne_tracker.c
+index d487fc8d60a3b10d386352019a8813be69691f20..6b8b0035031b63fb5078d127db1793fd2d5384c6 100644
 --- a/kernel/manager/throne_tracker.c
 +++ b/kernel/manager/throne_tracker.c
-@@ -13,2 +13,5 @@
+@@ -11,6 +11,9 @@
+ #include <linux/stat.h>
+ #include <linux/namei.h>
  #include <linux/kernel.h> // for container_of in UL
 +#ifdef CONFIG_KSU_SUSFS_PRIORITY_UID_FILTER
 +#include <linux/susfs.h>
 +#endif
  
-@@ -362,2 +365,6 @@ out:
+ #include "policy/allowlist.h"
+ #include "manager/apk_sign.h"
+@@ -360,6 +363,10 @@ out:
+         kfree(np);
+     }
      revert_creds(old_cred);
 +#ifdef CONFIG_KSU_SUSFS_PRIORITY_UID_FILTER
 +    // Refresh after tracking completes, including deferred scans.
 +    susfs_parse_priority_app_strings();
 +#endif
  }
+ 
+ void track_throne(unsigned int flags)
+diff --git a/kernel/selinux/inode.c b/kernel/selinux/inode.c
+deleted file mode 100644
+index ef20b1970e9c10f4a1a98649637c0004db318410..0000000000000000000000000000000000000000
+--- a/kernel/selinux/inode.c
++++ /dev/null
+@@ -1,61 +0,0 @@
+-#include <linux/errno.h>
+-#include <linux/err.h>
+-#include <linux/fs.h>
+-#include <linux/uaccess.h>
+-
+-#include "objsec.h"
+-#include "selinux/selinux.h"
+-#include "compat/kernel_compat.h"
+-#include "infra/btf_parser.h"
+-#include "klog.h"
+-
+-#if defined(MODULE) && defined(CONFIG_DEBUG_INFO_BTF)
+-#include <uapi/linux/btf.h>
+-
+-static u32 inode_blob_offset __ro_after_init;
+-
+-int __init ksu_selinux_inode_init(void)
+-{
+-    struct ksu_btf_field blob_field;
+-    s32 blob_offset;
+-    int ret;
+-
+-    ret = ksu_btf_field("lsm_blob_sizes", "lbs_inode", BTF_KIND_INT, sizeof(int), &blob_field);
+-    if (ret)
+-        goto fail;
+-    ret = copy_from_kernel_nofault(&blob_offset, (const char *)&selinux_blob_sizes + blob_field.offset,
+-                                   sizeof(blob_offset));
+-    if (ret) {
+-        pr_err("selinux_blob_sizes.lbs_inode unreadable (%d)\n", ret);
+-        goto fail;
+-    }
+-    if (blob_offset < 0 || blob_offset % __alignof__(struct inode_security_struct)) {
+-        ret = -EINVAL;
+-        goto fail;
+-    }
+-    inode_blob_offset = blob_offset;
+-    pr_info("offset from vmlinux.btf, lbs_inode@%u, blob=%u\n", blob_field.offset, inode_blob_offset);
+-    return 0;
+-fail:
+-    pr_err("vmlinux BTF (%d) unreadable!\n", ret);
+-    return ret;
+-}
+-#endif
+-
+-struct inode_security_struct *ksu_selinux_inode(const struct inode *inode)
+-{
+-#if defined(MODULE) && defined(CONFIG_DEBUG_INFO_BTF)
+-    struct inode_security_struct *security;
+-
+-    if (!inode->i_security)
+-        return NULL;
+-    security = (void *)((char *)inode->i_security + inode_blob_offset);
+-    if (READ_ONCE(security->inode) != inode) {
+-        pr_err("Can not resolve inode_security_struct offset, current offset got: %d\n", inode_blob_offset);
+-        return ERR_PTR(-EINVAL);
+-    }
+-    return security;
+-#else
+-    return selinux_inode(inode);
+-#endif
+-}
+diff --git a/kernel/selinux/selinux.h b/kernel/selinux/selinux.h
+index 05fd655f38eef40877dec8acf5e7bb2c7a93ecfd..f86461b1173b2fc32b08add22f1484153bf321e3 100644
+--- a/kernel/selinux/selinux.h
++++ b/kernel/selinux/selinux.h
+@@ -69,19 +69,6 @@ void susfs_set_priv_app_sid(void);
+ 
+ void escape_to_root_for_adb_root();
+ 
+-struct inode;
+-struct inode_security_struct;
+-struct inode_security_struct *ksu_selinux_inode(const struct inode *inode);
+-
+-#if defined(MODULE) && defined(CONFIG_DEBUG_INFO_BTF)
+-int __init ksu_selinux_inode_init(void);
+-#else
+-static inline int ksu_selinux_inode_init(void)
+-{
+-    return 0;
+-}
+-#endif
+-
+ extern u32 ksu_file_sid;
+ 
+ void __init ksu_selinux_init();
+diff --git a/kernel/selinux/sepolicy.c b/kernel/selinux/sepolicy.c
+index 288d55b01ce5c62229843c2ec780b95956eac58c..6eb4aba13e07e3c73f53fb4f103e93544598f004 100644
+--- a/kernel/selinux/sepolicy.c
++++ b/kernel/selinux/sepolicy.c
+@@ -18,6 +18,11 @@
+ #include "ss/symtab.h"
+ #include "compat/kernel_compat.h" // Add check Huawei Device
+ 
++#ifdef CONFIG_KSU_SUSFS
++extern int susfs_add_sus_avd_allowed_by_type(u32 s_type, u32 t_type, u32 c_type, u32 orig_avd_allowed);
++extern int susfs_add_sus_type(const char *secctx, u32 type_value);
++#endif // #ifdef CONFIG_KSU_SUSFS
++
+ #define KSU_SUPPORT_ADD_TYPE
+ 
+ //////////////////////////////////////////////////////
+@@ -338,6 +343,10 @@ static bool add_rule_raw(struct policydb *db, struct type_datum *src, struct typ
+                 return false;
+         }
+ 
++#ifdef CONFIG_KSU_SUSFS
++        susfs_add_sus_avd_allowed_by_type(src->value, tgt->value, cls->value, node->datum.u.data);
++#endif // #ifdef CONFIG_KSU_SUSFS
++
+         if (invert) {
+             if (perm)
+                 node->datum.u.data &= ~(1U << (perm->value - 1));
+@@ -761,6 +770,9 @@ static bool add_type(struct policydb *db, const char *type_name, bool attr)
+         ebitmap_set_bit(&db->role_val_to_struct[i]->types, value - 1, 1);
+     }
+ 
++#ifdef CONFIG_KSU_SUSFS
++    susfs_add_sus_type(type_name, type->value);
++#endif // #ifdef CONFIG_KSU_SUSFS
+     return true;
+ 
+     // safe? because only huawei do this fucking things
 diff --git a/kernel/supercall/dispatch.c b/kernel/supercall/dispatch.c
+index c23a7cb4cfb172673c85edca44822ba56dd103e4..7a51161011f11ea605376e1ac2494e8e328d21c2 100644
 --- a/kernel/supercall/dispatch.c
 +++ b/kernel/supercall/dispatch.c
-@@ -11,2 +11,3 @@
+@@ -9,6 +9,7 @@
+ #include <linux/uaccess.h>
+ #include <linux/version.h>
  #ifdef CONFIG_KSU_SUSFS
 +#include <linux/susfs.h>
  #include <linux/susfs_def.h>
-@@ -1170,2 +1171,8 @@ int ksu_handle_susfs_cmd(unsigned int cmd, void __user **arg)
+ #endif
+ 
+@@ -1168,6 +1169,12 @@ int ksu_handle_susfs_cmd(unsigned int cmd, void __user **arg)
+         return 0;
+     }
  #endif // #ifdef CONFIG_KSU_SUSFS_SUS_MAP
 +#ifdef CONFIG_KSU_SUSFS_PRIORITY_UID_FILTER
 +    case CMD_SUSFS_SET_PRIORITY_UID_FILTER: {
@@ -44,3 +803,24 @@ diff --git a/kernel/supercall/dispatch.c b/kernel/supercall/dispatch.c
 +    }
 +#endif // CONFIG_KSU_SUSFS_PRIORITY_UID_FILTER
      case CMD_SUSFS_ENABLE_AVC_LOG_SPOOFING: {
+         susfs_set_avc_log_spoofing(arg);
+         return 0;
+diff --git a/kernel/tools/kernel_compat.mk b/kernel/tools/kernel_compat.mk
+index 39e5ab9b899f95ab3952a92b2ce5c82705ee0c43..fbbbafde54a2cb7ee41df68dc4471dce434cadf0 100644
+--- a/kernel/tools/kernel_compat.mk
++++ b/kernel/tools/kernel_compat.mk
+@@ -266,6 +266,14 @@ $(info -- $(REPO_NAME)/compat: found hashtab_key_params function)
+ ccflags-y += -DKSU_COMPAT_HAS_HASHTAB_KEY_PARAMS
+ endif
+ 
++# Match the target's symbol hash, including Android/vendor backports. Do not
++# select a hash by kernel version: using a different hash silently misses keys.
++ifeq ($(shell grep -F -q '((hash << 5) + hash) ^ c' $(srctree)/security/selinux/ss/symtab.c && grep -E -q 'hash[[:space:]]*=[[:space:]]*5381' $(srctree)/security/selinux/ss/symtab.c; echo $$?),0)
++ccflags-y += -DKSU_COMPAT_SYMTAB_HASH_DJB2A
++else ifeq ($(shell grep -F -q 'val = (val << 4 | (val >> (8*sizeof(unsigned int)-4))) ^ (*p)' $(srctree)/security/selinux/ss/symtab.c; echo $$?),0)
++ccflags-y += -DKSU_COMPAT_SYMTAB_HASH_ROT4
++endif
++
+ # https://github.com/torvalds/linux/commit/c3a276111ea2572399281988b3129683e2a6b60b
+ ifeq ($(shell grep -q "filename_trans_key" $(srctree)/security/selinux/ss/policydb.h; echo $$?),0)
+ $(info -- $(REPO_NAME)/compat: found filename_trans_key function)
