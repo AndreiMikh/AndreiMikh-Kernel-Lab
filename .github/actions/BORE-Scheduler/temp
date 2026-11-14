@@ -1,0 +1,369 @@
+  # Export Composite Inputs and Import Workflow Environment Variables
+  env:
+    BORE: ${{ inputs.BORE }}
+    KERNELVERSION: ${{ env.KERNELVERSION }}
+    COMMONKERNELFOLDER: ${{ env.COMMONKERNELFOLDER }}
+    DEFCONFIG: ${{ env.DEFCONFIG }}
+    PATCHDIR: ${{ env.PATCHDIR }}
+    REJECTCHECKER: ${{ env.REJECTCHECKER }}
+  # Enable Strict Bash Error Handling
+  run: |
+    set -Eeuo pipefail
+    echo "------------------------------"
+    echo "[Info] 🧠 Integrating BORE Scheduler..."
+    echo "------------------------------"
+    # Validate Required Workspace Paths
+    [[ -n "$KERNELVERSION" ]] || {
+      echo "└─ [Warn] ⚠️ Kernel Version is Empty"
+      exit 1
+    }
+    [[ -d "$COMMONKERNELFOLDER" ]] || {
+      echo "└─ [Warn] ⚠️ Common Kernel Directory Not Found : $COMMONKERNELFOLDER"
+      exit 1
+    }
+    [[ -f "$DEFCONFIG" ]] || {
+      echo "└─ [Warn] ⚠️ Kernel Default Configuration Not Found : $DEFCONFIG"
+      exit 1
+    }
+    [[ -d "$PATCHDIR" ]] || {
+      echo "└─ [Warn] ⚠️ Patch Directory Not Found : $PATCHDIR"
+      exit 1
+    }
+    # Validate Supported Kernel Versions
+    case "$KERNELVERSION" in
+      6.12|6.6|6.1|5.15|5.10)
+        echo "└─ [Info] 📌 Supported Kernel Version : $KERNELVERSION"
+        ;;
+      *)
+        echo "└─ [Info] ℹ️ No BORE Patch For Kernel $KERNELVERSION"
+        echo "└─ [Info] ⏭️ Skipping BORE Integration"
+        exit 0
+        ;;
+    esac
+    # Resolve Version-Specific BORE Patch
+    PATCH="$PATCHDIR/BORE/BORE-${KERNELVERSION}.patch"
+    [[ -f "$PATCH" ]] || {
+      echo "└─ [Warn] ⚠️ BORE Patch Not Found : $PATCH"
+      exit 1
+    }
+    echo "└─ [Info] 📦 BORE Patch : $(basename "$PATCH")"
+    # Navigate to Common Kernel Directory
+    cd "$COMMONKERNELFOLDER"
+    # Detect Existing BORE Integration
+    # Do Not Exit Here : Remaining Configuration and Hook Checks Must Still Run
+    BOREALREADYPRESENT=false
+    if grep -q "CONFIG_SCHED_BORE" kernel/sched/sched.h 2>/dev/null; then
+      BOREALREADYPRESENT=true
+      echo "└─ [Info] 📌 Existing BORE Integration Detected"
+      echo "└─ [Info] ⏭️ Skipping BORE Patch Application"
+    fi
+
+    # Apply BORE Patch Only When it is Not Already Integrated
+    if [[ "$BOREALREADYPRESENT" == "false" ]]; then
+      # Normalize EEVDF Base Slice Context For OnePlus Vendor Trees
+      # Required by BORE Patch Context For Applicable Kernel Trees
+      echo "└─ [Info] 🔧 Normalizing EEVDF Base Slice..."
+      sed -i \
+        's/750000ULL/700000ULL/g; s/0\.75 msec/0.70 msec/g' \
+        kernel/sched/fair.c
+      # Apply BORE Patch
+      # KernelSU / SUSFS / NoMount May Modify Scheduler Sources Before this Step
+      echo "└─ [Info] 🔧 Applying BORE Scheduler Patch..."
+      PATCHSTATUS=0
+      patch -p1 --ignore-whitespace -F3 < "$PATCH" || PATCHSTATUS=$?
+      # Detect Rejected Patch Hunks Before Checking Patch Exit Status
+      left="$(find . -name '*.rej' -type f -print | sort)"
+      if [[ -n "$left" ]]; then
+        echo "└─ [Warn] ⚠️ BORE Patch Left Rejected Files:"
+        echo "$left" | sed 's/^/     /'
+        exit 1
+      fi
+
+      # Reject Other Patch Failures Even When No Reject File was Created
+      if [[ "$PATCHSTATUS" -ne 0 ]]; then
+        echo "└─ [Warn] ⚠️ BORE Patch Application Failed : $PATCHSTATUS"
+        exit 1
+      fi
+
+      # Remove Patch Backup Files
+      find . -name '*.orig' -type f -delete
+      echo "└─ [Info] 📌 BORE Patch Applied Successfully"
+
+    fi
+
+    # Adjust Set Protect Slice() to Track BORE Base Slice
+    # Keeps Protection Window Synchronized With BORE Base Slice
+    echo "└─ [Info] 🔧 Checking Set Protect Slice()..."
+    if grep -q \
+      'u64 slice = normalized_sysctl_sched_base_slice;' \
+      kernel/sched/fair.c; then
+      sed -i -E \
+        's/^([[:space:]]*)u64 slice = normalized_sysctl_sched_base_slice;/\1u64 slice = sysctl_sched_base_slice;/' \
+        kernel/sched/fair.c
+      # Verify Set Protect Slice() Transformation
+      grep -q \
+        'u64 slice = sysctl_sched_base_slice;' \
+        kernel/sched/fair.c || {
+          echo "└─ [Warn] ⚠️ Set Protect Slice() Transformation Failed"
+          exit 1
+        }
+      echo "└─ [Info] 📌 Set Protect Slice() Tracks Sysctl Sched Base Slice"
+    elif grep -q \
+      'u64 slice = sysctl_sched_base_slice;' \
+      kernel/sched/fair.c; then
+      echo "└─ [Info] 📌 Set Protect Slice() Already Uses Sysctl Sched Base Slice"
+    else
+      echo "└─ [Info] ℹ️ Set Protect Slice() Not Present, Skipping..."
+    fi
+
+    # Resolve Sched BORE Definition
+    # EEVDF: Sched BORE Source
+    # CFS: Sched Fair Source
+    # Kernel 5.15 / 5.10 Use Bool; Newer Versions Use u8
+    # Accept Both Initializer Values To Support Repeated Builds
+    echo "└─ [Info] 🔎 Locating Sched BORE Definition..."
+    BORESRC=""
+    for candidate in \
+      "$COMMONKERNELFOLDER/kernel/sched/bore.c" \
+      "$COMMONKERNELFOLDER/kernel/sched/fair.c"; do
+      if [[ -f "$candidate" ]] && grep -qE \
+        '^[[:space:]]*(u8|bool)[[:space:]]+__read_mostly[[:space:]]+sched_bore[[:space:]]*=[[:space:]]*[01];' \
+        "$candidate"; then
+        BORESRC="$candidate"
+        break
+      fi
+
+    done
+
+    [[ -n "$BORESRC" ]] || {
+      echo "└─ [Warn] ⚠️ Sched BORE Definition Not Found After Patching"
+      exit 1
+    }
+    echo "└─ [Info] 📂 BORE Source : ${BORESRC#"$COMMONKERNELFOLDER"/}"
+    # Configure BORE Runtime Default
+    # BORE=true Integrates BORE And Enables It Automatically At Boot
+    echo "└─ [Info] ⚙️ Configuring BORE Runtime Default..."
+    perl -pi -e \
+      's/^([[:space:]]*(?:u8|bool)[[:space:]]+__read_mostly[[:space:]]+sched_bore[[:space:]]*=[[:space:]]*)[01];/${1}1;/' \
+      "$BORESRC"
+    # Verify BORE Runtime Default is Enabled
+    grep -qE \
+      '^[[:space:]]*(u8|bool)[[:space:]]+__read_mostly[[:space:]]+sched_bore[[:space:]]*=[[:space:]]*1;' \
+      "$BORESRC" || {
+        echo "└─ [Warn] ⚠️ Could Not Enable Sched BORE by Default"
+        exit 1
+      }
+    echo "└─ [Info] 📌 Sched BORE Defaults to 1 (Active From Boot)"
+    # 6.6 / 6.1 / 5.15 / 5.10
+    # Restore Dequeue Task Fair BORE Block Using a Stable Anchor
+    case "$KERNELVERSION" in
+      6.6|6.1|5.15|5.10)
+        FAIRC="$COMMONKERNELFOLDER/kernel/sched/fair.c"
+        echo "└─ [Info] 🔧 Checking Dequeue Task Fair() BORE Block..."
+        # Ensure Dequeue Insertion Anchor is Unique
+        n="$(grep -cF 'util_est_dequeue(&rq->cfs, p);' "$FAIRC" || true)"
+        [[ "$n" == "1" ]] || {
+          echo "└─ [Warn] ⚠️ Dequeue Task Fair Anchor Not Unique : $n Matches"
+          exit 1
+        }
+        # Check Whether BORE Dequeue Block is Already Present
+        if awk '
+          /util_est_dequeue\(&rq->cfs, p\);/ {
+            if (getline && $0 ~ /^[[:space:]]*#ifdef CONFIG_SCHED_BORE/)
+              found=1
+          }
+          END { exit !found }
+        ' "$FAIRC"; then
+          echo "└─ [Info] 📌 Dequeue Task Fair() BORE Block Already Present"
+        else
+          # Insert BORE Dequeue Logic Immediately After Anchor
+          awk '
+            /util_est_dequeue\(&rq->cfs, p\);/ && !ins {
+              print
+              print "#ifdef CONFIG_SCHED_BORE"
+              print "\tif (task_sleep) {"
+              print "\t\tcfs_rq = cfs_rq_of(se);"
+              print "\t\tif (cfs_rq->curr == se)"
+              print "\t\t\tupdate_curr(cfs_rq);"
+              print "\t\trestart_burst(se);"
+              print "\t}"
+              print "#endif // CONFIG_SCHED_BORE"
+              ins=1
+              next
+            }
+            { print }
+            END {
+              if (!ins)
+                exit 1
+            }
+          ' "$FAIRC" > "$FAIRC.new" || {
+            rm -f "$FAIRC.new"
+            echo "└─ [Warn] ⚠️ Failed To Insert Dequeue Task Fair() BORE Block"
+            exit 1
+          }
+
+          # Replace Original File After Successful AWK Processing
+          mv "$FAIRC.new" "$FAIRC"
+          # Verify BORE Dequeue Block Placement
+          awk '
+            /util_est_dequeue\(&rq->cfs, p\);/ {
+              if (getline && $0 ~ /^[[:space:]]*#ifdef CONFIG_SCHED_BORE/)
+                found=1
+            }
+            END { exit !found }
+          ' "$FAIRC" || {
+            echo "└─ [Warn] ⚠️ Dequeue Task Fair() BORE Block Did Not Land"
+            exit 1
+          }
+          echo "└─ [Info] 📌 Dequeue Task Fair() BORE Block Inserted"
+        fi
+
+        # Verify BORE Dequeue Logic is Inside a Function
+        awk -v pat='restart_burst(se);' -v what='dequeue BORE block' '
+          {
+            line=$0
+            sub(/\/\/.*/,"",line)
+            if (!f && index($0,pat)>0) {
+              f=1
+              if (d<=0) {
+                printf("⚠️ %s at brace depth %d (file scope), line %d\n",what,d,NR)
+                bad=1
+              } else {
+                printf("📌 %s verified inside a function, line %d (depth %d)\n",what,NR,d)
+              }
+            }
+            o=gsub(/\{/,"{",line)
+            c=gsub(/\}/,"}",line)
+            d+=o-c
+          }
+          END {
+            if (!f) {
+              printf("⚠️ %s not found\n",what)
+              exit 1
+            }
+            exit bad ? 1 : 0
+          }
+        ' "$FAIRC" || {
+          echo "└─ [Warn] ⚠️ Dequeue Task Fair() BORE Block Verification Failed"
+          exit 1
+        }
+        ;;
+    esac
+    # Kernel Base 6.6 / 6.12
+    # Insert Sched BORE Init() Before Wait Bit Init()
+    case "$KERNELVERSION" in
+      6.12|6.6)
+        COREC="$COMMONKERNELFOLDER/kernel/sched/core.c"
+        echo "└─ [Info] 🔧 Checking Sched BORE Init()..."
+        # Ensure Wait Bit Init() Insertion Anchor is Unique
+        n="$(grep -c '^[[:space:]]*wait_bit_init();' "$COREC" || true)"
+        [[ "$n" == "1" ]] || {
+          echo "└─ [Warn] ⚠️ Wait Bit Init() Anchor Not Unique : $n Matches"
+          exit 1
+        }
+        # Avoid Duplicate Sched BORE Initialization Calls
+        if grep -q 'sched_bore_init();' "$COREC"; then
+          echo "└─ [Info] 📌 Sched BORE Init() Already Present"
+        else
+          # Insert BORE Initialization Before Wait Bit Init()
+          awk '
+            /^[[:space:]]*wait_bit_init\(\);/ && !ins {
+              print "#ifdef CONFIG_SCHED_BORE"
+              print "\tsched_bore_init();"
+              print "#endif // CONFIG_SCHED_BORE"
+              print ""
+              ins=1
+            }
+            { print }
+            END {
+              if (!ins)
+                exit 1
+            }
+          ' "$COREC" > "$COREC.new" || {
+            rm -f "$COREC.new"
+            echo "└─ [Warn] ⚠️ Failed to Insert Sched BORE Init()"
+            exit 1
+          }
+          # Replace Original File After Successful AWK Processing
+          mv "$COREC.new" "$COREC"
+          echo "└─ [Info] 📌 Sched BORE Init() Inserted"
+        fi
+
+        # Verify Sched BORE Init() is Inside a Function
+        awk -v pat='sched_bore_init();' -v what='sched_bore_init()' '
+          {
+            line=$0
+            sub(/\/\/.*/,"",line)
+            if (!f && index($0,pat)>0 && $0 !~ /^[[:space:]]*(extern|void)/) {
+              f=1
+              if (d<=0) {
+                printf("⚠️ %s at brace depth %d (file scope), line %d\n",what,d,NR)
+                bad=1
+              } else {
+                printf("📌 %s verified inside a function, line %d (depth %d)\n",what,NR,d)
+              }
+            }
+            o=gsub(/\{/,"{",line)
+            c=gsub(/\}/,"}",line)
+            d+=o-c
+          }
+          END {
+            if (!f) {
+              printf("⚠️ %s not found\n",what)
+              exit 1
+            }
+            exit bad ? 1 : 0
+          }
+        ' "$COREC" || {
+          echo "└─ [Warn] ⚠️ Sched BORE Init() Verification Failed"
+          exit 1
+        }
+        ;;
+    esac
+    # Enable BORE in Kernel Default Configuration
+    # Normalize Existing Disabled or Differently Configured Entries
+    echo "└─ [Info] ⚙️ Enabling BORE Configuration..."
+    if grep -q '^CONFIG_SCHED_BORE=y$' "$DEFCONFIG"; then
+      echo "└─ [Info] 📌 BORE Configuration Already Enabled"
+    elif grep -q '^# CONFIG_SCHED_BORE is not set$' "$DEFCONFIG"; then
+      sed -i \
+        's/^# CONFIG_SCHED_BORE is not set$/CONFIG_SCHED_BORE=y/' \
+        "$DEFCONFIG"
+    elif grep -q '^CONFIG_SCHED_BORE=' "$DEFCONFIG"; then
+      sed -i \
+        's/^CONFIG_SCHED_BORE=.*/CONFIG_SCHED_BORE=y/' \
+        "$DEFCONFIG"
+    else
+      echo "CONFIG_SCHED_BORE=y" >> "$DEFCONFIG"
+    fi
+
+    # Verify Final Kernel Default Configuration
+    grep -q '^CONFIG_SCHED_BORE=y$' "$DEFCONFIG" || {
+      echo "└─ [Warn] ⚠️ Failed to Enable BORE in Kernel Configuration"
+      exit 1
+    }
+    echo "└─ [Info] 📌 BORE Configuration Applied Successfully"
+    # Run Existing Kernel Reject Checker When Available
+    echo "└─ [Info] 🔍 Checking Kernel Patch Rejections..."
+    if [[ -n "${REJECTCHECKER:-}" && -f "$REJECTCHECKER" ]]; then
+      source "$REJECTCHECKER"
+      if declare -F checkrejects >/dev/null 2>&1; then
+        checkrejects .
+        echo "└─ [Info] 📌 Kernel Reject Checker Completed"
+      else
+        echo "└─ [Info] ℹ️ Check Rejects() Function Not Found in Reject Checker"
+      fi
+
+    else
+      echo "└─ [Info] ℹ️ Reject Checker Not Available, Skipping..."
+    fi
+
+    # Display BORE Integration Summary
+    echo "------------------------------"
+    echo "└─ [Info] 🎉 BORE Scheduler Integration Completed"
+    echo "------------------------------"
+    echo "└─ [Info] 📌 Kernel Version : $KERNELVERSION"
+    echo "└─ [Info] 📌 BORE Patch     : $(basename "$PATCH")"
+    echo "└─ [Info] 📌 Runtime        : Enabled (Default: 1)"
+    echo "└─ [Info] 📌 Configuration  : CONFIG SCHED BORE Set to Y"
+    echo "------------------------------"
