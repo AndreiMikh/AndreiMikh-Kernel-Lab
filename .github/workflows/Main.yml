@@ -193,7 +193,7 @@ on:
         type: choice
         description: "NoMount Built-in Integration"
         required: true
-        default: NoMount-Dev
+        default: NoMount
         options:
           - NoMount
           - NoMount-Dev
@@ -261,9 +261,9 @@ on:
           - oplus_secure_guard,oplus_secure_guard_new
           - vr,vklp,vklp_smaps_rollup,oplus_secure_guard,oplus_secure_guard_new,mkp
           - None
-      MLGO:
+      BORE:
         type: boolean
-        description: "Enable LLVM Machine Learning Guided Optimization (MLGO)"
+        description: "Enable BORE Scheduler Integration"
         required: true
         default: true
       KERNELPATCH:
@@ -276,13 +276,14 @@ on:
           - None    
       PROFILE:
         type: choice
-        description: "Balance = Clean Space Enabled - Build Cache Enabled | GitRelease = Clean Space Enabled - Build Cache Enabled - Git Release Enabled | Disable = Clean Space Disabled"
+        description: "Balance = Clean Space Enabled - Build Cache Enabled | Default Runtime BORE = Default Runtime BORE Enabled - Clean Space Enabled - Build Cache Enabled | GitRelease = Clean Space Enabled - Build Cache Enabled - Git Release Enabled | Disable = Clean Space Disabled"
         required: true
-        default: Balance
+        default: Default-Runtime-BORE
         options:
           - Balance
-          - GitRelease
-          - Disable
+          - Default-Runtime-BORE
+          - Git-Release
+          - Disable-Cleanspace
 
 jobs:
   prepare:
@@ -304,6 +305,8 @@ jobs:
       ksuversion: ${{ steps.manager.outputs.ksuversion }}
       cleanspace: ${{ steps.buildprofile.outputs.cleanspace }}
       buildccache: ${{ steps.buildprofile.outputs.buildccache }}
+      mlgo: ${{ steps.buildprofile.outputs.mlgo }}
+      runtimebore: ${{ steps.buildprofile.outputs.runtimebore }}
       gitrelease: ${{ steps.buildprofile.outputs.gitrelease }}
     steps:
       - name: 🌿 Checkout
@@ -319,15 +322,20 @@ jobs:
           # Initialize Default Build Profile Flags
           CLEANSPACE="Enabled"
           BUILDCCACHE="Enabled"
+          MLGO="Enabled"
+          RUNTIMEBORE="Disabled"
           GITRELEASE="Disabled"
           # Resolve Build Profile Settings
           case "$PROFILE" in
             Balance)
               ;;
-            GitRelease)
+            Default-Runtime-BORE)
+              RUNTIMEBORE="Enabled"              
+              ;;
+            Git-Release)
               GITRELEASE="Enabled"
               ;;
-            Disable)
+            Disable-Cleanspace)
               CLEANSPACE="Disabled"
               ;;
             *)
@@ -336,14 +344,18 @@ jobs:
               ;;
           esac
           # Display Resolved Build Profile Flags
-          echo "└─ 📌 Build Profile       : $PROFILE"
-          echo "└─ 🧹 Clean Space         : $CLEANSPACE"
-          echo "└─ 🗃️ Build Cache         : $BUILDCCACHE"
-          echo "└─ 🚀 Git Release         : $GITRELEASE"
+          echo "└─ 📌 Build Profile        : $PROFILE"
+          echo "└─ 🧹 Clean Space          : $CLEANSPACE"
+          echo "└─ 🗃️ Build Cache          : $BUILDCCACHE"
+          echo "└─ 🗃️ MLGO                 : $MLGO"
+          echo "└─ 🗃️ BORE Runtime Default : $RUNTIMEBORE"
+          echo "└─ 🚀 Git Release          : $GITRELEASE"
           # Export Build Profile Flags as Step Outputs
           {
             echo "cleanspace=$CLEANSPACE"
             echo "buildccache=$BUILDCCACHE"
+            echo "mlgo=$MLGO"
+            echo "runtimebore=$RUNTIMEBORE"
             echo "gitrelease=$GITRELEASE"
           } >> "$GITHUB_OUTPUT"
   
@@ -384,7 +396,7 @@ jobs:
           ),
           (inputs.LSMBBG && 'LSM ' || ''),
           (inputs.WINDSPEED && 'Wind ' || ''),
-          (inputs.MLGO && 'MLGO ' || ''),
+          (inputs.BORE && 'BORE ' || ''),
           (
             inputs.REKERNEL == 'Built-in' && 'RK-Builtin ' ||
             inputs.REKERNEL == 'Module' && 'RK-Module ' || ''
@@ -416,6 +428,8 @@ jobs:
       # Build Profile
       CLEANSPACE: ${{ needs.prepare.outputs.cleanspace }}
       BUILDCCACHE: ${{ needs.prepare.outputs.buildccache }}
+      MLGO: ${{ needs.prepare.outputs.mlgo }}
+      RUNTIMEBORE: ${{ needs.prepare.outputs.runtimebore }}
       GITRELEASE: ${{ needs.prepare.outputs.gitrelease }}
     timeout-minutes: 60
     outputs:
@@ -547,7 +561,9 @@ jobs:
           REKERNEL: ${{ inputs.REKERNEL }}
           TCPALGORITHM: ${{ inputs.TCPALGORITHM }}
           NETFILTER: ${{ inputs.NETFILTER }}
-          MLGO: ${{ inputs.MLGO }}
+          MLGO: ${{ env.MLGO }}
+          BORE: ${{ inputs.BORE }}
+          DEFAULTBORE: ${{ env.RUNTIMEBORE }}
    
       # Install Cache-ECS, Restore Compiler and ThinLTO Caches and Configure Build Cache
       - name: 📦 Install and Configure Cache
@@ -702,13 +718,13 @@ jobs:
           LINUXCNTSYNC: ${{ inputs.LINUXCNTSYNC }}
           # NoMount Kernel Integration
           NOMOUNT: ${{ inputs.NOMOUNT }}
-        
-      # Apply IPv6 NAT Compatibility Fix When NetFilter is Enabled
-      - name: 🔧 IPv6 NAT Fix Stage
-        uses: ./kernel_workspace/AndreiMikh-Kernel-Lab/.github/actions/IPv6-NAT-Fix
+
+      # Apply BORE Scheduler Composite Action
+      - name: 🧠 BORE Scheduler Integration
+        uses: ./kernel_workspace/AndreiMikh-Kernel-Lab/.github/actions/BORE-Scheduler
         with:
-          # Pass NetFilter Toggle
-          NETFILTER: ${{ inputs.NETFILTER }}
+          BORE: ${{ inputs.BORE }}
+          DEFAULTBORE: ${{ env.RUNTIMEBORE }}        
 
       # Configure Vendor Kernel Module Blacklist
       - name: 🚫 Configure Vendor Kernel Module(s) Blacklist
@@ -739,7 +755,7 @@ jobs:
           # Pass Rust Compiler Configuration
           ENABLERUSTC: ${{ steps.kernel-toolchain.outputs.enablerustc }}
           # Pass LLVM Machine Learning Guided Optimization (MLGO) Configuration
-          ENABLEMLGO: ${{ inputs.MLGO }}
+          ENABLEMLGO: ${{ env.MLGO }}
    
       # Manage Build Cache
       - name: 🗃️ Manage Build Cache
@@ -857,9 +873,11 @@ jobs:
           # Pass Netfilter Configuration
           NETFILTER: ${{ inputs.NETFILTER }}
           # Pass Requested LLVM MLGO Configuration
-          MLGO: ${{ inputs.MLGO }}
+          MLGO: ${{ env.MLGO }}
           # Pass Actual LLVM MLGO Compiler Support Status
           MLGOENABLED: ${{ steps.kernelbuild.outputs.mlgoenabled }}
+          BORE: ${{ inputs.BORE }}
+          DEFAULTBORE: ${{ env.RUNTIMEBORE }}
           # Pass Compiler Build Cache Configuration
           BUILDCCACHE: ${{ env.BUILDCCACHE }}
           # Pass Disk Space Cleanup Configuration
