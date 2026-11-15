@@ -60,15 +60,14 @@ jobs:
 
           if [[ ! -s "$SUSFS_PATCH" ]]; then
             echo "::error::Upstream SUSFS patch not found: $SUSFS_PATCH_RELATIVE on $SUSFS_BRANCH"
-            echo "Files available under kernel_patches/KernelSU:"
             find "$SUSFS_DIR/kernel_patches/KernelSU" -maxdepth 2 -type f -print 2>/dev/null || true
             exit 1
           fi
 
-          if ! grep -q '^diff --git ' "$SUSFS_PATCH"; then
+          grep -q '^diff --git ' "$SUSFS_PATCH" || {
             echo "::error::The upstream SUSFS patch is not a Git-format patch."
             exit 1
-          fi
+          }
 
           echo "sha=$SUSFS_SHA" >> "$GITHUB_OUTPUT"
           echo "patch=$SUSFS_PATCH" >> "$GITHUB_OUTPUT"
@@ -90,7 +89,7 @@ jobs:
           echo "SukiSU source ref: $SUKISU_REF"
           echo "SukiSU source commit: $SUKISU_SHA"
 
-      - name: Apply upstream SUSFS patch to SukiSU-Ultra
+      - name: Rebase upstream patch format and apply to SukiSU-Ultra
         id: port
         shell: bash
         run: |
@@ -100,18 +99,19 @@ jobs:
           SUSFS_PATCH="${{ steps.susfs.outputs.patch }}"
           SUKISU_SHA="${{ steps.sukisu.outputs.sha }}"
           OUTPUT_FILE="$GITHUB_WORKSPACE/$OUTPUT_PATCH"
-
-          # The SUSFS4KSU patch remains the source of truth.
-          # Rebase the include hunk that differs only because SukiSU inserted
-          # extension headers between selinux.h and infra/file_wrapper.h.
           PORTED_PATCH="$RUNNER_TEMP/susfs4ksu-sukisu.patch"
 
+          # The upstream diff targets KernelSU. SukiSU has a different
+          # dispatch.c include block, so adapt only that known include change.
+          # Recount all unified-diff hunk lengths after editing. This prevents
+          # a stale @@ line count from corrupting the generated patch.
           python3 - "$SUSFS_PATCH" "$PORTED_PATCH" <<'PY'
           from pathlib import Path
+          import re
           import sys
 
           source = Path(sys.argv[1]).read_text(encoding="utf-8")
-          target = Path(sys.argv[2])
+          output = Path(sys.argv[2])
 
           old_hunk = """@@ -20,7 +22,6 @@
            #include "manager/manager_identity.h"
@@ -123,7 +123,9 @@ jobs:
            #include "sulog/fd.h"
           """
 
-          new_hunks = """@@ -8,6 +8,8 @@
+          # Insert SUSFS headers next to the Linux headers, and remove the
+          # obsolete tp_marker include from the SukiSU-specific context.
+          replacement = """@@ -8,3 +8,5 @@
            #include <linux/uaccess.h>
            #include <linux/version.h>
            #include <linux/thread_info.h>
@@ -135,29 +137,87 @@ jobs:
            #include "policy/app_profile.h"
           """
 
-          if source.count(old_hunk) != 1:
+          count = source.count(old_hunk)
+          if count != 1:
               raise SystemExit(
-                  "Could not uniquely locate the upstream dispatch.c include hunk; "
-                  "the SUSFS patch format may have changed. Refusing to guess."
+                  f"Expected exactly one dispatch.c include hunk, found {count}; "
+                  "upstream patch changed. Refusing unsafe automatic rewrite."
               )
 
-          target.write_text(source.replace(old_hunk, new_hunks, 1), encoding="utf-8")
+          patched = source.replace(old_hunk, replacement, 1)
+
+          # Normalize every unified-diff hunk count from its actual body.
+          # This is intentionally done on the patch text, not source files.
+          lines = patched.splitlines(keepends=True)
+          normalized = []
+          i = 0
+          hunk_re = re.compile(
+              r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@(.*)$"
+          )
+
+          while i < len(lines):
+              line = lines[i]
+              match = hunk_re.match(line.rstrip("\r\n"))
+              if not match:
+                  normalized.append(line)
+                  i += 1
+                  continue
+
+              old_start, _, new_start, _, suffix = match.groups()
+              i += 1
+              body = []
+              old_count = 0
+              new_count = 0
+
+              while i < len(lines):
+                  current = lines[i]
+                  if current.startswith(("diff --git ", "@@ ")):
+                      break
+                  # Do not treat lines beginning with "---" or "+++" as
+                  # file headers here: they can be legitimate deleted or
+                  # added source lines inside a hunk.
+                  marker = current[:1]
+                  if marker == " ":
+                      old_count += 1
+                      new_count += 1
+                  elif marker == "-":
+                      old_count += 1
+                  elif marker == "+":
+                      new_count += 1
+                  elif current.startswith("\\ No newline at end of file"):
+                      pass
+                  else:
+                      # A line without a valid unified-diff prefix inside a
+                      # hunk means the source patch itself is malformed.
+                      raise SystemExit(
+                          "Malformed unified-diff body near: " + repr(current)
+                      )
+                  body.append(current)
+                  i += 1
+
+              normalized.append(
+                  f"@@ -{old_start},{old_count} +{new_start},{new_count} @@{suffix}\n"
+              )
+              normalized.extend(body)
+
+          output.write_text("".join(normalized), encoding="utf-8")
           PY
 
-          # Do not request a three-way merge: the SUSFS patch's base blobs are
-          # from KernelSU, not SukiSU, so those blobs are not expected in this repo.
-          if ! git -C "$UPSTREAM_DIR" apply --index "$PORTED_PATCH"; then
-            echo "::error::The upstream SUSFS patch still has source conflicts after the SukiSU include-hunk adaptation."
+          echo "Checking normalized patch syntax..."
+          git -C "$UPSTREAM_DIR" apply --check --recount --ignore-space-change --ignore-whitespace "$PORTED_PATCH" || {
+            echo "::error::Normalized SUSFS patch does not apply cleanly to SukiSU-Ultra."
+            echo "This is now a real source/context conflict, not a malformed hunk-count error."
             echo "SUSFS branch: $SUSFS_BRANCH"
             echo "SUSFS commit: ${{ steps.susfs.outputs.sha }}"
             echo "SukiSU ref: $SUKISU_REF"
             echo "SukiSU commit: $SUKISU_SHA"
-            echo
-            echo "Failed files and reject details:"
-            git -C "$UPSTREAM_DIR" status --short || true
+            git -C "$UPSTREAM_DIR" apply --verbose --recount --ignore-space-change --ignore-whitespace --reject "$PORTED_PATCH" || true
             find "$UPSTREAM_DIR" -name '*.rej' -type f -print -exec cat {} \; || true
             exit 1
-          fi
+          }
+
+          # Apply only after the full patch passes a clean-tree check.
+          git -C "$UPSTREAM_DIR" apply --index --recount --ignore-space-change --ignore-whitespace "$PORTED_PATCH"
 
           mkdir -p "$(dirname "$OUTPUT_FILE")"
           git -C "$UPSTREAM_DIR" diff --cached --binary "$SUKISU_SHA" -- > "$OUTPUT_FILE"
@@ -167,7 +227,7 @@ jobs:
             exit 1
           fi
 
-          # Verify the generated SukiSU-targeted patch against a clean checkout.
+          # Verify against a clean checkout of the exact SukiSU commit.
           git -C "$UPSTREAM_DIR" reset --hard "$SUKISU_SHA"
           git -C "$UPSTREAM_DIR" apply --check "$OUTPUT_FILE"
 
@@ -190,10 +250,10 @@ jobs:
             echo "- SukiSU ref: $SUKISU_REF"
             echo "- SukiSU commit: ${{ steps.sukisu.outputs.sha }}"
             echo "- Generated patch: $OUTPUT_PATCH"
-            echo "- Apply to SukiSU: passed"
+            echo "- Patch application: passed"
             echo "- Clean-checkout validation: passed"
             echo
-            echo "The selected SUSFS4KSU patch is the source of truth. The generated output is a SukiSU-Ultra-targeted patch."
+            echo "Patch application was validated; no kernel build or runtime test was performed."
           } > "$RUNNER_TEMP/sync-report.txt"
 
       - name: Upload sync report
@@ -217,7 +277,7 @@ jobs:
           commit-message: "sync: port upstream SUSFS patch to SukiSU-Ultra"
           title: "sync: port latest SUSFS patch to SukiSU-Ultra"
           body: |
-            This pull request was generated automatically from the selected SUSFS4KSU source branch.
+            This pull request was generated from the selected SUSFS4KSU source branch.
 
             - SUSFS source: https://github.com/AndreiMikh/susfs4ksu
             - SUSFS branch: `${{ env.SUSFS_BRANCH }}`
@@ -228,6 +288,6 @@ jobs:
             - SukiSU commit: `${{ steps.sukisu.outputs.sha }}`
             - Generated patch: `${{ env.OUTPUT_PATCH }}`
 
-            The upstream SUSFS patch is the source of truth. This workflow applies it to SukiSU-Ultra and publishes the resulting SukiSU-targeted diff only when application and clean-checkout validation pass.
+            The selected SUSFS4KSU patch remains the source of truth. The workflow publishes a SukiSU-targeted diff only after application and clean-checkout validation.
 
             This validates patch application only; it does not perform a kernel build or runtime test.
