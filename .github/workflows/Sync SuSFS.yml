@@ -1,0 +1,199 @@
+name: Sync SukiSU-Ultra SUSFS Patch
+
+on:
+  workflow_dispatch:
+    inputs:
+      susfs_branch:
+        description: SUSFS4KSU branch to fetch
+        required: true
+        default: gki-android15-6.6
+        type: choice
+        options:
+          - gki-android15-6.6
+          - gki-android14-6.1
+          - gki-android16-6.12
+      patch_path:
+        description: SukiSU-compatible SUSFS patch path inside this repository
+        required: true
+        default: kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch
+        type: string
+  schedule:
+    - cron: "0 3 * * *"
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: sync-sukisu-susfs-patch
+  cancel-in-progress: false
+
+jobs:
+  sync-patch:
+    name: Sync SUSFS patch against selected sources
+    runs-on: ubuntu-latest
+
+    env:
+      SUKISU_REPOSITORY: https://github.com/SukiSU-Ultra/SukiSU-Ultra.git
+      SUSFS_REPOSITORY: https://github.com/AndreiMikh/susfs4ksu.git
+      SUKISU_REF: main
+      SUSFS_BRANCH: ${{ inputs.susfs_branch || 'gki-android15-6.6' }}
+      PATCH_PATH: ${{ inputs.patch_path || 'kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch' }}
+      TARGET_BRANCH: LiquidAndrei
+
+    steps:
+      - name: Checkout kernel repository
+        uses: actions/checkout@v4
+        with:
+          ref: LiquidAndrei
+          fetch-depth: 0
+
+      - name: Validate patch path
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [[ ! -f "$PATCH_PATH" ]]; then
+            echo "::error::SukiSU-compatible patch not found: $PATCH_PATH"
+            exit 1
+          fi
+
+          if ! grep -q '^diff --git ' "$PATCH_PATH"; then
+            echo "::error::The selected file is not a Git-generated patch."
+            exit 1
+          fi
+
+      - name: Clone selected SUSFS4KSU branch
+        id: susfs
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          git clone --no-checkout "$SUSFS_REPOSITORY" "$RUNNER_TEMP/susfs4ksu"
+          git -C "$RUNNER_TEMP/susfs4ksu" fetch --no-tags origin "$SUSFS_BRANCH"
+          git -C "$RUNNER_TEMP/susfs4ksu" checkout --detach FETCH_HEAD
+
+          SUSFS_SHA="$(git -C "$RUNNER_TEMP/susfs4ksu" rev-parse HEAD)"
+          SUSFS_PATCH="$RUNNER_TEMP/susfs4ksu/kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch"
+
+          if [[ ! -f "$SUSFS_PATCH" ]]; then
+            echo "::error::The selected SUSFS4KSU branch does not contain kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch"
+            exit 1
+          fi
+
+          echo "sha=$SUSFS_SHA" >> "$GITHUB_OUTPUT"
+          echo "patch=$SUSFS_PATCH" >> "$GITHUB_OUTPUT"
+          echo "SUSFS4KSU branch: $SUSFS_BRANCH"
+          echo "SUSFS4KSU commit: $SUSFS_SHA"
+
+      - name: Clone selected SukiSU-Ultra source
+        id: sukisu
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          git clone --no-checkout --branch main "$SUKISU_REPOSITORY" "$RUNNER_TEMP/SukiSU-Ultra"
+          git -C "$RUNNER_TEMP/SukiSU-Ultra" checkout --detach origin/main
+
+          SUKISU_SHA="$(git -C "$RUNNER_TEMP/SukiSU-Ultra" rev-parse HEAD)"
+          echo "sha=$SUKISU_SHA" >> "$GITHUB_OUTPUT"
+          echo "SukiSU-Ultra ref: $SUKISU_REF"
+          echo "SukiSU-Ultra commit: $SUKISU_SHA"
+
+      - name: Reapply SukiSU-compatible SUSFS patch
+        id: rebase
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          UPSTREAM_DIR="$RUNNER_TEMP/SukiSU-Ultra"
+          PATCH_FILE="$GITHUB_WORKSPACE/$PATCH_PATH"
+          UPSTREAM_SHA="${{ steps.sukisu.outputs.sha }}"
+
+          # This is the SukiSU-adapted patch stored in this repository.
+          # The selected SUSFS4KSU branch is fetched and recorded separately;
+          # its stock KernelSU patch is not blindly substituted because it
+          # targets a different KernelSU source tree.
+          if ! git -C "$UPSTREAM_DIR" apply --3way --index "$PATCH_FILE"; then
+            {
+              echo "SukiSU-Ultra SUSFS patch synchronization failed."
+              echo "SukiSU ref: $SUKISU_REF"
+              echo "SukiSU commit: $UPSTREAM_SHA"
+              echo "SUSFS4KSU branch: $SUSFS_BRANCH"
+              echo "SUSFS4KSU commit: ${{ steps.susfs.outputs.sha }}"
+              echo "The existing patch in the repository was not modified."
+              echo "Resolve the source conflicts before updating the patch."
+            } | tee "$RUNNER_TEMP/sync-report.txt"
+            exit 1
+          fi
+
+          git -C "$UPSTREAM_DIR" diff --cached --binary "$UPSTREAM_SHA" -- > "$PATCH_FILE"
+
+          if [[ ! -s "$PATCH_FILE" ]]; then
+            echo "::error::The regenerated patch is empty. Refusing to continue."
+            exit 1
+          fi
+
+          git -C "$UPSTREAM_DIR" reset --hard "$UPSTREAM_SHA"
+          git -C "$UPSTREAM_DIR" apply --check "$PATCH_FILE"
+
+          echo "Patch regenerated and clean-apply validation passed."
+          echo "upstream_sha=$UPSTREAM_SHA" >> "$GITHUB_OUTPUT"
+
+      - name: Create sync report
+        if: success()
+        shell: bash
+        run: |
+          {
+            echo "SukiSU-Ultra / SUSFS4KSU patch synchronization"
+            echo
+            echo "- SukiSU repository: $SUKISU_REPOSITORY"
+            echo "- SukiSU ref: $SUKISU_REF"
+            echo "- SukiSU commit: ${{ steps.sukisu.outputs.sha }}"
+            echo "- SUSFS repository: $SUSFS_REPOSITORY"
+            echo "- SUSFS branch: $SUSFS_BRANCH"
+            echo "- SUSFS commit: ${{ steps.susfs.outputs.sha }}"
+            echo "- SukiSU-compatible patch: $PATCH_PATH"
+            echo "- Three-way reapplication: passed"
+            echo "- Clean apply validation: passed"
+            echo
+            echo "Note: the selected SUSFS4KSU branch is fetched and tracked. Its stock KernelSU patch is not automatically merged into SukiSU-Ultra because it targets a different source tree."
+          } > "$RUNNER_TEMP/sync-report.txt"
+
+      - name: Upload sync report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sukisu-susfs-sync-report
+          path: ${{ runner.temp }}/sync-report.txt
+          if-no-files-found: ignore
+          retention-days: 14
+
+      - name: Open pull request with updated patch
+        if: success()
+        uses: peter-evans/create-pull-request@v6
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          branch: automation/sync-sukisu-susfs-patch
+          base: LiquidAndrei
+          delete-branch: true
+          add-paths: ${{ env.PATCH_PATH }}
+          commit-message: "sync: rebase SUSFS patch onto latest SukiSU-Ultra"
+          title: "sync: update SukiSU-Ultra SUSFS patch"
+          body: |
+            This pull request was generated automatically.
+
+            The SukiSU-compatible SUSFS patch was reapplied to the selected SukiSU-Ultra source using Git's three-way apply, then regenerated against that upstream commit.
+
+            - SukiSU repository: https://github.com/SukiSU-Ultra/SukiSU-Ultra
+            - SukiSU ref: `${{ env.SUKISU_REF }}`
+            - SukiSU commit: `${{ steps.sukisu.outputs.sha }}`
+            - SUSFS4KSU repository: https://github.com/AndreiMikh/susfs4ksu
+            - SUSFS4KSU branch: `${{ env.SUSFS_BRANCH }}`
+            - SUSFS4KSU commit: `${{ steps.susfs.outputs.sha }}`
+            - Patch: `${{ env.PATCH_PATH }}`
+            - Clean-apply validation: passed
+
+            Note: the selected SUSFS4KSU branch is fetched and recorded. Its stock KernelSU patch is not blindly substituted into SukiSU-Ultra because it targets a different source tree.
+
+            Please review the diff before merging. This workflow validates patch application; it does not perform a kernel build or runtime test.
