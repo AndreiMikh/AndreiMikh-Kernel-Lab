@@ -101,20 +101,61 @@ jobs:
           SUKISU_SHA="${{ steps.sukisu.outputs.sha }}"
           OUTPUT_FILE="$GITHUB_WORKSPACE/$OUTPUT_PATCH"
 
-          # The SUSFS4KSU patch is the source of truth.
-          # Apply it directly to a clean SukiSU-Ultra main checkout.
-          if ! git -C "$UPSTREAM_DIR" apply --3way --index "$SUSFS_PATCH"; then
-            echo "::error::The selected upstream SUSFS patch does not apply cleanly to SukiSU-Ultra main."
+          # The SUSFS4KSU patch remains the source of truth.
+          # Rebase the include hunk that differs only because SukiSU inserted
+          # extension headers between selinux.h and infra/file_wrapper.h.
+          PORTED_PATCH="$RUNNER_TEMP/susfs4ksu-sukisu.patch"
+
+          python3 - "$SUSFS_PATCH" "$PORTED_PATCH" <<'PY'
+          from pathlib import Path
+          import sys
+
+          source = Path(sys.argv[1]).read_text(encoding="utf-8")
+          target = Path(sys.argv[2])
+
+          old_hunk = """@@ -20,7 +22,6 @@
+           #include "manager/manager_identity.h"
+           #include "selinux/selinux.h"
+           #include "infra/file_wrapper.h"
+          -#include "hook/tp_marker.h"
+           #include "policy/app_profile.h"
+           #include "sulog/event.h"
+           #include "sulog/fd.h"
+          """
+
+          new_hunks = """@@ -8,6 +8,8 @@
+           #include <linux/uaccess.h>
+           #include <linux/version.h>
+           #include <linux/thread_info.h>
+          +#include <linux/namei.h>
+          +#include <linux/susfs.h>
+          @@ -20,3 +22,2 @@
+           #include "infra/file_wrapper.h"
+          -#include "hook/tp_marker.h"
+           #include "policy/app_profile.h"
+          """
+
+          if source.count(old_hunk) != 1:
+              raise SystemExit(
+                  "Could not uniquely locate the upstream dispatch.c include hunk; "
+                  "the SUSFS patch format may have changed. Refusing to guess."
+              )
+
+          target.write_text(source.replace(old_hunk, new_hunks, 1), encoding="utf-8")
+          PY
+
+          # Do not request a three-way merge: the SUSFS patch's base blobs are
+          # from KernelSU, not SukiSU, so those blobs are not expected in this repo.
+          if ! git -C "$UPSTREAM_DIR" apply --index "$PORTED_PATCH"; then
+            echo "::error::The upstream SUSFS patch still has source conflicts after the SukiSU include-hunk adaptation."
             echo "SUSFS branch: $SUSFS_BRANCH"
             echo "SUSFS commit: ${{ steps.susfs.outputs.sha }}"
             echo "SukiSU ref: $SUKISU_REF"
             echo "SukiSU commit: $SUKISU_SHA"
             echo
-            echo "Git conflict summary:"
+            echo "Failed files and reject details:"
             git -C "$UPSTREAM_DIR" status --short || true
-            echo
-            echo "This is a source compatibility conflict, not a missing local patch."
-            echo "The workflow will not silently drop or rewrite upstream SUSFS changes."
+            find "$UPSTREAM_DIR" -name '*.rej' -type f -print -exec cat {} \; || true
             exit 1
           fi
 
