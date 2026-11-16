@@ -173,7 +173,7 @@ jobs:
           print("All referenced upstream base blobs are available.")
           PY
 
-      - name: Three-way apply upstream SUSFS patch and capture conflicts
+      - name: Three-way apply and resolve conflicts using upstream SUSFS
         id: port
         continue-on-error: true
         shell: bash
@@ -186,111 +186,163 @@ jobs:
           CONFLICT_DIR="$REPORT_DIR/conflicts"
           mkdir -p "$CONFLICT_DIR"
 
-          if git -C "$SUKISU_DIR" apply --3way --index "$SUSFS_PATCH"; then
-            echo "result=success" >> "$GITHUB_OUTPUT"
-            echo "Three-way application succeeded."
-          else
-            echo "result=conflict" >> "$GITHUB_OUTPUT"
-            echo "::warning::Three-way application produced conflicts."
+          APPLY_RESULT="success"
+          if ! git -C "$SUKISU_DIR" apply --3way --index "$SUSFS_PATCH"; then
+            APPLY_RESULT="conflict"
+            echo "::warning::Three-way merge conflicts detected. Resolving each conflict using the upstream SUSFS patch side (index stage 3)."
+          fi
 
-            git -C "$SUKISU_DIR" status --short \
-              > "$CONFLICT_DIR/status.txt" || true
-            git -C "$SUKISU_DIR" ls-files -u \
-              > "$CONFLICT_DIR/unmerged-index.txt" || true
-            git -C "$SUKISU_DIR" diff --cc \
-              > "$CONFLICT_DIR/conflict-diff.txt" || true
-            git -C "$SUKISU_DIR" diff \
-              > "$CONFLICT_DIR/working-diff.txt" || true
-            git -C "$SUKISU_DIR" diff --cached \
-              > "$CONFLICT_DIR/staged-diff.txt" || true
-
-            # Capture the actual index stages. Read the index through a
-            # subprocess so the Python heredoc remains available as stdin.
-            python3 - "$SUKISU_DIR" "$CONFLICT_DIR" <<'PY'
+          # With git apply --3way, stage 1 is the common base, stage 2 is
+          # the current SukiSU version, and stage 3 is the upstream patch
+          # result. The requested policy is to follow upstream SUSFS even
+          # when that replaces SukiSU-specific code in a conflicted file.
+          python3 - "$SUKISU_DIR" "$CONFLICT_DIR" <<'PYPORT'
           from pathlib import Path
+          import os
+          import shutil
           import subprocess
           import sys
 
           repo = sys.argv[1]
-          output = Path(sys.argv[2])
+          report = Path(sys.argv[2])
 
-          result = subprocess.run(
-              ["git", "-C", repo, "ls-files", "-u", "-z"],
-              check=True,
-              stdout=subprocess.PIPE,
-          )
+          def git(*args, check=True, data=None):
+              return subprocess.run(
+                  ["git", "-C", repo, *args],
+                  input=data,
+                  stdout=subprocess.PIPE,
+                  stderr=subprocess.PIPE,
+                  check=check,
+              )
 
+          raw = git("ls-files", "-u", "-z").stdout
           entries = {}
-          for record in result.stdout.split(b"\0"):
+          for record in raw.split(b"\0"):
               if not record:
                   continue
               metadata, raw_path = record.split(b"\t", 1)
-              _mode, blob, stage = metadata.decode().split()
+              mode, blob, stage = metadata.decode("ascii").split()
               path = raw_path.decode("utf-8", errors="surrogateescape")
-              entries.setdefault(path, {})[int(stage)] = blob
+              entries.setdefault(path, {})[int(stage)] = (mode, blob)
 
           if not entries:
-              print("No unmerged index entries were reported.")
+              print("No unresolved paths remain; no conflict resolution was needed.")
+              (report / "resolution-policy.txt").write_text(
+                  "No conflicts. Upstream SUSFS patch applied without conflict.\n",
+                  encoding="utf-8",
+              )
+              raise SystemExit(0)
 
-          for relative, stages in entries.items():
-              destination = output / relative
+          resolved = []
+          missing_upstream = []
+
+          for relative, stages in sorted(entries.items()):
+              destination = report / relative
               destination.parent.mkdir(parents=True, exist_ok=True)
-              print(f"Capturing conflict: {relative}")
 
+              # Preserve all available index stages and Git's conflicted file
+              # before changing the index or working tree.
               for stage in (1, 2, 3):
-                  blob = stages.get(stage)
-                  if not blob:
+                  item = stages.get(stage)
+                  if item is None:
                       continue
-                  data = subprocess.run(
-                      ["git", "-C", repo, "cat-file", "blob", blob],
-                      check=True,
-                      stdout=subprocess.PIPE,
-                  ).stdout
-                  Path(str(destination) + f".stage{stage}").write_bytes(data)
+                  mode, blob = item
+                  content = git("cat-file", "blob", blob).stdout
+                  Path(str(destination) + f".stage{stage}").write_bytes(content)
 
-              working = Path(repo) / relative
-              if working.is_file():
+              work_path = Path(repo) / relative
+              if work_path.is_symlink():
+                  (report / (relative + ".working")).write_text(
+                      os.readlink(work_path), encoding="utf-8"
+                  )
+              elif work_path.is_file():
                   Path(str(destination) + ".working").write_bytes(
-                      working.read_bytes()
+                      work_path.read_bytes()
                   )
 
-          print(f"Captured {len(entries)} conflicted paths.")
-          PY
+              upstream = stages.get(3)
+              if upstream is None:
+                  # Stage 3 absent means the upstream patch deletes this path.
+                  if work_path.is_dir() and not work_path.is_symlink():
+                      shutil.rmtree(work_path)
+                  elif work_path.exists() or work_path.is_symlink():
+                      work_path.unlink()
+                  git("update-index", "--force-remove", "--", relative)
+                  resolved.append(f"DELETE\t{relative}")
+                  print(f"Resolved using upstream deletion: {relative}")
+                  continue
 
-            cp "$SUSFS_PATCH" "$CONFLICT_DIR/upstream-susfs.patch"
+              mode, blob = upstream
+              content = git("cat-file", "blob", blob).stdout
 
-            {
-              echo "SukiSU SUSFS conflict diagnostic"
-              echo
-              echo "SukiSU commit: $SUKISU_SHA"
-              echo "SUSFS commit: ${{ steps.susfs.outputs.sha }}"
-              echo
-              echo "Unmerged paths:"
-              git -C "$SUKISU_DIR" diff --name-only --diff-filter=U || true
-              echo
-              echo "Unmerged index:"
-              git -C "$SUKISU_DIR" ls-files -u || true
-            } > "$CONFLICT_DIR/diagnostic.txt"
+              if work_path.exists() or work_path.is_symlink():
+                  if work_path.is_dir() and not work_path.is_symlink():
+                      shutil.rmtree(work_path)
+                  else:
+                      work_path.unlink()
 
-            echo "::error::Conflicts captured. No patch will be published."
-            exit 1
-          fi
+              work_path.parent.mkdir(parents=True, exist_ok=True)
+
+              if mode == "120000":
+                  target = os.fsdecode(content)
+                  os.symlink(target, work_path)
+              else:
+                  work_path.write_bytes(content)
+                  if mode == "100755":
+                      work_path.chmod(0o755)
+                  else:
+                      work_path.chmod(0o644)
+
+              # Remove all unmerged stages first, then install the exact
+              # upstream stage-3 blob as the resolved stage-0 entry.
+              git("update-index", "--force-remove", "--", relative, check=False)
+              git(
+                  "update-index",
+                  "--add",
+                  "--cacheinfo",
+                  f"{mode},{blob},{relative}",
+              )
+              resolved.append(f"UPSTREAM_STAGE_3\t{relative}\t{blob}")
+              print(f"Resolved using upstream SUSFS version: {relative}")
+
+          remaining = git("ls-files", "-u", "-z").stdout
+          if remaining:
+              raise SystemExit(
+                  "Unmerged index entries remain after upstream-side resolution."
+              )
+
+          (report / "resolved-files.tsv").write_text(
+              "\n".join(resolved) + "\n",
+              encoding="utf-8",
+          )
+          (report / "resolution-policy.txt").write_text(
+              "Conflict policy: prefer upstream SUSFS patch result (Git index stage 3).\n"
+              "This intentionally replaces SukiSU-side content in conflicted files.\n"
+              "Stage 1 = common base; stage 2 = SukiSU side; stage 3 = upstream SUSFS side.\n",
+              encoding="utf-8",
+          )
+          print(f"Resolved {len(resolved)} conflicted paths using upstream stage 3/deletions.")
+          PYPORT
 
           if [[ -n "$(git -C "$SUKISU_DIR" ls-files -u)" ]]; then
-            echo "::error::Unmerged index entries remain after application."
+            echo "::error::Unmerged index entries remain after conflict resolution."
+            git -C "$SUKISU_DIR" ls-files -u
+            echo "result=failed" >> "$GITHUB_OUTPUT"
             exit 1
           fi
 
           if ! git -C "$SUKISU_DIR" diff --quiet; then
-            echo "::error::Unexpected unstaged changes remain after --index application."
+            echo "::error::Unexpected unstaged changes remain after conflict resolution."
             git -C "$SUKISU_DIR" diff --stat
+            echo "result=failed" >> "$GITHUB_OUTPUT"
             exit 1
           fi
 
           git -C "$SUKISU_DIR" diff --cached --check
 
           if git -C "$SUKISU_DIR" diff --cached --quiet "$SUKISU_SHA"; then
-            echo "::error::The upstream patch produced no changes."
+            echo "::error::The upstream SUSFS patch produced no changes."
+            echo "result=failed" >> "$GITHUB_OUTPUT"
             exit 1
           fi
 
@@ -302,11 +354,14 @@ jobs:
 
           if [[ ! -s "$OUTPUT_FILE" ]]; then
             echo "::error::Generated SukiSU patch is empty."
+            echo "result=failed" >> "$GITHUB_OUTPUT"
             exit 1
           fi
 
-          echo "Generated patch: $OUTPUT_PATCH"
+          echo "result=success" >> "$GITHUB_OUTPUT"
+          echo "Generated SukiSU patch: $OUTPUT_PATCH"
           echo "Patch size: $(wc -c < "$OUTPUT_FILE") bytes"
+          echo "Conflict policy: upstream SUSFS stage 3 takes precedence."
 
       - name: Verify generated patch on pristine SukiSU checkout
         id: verify
@@ -371,7 +426,8 @@ jobs:
             echo "Three-way application: ${PORT_RESULT:-not completed}"
             echo "Clean-checkout verification: ${VERIFY_RESULT:-not completed}"
             echo
-            echo "This workflow captures conflicts; it does not automatically translate conflicting KernelSU code into SukiSU-specific implementations."
+            echo "Conflict policy: upstream SUSFS stage 3 takes precedence over SukiSU for conflicted files."
+            echo "See conflicts/resolved-files.tsv and conflicts/resolution-policy.txt for details."
             echo "Patch application does not prove kernel compilation or runtime compatibility."
           } > "$REPORT"
 
@@ -406,5 +462,6 @@ jobs:
             - SukiSU commit: `${{ steps.sukisu.outputs.sha }}`
             - Generated patch: `${{ env.OUTPUT_PATCH }}`
 
-            The patch was verified against a pristine SukiSU checkout.
-            This verifies patch application only; it does not prove kernel build or runtime compatibility.
+            Conflicts, when present, were resolved by selecting the upstream SUSFS patch side (Git index stage 3). This intentionally may replace SukiSU-specific features in conflicted files.
+
+            The generated patch was verified against a pristine SukiSU checkout. This verifies patch application only; it does not prove kernel build or runtime compatibility.
