@@ -1,4 +1,3 @@
-
 name: Sync Upstream SUSFS Patch to SukiSU-Ultra
 
 on:
@@ -13,7 +12,6 @@ on:
           - gki-android15-6.6
           - gki-android14-6.1
           - gki-android16-6.12
-
   schedule:
     - cron: "0 3 * * *"
 
@@ -33,14 +31,11 @@ jobs:
     env:
       SUKISU_REPOSITORY: https://github.com/SukiSU-Ultra/SukiSU-Ultra.git
       SUKISU_REF: main
-
       KERNELSU_BASE_REPOSITORY: https://github.com/tiann/KernelSU.git
       KERNELSU_BASE_REF: main
-
       SUSFS_REPOSITORY: https://github.com/AndreiMikh/susfs4ksu.git
       SUSFS_BRANCH: ${{ inputs.susfs_branch || 'gki-android15-6.6' }}
       SUSFS_PATCH_RELATIVE: kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch
-
       OUTPUT_PATCH: kernel_patches/SukiSU-Ultra/10_enable_susfs_for_ksu.patch
       TARGET_BRANCH: LiquidAndrei
 
@@ -51,11 +46,10 @@ jobs:
           ref: LiquidAndrei
           fetch-depth: 0
 
-      - name: Initialize diagnostic directory
+      - name: Initialize report directory
         shell: bash
         run: |
           set -euo pipefail
-
           mkdir -p "$RUNNER_TEMP/susfs-report/conflicts"
 
       - name: Fetch upstream SUSFS source patch
@@ -65,7 +59,6 @@ jobs:
           set -euo pipefail
 
           SUSFS_DIR="$RUNNER_TEMP/susfs4ksu"
-
           git clone --no-checkout "$SUSFS_REPOSITORY" "$SUSFS_DIR"
           git -C "$SUSFS_DIR" fetch --no-tags origin "$SUSFS_BRANCH"
           git -C "$SUSFS_DIR" checkout --detach FETCH_HEAD
@@ -74,14 +67,14 @@ jobs:
           SUSFS_PATCH="$SUSFS_DIR/$SUSFS_PATCH_RELATIVE"
 
           if [[ ! -s "$SUSFS_PATCH" ]]; then
-            echo "::error::Upstream SUSFS patch not found."
+            echo "::error::Upstream SUSFS patch not found: $SUSFS_PATCH_RELATIVE"
             exit 1
           fi
 
-          grep -q '^diff --git ' "$SUSFS_PATCH" || {
-            echo "::error::Invalid Git-format SUSFS patch."
+          if ! grep -q '^diff --git ' "$SUSFS_PATCH"; then
+            echo "::error::Upstream SUSFS file is not a Git-format patch."
             exit 1
-          }
+          fi
 
           echo "sha=$SUSFS_SHA" >> "$GITHUB_OUTPUT"
           echo "patch=$SUSFS_PATCH" >> "$GITHUB_OUTPUT"
@@ -91,7 +84,7 @@ jobs:
             echo "SUSFS branch: $SUSFS_BRANCH"
             echo "SUSFS commit: $SUSFS_SHA"
             echo "SUSFS patch: $SUSFS_PATCH_RELATIVE"
-          } | tee "$RUNNER_TEMP/susfs-report/upstream.txt"
+          } > "$RUNNER_TEMP/susfs-report/upstream.txt"
 
       - name: Fetch SukiSU-Ultra main
         id: sukisu
@@ -100,14 +93,10 @@ jobs:
           set -euo pipefail
 
           SUKISU_DIR="$RUNNER_TEMP/SukiSU-Ultra"
-
-          git clone --no-tags --no-single-branch \
-            "$SUKISU_REPOSITORY" "$SUKISU_DIR"
-
+          git clone --no-tags --no-single-branch "$SUKISU_REPOSITORY" "$SUKISU_DIR"
           git -C "$SUKISU_DIR" checkout --detach "origin/$SUKISU_REF"
 
           SUKISU_SHA="$(git -C "$SUKISU_DIR" rev-parse HEAD)"
-
           echo "sha=$SUKISU_SHA" >> "$GITHUB_OUTPUT"
           echo "SUKISU_DIR=$SUKISU_DIR" >> "$GITHUB_ENV"
           echo "SUKISU_SHA=$SUKISU_SHA" >> "$GITHUB_ENV"
@@ -116,7 +105,7 @@ jobs:
             echo "SukiSU repository: $SUKISU_REPOSITORY"
             echo "SukiSU ref: $SUKISU_REF"
             echo "SukiSU commit: $SUKISU_SHA"
-          } | tee "$RUNNER_TEMP/susfs-report/sukisu.txt"
+          } > "$RUNNER_TEMP/susfs-report/sukisu.txt"
 
       - name: Import original KernelSU base objects
         id: base
@@ -127,17 +116,14 @@ jobs:
           git -C "$SUKISU_DIR" fetch --no-tags \
             "$KERNELSU_BASE_REPOSITORY" "$KERNELSU_BASE_REF"
 
-          KERNELSU_BASE_SHA="$(
-            git -C "$SUKISU_DIR" rev-parse FETCH_HEAD
-          )"
-
+          KERNELSU_BASE_SHA="$(git -C "$SUKISU_DIR" rev-parse FETCH_HEAD)"
           echo "sha=$KERNELSU_BASE_SHA" >> "$GITHUB_OUTPUT"
 
           {
             echo "KernelSU base repository: $KERNELSU_BASE_REPOSITORY"
             echo "KernelSU base ref: $KERNELSU_BASE_REF"
             echo "KernelSU base commit: $KERNELSU_BASE_SHA"
-          } | tee "$RUNNER_TEMP/susfs-report/kernel-su-base.txt"
+          } > "$RUNNER_TEMP/susfs-report/kernel-su-base.txt"
 
       - name: Verify upstream patch base blobs
         shell: bash
@@ -154,58 +140,40 @@ jobs:
 
           patch_path = Path(sys.argv[1])
           repo = sys.argv[2]
-
-          patch = patch_path.read_text(
-              encoding="utf-8",
-              errors="replace"
-          )
+          patch = patch_path.read_text(encoding="utf-8", errors="replace")
 
           base_ids = re.findall(
               r"^index ([0-9a-f]+)\.\.[0-9a-f]+(?: [0-7]{6})?$",
               patch,
-              re.M
+              re.M,
           )
 
           if not base_ids:
-              raise SystemExit(
-                  "No Git blob index entries found in upstream patch."
-              )
+              raise SystemExit("No Git blob index entries found in upstream patch.")
 
           missing = []
-
           for blob in sorted(set(base_ids)):
-              result = subprocess.run(
-                  [
-                      "git", "-C", repo,
-                      "cat-file", "-e",
-                      f"{blob}^{{blob}}"
-                  ],
+              check = subprocess.run(
+                  ["git", "-C", repo, "cat-file", "-e", f"{blob}^{{blob}}"],
                   stdout=subprocess.DEVNULL,
-                  stderr=subprocess.DEVNULL
+                  stderr=subprocess.DEVNULL,
               )
-
-              if result.returncode:
+              if check.returncode:
                   missing.append(blob)
 
-          print(
-              f"Found {len(set(base_ids))} distinct base blobs."
-          )
-
+          print(f"Found {len(set(base_ids))} distinct upstream base blobs.")
           if missing:
               print("Missing original blobs:")
-
               for blob in missing:
                   print(f"  {blob}")
-
               raise SystemExit(
-                  "Original patch base blobs are unavailable. "
-                  "Cannot perform a reliable three-way application."
+                  "KernelSU history does not contain every required patch base blob."
               )
 
-          print("All original patch base blobs are available.")
+          print("All referenced upstream base blobs are available.")
           PY
 
-      - name: Three-way apply and capture conflicts
+      - name: Three-way apply upstream SUSFS patch and capture conflicts
         id: port
         continue-on-error: true
         shell: bash
@@ -216,39 +184,28 @@ jobs:
 
           REPORT_DIR="$RUNNER_TEMP/susfs-report"
           CONFLICT_DIR="$REPORT_DIR/conflicts"
-
           mkdir -p "$CONFLICT_DIR"
 
-          if git -C "$SUKISU_DIR" apply \
-            --3way --index "$SUSFS_PATCH"; then
-
-            echo "Three-way application succeeded."
-
+          if git -C "$SUKISU_DIR" apply --3way --index "$SUSFS_PATCH"; then
             echo "result=success" >> "$GITHUB_OUTPUT"
-            echo "PORT_RESULT=success" >> "$GITHUB_ENV"
-
+            echo "Three-way application succeeded."
           else
-            echo "::warning::SukiSU source conflicts detected."
-
             echo "result=conflict" >> "$GITHUB_OUTPUT"
-            echo "PORT_RESULT=conflict" >> "$GITHUB_ENV"
+            echo "::warning::Three-way application produced conflicts."
 
             git -C "$SUKISU_DIR" status --short \
               > "$CONFLICT_DIR/status.txt" || true
-
             git -C "$SUKISU_DIR" ls-files -u \
               > "$CONFLICT_DIR/unmerged-index.txt" || true
-
             git -C "$SUKISU_DIR" diff --cc \
               > "$CONFLICT_DIR/conflict-diff.txt" || true
-
             git -C "$SUKISU_DIR" diff \
               > "$CONFLICT_DIR/working-diff.txt" || true
-
             git -C "$SUKISU_DIR" diff --cached \
               > "$CONFLICT_DIR/staged-diff.txt" || true
 
-            git -C "$SUKISU_DIR" ls-files -u -z |
+            # Capture the actual index stages. Read the index through a
+            # subprocess so the Python heredoc remains available as stdin.
             python3 - "$SUKISU_DIR" "$CONFLICT_DIR" <<'PY'
           from pathlib import Path
           import subprocess
@@ -257,53 +214,50 @@ jobs:
           repo = sys.argv[1]
           output = Path(sys.argv[2])
 
-          raw = sys.stdin.buffer.read()
-          paths = sorted({
-              item.decode("utf-8", errors="surrogateescape")
-              for item in raw.split(b"\0")
-              if item
-          })
+          result = subprocess.run(
+              ["git", "-C", repo, "ls-files", "-u", "-z"],
+              check=True,
+              stdout=subprocess.PIPE,
+          )
 
-          if not paths:
-              print("No unmerged index paths were reported.")
-              raise SystemExit(0)
+          entries = {}
+          for record in result.stdout.split(b"\0"):
+              if not record:
+                  continue
+              metadata, raw_path = record.split(b"\t", 1)
+              _mode, blob, stage = metadata.decode().split()
+              path = raw_path.decode("utf-8", errors="surrogateescape")
+              entries.setdefault(path, {})[int(stage)] = blob
 
-          for relative in paths:
+          if not entries:
+              print("No unmerged index entries were reported.")
+
+          for relative, stages in entries.items():
               destination = output / relative
-              destination.parent.mkdir(
-                  parents=True,
-                  exist_ok=True
-              )
-
-              print(f"Capturing: {relative}")
+              destination.parent.mkdir(parents=True, exist_ok=True)
+              print(f"Capturing conflict: {relative}")
 
               for stage in (1, 2, 3):
-                  result = subprocess.run(
-                      [
-                          "git", "-C", repo,
-                          "show",
-                          f":{stage}:{relative}"
-                      ],
+                  blob = stages.get(stage)
+                  if not blob:
+                      continue
+                  data = subprocess.run(
+                      ["git", "-C", repo, "cat-file", "blob", blob],
+                      check=True,
                       stdout=subprocess.PIPE,
-                      stderr=subprocess.DEVNULL
+                  ).stdout
+                  Path(str(destination) + f".stage{stage}").write_bytes(data)
+
+              working = Path(repo) / relative
+              if working.is_file():
+                  Path(str(destination) + ".working").write_bytes(
+                      working.read_bytes()
                   )
 
-                  if result.returncode == 0:
-                      stage_file = Path(
-                          str(destination) + f".stage{stage}"
-                      )
-                      stage_file.write_bytes(result.stdout)
-
-              working_file = Path(repo) / relative
-
-              if working_file.is_file():
-                  Path(
-                      str(destination) + ".working"
-                  ).write_bytes(working_file.read_bytes())
+          print(f"Captured {len(entries)} conflicted paths.")
           PY
 
-            cp "$SUSFS_PATCH" \
-              "$CONFLICT_DIR/upstream-susfs.patch"
+            cp "$SUSFS_PATCH" "$CONFLICT_DIR/upstream-susfs.patch"
 
             {
               echo "SukiSU SUSFS conflict diagnostic"
@@ -312,47 +266,50 @@ jobs:
               echo "SUSFS commit: ${{ steps.susfs.outputs.sha }}"
               echo
               echo "Unmerged paths:"
-              git -C "$SUKISU_DIR" diff \
-                --name-only --diff-filter=U || true
+              git -C "$SUKISU_DIR" diff --name-only --diff-filter=U || true
               echo
               echo "Unmerged index:"
               git -C "$SUKISU_DIR" ls-files -u || true
             } > "$CONFLICT_DIR/diagnostic.txt"
 
-            echo "::error::Conflicts captured. Automatic patch generation stopped."
+            echo "::error::Conflicts captured. No patch will be published."
             exit 1
           fi
 
           if [[ -n "$(git -C "$SUKISU_DIR" ls-files -u)" ]]; then
-            echo "::error::Unmerged index entries remain."
+            echo "::error::Unmerged index entries remain after application."
+            exit 1
+          fi
+
+          if ! git -C "$SUKISU_DIR" diff --quiet; then
+            echo "::error::Unexpected unstaged changes remain after --index application."
+            git -C "$SUKISU_DIR" diff --stat
             exit 1
           fi
 
           git -C "$SUKISU_DIR" diff --cached --check
 
-          if git -C "$SUKISU_DIR" diff --cached \
-            --quiet "$SUKISU_SHA"; then
+          if git -C "$SUKISU_DIR" diff --cached --quiet "$SUKISU_SHA"; then
             echo "::error::The upstream patch produced no changes."
             exit 1
           fi
 
           OUTPUT_FILE="$GITHUB_WORKSPACE/$OUTPUT_PATCH"
-
           mkdir -p "$(dirname "$OUTPUT_FILE")"
 
-          git -C "$SUKISU_DIR" diff \
-            --cached --binary --full-index "$SUKISU_SHA" \
-            -- > "$OUTPUT_FILE"
+          git -C "$SUKISU_DIR" diff --cached --binary --full-index \
+            "$SUKISU_SHA" -- > "$OUTPUT_FILE"
 
           if [[ ! -s "$OUTPUT_FILE" ]]; then
-            echo "::error::Generated patch is empty."
+            echo "::error::Generated SukiSU patch is empty."
             exit 1
           fi
 
           echo "Generated patch: $OUTPUT_PATCH"
           echo "Patch size: $(wc -c < "$OUTPUT_FILE") bytes"
 
-      - name: Verify generated patch on pristine SukiSU
+      - name: Verify generated patch on pristine SukiSU checkout
+        id: verify
         if: steps.port.outputs.result == 'success'
         shell: bash
         run: |
@@ -361,69 +318,61 @@ jobs:
           VERIFY_DIR="$RUNNER_TEMP/SukiSU-Ultra-Verify"
           OUTPUT_FILE="$GITHUB_WORKSPACE/$OUTPUT_PATCH"
 
-          git -C "$SUKISU_DIR" worktree add \
-            --detach "$VERIFY_DIR" "$SUKISU_SHA"
+          git -C "$SUKISU_DIR" worktree add --detach \
+            "$VERIFY_DIR" "$SUKISU_SHA"
 
           git -C "$VERIFY_DIR" apply --check "$OUTPUT_FILE"
           git -C "$VERIFY_DIR" apply --index "$OUTPUT_FILE"
-
           git -C "$VERIFY_DIR" diff --cached --check
 
-          SOURCE_TREE="$(
-            git -C "$SUKISU_DIR" write-tree
-          )"
-
-          VERIFY_TREE="$(
-            git -C "$VERIFY_DIR" write-tree
-          )"
+          SOURCE_TREE="$(git -C "$SUKISU_DIR" write-tree)"
+          VERIFY_TREE="$(git -C "$VERIFY_DIR" write-tree)"
 
           if [[ "$SOURCE_TREE" != "$VERIFY_TREE" ]]; then
-            echo "::error::Clean-checkout verification failed."
-            echo "Expected: $SOURCE_TREE"
-            echo "Actual: $VERIFY_TREE"
+            echo "::error::Clean-checkout verification did not reproduce the merged tree."
+            echo "Expected tree: $SOURCE_TREE"
+            echo "Actual tree: $VERIFY_TREE"
             exit 1
           fi
 
-          echo "Clean SukiSU patch verification passed."
-
-          echo "verification=passed" >> "$GITHUB_ENV"
+          echo "result=passed" >> "$GITHUB_OUTPUT"
+          echo "Generated patch applies cleanly and reproduces the merged tree."
 
       - name: Create sync report
         if: always()
         shell: bash
+        env:
+          SUSFS_SHA: ${{ steps.susfs.outputs.sha }}
+          SUKISU_SHA: ${{ steps.sukisu.outputs.sha }}
+          KERNELSU_BASE_SHA: ${{ steps.base.outputs.sha }}
+          PORT_RESULT: ${{ steps.port.outputs.result }}
+          VERIFY_RESULT: ${{ steps.verify.outputs.result }}
         run: |
           set -euo pipefail
 
           REPORT="$RUNNER_TEMP/susfs-report/report.txt"
-
           {
             echo "SukiSU-Ultra SUSFS port report"
             echo
             echo "SUSFS repository: $SUSFS_REPOSITORY"
             echo "SUSFS branch: $SUSFS_BRANCH"
-            echo "SUSFS commit: ${{ steps.susfs.outputs.sha }}"
+            echo "SUSFS commit: ${SUSFS_SHA:-not fetched}"
+            echo "SUSFS patch: $SUSFS_PATCH_RELATIVE"
             echo
             echo "SukiSU repository: $SUKISU_REPOSITORY"
             echo "SukiSU ref: $SUKISU_REF"
-            echo "SukiSU commit: ${{ steps.sukisu.outputs.sha }}"
+            echo "SukiSU commit: ${SUKISU_SHA:-not fetched}"
             echo
-            echo "KernelSU base: $KERNELSU_BASE_REPOSITORY"
+            echo "KernelSU base repository: $KERNELSU_BASE_REPOSITORY"
             echo "KernelSU base ref: $KERNELSU_BASE_REF"
-            echo "KernelSU base commit: ${{ steps.base.outputs.sha }}"
+            echo "KernelSU base commit: ${KERNELSU_BASE_SHA:-not fetched}"
             echo
             echo "Output patch: $OUTPUT_PATCH"
-            echo "Port result: ${{ steps.port.outputs.result }}"
-            echo "Verification: ${verification:-not completed}"
+            echo "Three-way application: ${PORT_RESULT:-not completed}"
+            echo "Clean-checkout verification: ${VERIFY_RESULT:-not completed}"
             echo
-            if [[ "${{ steps.port.outputs.result }}" == "success" ]]; then
-              echo "Three-way application: passed"
-              echo "Clean-checkout verification: see verification result above"
-            else
-              echo "Three-way application: conflicts detected or step failed"
-              echo "Conflict source files are included when available."
-            fi
-            echo
-            echo "Patch application does not prove kernel build or runtime compatibility."
+            echo "This workflow captures conflicts; it does not automatically translate conflicting KernelSU code into SukiSU-specific implementations."
+            echo "Patch application does not prove kernel compilation or runtime compatibility."
           } > "$REPORT"
 
       - name: Upload SUSFS port diagnostics
@@ -436,7 +385,7 @@ jobs:
           retention-days: 14
 
       - name: Open pull request with generated patch
-        if: success() && steps.port.outputs.result == 'success' && env.verification == 'passed'
+        if: success() && steps.port.outputs.result == 'success' && steps.verify.outputs.result == 'passed'
         uses: peter-evans/create-pull-request@v6
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
@@ -449,14 +398,13 @@ jobs:
           body: |
             Automatically generated SukiSU-Ultra SUSFS patch.
 
-            SUSFS source:
-            https://github.com/AndreiMikh/susfs4ksu
+            - SUSFS source: https://github.com/AndreiMikh/susfs4ksu
+            - SUSFS branch: `${{ env.SUSFS_BRANCH }}`
+            - SUSFS commit: `${{ steps.susfs.outputs.sha }}`
+            - KernelSU base: https://github.com/tiann/KernelSU (`${{ env.KERNELSU_BASE_REF }}`)
+            - SukiSU source: https://github.com/SukiSU-Ultra/SukiSU-Ultra (`${{ env.SUKISU_REF }}`)
+            - SukiSU commit: `${{ steps.sukisu.outputs.sha }}`
+            - Generated patch: `${{ env.OUTPUT_PATCH }}`
 
-            SukiSU source:
-            https://github.com/SukiSU-Ultra/SukiSU-Ultra
-
-            The workflow verifies the generated patch against a pristine
-            SukiSU checkout before opening this pull request.
-
-            This validates patch application only. Kernel compilation
-            and runtime testing are separate requirements.
+            The patch was verified against a pristine SukiSU checkout.
+            This verifies patch application only; it does not prove kernel build or runtime compatibility.
