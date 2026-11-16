@@ -1,268 +1,290 @@
-
-name: 🧬 Update SuSFS Enable Features Patch
+name: Sync Upstream SUSFS Patch to SukiSU-Ultra
 
 on:
   workflow_dispatch:
+    inputs:
+      susfs_branch:
+        description: SUSFS4KSU branch to use as the source of truth
+        required: true
+        default: gki-android15-6.6
+        type: choice
+        options:
+          - gki-android15-6.6
+          - gki-android14-6.1
+          - gki-android16-6.12
   schedule:
-    - cron: "17 3 * * *"
+    - cron: "0 3 * * *"
 
 permissions:
   contents: write
+  pull-requests: write
 
 concurrency:
-  group: update-susfs-enable-features
+  group: sync-sukisu-susfs-patch
   cancel-in-progress: false
 
 jobs:
-  update:
-    name: 🧬 Sync Upstream SUSFS With SukiSU-Ultra
-    runs-on: ubuntu-24.04
+  sync-patch:
+    name: Three-way port upstream SUSFS changes to SukiSU-Ultra
+    runs-on: ubuntu-latest
+
+    env:
+      SUKISU_REPOSITORY: https://github.com/SukiSU-Ultra/SukiSU-Ultra.git
+      SUKISU_REF: main
+      KERNELSU_BASE_REPOSITORY: https://github.com/tiann/KernelSU.git
+      KERNELSU_BASE_REF: main
+      SUSFS_REPOSITORY: https://github.com/AndreiMikh/susfs4ksu.git
+      SUSFS_BRANCH: ${{ inputs.susfs_branch || 'gki-android15-6.6' }}
+      SUSFS_PATCH_RELATIVE: kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch
+      OUTPUT_PATCH: kernel_patches/SukiSU-Ultra/10_enable_susfs_for_ksu.patch
+      TARGET_BRANCH: LiquidAndrei
 
     steps:
-      # Checkout Your Kernel Repository
-      - name: 📥 Checkout Kernel Repository
-        uses: actions/checkout@v7
+      - name: Checkout kernel repository
+        uses: actions/checkout@v4
         with:
-          path: repo
-          ref: ${{ github.ref }}
+          ref: LiquidAndrei
           fetch-depth: 0
 
-      # Clone Latest SukiSU-Ultra Source
-      - name: 📥 Clone Latest SukiSU-Ultra
-        uses: actions/checkout@v7
-        with:
-          repository: SukiSU-Ultra/SukiSU-Ultra
-          ref: main
-          path: SukiSU-Ultra
-          fetch-depth: 0
-          persist-credentials: false
-
-      # Download Upstream SUSFS Repository
-      - name: 📥 Clone Upstream SUSFS
-        uses: actions/checkout@v7
-        with:
-          repository: AndreiMikh/susfs4ksu
-          ref: gki-android15-6.6
-          path: susfs4ksu
-          fetch-depth: 1
-          persist-credentials: false
-
-      # Record Source Revisions
-      - name: 🪪 Record Source Commits
-        id: source
+      - name: Fetch upstream SUSFS source patch
+        id: susfs
+        shell: bash
         run: |
           set -euo pipefail
 
-          SUSFS_COMMIT=$(git -C susfs4ksu rev-parse --short=7 HEAD)
-          SUSFS_FULL=$(git -C susfs4ksu rev-parse HEAD)
+          SUSFS_DIR="$RUNNER_TEMP/susfs4ksu"
+          git clone --no-checkout "$SUSFS_REPOSITORY" "$SUSFS_DIR"
+          git -C "$SUSFS_DIR" fetch --no-tags origin "$SUSFS_BRANCH"
+          git -C "$SUSFS_DIR" checkout --detach FETCH_HEAD
 
-          SUKISU_COMMIT=$(git -C SukiSU-Ultra rev-parse --short=7 HEAD)
-          SUKISU_FULL=$(git -C SukiSU-Ultra rev-parse HEAD)
+          SUSFS_SHA="$(git -C "$SUSFS_DIR" rev-parse HEAD)"
+          SUSFS_PATCH="$SUSFS_DIR/$SUSFS_PATCH_RELATIVE"
 
-          echo "susfs_commit=${SUSFS_COMMIT}" >> "$GITHUB_OUTPUT"
-          echo "susfs_full=${SUSFS_FULL}" >> "$GITHUB_OUTPUT"
+          if [[ ! -s "$SUSFS_PATCH" ]]; then
+            echo "::error::Upstream SUSFS patch not found: $SUSFS_PATCH_RELATIVE"
+            exit 1
+          fi
 
-          echo "sukisu_commit=${SUKISU_COMMIT}" >> "$GITHUB_OUTPUT"
-          echo "sukisu_full=${SUKISU_FULL}" >> "$GITHUB_OUTPUT"
+          grep -q '^diff --git ' "$SUSFS_PATCH" || {
+            echo "::error::The upstream SUSFS file is not a Git-format patch."
+            exit 1
+          }
 
+          echo "sha=$SUSFS_SHA" >> "$GITHUB_OUTPUT"
+          echo "patch=$SUSFS_PATCH" >> "$GITHUB_OUTPUT"
+          echo "SUSFS source: $SUSFS_REPOSITORY"
+          echo "SUSFS branch: $SUSFS_BRANCH"
+          echo "SUSFS commit: $SUSFS_SHA"
+
+      - name: Fetch SukiSU-Ultra main
+        id: sukisu
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          SUKISU_DIR="$RUNNER_TEMP/SukiSU-Ultra"
+          git clone --no-tags --no-single-branch "$SUKISU_REPOSITORY" "$SUKISU_DIR"
+          git -C "$SUKISU_DIR" checkout --detach "origin/$SUKISU_REF"
+
+          SUKISU_SHA="$(git -C "$SUKISU_DIR" rev-parse HEAD)"
+          echo "sha=$SUKISU_SHA" >> "$GITHUB_OUTPUT"
+          echo "SUKISU_DIR=$SUKISU_DIR" >> "$GITHUB_ENV"
+          echo "SUKISU_SHA=$SUKISU_SHA" >> "$GITHUB_ENV"
+          echo "SukiSU ref: $SUKISU_REF"
+          echo "SukiSU commit: $SUKISU_SHA"
+
+      - name: Import original KernelSU base objects
+        id: base
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          # The SUSFS patch was generated against tiann/KernelSU. Its index
+          # hashes identify the original pre-patch blobs. Fetching this history
+          # places those blobs in the SukiSU repository's object database so
+          # git apply --3way can perform a real three-way merge.
+          git -C "$SUKISU_DIR" fetch --no-tags "$KERNELSU_BASE_REPOSITORY" "$KERNELSU_BASE_REF"
+
+          KERNELSU_BASE_SHA="$(git -C "$SUKISU_DIR" rev-parse FETCH_HEAD)"
+          echo "sha=$KERNELSU_BASE_SHA" >> "$GITHUB_OUTPUT"
+          echo "KernelSU base repository: $KERNELSU_BASE_REPOSITORY"
+          echo "KernelSU base ref: $KERNELSU_BASE_REF"
+          echo "KernelSU base commit: $KERNELSU_BASE_SHA"
+
+      - name: Verify every upstream patch base blob is available
+        shell: bash
+        env:
+          SUSFS_PATCH: ${{ steps.susfs.outputs.patch }}
+        run: |
+          set -euo pipefail
+
+          python3 - "$SUSFS_PATCH" "$SUKISU_DIR" <<'PY'
+          from pathlib import Path
+          import re
+          import subprocess
+          import sys
+
+          patch_path = Path(sys.argv[1])
+          repo = sys.argv[2]
+          patch = patch_path.read_text(encoding="utf-8", errors="replace")
+          base_ids = re.findall(r"^index ([0-9a-f]+)\.\.[0-9a-f]+(?: [0-7]{6})?$", patch, re.M)
+          if not base_ids:
+              raise SystemExit("No Git blob index entries found in the upstream patch.")
+
+          missing = []
+          for blob in sorted(set(base_ids)):
+              result = subprocess.run(
+                  ["git", "-C", repo, "cat-file", "-e", f"{blob}^{{blob}}"],
+                  stdout=subprocess.DEVNULL,
+                  stderr=subprocess.DEVNULL,
+              )
+              if result.returncode:
+                  missing.append(blob)
+
+          print(f"Found {len(set(base_ids))} distinct upstream base blobs in patch metadata.")
+          if missing:
+              print("Missing original blobs:")
+              for blob in missing:
+                  print(f"  {blob}")
+              raise SystemExit(
+                  "The fetched KernelSU history does not contain every patch base blob. "
+                  "Refusing to attempt an unreliable merge."
+              )
+          print("All upstream base blobs are available for three-way application.")
+          PY
+
+      - name: Three-way apply upstream SUSFS patch to SukiSU
+        id: port
+        shell: bash
+        env:
+          SUSFS_PATCH: ${{ steps.susfs.outputs.patch }}
+        run: |
+          set -euo pipefail
+
+          if ! git -C "$SUKISU_DIR" apply --3way --index "$SUSFS_PATCH"; then
+            echo "::error::The upstream SUSFS patch has source conflicts against SukiSU-Ultra."
+            echo "Git now has the original KernelSU base blobs, so this is a genuine merge conflict rather than a missing-blob error."
+            echo "Conflicting/unmerged paths:"
+            git -C "$SUKISU_DIR" ls-files -u || true
+            echo "Working tree status:"
+            git -C "$SUKISU_DIR" status --short || true
+            exit 1
+          fi
+
+          if [[ -n "$(git -C "$SUKISU_DIR" ls-files -u)" ]]; then
+            echo "::error::Unmerged index entries remain after three-way application."
+            git -C "$SUKISU_DIR" ls-files -u
+            exit 1
+          fi
+
+          if ! git -C "$SUKISU_DIR" diff --quiet; then
+            echo "::error::Unexpected unstaged changes remain after --index application."
+            git -C "$SUKISU_DIR" diff --stat
+            exit 1
+          fi
+
+          git -C "$SUKISU_DIR" diff --cached --check
+          git -C "$SUKISU_DIR" diff --cached --quiet "$SUKISU_SHA" && {
+            echo "::error::The SUSFS patch produced no changes."
+            exit 1
+          }
+
+          mkdir -p "$GITHUB_WORKSPACE/$(dirname "$OUTPUT_PATCH")"
+          OUTPUT_FILE="$GITHUB_WORKSPACE/$OUTPUT_PATCH"
+          git -C "$SUKISU_DIR" diff --cached --binary --full-index "$SUKISU_SHA" -- > "$OUTPUT_FILE"
+
+          if [[ ! -s "$OUTPUT_FILE" ]]; then
+            echo "::error::Generated SukiSU patch is empty."
+            exit 1
+          fi
+
+          echo "Generated SukiSU patch: $OUTPUT_PATCH"
+          echo "Generated patch size: $(wc -c < "$OUTPUT_FILE") bytes"
+
+      - name: Verify generated patch on a pristine SukiSU checkout
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          VERIFY_DIR="$RUNNER_TEMP/SukiSU-Ultra-Verify"
+          OUTPUT_FILE="$GITHUB_WORKSPACE/$OUTPUT_PATCH"
+
+          git -C "$SUKISU_DIR" worktree add --detach "$VERIFY_DIR" "$SUKISU_SHA"
+          git -C "$VERIFY_DIR" apply --check "$OUTPUT_FILE"
+          git -C "$VERIFY_DIR" apply --index "$OUTPUT_FILE"
+          git -C "$VERIFY_DIR" diff --cached --check
+
+          SOURCE_TREE="$(git -C "$SUKISU_DIR" write-tree)"
+          VERIFY_TREE="$(git -C "$VERIFY_DIR" write-tree)"
+          if [[ "$SOURCE_TREE" != "$VERIFY_TREE" ]]; then
+            echo "::error::Clean-checkout application did not reproduce the generated SukiSU tree."
+            echo "Expected tree: $SOURCE_TREE"
+            echo "Actual tree:   $VERIFY_TREE"
+            exit 1
+          fi
+
+          echo "Generated patch applies cleanly and reproduces the merged SukiSU tree."
+
+      - name: Create sync report
+        if: always()
+        shell: bash
+        run: |
+          mkdir -p "$RUNNER_TEMP/susfs-report"
           {
-            echo "### 🪪 Source Revisions"
-            echo "- SUSFS: \`${SUSFS_FULL}\`"
-            echo "- SukiSU-Ultra: \`${SUKISU_FULL}\`"
-          } >> "$GITHUB_STEP_SUMMARY"
+            echo "SukiSU-Ultra SUSFS three-way port report"
+            echo
+            echo "- SUSFS repository: $SUSFS_REPOSITORY"
+            echo "- SUSFS branch: $SUSFS_BRANCH"
+            echo "- SUSFS commit: ${{ steps.susfs.outputs.sha }}"
+            echo "- Upstream patch: $SUSFS_PATCH_RELATIVE"
+            echo "- KernelSU base repository: $KERNELSU_BASE_REPOSITORY"
+            echo "- KernelSU base ref: $KERNELSU_BASE_REF"
+            echo "- KernelSU base commit: ${{ steps.base.outputs.sha }}"
+            echo "- SukiSU repository: $SUKISU_REPOSITORY"
+            echo "- SukiSU ref: $SUKISU_REF"
+            echo "- SukiSU commit: ${{ steps.sukisu.outputs.sha }}"
+            echo "- Output patch: $OUTPUT_PATCH"
+            if [[ "${{ job.status }}" == "success" ]]; then
+              echo "- Three-way application: passed"
+              echo "- Clean-checkout verification: passed"
+            else
+              echo "- Result: failed; inspect the workflow log for missing blobs or merge conflicts"
+            fi
+            echo
+            echo "Patch application is not a kernel build or runtime test."
+          } > "$RUNNER_TEMP/susfs-report/report.txt"
 
-          echo "└─ 🪪 SUSFS Commit  : ${SUSFS_COMMIT}"
-          echo "└─ 🪪 SukiSU Commit : ${SUKISU_COMMIT}"
-
-      # Locate Upstream SUSFS Enable Patch
-      - name: 🔍 Validate Upstream SUSFS Patch
-        id: upstream
-        working-directory: susfs4ksu
-        run: |
-          set -euo pipefail
-
-          PATCH="kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch"
-
-          if [[ ! -f "$PATCH" ]]; then
-            echo "└─ ❌ Upstream SUSFS Patch Not Found"
-            exit 1
-          fi
-
-          if [[ ! -s "$PATCH" ]]; then
-            echo "└─ ❌ Upstream SUSFS Patch Is Empty"
-            exit 1
-          fi
-
-          mkdir -p "${GITHUB_WORKSPACE}/patches"
-
-          cp "$PATCH" "${GITHUB_WORKSPACE}/patches/10_enable_susfs_for_ksu.patch"
-
-          echo "path=${GITHUB_WORKSPACE}/patches/10_enable_susfs_for_ksu.patch" >> "$GITHUB_OUTPUT"
-
-          echo "└─ 📌 Upstream SUSFS Patch Found"
-          echo "└─ 📦 Patch Size : $(du -h "$PATCH" | cut -f1)"
-
-      # Apply Upstream SUSFS Changes to SukiSU
-      - name: 🔧 Apply Upstream SUSFS Patch to SukiSU
-        id: apply
-        working-directory: SukiSU-Ultra
-        env:
-          PATCH_FILE: ${{ steps.upstream.outputs.path }}
-        run: |
-          set -euo pipefail
-
-          echo "└─ 🔧 Applying Upstream SUSFS Changes"
-          echo "└─ 📌 Source : gki-android15-6.6"
-
-          if ! git apply --3way --index "$PATCH_FILE"; then
-            echo "└─ ❌ Upstream SUSFS Patch Could Not Be Applied"
-            echo "└─ ⚠️ SukiSU Source Requires Manual Porting"
-
-            git status --short || true
-            git diff --name-only --diff-filter=U || true
-
-            exit 1
-          fi
-
-          if [[ -n "$(git diff --name-only --diff-filter=U)" ]]; then
-            echo "└─ ❌ Unresolved SUSFS Conflicts Detected"
-            git diff --name-only --diff-filter=U
-            exit 1
-          fi
-
-          echo "└─ 📌 Upstream SUSFS Changes Applied"
-
-      # Validate Integrated SUSFS Changes
-      - name: 🔍 Validate SUSFS Integration
-        working-directory: SukiSU-Ultra
-        run: |
-          set -euo pipefail
-
-          git diff --cached --check
-
-          if git diff --cached --quiet; then
-            echo "└─ ❌ No SUSFS Changes Were Integrated"
-            exit 1
-          fi
-
-          FILE_COUNT=$(git diff --cached --name-only | wc -l)
-
-          echo "└─ 📌 Integration Changes Validated"
-          echo "└─ 📂 Modified Files : ${FILE_COUNT}"
-
-          git diff --cached --stat
-
-      # Generate SukiSU-Compatible SUSFS Patch
-      - name: 🧬 Generate SukiSU SUSFS Enable Features Patch
-        id: generate
-        working-directory: SukiSU-Ultra
-        env:
-          OUTPUT: ${{ github.workspace }}/repo/kernel_patches/KernelSU/SuSFS-Enable-Features.patch
-        run: |
-          set -euo pipefail
-
-          mkdir -p "$(dirname "$OUTPUT")"
-
-          TEMP_PATCH="${OUTPUT}.tmp"
-
-          git diff --cached \
-            --binary \
-            --full-index \
-            --no-ext-diff \
-            > "$TEMP_PATCH"
-
-          if [[ ! -s "$TEMP_PATCH" ]]; then
-            echo "└─ ❌ Generated SUSFS Patch Is Empty"
-            exit 1
-          fi
-
-          mv "$TEMP_PATCH" "$OUTPUT"
-
-          echo "└─ 📌 SukiSU SUSFS Patch Generated"
-          echo "└─ 📦 Patch Size : $(du -h "$OUTPUT" | cut -f1)"
-
-          echo "└─ 📂 Generated File : ${OUTPUT}"
-
-      # Verify Generated Patch Against Pristine SukiSU
-      - name: 🧪 Verify Generated SUSFS Patch
-        working-directory: SukiSU-Ultra
-        env:
-          PATCH_FILE: ${{ github.workspace }}/repo/kernel_patches/KernelSU/SuSFS-Enable-Features.patch
-          VERIFY_DIR: ${{ runner.temp }}/susfs-sukisu-verify
-        run: |
-          set -euo pipefail
-
-          trap 'git worktree remove --force "$VERIFY_DIR" 2>/dev/null || true' EXIT
-
-          echo "└─ 🧪 Creating Pristine SukiSU Worktree"
-
-          git worktree add --detach "$VERIFY_DIR" HEAD
-
-          echo "└─ 🔍 Checking Generated Patch"
-
-          git -C "$VERIFY_DIR" apply --check "$PATCH_FILE"
-
-          echo "└─ 📌 Patch Apply Check Passed"
-
-          git -C "$VERIFY_DIR" apply "$PATCH_FILE"
-
-          git -C "$VERIFY_DIR" diff --check
-
-          echo "└─ 📌 Patch Application Verified Successfully"
-
-      # Record Patch Provenance
-      - name: 🪪 Record Patch Provenance
-        working-directory: repo
-        env:
-          SUSFS_COMMIT: ${{ steps.source.outputs.susfs_full }}
-          SUKISU_COMMIT: ${{ steps.source.outputs.sukisu_full }}
-        run: |
-          set -euo pipefail
-
-          {
-            echo "### 🧬 SUSFS Patch Provenance"
-            echo "- Upstream: [AndreiMikh/susfs4ksu](https://github.com/AndreiMikh/susfs4ksu/tree/gki-android15-6.6)"
-            echo "- Upstream patch: \`10_enable_susfs_for_ksu.patch\`"
-            echo "- SUSFS commit: \`${SUSFS_COMMIT}\`"
-            echo "- SukiSU commit: \`${SUKISU_COMMIT}\`"
-            echo "- Generated output: \`kernel_patches/KernelSU/SuSFS-Enable-Features.patch\`"
-            echo "- Verification: \`git apply --check\` and \`git diff --check\` passed."
-          } >> "$GITHUB_STEP_SUMMARY"
-
-      # Commit Updated SUSFS Patch
-      - name: 📤 Commit Updated SUSFS Patch
-        working-directory: repo
-        env:
-          SUSFS_COMMIT: ${{ steps.source.outputs.susfs_commit }}
-          SUKISU_COMMIT: ${{ steps.source.outputs.sukisu_commit }}
-        run: |
-          set -euo pipefail
-
-          PATCH="kernel_patches/KernelSU/SuSFS-Enable-Features.patch"
-
-          git add "$PATCH"
-
-          if git diff --cached --quiet; then
-            echo "└─ 📌 SUSFS Patch Is Already Up to Date"
-            exit 0
-          fi
-
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-
-          git commit -m "chore: sync SUSFS patch with SukiSU ${SUKISU_COMMIT}" \
-            -m "Upstream SUSFS: ${SUSFS_COMMIT}"
-
-          git push origin "HEAD:${GITHUB_REF_NAME}"
-
-          echo "└─ 📤 Updated SUSFS Patch Committed"
-
-      # Upload Generated SUSFS Patch
-      - name: 📦 Upload Generated SUSFS Patch
+      - name: Upload sync report
+        if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: SuSFS-Enable-Features-SukiSU-${{ steps.source.outputs.sukisu_commit }}
-          path: repo/kernel_patches/KernelSU/SuSFS-Enable-Features.patch
-          compression-level: 0
-          if-no-files-found: error
-          retention-days: 30
+          name: SukiSU-SUSFS-Three-Way-Port-Report
+          path: ${{ runner.temp }}/susfs-report/report.txt
+          if-no-files-found: ignore
+          retention-days: 14
+
+      - name: Open pull request with generated patch
+        if: success()
+        uses: peter-evans/create-pull-request@v6
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          branch: automation/sync-sukisu-susfs-patch
+          base: LiquidAndrei
+          delete-branch: true
+          add-paths: kernel_patches/SukiSU-Ultra/10_enable_susfs_for_ksu.patch
+          commit-message: "sync: port upstream SUSFS patch to SukiSU-Ultra"
+          title: "sync: update SukiSU-Ultra SUSFS patch"
+          body: |
+            This pull request was generated by applying the upstream SUSFS4KSU patch to SukiSU-Ultra using Git's three-way merge.
+
+            - SUSFS source: https://github.com/AndreiMikh/susfs4ksu
+            - SUSFS branch: `${{ env.SUSFS_BRANCH }}`
+            - SUSFS commit: `${{ steps.susfs.outputs.sha }}`
+            - KernelSU base objects: https://github.com/tiann/KernelSU (`${{ env.KERNELSU_BASE_REF }}`)
+            - SukiSU source: https://github.com/SukiSU-Ultra/SukiSU-Ultra (`${{ env.SUKISU_REF }}`)
+            - SukiSU commit: `${{ steps.sukisu.outputs.sha }}`
+            - Generated patch: `${{ env.OUTPUT_PATCH }}`
+
+            The workflow refuses to publish if any original patch base blob is missing, if Git reports a merge conflict, or if the generated patch does not reproduce the merged tree on a clean SukiSU checkout.
+
+            Patch application is validated; no kernel build or runtime test is performed.
