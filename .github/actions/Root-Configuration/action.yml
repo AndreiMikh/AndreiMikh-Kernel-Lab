@@ -64,11 +64,36 @@ runs:
       # Enable Strict Bash Error Handling
       run: |
         set -Eeuo pipefail
+        # ------------------------------------------------------------
+        # Repository Host Helpers
+        #   GitHub Repositories   : "owner/repo"
+        #   Self-Hosted Repos     : Full URL (SukiSU-Nova -> Gitea / Forgejo Style Server)
+        # GITHUB_TOKEN Is NEVER Sent To A Self-Hosted Server.
+        # ------------------------------------------------------------
+        # Return Success When The Repository Is A Full URL (Self-Hosted)
+        isselfhosted() { [[ "${1:-}" =~ ^https?://. ]]; }
+        # Convert A Repository URL Into Its Gitea API Base
+        # https://host:port/owner/repo -> https://host:port/api/v1/repos/owner/repo
+        giteaapi() {
+          local url="${1%/}"
+          local scheme="${url%%://*}"
+          local rest="${url#*://}"
+          local host="${rest%%/*}"
+          local slug="${rest#*/}"
+          slug="${slug%.git}"
+          echo "${scheme}://${host}/api/v1/repos/${slug}"
+        }
+        # Convert A Repository URL Into Its Raw Web Base (Used For Raw File Downloads)
+        # https://host:port/owner/repo -> https://host:port/owner/repo
+        giteaweb() {
+          local url="${1%/}"
+          echo "${url%.git}"
+        }
         # Enter Kernel Platform Directory
         cd "$KERNELPLATFORM"
-        # Ensure Effective Root Engine Branch was Resolved
+        # Ensure Effective Root Engine Branch Was Resolved
         if [[ -z "$MANAGERBRANCH" ]]; then
-          echo "└─ [Warn] ⚠️ Effective Root Engine Branch was Not Resolved"
+          echo "└─ [Warn] ⚠️ Effective Root Engine Branch Was Not Resolved"
           exit 1
         fi
         # Ensure Root Engine Version and Manager Tag Were Resolved
@@ -117,14 +142,18 @@ runs:
           # Recreate Clean Directory For Setup Script
           rm -rf "$sourcedir"
           mkdir -p "$sourcedir"
-          # Download Setup Script From Pinned Commit
-          echo "└─ [Info] 📥 Downloading Setup Script..."
-          local setupurl=""
-          if [[ "$ROOTENGINE" == "SukiSU-Nova" ]]; then
-            setupurl="https://git.zako.shirkneko.top:20004/${repo}/raw/commit/${commit}/kernel/setup.sh"
+          # Build Raw Setup Script URL For The Pinned Commit
+          #   GitHub      : raw.githubusercontent.com/owner/repo/<commit>/kernel/setup.sh
+          #   Self-Hosted : <repo url>/raw/commit/<commit>/kernel/setup.sh
+          local setupurl
+          if isselfhosted "$repo"; then
+            setupurl="$(giteaweb "$repo")/raw/commit/${commit}/kernel/setup.sh"
           else
             setupurl="https://raw.githubusercontent.com/${repo}/${commit}/kernel/setup.sh"
           fi
+          # Download Setup Script From Pinned Commit
+          echo "└─ [Info] 📥 Downloading Setup Script..."
+          echo "└─ [Info] 🔗 Setup URL        : $setupurl"
           if ! curl -fsSL --retry 3 --retry-all-errors \
             "$setupurl" \
             -o "$setupscript"; then
@@ -173,67 +202,28 @@ runs:
           echo "└─ [Info] 📦 Repository : $KSUREPO"
           echo "└─ [Info] 🌿 Branch     : $branch"
           echo "└─ [Info] 🔖 Requested  : $commit"
-          # Resolve and Install SukiSU Commits Directly From its Git Server
-          if [[ "$ROOTENGINE" == "SukiSU-Nova" ]]; then
-            local tempdir="$(mktemp -d)"
-            local sukisusource="$tempdir/source"
-            local extracted="$tempdir/extracted"
-            local sukisurepo="https://git.zako.shirkneko.top:20004/shirkneko/SukiSU.git"
-            echo "└─ [Info] 📥 Fetching Exact SukiSU Commit..."
-            git clone --quiet --filter=blob:none --no-checkout "$sukisurepo" "$sukisusource" || {
-              echo "└─ [Warn] ⚠️ Failed to Clone SukiSU Repository"
-              rm -rf "$tempdir"
-              return 1
-            }
-            git -C "$sukisusource" fetch --quiet origin "$commit" || {
-              echo "└─ [Warn] ⚠️ Failed to Fetch Requested SukiSU Commit"
-              rm -rf "$tempdir"
-              return 1
-            }
-            actual="$(git -C "$sukisusource" rev-parse 'FETCH_HEAD^{commit}')" || {
-              echo "└─ [Warn] ⚠️ Failed to Verify Requested SukiSU Commit"
-              rm -rf "$tempdir"
-              return 1
-            }
-            if [[ "${actual,,}" != "${commit,,}" ]]; then
-              echo "└─ [Warn] ⚠️ SukiSU Commit Verification Failed"
-              echo "└─ [Info] Requested : $commit"
-              echo "└─ [Info] Actual    : $actual"
-              rm -rf "$tempdir"
-              return 1
-            fi
-            mkdir -p "$extracted"
-            git -C "$sukisusource" archive "$actual" | tar -xf - -C "$extracted" || {
-              echo "└─ [Warn] ⚠️ Failed to Extract Exact SukiSU Commit"
-              rm -rf "$tempdir"
-              return 1
-            }
-            if [[ ! -f "$extracted/Kbuild" && ! -f "$extracted/kernel/Kbuild" ]]; then
-              echo "└─ [Warn] ⚠️ Downloaded SukiSU Source has an Invalid Layout"
-              rm -rf "$tempdir"
-              return 1
-            fi
-            find "$dir" -mindepth 1 -maxdepth 1 ! -name ".git" -exec rm -rf -- {} + || {
-              echo "└─ [Warn] ⚠️ Failed to Clean Existing SukiSU Source"
-              rm -rf "$tempdir"
-              return 1
-            }
-            cp -a "$extracted/." "$dir/" || {
-              echo "└─ [Warn] ⚠️ Failed to Install Exact SukiSU Source"
-              rm -rf "$tempdir"
-              return 1
-            }
-            rm -rf "$tempdir"
-            echo "└─ [Info] 📌 Remote Commit Verified : $actual"
-            echo "└─ [Info] 📌 Exact Source Installed : $commit"
-            return 0
+          # Select API Endpoints And Credentials For The Hosting Platform
+          #   GitHub      : api.github.com  (Authenticated With GITHUB_TOKEN)
+          #   Self-Hosted : Gitea API v1    (Unauthenticated, Token Never Forwarded)
+          local verifyurl
+          local -a curlauth=()
+          if isselfhosted "$KSUREPO"; then
+            verifyurl="$(giteaapi "$KSUREPO")/git/commits/${commit}"
+            archive="$(giteaapi "$KSUREPO")/archive/${commit}.tar.gz"
+          else
+            verifyurl="https://api.github.com/repos/${KSUREPO}/commits/${commit}"
+            archive="https://api.github.com/repos/${KSUREPO}/tarball/${commit}"
+            curlauth=(
+              -H "Accept: application/vnd.github+json"
+              -H "Authorization: Bearer $GITHUB_TOKEN"
+            )
           fi
-          # Verify Requested Commit Against GitHub API
+
+          # Verify Requested Commit Against The Hosting Platform API
           actual="$(
             curl -fsSL --retry 3 --retry-all-errors \
-              -H "Accept: application/vnd.github+json" \
-              -H "Authorization: Bearer $GITHUB_TOKEN" \
-              "https://api.github.com/repos/${KSUREPO}/commits/${commit}" \
+              "${curlauth[@]}" \
+              "$verifyurl" \
               | jq -r '.sha // empty'
           )" || {
             echo "└─ [Warn] ⚠️ Failed to Verify Remote Commit"
@@ -247,15 +237,12 @@ runs:
             return 1
           fi
 
-          # Build GitHub API URL For Exact Commit Archive
-          archive="https://api.github.com/repos/${KSUREPO}/tarball/${commit}"
           # Download Verified Commit Into a Temporary Directory
           echo "└─ [Info] 📥 Downloading Exact Root Engine Commit..."
           local tempdir
           tempdir="$(mktemp -d)"
           curl -fsSL --retry 3 --retry-all-errors \
-            -H "Accept: application/vnd.github+json" \
-            -H "Authorization: Bearer $GITHUB_TOKEN" \
+            "${curlauth[@]}" \
             "$archive" \
             -o "$tempdir/source.tar.gz" || {
               echo "└─ [Warn] ⚠️ Failed to Download Requested Commit"
@@ -333,17 +320,15 @@ runs:
         # Execute Setup and Configuration Steps For Selected Engine
         case "$ROOTENGINE" in
           SukiSU-Nova)
-            # Install SukiSU Using the Pinned Setup Script
-            echo "└─ [Info] 🚀 Setting Up SukiSU..."
+            # Install SukiSU-Nova Using Pinned Commit  
+            echo "└─ [Info] 🚀 Setting Up SukiSU-Nova..."
             setupengine "$KSUREPO" "$MANAGERBRANCH" "$BRANCHPATH" "$ROOTCOMMIT"
-            # Enter Installed SukiSU Directory
+            # Enter Installed SukiSU-Nova Directory
             cd KernelSU || {
               echo "└─ [Warn] ⚠️ SukiSU-Nova Directory Not Found"
               exit 1
             }
-            # Replace Setup Script Checkout With the Exact Resolved SukiSU Commit
-            checkoutrootcommit "$PWD" "$ROOTCOMMIT" "$MANAGERBRANCH"
-            # Remove Commit Hash and Branch From SukiSU Full Version
+            # Remove Commit Hash and Branch From SukiSU-Nova Full Version
             # Initialize Kernel Version Definition File Variable
             KVERSIONFILE=""
             # Locate Makefile or Kbuild Containing Kernel Full Version
@@ -414,7 +399,7 @@ runs:
             # Export Version Metadata and Configure Fallback Version
             recordrootversion
             configureksuversionfallback
-            # Apply SuSFS Inline Hook Mode When SuSFS is Enabled
+            # Apply SUSFS Inline Hook Mode When SUSFS is Enabled
             if [[ ! "$SUSFS" =~ ^-[0-9]+$ && "$SUSFS" != "0" ]] &&
                [[ -f kernel/supercall/dispatch.c ]]; then
               perl -0777 -i -pe '
@@ -422,7 +407,7 @@ runs:
                 strscpy(cmd.mode, "Inline", sizeof(cmd.mode));
                 /s
               ' kernel/supercall/dispatch.c
-              echo "└─ [Info] 📌 SuSFS Hook Mode Set to Inline"
+              echo "└─ [Info] 📌 SUSFS Hook Mode Set to Inline"
             fi
 
             echo "└─ [Info] 🎉 KernelSU-Next Setup Complete"
