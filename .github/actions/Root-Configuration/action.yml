@@ -321,6 +321,120 @@ runs:
             echo "└─ [Info] 📌 KSU Version Fallback : $KSUVERSION"
           fi
         }
+        # Apply Additional SuSFS Integration For SukiSU-Nova-Main
+        applysukisususfs() {
+          # Skip Additional Integration For Other Source Branches
+          if [[ "$ROOTBRANCHSOURCE" != "SukiSU-Nova-Main" ]]; then
+            echo "└─ [Info] ⏭️ Additional SuSFS Integration Not Required"
+            return 0
+          fi
+
+          # Skip Additional Integration When SuSFS is Disabled
+          if [[ "$SUSFS" =~ ^-[0-9]+$ ]]; then
+            echo "└─ [Info] ⏭️ SuSFS Disabled, Skipping Additional Integration"
+            return 0
+          fi
+
+          # Define Required SuSFS Patch Paths
+          local SUSFS10PATCH="${PATCHDIR}/SuSFS/SukiSU-Ultra/SuSFS-Enable-Feat.patch"
+          local EXTFEATUREFIXPATCH="${PATCHDIR}/SuSFS/SukiSU-Ultra/Extension-Feat-Restore.patch"
+          local OVERWRITEHOOK="${PATCHDIR}/SuSFS/SukiSU-Ultra/Rewrite-Hook.patch"
+          local -a REJECTEDFILES=()
+          echo "└─ [Info] ⚙️ Applying Additional SuSFS Integration For SukiSU-Nova-Main..."
+          # Verify Required SuSFS Enable Patch
+          if [[ ! -f "$SUSFS10PATCH" ]]; then
+            echo "└─ [Warn] ⚠️ SuSFS Enable Patch Not Found : $SUSFS10PATCH"
+            return 1
+          fi
+
+          # Apply Main SuSFS Enable Patch
+          echo "└─ [Info] 🩹 Applying SuSFS Enable Patch..."
+          patch -p1 --forward < "$SUSFS10PATCH" || true
+          # Collect Source Files with Rejected SuSFS Patch Hunks
+          mapfile -t REJECTEDFILES < <(
+            find ./kernel -maxdepth 2 -type f -name "*.rej" \
+              -printf '%f\n' |
+              sed 's/\.rej$//' |
+              sort -u
+          )
+          # Apply Individual SuSFS Compatibility Fixes
+          if (( ${#REJECTEDFILES[@]} > 0 )); then
+            echo "└─ [Info] 🔍 Found ${#REJECTEDFILES[@]} Rejected Files"
+            for file in "${REJECTEDFILES[@]}"; do
+              local FIXPATCH="${PATCHDIR}/SuSFS/fix-${file}.patch"
+              # Verify Individual Compatibility Patch
+              if [[ ! -f "$FIXPATCH" ]]; then
+                echo "└─ [Warn] ⚠️ Compatibility Patch Not Found : $FIXPATCH"
+                echo "└─ [Info] ℹ️ Skipping Compatibility Fix : $file"
+                continue
+              fi
+
+              # Apply Individual Compatibility Fix
+              echo "└─ [Info] 🩹 Applying Compatibility Fix : $file"
+              if patch --forward -p1 < "$FIXPATCH"; then
+                echo "└─ [Info] 📌 Compatibility Fix Applied Successfully : $file"
+                # Remove Rejected Patch File Resolved by Compatibility Fix
+                find ./kernel -maxdepth 2 -type f \
+                  -name "${file}.rej" -delete
+              else
+                echo "└─ [Warn] ⚠️ Compatibility Fix Failed : $file"
+              fi
+              
+            done
+            
+          else
+            echo "└─ [Info] 📌 No Rejected Files Found"
+          fi
+
+          # Verify Extension Feature Compatibility Patch
+          echo "└─ [Info] 🩹 Applying Extension Feature Compatibility Fix..."
+          if [[ ! -f "$EXTFEATUREFIXPATCH" ]]; then
+            echo "└─ [Warn] ⚠️ Extension Feature Compatibility Patch Not Found : $EXTFEATUREFIXPATCH"
+            return 1
+          fi
+
+          # Apply Extension Feature Compatibility Patch
+          if patch --dry-run --forward -p1 < "$EXTFEATUREFIXPATCH" >/dev/null 2>&1; then
+            if patch --forward -p1 < "$EXTFEATUREFIXPATCH"; then
+              echo "└─ [Info] 📌 Extension Feature Compatibility Fix Applied Successfully"
+            else
+              echo "└─ [Warn] ⚠️ Extension Feature Compatibility Fix Failed"
+              return 1
+            fi
+
+          # Detect Already Applied Extension Feature Compatibility Patch
+          elif patch --dry-run --reverse -p1 < "$EXTFEATUREFIXPATCH" >/dev/null 2>&1; then
+            echo "└─ [Info] 📌 Extension Feature Compatibility Fix Already Applied"
+          else
+            echo "└─ [Warn] ⚠️ Extension Feature Compatibility Patch Does Not Match SukiSU-Ultra Source"
+            return 1
+          fi
+
+          # Apply Optional Hook Mode Replacement
+          if [[ ! -f "$OVERWRITEHOOK" ]]; then
+            echo "└─ [Warn] ⚠️ Hook Mode Patch Not Found : $OVERWRITEHOOK"
+            echo "└─ [Info] ℹ️ Skipping Hook Mode Replacement"
+          else
+            echo "└─ [Info] 🔧 Applying Hook Mode Replacement..."
+            if patch --dry-run --forward -p1 < "$OVERWRITEHOOK" >/dev/null 2>&1; then
+              if patch --forward -p1 < "$OVERWRITEHOOK"; then
+                echo "└─ [Info] 📌 Hook Mode Replacement Applied Successfully"
+              else
+                echo "└─ [Warn] ⚠️ Hook Mode Replacement Failed"
+                echo "└─ [Info] ℹ️ Skipping Hook Mode Replacement"
+              fi
+
+            elif patch --dry-run --reverse -p1 < "$OVERWRITEHOOK" >/dev/null 2>&1; then
+              echo "└─ [Info] 📌 Hook Mode Replacement Already Applied"
+            else
+              echo "└─ [Warn] ⚠️ Hook Mode Patch Does Not Match Source"
+              echo "└─ [Info] ℹ️ Skipping Hook Mode Replacement"
+            fi
+          fi
+
+          # Confirm Additional SuSFS Integration Completed
+          echo "└─ [Info] 🎉 Additional SuSFS Integration Completed Successfully"
+        }
         # Execute Setup and Configuration Steps For Selected Engine
         case "$ROOTENGINE" in
           SukiSU-Nova)
@@ -332,6 +446,8 @@ runs:
               echo "└─ [Warn] ⚠️ SukiSU-Nova Directory Not Found"
               exit 1
             }
+            # Apply Additional SuSFS Integration For SukiSU-Nova Main Branch
+            applysukisususfs
             # Remove Commit Hash and Branch From SukiSU-Nova Full Version
             # Initialize Kernel Version Definition File Variable
             KVERSIONFILE=""
