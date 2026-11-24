@@ -7,12 +7,11 @@ on:
         type: choice
         description: 'Select Device'
         required: true       
-        default: OnePlus 13
+        default: 1+13
         options:
-          - OnePlus 11
-          - OnePlus 12
-          - OnePlus 13
-          - OnePlus 15
+          - 1+13
+          - 1+12
+          - 1+11
       AOSPSOURCE:
         type: choice
         description: 'Select Android Open Source Project (AOSP) ROM Source'
@@ -25,12 +24,12 @@ on:
           - CrDroid-16.0
       ROOTENGINE:
         type: choice
-        description: 'Select Kernel Root Engine (BakaSU, SukiSU-Ultra, or KernelSU-Next; None = Disable Root Integration)'
+        description: 'Select Kernel Root Engine (BakaSU, SukiSU-Nova, or KernelSU-Next; None = Disable Root Integration)'
         required: true      
         default: BakaSU
         options:
           - BakaSU
-          - SukiSU-Ultra
+          - SukiSU-Nova
           - KernelSU-Next
           - KernelSU
       ROOTBRANCHSOURCE:
@@ -41,7 +40,7 @@ on:
         options:
          - BakaSU-Main      
          - KernelSU-Next-Dev-SUSFS
-         - SukiSU-Ultra-Builtin
+         - SukiSU-Nova-Builtin
          - KernelSU-Main
       ROOTCOMMIT:
         type: string
@@ -109,12 +108,12 @@ on:
         type: boolean
         description: 'ReKernel Support (Freezer / NoActive Binder Hooks)'
         required: true
-        default: true
+        default: false
       KERNELPATCH:
         type: boolean
         description: 'Enable KernelPatch Support'
         required: true
-        default: true
+        default: false
       KERNELSUFFIX:
         type: string
         description: 'Custom Kernel Version Suffix (Empty = Use Git Commit)'
@@ -143,6 +142,11 @@ on:
         description: 'Enable Public Compiler Cache Upload to a GitHub Release For Re-Use in Future Builds'
         required: true
         default: true 
+      CLEANSPACE:
+        type: boolean
+        description: 'Disable Cleanup of Unused Runner Components to Optimize Build Space'
+        required: true
+        default: false 
       DEBUGBUILDCCACHE:
         type: boolean
         description: 'Enable Compiler Cache Debug Logs and Upload Them as Diagnostic Artifacts'
@@ -153,15 +157,13 @@ on:
         description: 'Enable Packaging and Upload Debug Mode (Skip Kernel Compilation and Generate a Dummy Kernel Image)'
         required: true
         default: false
-
 permissions:
   contents: write
   actions: write
-
 jobs:
   kernel-build:
     name: AOSP Kernel Build
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 120
     outputs:
       ak3name: ${{ steps.package.outputs.ak3name }}
@@ -180,6 +182,7 @@ jobs:
       GITHOST: AOSP-Crimson-Kernel
     steps:
       - name: 🧹 Clean Runner Environment
+        if: ${{ inputs.CLEANSPACE }}
         shell: bash
         run: |
           echo "└─ 🧹 Cleaning Unused Runner Components..."
@@ -192,6 +195,27 @@ jobs:
           echo "└─ 📊 Workspace Storage :"
           du -sh "$GITHUB_WORKSPACE" 2>/dev/null || true
           echo "└─ 🎉 Runner Cleanup Complete"
+
+      - name: 📦 Install Build Dependencies
+        shell: bash
+        run: |
+          # Hold Critical Packages
+          sudo apt-mark hold firefox libc-bin      
+          # Remove Man-DB
+          sudo apt-get purge -y man-db
+          sudo rm -rf /var/lib/man-db/auto-update      
+          # Update APT Package Indexes
+          sudo apt-get update      
+          # Install Kernel Build Dependencies
+          sudo apt-get install -y --no-install-recommends \
+            binutils zip zstd patch bc flex bison \
+            libssl-dev libncurses-dev libelf-dev libdw-dev \
+            lz4 dwarves python3 python-is-python3 ccache mkbootimg      
+          # Clean APT Package Cache
+          sudo apt-get clean
+          sudo rm -rf /var/lib/apt/lists/*    
+          # Confirm Installation
+          echo "└─ 🎉 Build Dependencies Ready"
    
       - name: 📥 Checkout
         uses: actions/checkout@v7
@@ -200,6 +224,67 @@ jobs:
           ref: LiquidAndrei
           path: work/AndreiMikh-Kernel-Lab
           fetch-depth: 1
+
+      - name: 💼 Prepare Build Workspace
+        shell: bash
+        run: |
+          # Configure Git Identity
+          if ! git config --global user.name >/dev/null; then
+            git config --global user.name "AndreiMikh"
+          fi
+      
+          if ! git config --global user.email >/dev/null; then
+            git config --global user.email "andreimikhail0088@gmail.com"
+          fi
+
+          # Define Build Workspace Paths
+          WORKDIR="$GITHUB_WORKSPACE/work"
+          SOURCEDIR="$WORKDIR/src"
+          DEFCONFIG="$SOURCEDIR/arch/arm64/configs/gki_defconfig"
+          LABDIR="$WORKDIR/AndreiMikh-Kernel-Lab"
+          PATCHDIR="$LABDIR/patches"
+          LIBDIR="$LABDIR/lib"
+          OUTDIR="$GITHUB_WORKSPACE/out"
+          # Export Workspace Paths to Following Workflow Steps
+          {
+            echo "WORKDIR=$WORKDIR"
+            echo "SOURCEDIR=$SOURCEDIR"
+            echo "DEFCONFIG=$DEFCONFIG"
+            echo "LABDIR=$LABDIR"
+            echo "PATCHDIR=$PATCHDIR"
+            echo "LIBDIR=$LIBDIR"
+            echo "OUTDIR=$OUTDIR"
+          } >> "$GITHUB_ENV"
+          # Create Required Build Directories
+          echo "📁 Preparing Build Workspace..."
+          mkdir -p \
+            "$WORKDIR" \
+            "$OUTDIR" \
+            "$GITHUB_WORKSPACE/pack"
+          # Prepare Compiler / GKI Directories
+          mkdir -p \
+            "$GITHUB_WORKSPACE/clang" \
+            "/tmp/gki"
+          # Display Kernel Lab Repository
+          echo "└─ 📂 Repository : $LABDIR"
+          ls -la "$LABDIR"
+          # Display Prepared Build Directories
+          echo "└─ 📂 Prepared Directories :"
+          printf '  ✔ %s\n' \
+            "$WORKDIR" \
+            "$SOURCEDIR" \
+            "$DEFCONFIG" \
+            "$LABDIR" \
+            "$GITHUB_WORKSPACE/.ccache" \
+            "$GITHUB_WORKSPACE/clang" \
+            "$OUTDIR" \
+            "$GITHUB_WORKSPACE/pack" \
+            "/tmp/gki"
+          # Display Git Identity Configuration
+          echo "└─ 🔧 Git Identity :"
+          echo "└─ 📌 Name         : $(git config --global user.name)"
+          echo "└─ 📌 Email        : $(git config --global user.email)"
+          echo "└─ 🎉 Git Identity and Build Workspace Prepared Successfully"
 
       - name: 🤖 Target Device SoC
         id: cpu-info
@@ -210,17 +295,14 @@ jobs:
         run: |
           # Detect Qualcomm SoC Based on Selected Device
           case "$DEVICE" in
-            "OnePlus 11")
-              CPU="sm8550"
-              ;;
-            "OnePlus 12")
-              CPU="sm8650"
-              ;;
-            "OnePlus 13")
+            "1+13")
               CPU="sm8750"
-              ;;
-            "OnePlus 15")
-              CPU="sm8850"
+              ;;     
+            "1+12")
+              CPU="sm8650"
+              ;;              
+            "1+11")
+              CPU="sm8550"
               ;;
             *)
               # Stop Workflow if Selected Device is Not Supported
@@ -352,10 +434,9 @@ jobs:
 
           # Device
           declare -A DEVICEMAP=(
-            ["OnePlus 11"]="1+11"
-            ["OnePlus 12"]="1+12"
-            ["OnePlus 13"]="1+13"
-            ["OnePlus 15"]="1+15"
+            ["1+13"]="1+13"   
+            ["1+12"]="1+12"            
+            ["1+11"]="1+11"
           )
           SUFFIX+="${DEVICEMAP[$DEVICE]:-}"
           # AOSP / Custom ROM Source
@@ -370,7 +451,7 @@ jobs:
           declare -A ROOTENGINEMAP=(
             ["BakaSU"]="-BakaSU"
             ["KernelSU-Next"]="-KernelSU-Next"
-            ["SukiSU-Ultra"]="-SukiSU-Ultra"
+            ["SukiSU-Nova"]="-SukiSU-Nova"
           )
           SUFFIX+="${ROOTENGINEMAP[$ROOTENGINE]:-}"  
           # Append SuSFS Suffix When Repository Revision is Enabled
@@ -410,128 +491,66 @@ jobs:
           echo "└─ 🎉 Final Build Identity :"
           echo "└─ $SUFFIX"
           echo "└─ 🎉 Input Diagnostics Complete"
- 
-      - name: 💼 Prepare Build Workspace
-        shell: bash
-        run: |
-          # Configure Git Identity
-          if ! git config --global user.name >/dev/null; then
-            git config --global user.name "AndreiMikh"
-          fi
-      
-          if ! git config --global user.email >/dev/null; then
-            git config --global user.email "andreimikhail0088@gmail.com"
-          fi
 
-          # Define Build Workspace Paths
-          WORKDIR="$GITHUB_WORKSPACE/work"
-          SOURCEDIR="$WORKDIR/src"
-          DEFCONFIG="$SOURCEDIR/arch/arm64/configs/gki_defconfig"
-          LABDIR="$WORKDIR/AndreiMikh-Kernel-Lab"
-          PATCHDIR="$LABDIR/patches"
-          LIBDIR="$LABDIR/lib"
-          OUTDIR="$GITHUB_WORKSPACE/out"
-          # Export Workspace Paths to Following Workflow Steps
-          {
-            echo "WORKDIR=$WORKDIR"
-            echo "SOURCEDIR=$SOURCEDIR"
-            echo "DEFCONFIG=$DEFCONFIG"
-            echo "LABDIR=$LABDIR"
-            echo "PATCHDIR=$PATCHDIR"
-            echo "LIBDIR=$LIBDIR"
-            echo "OUTDIR=$OUTDIR"
-          } >> "$GITHUB_ENV"
-          # Create Required Build Directories
-          echo "📁 Preparing Build Workspace..."
-          mkdir -p \
-            "$WORKDIR" \
-            "$OUTDIR" \
-            "$GITHUB_WORKSPACE/pack"
-          # Prepare Compiler / GKI Directories
-          mkdir -p \
-            "$GITHUB_WORKSPACE/clang" \
-            "/tmp/gki"
-          # Display Kernel Lab Repository
-          echo "└─ 📂 Repository : $LABDIR"
-          ls -la "$LABDIR"
-          # Display Prepared Build Directories
-          echo "└─ 📂 Prepared Directories :"
-          printf '  ✔ %s\n' \
-            "$WORKDIR" \
-            "$SOURCEDIR" \
-            "$DEFCONFIG" \
-            "$LABDIR" \
-            "$GITHUB_WORKSPACE/.ccache" \
-            "$GITHUB_WORKSPACE/clang" \
-            "$OUTDIR" \
-            "$GITHUB_WORKSPACE/pack" \
-            "/tmp/gki"
-          # Display Git Identity Configuration
-          echo "└─ 🔧 Git Identity :"
-          echo "└─ 📌 Name         : $(git config --global user.name)"
-          echo "└─ 📌 Email        : $(git config --global user.email)"
-          echo "└─ 🎉 Git Identity and Build Workspace Prepared Successfully"
- 
-      - name: 📦 Install Build Dependencies
-        shell: bash
-        run: |
-          # Define Required APT Packages
-          export APTPACKAGES="zip zstd patch bc flex bison libssl-dev libncurses-dev libelf-dev libdw-dev lz4 dwarves python3 ccache mkbootimg"
-          # Define APT Packages Script
-          SCRIPT="${WORKDIR}/AndreiMikh-Kernel-Lab/scripts/APT-Packages.sh"
-          # Verify APT Packages Script
-          if [[ ! -f "$SCRIPT" ]]; then
-            echo "└─ ⚠️ APT Packages Script Not Found"
-            echo "└─ 📁 Expected Path : $SCRIPT"
-            exit 1
-          fi
-          # Make APT Packages Script Executable
-          chmod +x "$SCRIPT"
-          # Install Build Dependencies
-          echo "└─ 🚀 Running APT Packages Script..."
-          bash "$SCRIPT" "$HOME/.apt-pkg-cache"
-          # Clean APT Package Cache
-          echo "└─ 🧹 Cleaning APT Package Cache..."
-          sudo apt-get clean
-          sudo rm -rf /var/lib/apt/lists/*
-          echo "└─ 🎉 Build Dependencies Ready"
- 
-      - name: 📦 Restore / Publish Clang Version 21.0.0
+      - name: 📦 Restore and Publish Toolchain
         id: clang-release
         shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           OWNERREPO: ${{ github.repository }}
+          DEVICE: ${{ inputs.DEVICE }}
+          AOSPSOURCE: ${{ inputs.AOSPSOURCE }}
         run: |
-          # Define Android 16 QPR2 Clang Release Metadata
-          CLANGVERSION="r563880c"
-          CLANGARCHIVE="clang-${CLANGVERSION}-android16-qpr2.tar.gz"
-          CLANGRELEASE="AOSP-Clang-Revision-563880-Android16-QPR2"
-          CLANGDIR="$GITHUB_WORKSPACE/clang"
-          CLANGFILE="$GITHUB_WORKSPACE/$CLANGARCHIVE"
-          CLANGURL="https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/9916fb51ccb914d62d35ad9a7b9b21d2ef046928/clang-${CLANGVERSION}.tar.gz"
-          # Display Clang Release Information
-          echo "└─ 📌 Clang Revision : $CLANGVERSION"
-          echo "└─ 📌 Clang Archive  : $CLANGARCHIVE"
-          echo "└─ 📌 Release Tag    : $CLANGRELEASE"
-          # Prepare Clang Workspace
-          rm -rf "$CLANGDIR"
-          rm -f "$CLANGFILE"
-          mkdir -p "$CLANGDIR"
+          # Select Clang Revision and AOSP Reference Based on Device
+          case "$DEVICE" in
+            "1+13")
+              TOOLCHAINVERSION="563880c"
+              TOOLCHAINREFERENCE="531a564ba5426707dee226eccb19f104a7af5a5f"
+              ;;
+            "1+12")
+              TOOLCHAINVERSION="563880c"
+              TOOLCHAINREFERENCE="refs/heads/android16-qpr2-release"
+              ;;
+            "1+11")
+              TOOLCHAINVERSION="547379"
+              TOOLCHAINREFERENCE="refs/heads/android16-qpr2-release"
+              ;;
+            *)
+              echo "└─ ⚠️ No Clang Revision Configured For : $DEVICE"
+              exit 1
+              ;;
+          esac
+          # Define AOSP Clang Release Metadata
+          TOOLCHAINARCHIVE="Clang-R${TOOLCHAINVERSION}-${DEVICE}-${AOSPSOURCE}.tar.gz"
+          TOOLCHAINRELEASE="AOSP-Clang-Revision-${TOOLCHAINVERSION}"
+          TOOLCHAINDIRECTORY="$GITHUB_WORKSPACE/clang"
+          TOOLCHAINFILE="$GITHUB_WORKSPACE/$TOOLCHAINARCHIVE"
+          # Define AOSP Clang Archive Download URL
+          TOOLCHAINDOWNLOADURL="https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/${TOOLCHAINREFERENCE}/clang-r${TOOLCHAINVERSION}.tar.gz"
+          # Display Selected Device and Clang Release Information
+          echo "└─ 📱 Selected Device : $DEVICE"
+          echo "└─ 📌 Clang Revision  : $TOOLCHAINVERSION"
+          echo "└─ 📌 Clang Reference : $TOOLCHAINREFERENCE"
+          echo "└─ 📌 Clang Archive   : $TOOLCHAINARCHIVE"
+          echo "└─ 📌 Release Tag     : $TOOLCHAINRELEASE"
+          # Remove Previous Clang Installation and Temporary Archive
+          rm -rf "$TOOLCHAINDIRECTORY"
+          rm -f "$TOOLCHAINFILE"
+          mkdir -p "$TOOLCHAINDIRECTORY"
           # Restore Existing Clang Archive From GitHub Release
-          if gh release view "$CLANGRELEASE" --repo "$OWNERREPO" >/dev/null 2>&1 &&
-             gh release download "$CLANGRELEASE" \
+          if gh release view "$TOOLCHAINRELEASE" --repo "$OWNERREPO" >/dev/null 2>&1 &&
+             gh release download "$TOOLCHAINRELEASE" \
                --repo "$OWNERREPO" \
-               --pattern "$CLANGARCHIVE" \
+               --pattern "$TOOLCHAINARCHIVE" \
                --dir "$GITHUB_WORKSPACE" >/dev/null 2>&1 &&
-             [[ -s "$CLANGFILE" ]] &&
-             tar -tzf "$CLANGFILE" >/dev/null 2>&1; then
+             [[ -s "$TOOLCHAINFILE" ]] &&
+             tar -tzf "$TOOLCHAINFILE" >/dev/null 2>&1; then
             echo "└─ 📥 Clang Archive Restored From GitHub Release"
             echo "source=release" >> "$GITHUB_OUTPUT"
           else
-            # Download Clang Archive From AOSP
+            # Download Clang Archive From Official AOSP Repository
             echo "└─ 📥 Downloading Clang From AOSP..."
-            rm -f "$CLANGFILE"
+            rm -f "$TOOLCHAINFILE"
             curl \
               -fL \
               --retry 10 \
@@ -539,158 +558,117 @@ jobs:
               --retry-all-errors \
               --connect-timeout 30 \
               --max-time 1800 \
-              "$CLANGURL" \
-              -o "$CLANGFILE"
+              "$TOOLCHAINDOWNLOADURL" \
+              -o "$TOOLCHAINFILE"
             # Validate Downloaded Clang Archive
-            if [[ ! -s "$CLANGFILE" ]] || ! tar -tzf "$CLANGFILE" >/dev/null 2>&1; then
+            if [[ ! -s "$TOOLCHAINFILE" ]] || ! tar -tzf "$TOOLCHAINFILE" >/dev/null 2>&1; then
               echo "└─ ⚠️ Clang Archive Download or Validation Failed"
               exit 1
             fi
 
-            # Create Clang Release When Missing
-            if ! gh release view "$CLANGRELEASE" --repo "$OWNERREPO" >/dev/null 2>&1; then
-              gh release create "$CLANGRELEASE" \
+            # Create GitHub Release When it Does Not Exist
+            if ! gh release view "$TOOLCHAINRELEASE" --repo "$OWNERREPO" >/dev/null 2>&1; then
+              gh release create "$TOOLCHAINRELEASE" \
                 --repo "$OWNERREPO" \
-                --title "AOSP Clang Cache" \
-                --notes "Cached AOSP Clang Toolchains For AndreiMikh Kernel Lab"
+                --title "AOSP Clang ${TOOLCHAINVERSION} Cache" \
+                --notes "Cached AOSP Clang Toolchain ${TOOLCHAINVERSION} For AndreiMikh Kernel Lab"
             fi
 
-            # Check Whether Release Asset Already Exists
-            EXISTINGFILE="$GITHUB_WORKSPACE/existing-${CLANGARCHIVE}"
-            rm -f "$EXISTINGFILE"
-            if gh release download "$CLANGRELEASE" \
+            # Prepare Temporary Directory For Existing Archive Comparison
+            EXISTINGDIR="$(mktemp -d)"
+            EXISTINGFILE="$EXISTINGDIR/$TOOLCHAINARCHIVE"
+            # Check Whether Clang Archive Already Exists
+            if gh release download "$TOOLCHAINRELEASE" \
                  --repo "$OWNERREPO" \
-                 --pattern "$CLANGARCHIVE" \
-                 --dir "$GITHUB_WORKSPACE" >/dev/null 2>&1; then
-              if [[ -s "$CLANGFILE" ]] && [[ -s "$EXISTINGFILE" ]] &&
-                 cmp -s "$CLANGFILE" "$EXISTINGFILE"; then
-                echo "└─ 📤 Clang Archive is Unchanged; Skipping Upload"
+                 --pattern "$TOOLCHAINARCHIVE" \
+                 --dir "$EXISTINGDIR" >/dev/null 2>&1 &&
+               [[ -s "$EXISTINGFILE" ]]; then
+              # Compare Existing Archive with Newly Downloaded Archive
+              if cmp -s "$TOOLCHAINFILE" "$EXISTINGFILE"; then
+                echo "└─ 📤 Clang Archive Is Unchanged; Skipping Upload"
               else
-                # Publish New Or Updated Clang Archive
-                gh release upload "$CLANGRELEASE" "$CLANGFILE" \
+                # Publish Updated Clang Archive
+                gh release upload "$TOOLCHAINRELEASE" "$TOOLCHAINFILE" \
                   --repo "$OWNERREPO" \
                   --clobber
-                echo "└─ 📤 Clang Archive Published or Updated"
+                echo "└─ 📤 Clang Archive Updated"
               fi
-        
+
             else
-              # Publish Missing Clang Archive
-              gh release upload "$CLANGRELEASE" "$CLANGFILE" \
+              # Publish Clang Archive When Asset Is Missing
+              gh release upload "$TOOLCHAINRELEASE" "$TOOLCHAINFILE" \
                 --repo "$OWNERREPO"
-              echo "└─ 📤 Clang Archive Published to GitHub Release"
+              echo "└─ 📤 Clang Archive Published"
             fi
 
-            # Cleanup Comparison Archive
-            rm -f "$EXISTINGFILE"
+            # Remove Temporary Archive Comparison Directory
+            rm -rf "$EXISTINGDIR"
+            # Record AOSP as Clang Archive Source
             echo "source=aosp" >> "$GITHUB_OUTPUT"
           fi
 
-          # Extract Clang Toolchain
+          # Extract Clang Toolchain Into Workspace
           echo "└─ 📦 Extracting Clang..."
-          tar -xzf "$CLANGFILE" -C "$CLANGDIR"
-          # Validate Clang Installation
-          if [[ ! -x "$CLANGDIR/bin/clang" ]]; then
+          tar -xzf "$TOOLCHAINFILE" -C "$TOOLCHAINDIRECTORY"
+          # Verify Clang Executable After Extraction
+          if [[ ! -x "$TOOLCHAINDIRECTORY/bin/clang" ]]; then
             echo "└─ ⚠️ Clang Executable Not Found After Extraction"
             echo "└─ 📂 Clang Directory :"
-            ls -la "$CLANGDIR" || true
-            echo "└─ 📂 Clang/Bin       :"
-            ls -la "$CLANGDIR/bin" || true
+            ls -la "$TOOLCHAINDIRECTORY" || true
+            echo "└─ 📂 Clang / Bin     :"
+            ls -la "$TOOLCHAINDIRECTORY/bin" || true
             exit 1
           fi
 
-          # Remove Temporary Clang Archive
-          rm -f "$CLANGFILE"
+          # Remove Temporary Clang Archive After Extraction
+          rm -f "$TOOLCHAINFILE"
           # Display Successful Clang Installation
           echo "└─ 🎉 AOSP Clang Ready"
-          "$CLANGDIR/bin/clang" --version
-   
-      - name: 🪛 Configure Clang Version 21.0.0
+          "$TOOLCHAINDIRECTORY/bin/clang" --version
+        
+      - name: 🪛 Configure Toolchain
         shell: bash
         run: |
-          # Define Clang Toolchain Path
+          # Define Clang Toolchain Binary Directory
           CLANGBIN="$GITHUB_WORKSPACE/clang/bin"
-          # Add Clang To GitHub Actions Path
+          # Add Clang Toolchain to GitHub Actions PATH
           echo "$CLANGBIN" >> "$GITHUB_PATH"
           export PATH="$CLANGBIN:$PATH"
+          # Display Clang Configuration Information
           echo "└─ 🔧 Configuring LLVM Clang..."
-          echo "└─ 📂 Clang Path     : $CLANGBIN"
-          # Validate Clang Binary
-          if [ ! -x "$CLANGBIN/clang" ]; then
+          echo "└─ 📂 Clang Path : $CLANGBIN"
+          # Validate Clang Binary Availability
+          if [[ ! -x "$CLANGBIN/clang" ]]; then
             echo "└─ ⚠️ Clang Binary Not Found"
-            echo "└─ 📂 Expected     : $CLANGBIN/clang"
+            echo "└─ 📂 Expected : $CLANGBIN/clang"
             exit 1
           fi
-          # Verify LLVM Clang
+
+          # Verify LLVM Clang Version
           echo "└─ 🔎 Verifying LLVM Toolchain..."
-          echo "└─ 📌 Clang          :"
+          echo "└─ 📌 Clang :"
           clang --version
-          # Verify LLVM LLD
-          echo "└─ 📌 LLD            :"
+          # Verify LLVM LLD Version
+          echo "└─ 📌 LLD :"
           ld.lld --version
-          # Verify Clang LLD Resolution
+          # Verify Clang LLD Linker Resolution
           echo "└─ 📌 Clang LLD Path :"
           clang -print-prog-name=ld.lld
-          # Create GKI Certificate Stub
+          # Create GKI Certificate Generation Stub
+          mkdir -p /tmp/gki
           printf '%s\n' \
             'def generate_gki_certificate(*args, **kwargs):' \
             '    raise SystemExit("GKI SIGNING NOT SUPPORTED (STUB)")' \
             > /tmp/gki/generate_gki_certificate.py
           # Export Python Module Search Path
           echo "PYTHONPATH=/tmp" >> "$GITHUB_ENV"
-          echo "└─ 📌 GKI Certificate Stub  :"
-          echo "/tmp/gki/generate_gki_certificate.py"
-          echo "└─ 📌 PYTHONPATH     :"
+          # Display GKI Certificate Stub Configuration
+          echo "└─ 📌 GKI Certificate Stub :"
+          echo "└─ /tmp/gki/generate_gki_certificate.py"
+          echo "└─ 📌 Python Path :"
           echo "└─ /tmp"
-          echo "└─ 🎉 Clang Configuration and Toolchain Verification Complete"    
+          echo "└─ 🎉 Clang Configuration and Toolchain Verification Complete"
 
-      - name: 📥 Setup AArch64 GCC 6.4.1 Toolchain
-        shell: bash
-        run: |
-          # Define AArch64 GCC Toolchain Repository and Directory
-          GCCREPO="https://github.com/LineageOS/android_prebuilts_gcc_linux-x86_aarch64_aarch64-linux-gnu-6.4.1.git"
-          GCCDIR="$GITHUB_WORKSPACE/gcc"
-          GCCBIN="$GCCDIR/bin"
-          GCCPREFIX="aarch64-linux-gnu-"
-          # Display Toolchain Information
-          echo "└─ 📦 Setting Up AArch64 GCC 6.4.1..."
-          echo "└─ 📦 Repository : $GCCREPO"
-          echo "└─ 📂 Directory  : $GCCDIR"
-          # Remove Previous Toolchain Directory
-          rm -rf "$GCCDIR"
-          # Clone Prebuilt AArch64 GCC Toolchain
-          git clone \
-            --depth=1 \
-            "$GCCREPO" \
-            "$GCCDIR"
-          # Validate GCC Toolchain Directory
-          if [[ ! -x "$GCCBIN/aarch64-linux-gnu-gcc" ]]; then
-            echo "└─ ⚠️ AArch64 GCC Compiler Not Found"
-            echo "└─ 📂 Expected : $GCCBIN/aarch64-linux-gnu-gcc"
-            exit 1
-          fi
-
-          # Add GCC Toolchain to GitHub Actions PATH
-          echo "$GCCBIN" >> "$GITHUB_PATH"
-          # Export GCC Toolchain Variables
-          {
-            echo "AARCH64GCCDIR=$GCCDIR"
-            echo "AARCH64GCCBIN=$GCCBIN"
-            echo "AARCH64GCCPREFIX=$GCCPREFIX"
-          } >> "$GITHUB_ENV"
-          # Verify GCC Compiler
-          echo "└─ 🔎 AArch64 GCC Compiler  :"
-          "$GCCBIN/aarch64-linux-gnu-gcc" --version
-          # Verify GNU Linker
-          echo "└─ 🔎 AArch64 GNU Linker    :"
-          "$GCCBIN/aarch64-linux-gnu-ld" --version
-          # Verify GNU Assembler
-          echo "└─ 🔎 AArch64 GNU Assembler :"
-          "$GCCBIN/aarch64-linux-gnu-as" --version
-          # Verify GNU Object Copy
-          echo "└─ 🔎 AArch64 GNU Objcopy   :"
-          "$GCCBIN/aarch64-linux-gnu-objcopy" --version
-          echo "└─ 🎉 AArch64 GCC 6.4.1 Toolchain Ready"
-            
       - name: 📥 Restore Public Compiler Cache
         id: ccache-public
         if: ${{ inputs.BUILDCCACHE }}
@@ -1303,6 +1281,7 @@ jobs:
       - name: ⚙️ Kernel Build Metadata
         shell: bash
         env:
+          DEVICE: ${{ inputs.DEVICE }}
           KERNELSUFFIX: ${{ inputs.KERNELSUFFIX }}
           KERNELBUILDTIME: ${{ inputs.KERNELBUILDTIME }}
         run: |
@@ -1330,6 +1309,22 @@ jobs:
           else
             echo "└─ ⚠️ Kernel Defconfig Not Found : ${DEFCONFIG:-unset}"
             exit 1
+          fi
+
+          # Disable Unsupported OPlus Sensor Configuration For OnePlus 11
+          if [[ "$DEVICE" == "OnePlus11" ]]; then
+            echo "└─ 🔧 Applying OnePlus 11 Sensor Configuration Fix..."
+            if grep -Fxq 'CONFIG_OPLUS_FEATURE_SENSOR_CFG=y' "$DEFCONFIG"; then
+              sed -i \
+                's/^CONFIG_OPLUS_FEATURE_SENSOR_CFG=y$/# CONFIG_OPLUS_FEATURE_SENSOR_CFG is not set/' \
+                "$DEFCONFIG"
+              echo "└─ 🚫 OPlus Sensor Configuration Disabled"
+            else
+              echo "└─ ℹ️ OPlus Sensor Configuration Already Disabled or Not Defined"
+            fi
+            
+          else
+            echo "└─ ℹ️ Keeping OPlus Sensor Configuration For $DEVICE"
           fi
 
           # Verify Kernel Local Version Configuration
@@ -1646,15 +1641,15 @@ jobs:
           }
           # Configure Selected Root Engine
           case "$ROOTENGINE" in
-            SukiSU-Ultra)
-              echo "└─ 🚀 [Info] Setting Up SukiSU-Ultra..."
+            SukiSU-Nova)
+              echo "└─ 🚀 [Info] Setting Up SukiSU-Nova..."
               setupengine "$KSUREPO" "$MANAGERBRANCH" "$BRANCHPATH" "$ROOTCOMMIT"
               cd KernelSU || {
-                echo "└─ ⚠️ [Error] SukiSU-Ultra Directory Not Found"
+                echo "└─ ⚠️ [Error] SukiSU-Nova Directory Not Found"
                 exit 1
               }                            
-              # Remove Commit Hash and Branch From SukiSU-Ultra Full Version              
-              # Customize SukiSU-Ultra Full Version
+              # Remove Commit Hash and Branch From SukiSU-Nova Full Version              
+              # Customize SukiSU-Nova Full Version
               KVERSIONFILE=""
               # Locate Makefile or Kbuild Containing Kernel Full Version
               for file in kernel/Makefile kernel/Kbuild Makefile Kbuild; do
@@ -1665,16 +1660,16 @@ jobs:
                 fi
               done
 
-              # Apply Custom SukiSU-Ultra Kernel Full Version
+              # Apply Custom SukiSU-Nova Kernel Full Version
               if [[ -n "$KVERSIONFILE" ]]; then
                 # Set Displayed Version to Version Tag and Custom Name
                 sed -i -E \
-                  "s|^[[:space:]]*KSU_VERSION_FULL[[:space:]]*:=.*|KSU_VERSION_FULL := ${MANAGERTAG}-⚡Andrei⚡|" \
+                  "s|^[[:space:]]*KSU_VERSION_FULL[[:space:]]*:=.*|KSU_VERSION_FULL := Crimson-AOSP-${MANAGERTAG}|" \
                   "$KVERSIONFILE"
                 echo "└─ 📌 [Info] Modified File       : $KVERSIONFILE"
-                echo "└─ 📌 [Info] Kernel Full Version : ${MANAGERTAG}-⚡Andrei⚡"
+                echo "└─ 📌 [Info] Kernel Full Version : ${MANAGERTAG}"
               else
-                # Warn if SukiSU-Ultra Kernel Full Version Definition Cannot Be Found
+                # Warn if SukiSU-Nova Kernel Full Version Definition Cannot Be Found
                 echo "└─ ⚠️ [Warn] Kernel Full Version Not Found"
                 echo "└─ 📂 [Info] Current Directory : $PWD"
                 # Print Any Existing Definitions for Troubleshooting
@@ -1683,7 +1678,7 @@ jobs:
           
               recordrootversion
               configureksuversionfallback          
-              echo "└─ 🎉 SukiSU-Ultra Setup Complete"
+              echo "└─ 🎉 SukiSU-Nova Setup Complete"
               ;;
             BakaSU)
               echo "└─ 🚀 [Info] Setting Up ReSukiSU (BakaSU)..."
@@ -2582,8 +2577,7 @@ jobs:
               echo "CONFIG_POSIX_MQUEUE=y"             
               echo "CONFIG_TMPFS_POSIX_ACL=y"
               echo "CONFIG_TMPFS_XATTR=y"
-              echo "CONFIG_IP_NF_TARGET_REJECT=y"
-              echo "CONFIG_IP6_NF_TARGET_REJECT=y"
+              echo "CONFIG_NETFILTER_XT_TARGET_REJECT=y"
               echo "CONFIG_NETFILTER_XT_TARGET_LOG=y"
               echo "CONFIG_NETFILTER_XT_MATCH_RECENT=y"
             } >> "$DEFCONFIG"
@@ -2737,9 +2731,6 @@ jobs:
           # Configure Clang Compiler and Integrated Assembler
           export LLVM=1
           export LLVM_IAS=1
-          # Configure AArch64 GCC Cross-Compilation Prefix
-          # Allows Kbuild to Locate AArch64 GNU Toolchain Utilities
-          export CROSS_COMPILE="${AARCH64GCCPREFIX}"
           # Configure Kernel Build Identity
           export KBUILD_BUILD_USER="${GITOWNER}"
           export KBUILD_BUILD_HOST="${GITHOST}"
@@ -2805,7 +2796,7 @@ jobs:
           # Pahole is Used For Generating BTF Debug Information
           PAHOLEVERSION="$(pahole --version 2>/dev/null | head -n 1 || true)"
           if [[ -z "$PAHOLEVERSION" ]]; then
-            echo "└─ 📌 Pahole : Not Installed"
+            echo "└─ ⚠️ Pahole : Not Installed"
           else
             echo "└─ 📌 Pahole : $PAHOLEVERSION"
           fi
@@ -2813,39 +2804,6 @@ jobs:
           # Display Clang and LLD Versions
           echo "└─ 📌 Clang  : $(clang --version | head -n 1)"
           echo "└─ 📌 LLD    : $(ld.lld --version | head -n 1)"
-          # Configure Qualcomm Oryon CPU Targeting
-          # Enable Oryon-Specific Optimization Only for Qualcomm SoC 8750
-          KCFLAGSEXTRA=()
-          case "$CPU" in
-            sm8750)
-              echo "└─ 🔍 Checking Clang Oryon CPU Target Support..."
-              echo "└─ 🛠️ Clang Version :"
-              # Display Full Clang Version Information
-              CLANGVERSION="$(clang --version)"
-              echo "${CLANGVERSION%%$'\n'*}"
-              # Test Whether Clang Supports Oryon CPU Target
-              if printf 'int main(void){return 0;}\n' |
-                clang \
-                  -mcpu=oryon-1 \
-                  --target=aarch64-linux-gnu \
-                  -fsyntax-only -x c - \
-                  >/dev/null 2>&1; then
-                # Enable Oryon CPU Optimization Flag
-                KCFLAGSEXTRA+=(-mcpu=oryon-1)
-                echo "└─ 🧠 Oryon CPU Targeting Enabled"
-                echo "└─ 📱 Target : $CPU"
-                echo "└─ ⚙️ Flag   : -mcpu=oryon-1"
-              else
-                # Retain Default Clang CPU Target When Unsupported
-                echo "└─ ⚠️ Clang Does Not Support Oryon Optimizations"
-                echo "└─ ℹ️ Keeping Existing Compiler Target Defaults"
-              fi
-              ;;
-            *)
-              # Skip Oryon CPU Optimization for Other Devices
-              echo "└─ ℹ️ Oryon Targeting Skipped For $CPU"
-              ;;
-          esac
           # Validate Fake Time Shared Libraries
           if [[ ! -s "$LIBDIR/libfakestat.so" || ! -s "$LIBDIR/libfaketimeMT.so" ]]; then
             echo "└─ ⚠️ Fake Time Libraries Not Found"
@@ -2910,7 +2868,7 @@ jobs:
 
           # Display Kernel Build Metadata
           echo "└─ 📌 Build Timestamp : $KBUILD_BUILD_TIMESTAMP"
-          echo "└─ 📌 Build Version   : $KBUILD_BUILD_VERSION"
+          echo "└─ 📌 Build Version   : $KBUILD_BUILD_VERSION"          
           # Generate GKI Kernel Configuration
           echo "└─ ⚙️ Generating GKI Kernel Configuration..."
           make -C "$SOURCEDIR" \
@@ -2924,6 +2882,67 @@ jobs:
           if [[ ! -s "$CONFIGFILE" ]]; then
             echo "└─ ⚠️ GKI Configuration was Not Generated"
             exit 1
+          fi
+
+          # Locate Scripts / Configuration
+          CONFIGTOOL=""
+          for path in \
+            "$SOURCEDIR/scripts/config" \
+            ../scripts/config \
+            ./scripts/config \
+            ../../scripts/config
+          do
+            if [[ -x "$path" ]]; then
+              CONFIGTOOL="$path"
+              break
+            fi
+            
+          done
+
+          # Search Source Tree When No Standard Path Exists
+          if [[ -z "$CONFIGTOOL" ]]; then
+            CONFIGTOOL="$(
+              find "$SOURCEDIR" \
+                -type f \
+                -path '*/scripts/config' \
+                -executable \
+                -print -quit 2>/dev/null || true
+            )"
+          fi
+
+          # Validate Configuration Tool
+          if [[ -n "$CONFIGTOOL" ]] &&
+             [[ ! -x "$CONFIGTOOL" ]]; then
+            CONFIGTOOL=""
+          fi
+
+          # Configure ThinLTO For Supported 5.x Kernels
+          echo "🧾 Configuring Link Time Optimization (LTO) For Kernel $KERNELVERSION"
+          if [[ -z "$CONFIGTOOL" ]]; then
+            echo "└─ ⚠️ [Warn] Scripts / Configuration Tool Not Found"
+            echo "└─ 📊 [Info] LTO Status : Skipped (Missing Configuration Tool)"
+          else
+            echo "└─ 🧰 [Info] Configuration Tool : $CONFIGTOOL"
+            case "$KERNELVERSION" in
+              5.*)
+                echo "└─ 🚀 [Info] LTO : Thin"
+                if "$CONFIGTOOL" \
+                  --file "$CONFIGFILE" \
+                  -e LTO_CLANG \
+                  -e LTO_CLANG_THIN \
+                  -d LTO_CLANG_NONE \
+                  -d LTO_CLANG_FULL; then
+                  echo "└─ 📊 [Info] LTO Status : Applied (Thin)"
+                else
+                  echo "└─ ⚠️ [Warn] LTO Configuration Apply Failed"
+                  echo "└─ 📊 [Info] LTO Status : Skipped"
+                fi
+                ;;
+              *)
+                echo "└─ 🚀 [Skip] LTO Skipped For Kernel $KERNELVERSION"
+                echo "└─ 📊 [Info] LTO Status : Skipped (Unsupported Kernel)"
+                ;;
+            esac
           fi
 
           # Resolve Kernel Configuration Dependencies
@@ -2940,22 +2959,24 @@ jobs:
             exit 1
           fi
 
+          # Display Final LTO Configuration
+          echo "└─ 📊 Final LTO Configuration :"
+          grep -E '^CONFIG_LTO_CLANG(=|_)|^# CONFIG_LTO_CLANG' "$CONFIGFILE" || true
           # Start Kernel Build Timer and Remove Previous Image
           BUILDSTART="$(date +%s)"
           rm -f "$IMAGE"
-          # Build Kernel Image Using Clang, LLD and GCC Cross-Compilation Prefix
+          # Build Kernel Image Using Clang and LLD
           echo "└─ 🔨 Building Kernel Image..."
           make -C "$SOURCEDIR" \
             -j"$(nproc --all)" \
             ARCH="$ARCH" \
             LLVM="$LLVM" \
             LLVM_IAS="$LLVM_IAS" \
-            CROSS_COMPILE="$CROSS_COMPILE" \
             CC="$CCWRAPPER" \
             LD="$LDWRAPPER" \
             HOSTLD="ld.lld" \
             O="$OUTDIR" \
-            KCFLAGS="-O2 -Wno-error ${KCFLAGSEXTRA[*]}" \
+            KCFLAGS="-O2 -Wno-error" \
             Image
           # Calculate Kernel Build Duration
           BUILDEND="$(date +%s)"
@@ -3393,7 +3414,7 @@ jobs:
         with:
           name: Package-${{ inputs.DEVICE }}-${{ inputs.AOSPSOURCE }}(${{ steps.kernelversion.outputs.fullversion }})-${{ inputs.ROOTENGINE }}(${{ steps.rootengine.outputs.ksuversion }})
           path: |
-            out/AnyKernel3-*.zip
+            out/AK3-*.zip
             out/Image
             out/boot.img
           retention-days: 7
@@ -3612,7 +3633,7 @@ jobs:
         if: ${{ inputs.DEBUGBUILDCCACHE }}
         uses: actions/upload-artifact@v6
         with:
-          name: CCache-Debug-Log
+          name: Cache-Debug
           path: ccache.log
           if-no-files-found: ignore
 
